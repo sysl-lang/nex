@@ -424,3 +424,9 @@ file	category	name	mlir	pending	v3
 423-round-trip-via-to-integers-and-to-bytes	[byte] buffer	round-trip via to_integers and to_bytes	false		syntax
 424-slicing-copies	[byte] buffer	slicing copies	false		meaning
 425-structural-equality-on-length-and-bytes	[byte] buffer	structural equality on length and bytes	false		syntax
+426-a-unit-literal-prints-with-its-unit	units of measure	a unit literal prints with its unit	false		new
+427-a-product-converts-to-a-derived-unit	units of measure	a product converts to a derived unit	false		new
+428-a-sum-takes-the-left-operands-unit	units of measure	a sum takes the left operand's unit	false		new
+429-to-converts-between-scaled-units	units of measure	to converts between scaled units	false		new
+430-a-function-generic-over-a-unit	units of measure	a function generic over a unit	false		new
+431-strip-drops-the-unit	units of measure	strip drops the unit	false		new

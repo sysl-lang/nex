@@ -60,12 +60,29 @@ private described(t: Tok) -> string = t match
     Interp(_, _) -> "an interpolated string"
     Ident(name) -> s"'${name}'"
     Keyword(text) -> s"'${text}'"
+    UnitOpen -> "'<'"
+    UnitClose -> "'>'"
     Newline -> "the end of the line"
     Indent -> "an indented block"
     Dedent -> "the end of the block"
     Eof -> "the end of the input"
 
 private ex(span: Span, kind: ExprKind) -> Expr = Expr(span, kind)
+
+private is_unit_open(t: Tok) -> bool = t match
+    UnitOpen -> true
+    _ -> false
+
+private is_unit_close(t: Tok) -> bool = t match
+    UnitClose -> true
+    _ -> false
+
+// Whether `t` can begin a factor of a unit expression: a name, `in`, `1`, or a parenthesis.
+private starts_unit(t: Tok) -> bool = t match
+    Ident(_) -> true
+    Num(_) -> true
+    Keyword(k) -> k == "in" || k == "("
+    _ -> false
 
 // The words that may close a block after `end`, beside the construct's own name.
 private val end_words = ["if", "for", "while", "do", "def", "struct", "enum", "module", "match"]
@@ -206,7 +223,11 @@ struct Parser
         for word in ["@", "private", "val", "var", "const", "def", "extern", "struct", "enum", "module", "import"]
             if is_kw(t, word) then return true
 
-        false
+        self.at_unit_decl()
+
+    // Whether `unit` here opens a unit declaration: `unit` is a word only where a unit's name
+    // follows it, and stays the name of the empty tuple's type everywhere else.
+    at_unit_decl(self) -> bool = self.at_word("unit") && (is_ident(self.tok(1)) || is_kw(self.tok(1), "in"))
 
     decl(*self) -> Result[Decl, Diagnostic]
         val m = self.toks.mark()
@@ -279,8 +300,146 @@ struct Parser
 
         if self.accept("import") then return self.import_decl()
 
+        if self.at_unit_decl()
+            self.bump()
+            return self.unit_decl()
+
         self.fail("a declaration")
     end decl_kind
+
+    // After `unit`: a name, then nothing (a base unit), or `=` and a unit expression, which a
+    // number before it scales: `unit in = 0.0254 m`.
+    unit_decl(*self) -> Result[DeclKind, Diagnostic]
+        val name = if self.accept("in") then "in" else self.ident("a unit name")?
+
+        if !self.accept("=") then return Ok(UnitDecl(name, None, None))
+
+        var factor: Option[Expr] = None
+        val m = self.toks.mark()
+
+        self.tok(0) match
+            Num(text) ->
+                if starts_unit(self.tok(1))
+                    self.bump()
+                    factor = Some(number(self.toks.span_from(m), text, false)?)
+            _ -> ()
+
+        Ok(UnitDecl(name, factor, Some(self.unit_expr()?)))
+    end unit_decl
+
+    // -- units --------------------------------------------------------------------------------------
+
+    // `<unit>` after a number, a name or a type name, its `<` at the cursor.
+    annotation(*self) -> Result[UnitExpr, Diagnostic]
+        val m = self.toks.mark()
+
+        self.bump()
+
+        if is_unit_close(self.tok(0))
+            self.bump()
+            return Err(error(self.toks.span_from(m), "a unit annotation is empty: it names a unit, and `<1>` is the dimensionless one"))
+
+        val u = self.unit_expr()?
+
+        if !is_unit_close(self.tok(0)) then return self.fail("'>' to close the unit annotation")
+
+        self.bump()
+        Ok(u)
+    end annotation
+
+    // Products separated by `/`, to the left.
+    unit_expr(*self) -> Result[UnitExpr, Diagnostic]
+        val m = self.toks.mark()
+        var u = self.unit_product()?
+
+        while self.accept("/")
+            val rhs = self.unit_product()?
+
+            u = UnitExpr(self.toks.span_from(m), Div(u, rhs))
+
+        Ok(u)
+
+    // Powers written side by side, to the left.
+    unit_product(*self) -> Result[UnitExpr, Diagnostic]
+        val m = self.toks.mark()
+        var u = self.unit_power()?
+
+        while starts_unit(self.tok(0))
+            val rhs = self.unit_power()?
+
+            u = UnitExpr(self.toks.span_from(m), Mul(u, rhs))
+
+        Ok(u)
+
+    // A factor and an optional exponent: a whole number, `s^2`, `s^-1`, or a fraction in
+    // parentheses, `m^(1/2)`.
+    unit_power(*self) -> Result[UnitExpr, Diagnostic]
+        val m = self.toks.mark()
+        val base = self.unit_factor()?
+
+        if !self.accept("^") then return Ok(base)
+
+        if !self.accept("(")
+            val n = self.unit_integer(true)?
+
+            return Ok(UnitExpr(self.toks.span_from(m), Pow(base, n, 1)))
+
+        val num = self.unit_integer(true)?
+        var den: i64 = 1
+
+        if self.accept("/")
+            den = self.unit_integer(false)?
+
+            if den == 0 then return Err(error(self.toks.previous(), "a unit exponent's denominator may not be zero"))
+
+        self.expect(")")?
+        Ok(UnitExpr(self.toks.span_from(m), Pow(base, num, den)))
+    end unit_power
+
+    // A whole number in an exponent, with a `-` before it where `signed`.
+    unit_integer(*self, signed: bool) -> Result[i64, Diagnostic]
+        val negative = signed && self.accept("-")
+
+        val text = self.tok(0) match
+            Num(t) -> t
+            _ -> return self.fail("a whole-number exponent")
+
+        digits_value(text, 10) match
+            Some(v) ->
+                if v > 0x7FFF_FFFF_FFFF_FFFFu64 then return Err(error(self.toks.here(), "this exponent does not fit in an integer"))
+
+                self.bump()
+                Ok(if negative then -i64(v) else i64(v))
+            None ->
+                Err(error(self.toks.here(), "a unit exponent is a whole number, or a fraction in parentheses: `m^(3/2)`"))
+    end unit_integer
+
+    // A unit's name, `1`, or a parenthesised unit expression.
+    unit_factor(*self) -> Result[UnitExpr, Diagnostic]
+        val m = self.toks.mark()
+
+        self.tok(0) match
+            Ident(name) ->
+                self.bump()
+                return Ok(UnitExpr(self.toks.span_from(m), Base(name)))
+            Num(text) ->
+                if text != "1"
+                    return Err(error(self.toks.here(), "the only number in a unit expression is `1`, the dimensionless unit; a scale factor belongs in a `unit` declaration"))
+
+                self.bump()
+                return Ok(UnitExpr(self.toks.span_from(m), One))
+            _ -> ()
+
+        if self.accept("in") then return Ok(UnitExpr(self.toks.span_from(m), Base("in")))
+
+        if self.accept("(")
+            val inner = self.unit_expr()?
+
+            self.expect(")")?
+            return Ok(inner)
+
+        self.fail("a unit")
+    end unit_factor
 
     binding(*self, kind: BindKind) -> Result[DeclKind, Diagnostic]
         val pat = self.pattern_list()?
@@ -646,18 +805,31 @@ struct Parser
             return Ok(Type(self.toks.span_from(m), TypeKind.Array(elem, axes)))
 
         val name = self.ident("a type")?
+        var t = Type(self.toks.span_from(m), Named(name))
 
-        if !self.accept("[") then return Ok(Type(self.toks.span_from(m), Named(name)))
+        if self.accept("[")
+            var args: Buf[Type] = buf()
 
-        var args: Buf[Type] = buf()
+            loop
+                args.push(self.type_expr()?)
 
-        loop
-            args.push(self.type_expr()?)
+                if !self.accept(",") then break
 
-            if !self.accept(",") then break
+            self.expect("]")?
+            t = Type(self.toks.span_from(m), Applied(name, args))
+        end if
 
-        self.expect("]")?
-        Ok(Type(self.toks.span_from(m), Applied(name, args)))
+        if is_unit_open(self.tok(0))
+            val u = self.annotation()?
+
+            return Ok(Type(self.toks.span_from(m), Measured(t, u)))
+
+        // A `<` against a type name that the lexer did not take for an annotation has no `>` after
+        // it on the line.
+        if self.at("<") && self.toks.previous().end == self.toks.here().start
+            return Err(error(self.toks.here(), "this unit annotation is not closed: `real<m>` closes it with a `>` on the same line"))
+
+        Ok(t)
     end simple_type
 
     // One axis of an array type: `:`, a static extent, or a name (a const extent or a rank).
@@ -1050,7 +1222,10 @@ struct Parser
         t match
             Num(text) ->
                 self.bump()
-                return number(self.toks.span_from(m), text, false)
+
+                val lit = number(self.toks.span_from(m), text, false)?
+
+                return self.measured(m, lit)
             Str(v) ->
                 self.bump()
                 return Ok(ex(self.toks.span_from(m), StrLit(v)))
@@ -1072,7 +1247,7 @@ struct Parser
                 end if
 
                 self.bump()
-                return Ok(ex(self.toks.span_from(m), ExprKind.Name(name)))
+                return self.measured(m, ex(self.toks.span_from(m), ExprKind.Name(name)))
             _ -> ()
 
         if self.accept("true") then return Ok(ex(self.toks.span_from(m), BoolLit(true)))
@@ -1139,6 +1314,14 @@ struct Parser
 
         self.fail("an expression")
     end primary
+
+    // `e`, or `e<unit>` where the lexer found a unit annotation written against it.
+    measured(*self, m: usize, e: Expr) -> Result[Expr, Diagnostic]
+        if !is_unit_open(self.tok(0)) then return Ok(e)
+
+        val u = self.annotation()?
+
+        Ok(ex(self.toks.span_from(m), Measured(e, u)))
 
     // Whether an expression can begin at the cursor, which is what decides whether a `return` has
     // a value.

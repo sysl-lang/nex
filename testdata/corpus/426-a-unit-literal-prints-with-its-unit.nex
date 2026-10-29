@@ -1,0 +1,6 @@
+unit m
+unit s
+
+def main() =
+  val g = 9.81<m/s^2>
+  print(g)

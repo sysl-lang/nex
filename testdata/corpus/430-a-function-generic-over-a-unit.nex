@@ -1,0 +1,8 @@
+unit m
+unit s
+
+def sqr[U: Unit](x: real<U>): real<U^2> = x * x
+
+def main() =
+  print(sqr(3.0<m>))
+  print(sqr(0.5<s>))

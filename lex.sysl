@@ -8,6 +8,12 @@
 // - **A newline inside brackets is whitespace**, except after a `->` that ends its line: that
 //   opens a block-form lambda body, whose lines count until the bracket that holds it closes, or
 //   until a `,` at the body's own level hands the next argument back to the bracket.
+// - **A `<` written against a number or a name opens a unit annotation**, `9.81<m/s^2>`,
+//   `real<m>`, `to<mm>(x)`: against a number always, and against a name (or the `]` of
+//   `complex[real32]<V>`) when a `>` closes it on
+//   the same line around nothing but unit syntax (names other than reserved words, `in` aside;
+//   digits, blanks, `/`, `^`, `-`, `.` and parentheses). Anywhere else, and with a blank before it,
+//   `<` is the comparison, so `a < b`, `n<3` and `a[i]<b` compare.
 // - **A line ending in a binary operator, `and` or `or` continues on the next line**, outside
 //   brackets.
 // - **A `Newline` comes before an `Indent` and after each `Dedent`**, and the input ends with a
@@ -31,6 +37,10 @@ enum Tok
     // A reserved word or an operator: one variant for both, since every question about one is asked
     // by its spelling.
     Keyword(text: string)
+    // The `<` and `>` around a unit annotation, `9.81<m/s^2>` or `real<m>`: never a comparison, and
+    // a `>` that ends a line does not continue it.
+    UnitOpen
+    UnitClose
     Newline
     Indent
     Dedent
@@ -278,6 +288,39 @@ end scan_word
 // that opened inside brackets before they are emitted: a closing bracket, and a `,` at such a block's
 // own level, which ends a block-form lambda written as an argument.
 private scan_punct(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]], m: usize) -> Result[unit, Diagnostic]
+    if s.peek() == Some(u8('>')) && unit_open(out)
+        s.bump()
+        out.push(Spanned(UnitClose, s.span_from(m)))
+        return Ok(())
+
+    if s.peek() == Some(u8('<')) && s.peek_at(1) != Some(u8('=')) && out.len() > 0
+        val prev = out.at(out.len() - 1)
+        val glued = prev.span.end == m
+        val after = s.rest()[1..<s.rest().len]
+
+        prev.value match
+            Num(_) ->
+                if glued
+                    if !closes_on_line(after, false)
+                        return Err(error(Span(m, m + 1), "this unit annotation is not closed: a `<` written against a number opens one, closed by a `>` on the same line; a comparison is written with a blank, `a < b`"))
+
+                    s.bump()
+                    out.push(Spanned(UnitOpen, s.span_from(m)))
+                    return Ok(())
+            Ident(_) ->
+                if glued && closes_on_line(after, true)
+                    s.bump()
+                    out.push(Spanned(UnitOpen, s.span_from(m)))
+                    return Ok(())
+            Keyword(k) ->
+                // `complex[real32]<V>`: an applied type name.
+                if k == "]" && glued && closes_on_line(after, true)
+                    s.bump()
+                    out.push(Spanned(UnitOpen, s.span_from(m)))
+                    return Ok(())
+            _ -> ()
+    end if
+
     for op in operators
         if s.accept_seq(op.bytes)
             val at = s.span_from(m)
@@ -297,6 +340,62 @@ private scan_punct(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]], m: usize)
 
     Err(error(Span(m, m + 1), "illegal character"))
 end scan_punct
+
+// Whether the tokens since the start of the line leave a unit annotation open.
+private unit_open(out: *Buf[Spanned[Tok]]) -> bool
+    var i = out.len()
+
+    while i > 0
+        i -= 1
+
+        out.at(i).value match
+            UnitOpen -> return true
+            UnitClose -> return false
+            Newline -> return false
+            Indent -> return false
+            Dedent -> return false
+            _ -> ()
+
+    false
+end unit_open
+
+// Whether a `>` closes a unit annotation in `text` before the line ends. With `shaped`, only unit
+// syntax may stand before it: a name that is a reserved word other than `in`, or any other
+// punctuation, says the `<` was a comparison.
+private closes_on_line(text: []const u8, shaped: bool) -> bool
+    var i: usize = 0
+
+    while i < text.len
+        val c = text[i]
+
+        if c == u8('>') then return true
+        if c == u8('\n') || c == u8('\r') then return false
+
+        if !shaped
+            i += 1
+            continue
+
+        if is_name_start(c)
+            val start = i
+
+            while i < text.len && is_name_cont(text[i])
+                i += 1
+
+            val word = from_utf8_unchecked(text[start..<i])
+
+            if is_reserved(word) && word != "in" then return false
+
+            continue
+
+        if !(c.is_digit() || c == u8(' ') || c == u8('\t') || c == u8('/') || c == u8('^') ||
+            c == u8('-') || c == u8('.') || c == u8('(') || c == u8(')'))
+            return false
+
+        i += 1
+    end while
+
+    false
+end closes_on_line
 
 private drain(out: *Buf[Spanned[Tok]], closed: usize, at: Span)
     if closed == 0 then return

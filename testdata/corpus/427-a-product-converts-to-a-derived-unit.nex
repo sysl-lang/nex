@@ -1,0 +1,10 @@
+unit kg
+unit m
+unit s
+unit N = kg m / s^2
+
+def main() =
+  val mass = 2.0<kg>
+  val accel = 9.81<m/s^2>
+  val force = to<N>(mass * accel)
+  print(force)

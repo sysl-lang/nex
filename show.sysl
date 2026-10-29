@@ -22,6 +22,8 @@ show_token(src: Source, t: Tok) -> string = t match
     Interp(pieces, format) -> s"S(${escaped(interp_body(src, pieces, format))})"
     Ident(name) -> s"ID(${name})"
     Keyword(text) -> s"K(${text})"
+    UnitOpen -> "U<"
+    UnitClose -> "U>"
     Newline -> "NL"
     Indent -> "INDENT"
     Dedent -> "DEDENT"
@@ -238,6 +240,17 @@ show_decl(d: Decl) -> string
                 items.push(sel.alias match
                     Some(a) -> "(" + sel.name + " as " + a + ")"
                     None -> sel.name)
+        UnitDecl(name, factor, body) ->
+            head = head + "unit"
+            items.push(name)
+
+            factor match
+                Some(f) -> items.push(show_expr(f))
+                None -> ()
+
+            body match
+                Some(b) -> items.push(show_unit(b))
+                None -> ()
 
     form(head, items)
 end show_decl
@@ -286,6 +299,35 @@ show_type(t: Type) -> string = *t.kind match
         val ps = if params.len() == 1 then out[0] else "(" + join(out.view(), ", ") + ")"
 
         "(" + ps + " -> " + show_type(ret) + ")"
+    Measured(base, u) -> show_type(base) + "<" + show_unit(u) + ">"
+
+// A unit expression in its canonical spelling: factors side by side, `/` without blanks, an
+// exponent after `^` (`^(1/2)` where it is a fraction), and parentheses only where the tree differs
+// from what the spelling without them would read as: `kg m/s^2`, `J/(kg K)`, `(m/s)^2`.
+show_unit(u: UnitExpr) -> string = *u.kind match
+    One -> "1"
+    Base(n) -> n
+    Mul(l, r) -> unit_operand(l, false) + " " + unit_operand(r, true)
+    Div(l, r) -> show_unit(l) + "/" + unit_divisor(r)
+    Pow(b, num, den) ->
+        val base = *b.kind match
+            One -> show_unit(b)
+            Base(_) -> show_unit(b)
+            _ -> "(" + show_unit(b) + ")"
+
+        base + "^" + (if den == 1 then num.to_string() else "(" + num.to_string() + "/" + den.to_string() + ")")
+
+// A factor of a product: a quotient is parenthesised, and so is a product on the right, since a
+// product associates to the left.
+private unit_operand(u: UnitExpr, right: bool) -> string = *u.kind match
+    Div(_, _) -> "(" + show_unit(u) + ")"
+    Mul(_, _) -> if right then "(" + show_unit(u) + ")" else show_unit(u)
+    _ -> show_unit(u)
+
+// The right of a `/`: a quotient is parenthesised, since `/` associates to the left.
+private unit_divisor(u: UnitExpr) -> string = *u.kind match
+    Div(_, _) -> "(" + show_unit(u) + ")"
+    _ -> show_unit(u)
 
 private types(ts: Buf[Type]) -> string
     var out: Buf[string] = buf()
@@ -332,6 +374,7 @@ show_expr(e: Expr) -> string
             items.push(show_expr(c))
             items.push(show_expr(b))
             return form("juxt", items)
+        Measured(v, u) -> return show_expr(v) + "<" + show_unit(u) + ">"
         Range(lo, hi, inclusive, stride) ->
             items.push(opt_expr(lo))
             items.push(opt_expr(hi))

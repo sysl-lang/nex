@@ -1,0 +1,7 @@
+unit m
+unit in = 0.0254 m
+unit ft = 12 in
+
+def main() =
+  val length = 3.0<ft>
+  print(to<in>(length))

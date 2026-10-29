@@ -1,0 +1,6 @@
+unit m
+unit mm = 0.001 m
+unit in = 25.4 mm
+
+def main() =
+  print(10.0<mm> + 1.0<in>)

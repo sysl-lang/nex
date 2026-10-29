@@ -22,7 +22,7 @@ reference is right until the specification says otherwise. The architecture and 
 
 The port has started: what exists is the command's skeleton and the oracle. `testdata/corpus/`
 holds the reference's program corpus — 425 programs, each beside the exact output it must print —
-and every milestone of the port is measured against it.
+and six more for units of measure, and every milestone of the port is measured against it.
 
 ```
 sysl build .

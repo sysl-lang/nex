@@ -89,6 +89,9 @@ enum DeclKind
     Module(path: Buf[string])
     // `import a.b`, `import a.b.{x, y as z}` or `import a.b.*`.
     Import(path: Buf[string], selectors: Buf[Selector], wildcard: bool)
+    // `unit m`, a base unit; `unit N = kg m / s^2`, a derived one; `unit in = 0.0254 m`, a scaled
+    // one, whose numeric factor is `factor`.
+    UnitDecl(name: string, factor: Option[Expr], body: Option[UnitExpr])
 end DeclKind
 
 struct Pattern
@@ -128,6 +131,27 @@ enum TypeKind
     Tuple(elems: Buf[Type])
     // `(P1, inout P2) -> R`, or `P -> R` with one parameter; a mode per parameter.
     Func(params: Buf[Type], modes: Buf[Mode], ret: Type)
+    // `real<m>`, `complex<V>`: a scalar type carrying a unit.
+    Measured(base: Type, unit: UnitExpr)
+
+struct UnitExpr
+    span: Span
+    kind: &UnitKind
+
+// A unit expression, inside `<...>` or on the right of a `unit` declaration. Juxtaposition binds
+// tighter than `/`, and both associate to the left: `kg m / s^2` is `(kg m) / (s^2)`, and `J/kg K`
+// is `J / (kg K)`.
+enum UnitKind
+    // `1`: dimensionless.
+    One
+    // `m`, `in`, or a unit parameter `U`.
+    Base(name: string)
+    // `kg m`.
+    Mul(lhs: UnitExpr, rhs: UnitExpr)
+    // `m / s`.
+    Div(lhs: UnitExpr, rhs: UnitExpr)
+    // `s^2`, `s^-1`, `m^(1/2)`: an integer exponent has `den` 1.
+    Pow(base: UnitExpr, num: i64, den: i64)
 
 // A piece of an interpolated literal: literal text, or a value with the printf specifier written
 // after it in an `f"..."` literal (`""` where there is none). `$name` is the value of `name`.
@@ -179,6 +203,9 @@ enum ExprKind
     Unary(op: string, operand: Expr)
     // `2x`, `2pi`, `2(x + 1)`: a numeric coefficient written against what it multiplies.
     Juxtapose(coeff: Expr, body: Expr)
+    // `9.81<m/s^2>`: a number carrying a unit; or `to<mm>`, a name carrying one, as the callee of a
+    // conversion.
+    Measured(value: Expr, unit: UnitExpr)
     // `lo..hi`, which includes `hi`, or `lo..<hi`, which stops before it (`inclusive` false). Inside
     // an index list either bound of `..` may be left off, `lo` of `..<`, and a stride given:
     // `a[..n]`, `a[k..]`, `a[..]`, `a[..<k]`, `a[1..n by 2]`, `a[.. by -1]`.

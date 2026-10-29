@@ -1,0 +1,7 @@
+unit m
+
+def main() =
+  val d = 2.5<m>
+  val x: real = strip(d)
+  print(x)
+  print(x * 2.0)

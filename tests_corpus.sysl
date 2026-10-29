@@ -19,7 +19,7 @@ private names() -> Buf[string]
 
     out
 
-@test("all 425 corpus programs lex")
+@test("all 431 corpus programs lex")
 corpus_lexes()
     var count = 0
 
@@ -30,9 +30,9 @@ corpus_lexes()
             Ok(_) -> count += 1
             Err(d) -> assert(false, s"${name}: ${d.message} @${src.locate(d.span.start)}")
 
-    assert_eq(count, 425)
+    assert_eq(count, 431)
 
-@test("all 425 corpus programs parse")
+@test("all 431 corpus programs parse")
 corpus_parses()
     var count = 0
 
@@ -43,4 +43,4 @@ corpus_parses()
             Ok(_) -> count += 1
             Err(d) -> assert(false, s"${name}: ${d.message} @${src.locate(d.span.start)}")
 
-    assert_eq(count, 425)
+    assert_eq(count, 431)
