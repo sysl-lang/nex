@@ -300,10 +300,7 @@ private scan_punct(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]], m: usize)
 
         prev.value match
             Num(_) ->
-                if glued
-                    if !closes_on_line(after, false)
-                        return Err(error(Span(m, m + 1), "this unit annotation is not closed: a `<` written against a number opens one, closed by a `>` on the same line; a comparison is written with a blank, `a < b`"))
-
+                if glued && closes_on_line(after, true)
                     s.bump()
                     out.push(Spanned(UnitOpen, s.span_from(m)))
                     return Ok(())

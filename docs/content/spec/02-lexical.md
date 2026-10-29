@@ -197,7 +197,8 @@ pub       trait     type      where     yield
 
 **Units of measure** are written in angle brackets directly after a numeric literal or a type
 name, with no space: `9.81<m/s^2>`, `real<mm>`. Inside the brackets, names are unit names, so `in`
-is the inch there. A `<` anywhere else, or after a space, is the comparison.
+is the inch there. A `<` is a unit bracket only when unit syntax and a `>` follow on the same line;
+otherwise, or after a space, it is the comparison (`1<x` compares).
 
 **Type names are not keywords.** `integer`, `real`, `complex`, `int8` … `int64`, `uint8` …
 `uint64`, `real16`, `real32`, `real64`, `bool`, `string` and `unit` are names the prelude defines

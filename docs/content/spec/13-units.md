@@ -73,8 +73,9 @@ declares a unit only at the start of a top-level declaration.
 | an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
 | dimensionless | `<1>`: `real<1>` is `real` |
 
-The `<` follows the literal or the type name directly, with no space. After anything else, or after
-a space, `<` is the comparison: `x<y` with `x` a variable, and `2 < x`, compare.
+The `<` follows the literal or the type name directly, with no space, and the text after it up to a
+`>` on the same line must be valid unit syntax. Otherwise, or after a space, `<` is the comparison:
+`x<y`, `1<x` and `2 < x` compare, while `2<x>` is the literal 2 with unit `x`.
 
 Plain `real` is dimensionless, and so is a literal written without a unit. A unit can be attached to
 a real or complex type of any width; integers count things and carry no unit, and an integer

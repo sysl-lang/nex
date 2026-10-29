@@ -1153,10 +1153,11 @@ name. `unit` is contextual too: followed by a name at the start of a top-level d
 declares a unit of measure (§13.1), and everywhere else it is the type `unit`. The type names of
 §2.1 are prelude type names, not keywords.
 
-**Units**: a `<` written directly after a numeric literal or a type name, with no space, opens a
-unit of measure that the matching `>` closes (`9.81<m/s^2>`, `real32<m/s>`, §13.2). Inside the
-brackets, names are unit names in their own namespace, so `in` is a unit there. A `<` after
-anything else, or after a space, is the comparison.
+**Units**: a `<` written directly after a numeric literal, a name or a `]`, with no space, opens a
+unit of measure only if the text after it, up to a `>` on the same line, is valid unit syntax
+(`9.81<m/s^2>`, `real32<m/s>`, §13.2); otherwise it is the comparison, so `1<x` and
+`0<x and x>1` compare. Inside the brackets, names are unit names in their own namespace, so `in`
+is a unit there. A `<` after anything else, or after a space, is the comparison.
 
 **Operator precedence**: `^` binds tighter than unary minus, so `-x^2` is `-(x^2)` as in Fortran and
 mathematics, and `^` is right-associative (`2^3^2` is `2^(3^2)`). `^` is the only power operator;
@@ -1272,8 +1273,9 @@ unit psi = lbf / in^2
 | an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
 | dimensionless | `<1>`: `real<1>` is `real` |
 
-- **`<` opens a unit only directly after a numeric literal or a type name, with no space.** `x<y`
-  with `x` a binding is a comparison, and so is `2 < x`; `2<x>` is the literal 2 with unit `x`.
+- **`<` opens a unit only directly after a numeric literal, a name or a `]`, with no space, and
+  only when unit syntax up to a `>` on the same line follows.** `x<y`, `1<x` and `2 < x` are
+  comparisons; `2<x>` is the literal 2 with unit `x`.
 - **Plain `real` is dimensionless**, and so is an unannotated literal: `1.0` is `real<1>`.
 - **Units attach to real and complex types only** (**PROPOSED**); integers count things. An integer
   literal with a unit is a real literal of that value: `12<in>` is `12.0<in>`.
