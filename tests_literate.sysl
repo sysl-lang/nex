@@ -1,0 +1,75 @@
+@tests
+
+// Literate nex (spec §2.9): the program is the indented blocks of a Markdown file, and everything else
+// is blanked so that a position in the program is a position in the document.
+
+import sh.sysl.parsing.source_of
+import sysl.text.from_utf8_lossy
+
+// The program text a `.lnex` document holds, or the refusal.
+private tangled(text: string) -> string = program_text(source_of("t.lnex", text)) match
+    Ok(s) -> from_utf8_lossy(s.bytes)
+    Err(d) -> s"refused: ${d.message}"
+
+// The tree of the program a `.lnex` document holds.
+private literate_tree(text: string) -> string = program_text(source_of("t.lnex", text)) match
+    Ok(s) -> parse_program(s) match
+        Ok(p) -> show_program(p)
+        Err(d) -> s"error: ${d.message} @${s.locate(d.span.start)}"
+    Err(d) -> s"refused: ${d.message}"
+
+@test("a file is literate by its extension")
+literate_by_name()
+    assert(is_literate("a.lnex"), "a.lnex")
+    assert(!is_literate("a.nex"), "a.nex")
+    assert(!is_literate("lnex"), "no extension")
+
+@test("a .nex file is not tangled")
+plain_files_pass_through()
+    val doc = source_of("t.nex", "    indented\n")
+
+    assert_eq(from_utf8_lossy(program_text(doc).unwrap().bytes), "    indented\n")
+
+@test("prose is blanked and the indented block is the program")
+prose_and_code()
+    assert_eq(tangled("# Greeting\n\nSome prose.\n\n    def main() =\n        print(1)\n"), "\n\n\n\ndef main() =\n    print(1)\n")
+    assert_eq(literate_tree("# Greeting\n\nSome prose.\n\n    def main() =\n        print(1)\n"), "(def main () _ (call print 1))")
+
+@test("an error in the program is reported on the line of the document it was written on")
+positions_follow_the_document()
+    assert_eq(literate_tree("# T\n\nprose\n\n    val x = 1\n    val = 2\n"), "error: expected a name to bind, found '=' @6:5")
+
+@test("indentation past the first level is the program's own")
+deeper_indentation_survives()
+    assert_eq(tangled("    a\n        b\n            c\n"), "a\n    b\n        c\n")
+
+@test("a line with one to three spaces is prose")
+shallow_indentation_is_prose()
+    assert_eq(tangled("  two\n   three\n    four\n"), "\n\nfour\n")
+
+@test("a fenced block is blanked whole, its fences too")
+fenced_blocks()
+    assert_eq(tangled("text\n\n```\n    not code\n```\n\n    val x = 1\n"), "\n\n\n\n\n\nval x = 1\n")
+
+@test("a program may be several blocks apart")
+several_blocks()
+    assert_eq(literate_tree("    val a = 1\n\nBetween.\n\n    val b = 2\n"), "(val a 1)\n(val b 2)")
+
+@test("a document with no code is an empty program")
+no_code()
+    assert_eq(literate_tree("# Only prose\n\nMore prose.\n"), "")
+
+// Where `tangle_literate` and spec §2.9 part. Each test is §2.9's wording; the first two are refused
+// or misread by the tangling today.
+
+@test("a tab is one level of indentation", ignore: "tangle_literate refuses a tab in a code line's indentation; spec 2.9 makes a leading tab one level")
+tab_indented_code()
+    assert_eq(literate_tree("# T\n\n\tdef main() =\n\t    print(1)\n"), "(def main () _ (call print 1))")
+
+@test("a code block after a list item is code", ignore: "tangle_literate treats an indented line under a Markdown list item as prose; spec 2.9 says four spaces make a code line")
+code_after_a_list_item()
+    assert_eq(literate_tree("# T\n\n- item\n\n    def main() =\n        print(1)\n"), "(def main () _ (call print 1))")
+
+@test("a CRLF document keeps its CRLF line ends", ignore: "tangle_literate ends every line with a bare newline; the reference keeps \\r\\n")
+crlf_line_ends_kept()
+    assert_eq(tangled("# T\r\n\r\n    val x = 1\r\n"), "\r\n\r\nval x = 1\r\n")

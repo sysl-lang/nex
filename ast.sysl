@@ -1,0 +1,180 @@
+// The tree the parser builds: a nex program as it was written, before any name is resolved or any
+// type is known.
+//
+// **Every node is a span and a kind.** The span is where the node was written, which is what every
+// later phase's diagnostics point at; the kind is held through a `&`, which is what lets the kinds
+// refer to nodes of their own type and still have a size. A list is a `Buf`, an optional part an
+// `Option`.
+//
+// The tree records what was written and decides nothing a later phase decides: `x += 1` is an
+// assignment with its operator, not `x = x + 1`; a bare `Diverged` in a `match` arm is a name, which
+// the elaborator finds is a variant; `[1, 2]` is an array literal whatever its elements turn out to be.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+struct Program
+    decls: Buf[Decl]
+
+// `@name` or `@name("arg", T)`.
+struct Attribute
+    name: string
+    args: Buf[AttrArg]
+
+enum AttrArg
+    Str(value: string)
+    // A bare name: a type parameter of the declaration, as in `@intrinsic("libm.sqrt", T)`.
+    Name(name: string)
+
+struct Decl
+    span: Span
+    attrs: Buf[Attribute]
+    private_: bool
+    kind: &DeclKind
+
+// Which of the three binding words introduced a binding.
+enum BindKind
+    Val
+    Var
+    Const
+
+// A parameter's mode: read-only unless the declaration says `mut`.
+enum Mode
+    Read
+    Mut
+
+struct Param
+    name: string
+    typ: Type
+    mode: Mode
+    default: Option[Expr]
+
+// `T` or `T: Numeric` in a generic head.
+struct TypeParam
+    name: string
+    constraint: Option[string]
+
+struct Field
+    name: string
+    typ: Type
+
+// One variant of an `enum`: bare (`Diverged`) or with fields (`Converged(x: real)`).
+struct Variant
+    name: string
+    fields: Buf[Field]
+
+// `x` or `x as y` inside `import a.b.{...}`.
+struct Selector
+    name: string
+    alias: Option[string]
+
+enum DeclKind
+    // `val pattern [: type] = init`, and `var` and `const` alike.
+    Bind(kind: BindKind, pat: Pattern, typ: Option[Type], init: Expr)
+    // `def name[T: C](params) [: ret] [= body]`. A `def` without a body is how an `@intrinsic` is
+    // declared.
+    Fun(name: string, type_params: Buf[TypeParam], params: Buf[Param], ret: Option[Type], body: Option[Expr])
+    Struct(name: string, type_params: Buf[TypeParam], fields: Buf[Field])
+    Enum(name: string, type_params: Buf[TypeParam], variants: Buf[Variant])
+    // `module a.b`; under `@test` its declarations exist only in a test build.
+    Module(path: Buf[string])
+    // `import a.b`, `import a.b.{x, y as z}` or `import a.b.*`.
+    Import(path: Buf[string], selectors: Buf[Selector], wildcard: bool)
+end DeclKind
+
+struct Pattern
+    span: Span
+    kind: &PatternKind
+
+// The left of a binding, the variable of a `for`, or a `match` arm's pattern.
+enum PatternKind
+    Name(name: string)
+    Wildcard
+    // `a, b, c`: two or more, since a one-element tuple does not exist.
+    Tuple(elems: Buf[Pattern])
+    // `Converged(x, _)` in a `match` arm. A bare `Diverged` is a `Name`.
+    Variant(name: string, args: Buf[Pattern])
+
+struct Type
+    span: Span
+    kind: &TypeKind
+
+enum TypeKind
+    Named(name: string)
+    // `Pair[integer, string]`.
+    Applied(name: string, args: Buf[Type])
+    // `[T]`.
+    Array(elem: Type)
+    // `(T1, T2)`; `()` is the empty tuple.
+    Tuple(elems: Buf[Type])
+    // `(P1, P2) -> R`, or `P -> R` with one parameter.
+    Func(params: Buf[Type], ret: Type)
+
+// A piece of an interpolated literal: literal text, or a value with the printf specifier written
+// after it in an `f"..."` literal (`""` where there is none). `$name` is the value of `name`.
+enum Part
+    Text(text: string)
+    Value(expr: Expr, spec: string)
+
+struct LambdaParam
+    name: string
+    typ: Option[Type]
+
+struct MatchCase
+    pat: Pattern
+    body: Expr
+
+enum BlockItem
+    Item(decl: Decl)
+    Stmt(expr: Expr)
+
+struct Expr
+    span: Span
+    kind: &ExprKind
+
+enum ExprKind
+    IntLit(value: i64)
+    RealLit(value: real)
+    BoolLit(value: bool)
+    StrLit(value: string)
+    // `s"..."`, or `f"..."` where `format` is set.
+    Interp(parts: Buf[Part], format: bool)
+    UnitLit
+    Name(name: string)
+    // `op` is the operator as written: `+`, `div`, `@`, `and`, `==`.
+    BinOp(op: string, lhs: Expr, rhs: Expr)
+    // `a < b <= c`: two or more comparisons in a row, each operand evaluated once. A single
+    // comparison is a `BinOp`.
+    Chain(operands: Buf[Expr], ops: Buf[string])
+    // `-x` or `not x`.
+    Unary(op: string, operand: Expr)
+    // `2x`, `2pi`, `2(x + 1)`: a numeric coefficient written against what it multiplies.
+    Juxtapose(coeff: Expr, body: Expr)
+    // `lo..hi`, `lo..=hi`. Inside an index list either bound may be left off and a stride given:
+    // `a[..n]`, `a[k..]`, `a[..]`, `a[0..n by 2]`.
+    Range(lo: Option[Expr], hi: Option[Expr], inclusive: bool, stride: Option[Expr])
+    // `[a, b, c]`; a matrix is an array of rows.
+    Array(elems: Buf[Expr])
+    Tuple(elems: Buf[Expr])
+    Call(callee: Expr, args: Buf[Expr])
+    // `name = value` in a call's argument list.
+    NamedArg(name: string, value: Expr)
+    Index(target: Expr, indices: Buf[Expr])
+    // `:` in an index list: the whole of that axis.
+    AxisAll
+    Field(receiver: Expr, name: string)
+    // `t.0`.
+    TupleField(receiver: Expr, index: usize)
+    // `x.f(args)`: a field holding a function, or `f(x, args)` -- the elaborator decides.
+    MethodCall(receiver: Expr, name: string, args: Buf[Expr])
+    Lambda(params: Buf[LambdaParam], body: Expr)
+    If(cond: Expr, then_branch: Expr, else_branch: Option[Expr])
+    For(pat: Pattern, iterable: Expr, body: Expr)
+    While(cond: Expr, body: Expr)
+    Return(value: Option[Expr])
+    Match(scrutinee: Expr, cases: Buf[MatchCase])
+    // `target = value`, or a compound `+=`, `-=`, `*=`, `/=`, `%=`.
+    Assign(op: string, target: Expr, value: Expr)
+    // Statements and declarations, then the expression whose value the block is.
+    Block(items: Buf[BlockItem], result: Expr)
+end ExprKind

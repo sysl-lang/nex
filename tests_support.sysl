@@ -1,0 +1,27 @@
+// What the test files share: each turns a piece of nex text into a string a test can compare, so a
+// test reads as the input beside the thing it must come to.
+
+import sh.sysl.parsing.source_of
+import sysl.text.join
+
+// The tokens of `text` on one line (`K(def) ID(x) NL`), or the lexer's refusal with its position.
+lexed(text: string) -> string
+    val src = source_of("t.nex", text)
+
+    lex(src) match
+        Ok(toks) -> join(token_names(src, toks).view(), " ")
+        Err(d) -> s"error: ${d.message} @${src.locate(d.span.start)}"
+
+// The tree of a whole program, one declaration to a line, or the parser's refusal with its position.
+parsed(text: string) -> string
+    val src = source_of("t.nex", text)
+
+    parse_program(src) match
+        Ok(p) -> show_program(p)
+        Err(d) -> s"error: ${d.message} @${src.locate(d.span.start)}"
+
+// The tree of one expression, written as the right-hand side of a `val`.
+expr_tree(text: string) -> string
+    val whole = parsed(s"val r = ${text}")
+
+    if whole.starts_with("(val r ") then whole[7..<whole.len - 1] else whole

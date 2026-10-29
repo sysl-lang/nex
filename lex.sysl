@@ -1,0 +1,498 @@
+// The nex lexer: source text to a token list in which a block is an `Indent` ... `Dedent` pair and a
+// statement ends at a `Newline`, so the parser never looks at a column.
+//
+// The bookkeeping is `sh.sysl.parsing`'s: `Scanner` walks the bytes, `Layout` keeps the stack of open
+// blocks and the bracket depth, and `read_interpolated_named` takes an `s"..."` literal apart. What
+// is decided here is the grammar's part (spec §2):
+//
+// - **A newline inside brackets is whitespace**, except after a `->` that ends its line: that
+//   opens a block-form lambda body, whose lines count until the bracket that holds it closes, or
+//   until a `,` at the body's own level hands the next argument back to the bracket.
+// - **A line ending in a binary operator, `and` or `or` continues on the next line**, outside
+//   brackets.
+// - **A `Newline` comes before an `Indent` and after each `Dedent`**, and the input ends with a
+//   `Newline` and a `Dedent`/`Newline` pair for every block still open.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.from_utf8_unchecked
+import sh.sysl.parsing.{Diagnostic, Dent, Interpolation, Layout, Scanner, Source, Span, Spanned,
+    error, is_ident_cont, is_ident_start, layout, measure_indent, point, read_escape,
+    read_interpolated_named, scan}
+
+enum Tok
+    // A number as written, with its `_` separators taken out and its base prefix kept: `42`, `0xFF`,
+    // `2.5e-3`. Whether it is an integer or a real is the parser's to say.
+    Num(text: string)
+    // A string literal, escapes decoded.
+    Str(value: string)
+    // `s"..."` (or `f"..."`, `format` true), already split into text and holes.
+    Interp(parts: Buf[Piece], format: bool)
+    Ident(name: string)
+    // A reserved word or an operator: one variant for both, since every question about one is asked
+    // by its spelling.
+    Keyword(text: string)
+    Newline
+    Indent
+    Dedent
+    Eof
+end Tok
+
+// A piece of an interpolated literal as the lexer leaves it. A hole is where its expression was
+// written, so the parser reads it in place and its diagnostics point into the literal; `spec` is the
+// printf specifier after it in an `f"..."` literal, `""` where there is none.
+enum Piece
+    Chunk(text: string)
+    // `$name`: the span is the name's.
+    NameHole(at: Span, spec: string)
+    // `${expr}`: the span is the text between the braces.
+    ExprHole(at: Span, spec: string)
+
+// The words a name may not be.
+private val reserved = ["and", "as", "by", "const", "def", "div", "do", "elif", "else", "end", "enum",
+    "false", "for", "if", "import", "in", "match", "module", "mut", "not", "or", "private", "return",
+    "struct", "then", "true", "val", "var", "while"]
+
+// The operators and delimiters, longest first so that the first match is the longest one. `//` and
+// `/*` open comments and are taken before this table is asked. `.*` is a token of its own so that the
+// `*` of `import m.*` at the end of a line is not read as an operator continuing it.
+private val operators = ["..=", "..", "->", ".*", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
+    "%=", "(", ")", "[", "]", "{", "}", "+", "-", "*", "/", "%", "^", "@", "<", ">", "=", ".", ",",
+    ";", ":"]
+
+// The tokens that leave a line unfinished when they end it.
+private val continuations = ["+", "-", "*", "/", "%", "^", "==", "!=", "<", ">", "<=", ">=", "and",
+    "or"]
+
+private contains(set: []const string, word: string) -> bool
+    for w in set
+        if w == word then return true
+
+    false
+
+is_reserved(word: string) -> bool = contains(reserved, word)
+
+// The tokens of `src`, or the first thing in it that is not a token.
+lex(src: Source) -> Result[Buf[Spanned[Tok]], Diagnostic] = lex_from(scan(src), true)
+
+// The tokens of the text between `from` and `to`, read where it stands in `src` so that every token's
+// span is a span of the file -- the expression of a `${...}` hole, which starts mid-line and so has
+// no indentation of its own to measure.
+lex_within(src: Source, from: usize, to: usize) -> Result[Buf[Spanned[Tok]], Diagnostic] =
+    lex_from(Scanner(src.bytes[0..<to], from), false)
+
+private lex_from(start: Scanner, at_head: bool) -> Result[Buf[Spanned[Tok]], Diagnostic]
+    var s = start
+    var lay = layout()
+    var out: Buf[Spanned[Tok]] = buf()
+
+    // Whether the cursor is at the head of a line whose indentation has not been measured yet.
+    var at_line_head = at_head
+
+    // Whether any line has been read: the first line ends no statement, so no `Newline` precedes it.
+    var started = false
+
+    // Where the last line's content ran out, which is where the `Newline` ending it is placed.
+    var line_end: usize = 0
+
+    loop
+        if at_line_head
+            val margin = s.offset
+            val ind = measure_indent(&s, 1)
+
+            skip_trivia(&s)?
+
+            if s.at_end() then break
+
+            // A line holding only blanks and comments is not a line: it ends nothing and opens nothing.
+            if s.at_line_end()
+                s.accept_newline()
+                continue
+
+            if ind.is_mixed()
+                return Err(error(point(margin), "only tabs or spaces (but not both on a given line) may be used for indentation"))
+
+            val dent = lay.line(ind.columns)
+
+            dent match
+                Ragged(_) ->
+                    return Err(error(point(s.offset),
+                        s"this line is indented to column ${ind.columns}, which lines up with no open block — the block it closed starts at column ${lay.left_margin()} and the one around it at column ${lay.margin()}"))
+                _ -> ()
+
+            emit_dent(&out, dent, point(line_end), point(s.offset), started)
+
+            // A dedent that closes the last block opened inside brackets hands the line back to the
+            // bracket rule, where it may begin with the bracket's `)`: the `Newline` that would end
+            // a statement outside the block is not one.
+            if lay.brackets > 0 && !lay.significant()
+                dent match
+                    Shallower(_) -> drop_trailing_newline(&out)
+                    _ -> ()
+
+            started = true
+            at_line_head = false
+        else
+            skip_trivia(&s)?
+
+            if s.at_end() then break
+
+            if s.at_line_end()
+                line_end = s.offset
+
+                if ends_the_statement(&s, &lay, &out) then at_line_head = true
+
+                continue
+        end if
+
+        scan_token(&s, &lay, &out)?
+    end loop
+
+    val eof = point(s.offset)
+
+    out.push(Spanned(Newline, eof))
+
+    for _ in 0..<lay.finish()
+        out.push(Spanned(Dedent, eof))
+        out.push(Spanned(Newline, eof))
+
+    out.push(Spanned(Eof, eof))
+    Ok(out)
+end lex_from
+
+private emit_dent(out: *Buf[Spanned[Tok]], d: Dent, ended: Span, at: Span, started: bool)
+    d match
+        Same ->
+            if started then out.push(Spanned(Newline, ended))
+        Deeper ->
+            if started then out.push(Spanned(Newline, ended))
+
+            out.push(Spanned(Indent, at))
+        Shallower(levels) ->
+            if started then out.push(Spanned(Newline, ended))
+
+            for _ in 0..<levels
+                out.push(Spanned(Dedent, at))
+                out.push(Spanned(Newline, at))
+        Ragged(_) -> ()
+end emit_dent
+
+private drop_trailing_newline(out: *Buf[Spanned[Tok]])
+    if out.len() > 0 && is_newline(out.at(out.len() - 1).value) then out.pop()
+
+private is_newline(t: Tok) -> bool = t match
+    Newline -> true
+    _ -> false
+
+// The spelling of the last token emitted, where it was a keyword or an operator.
+private last_keyword(out: *Buf[Spanned[Tok]]) -> string
+    if out.len() == 0 then return ""
+
+    out.at(out.len() - 1).value match
+        Keyword(k) -> k
+        _ -> ""
+
+// Whether the line ending under the cursor ends a statement, having consumed it either way.
+private ends_the_statement(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]]) -> bool
+    val last = last_keyword(out)
+    val trigger = lay.brackets > 0 && last == "->"
+    val suspended = !lay.significant()
+
+    s.accept_newline()
+
+    if !suspended && contains(continuations, last) then return false
+    if suspended && !trigger then return false
+    if trigger then lay.opens_block()
+
+    true
+end ends_the_statement
+
+// Blanks and comments, up to the next token or the end of the line. A block comment may span lines
+// and nest.
+private skip_trivia(s: *Scanner) -> Result[unit, Diagnostic]
+    loop
+        s.skip_blanks()
+
+        if s.starts_with("//".bytes)
+            s.skip_to_line_end()
+            return Ok(())
+
+        if !s.starts_with("/*".bytes) then return Ok(())
+
+        val m = s.mark()
+
+        s.skip_block_comment("/*".bytes, "*/".bytes, true) match
+            Err(_) -> return Err(error(point(m), "unclosed comment"))
+            Ok(_) -> ()
+end skip_trivia
+
+private scan_token(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]]) -> Result[unit, Diagnostic]
+    val m = s.mark()
+    val c = s.peek().unwrap()
+
+    if c.is_digit() then
+        // After a `.` a number is a tuple field, so `t.0.1` is two fields and not `t` and a real.
+        val text = if last_keyword(out) == "." then read_field_number(s) else read_number(s)
+
+        out.push(Spanned(Num(text), s.span_from(m)))
+    elif c == u8('"') then
+        out.push(Spanned(Str(read_string(s)?), s.span_from(m)))
+    elif is_name_start(c) then
+        scan_word(s, out, m)?
+    else
+        scan_punct(s, lay, out, m)?
+
+    Ok(())
+end scan_token
+
+// A letter, `_`, or a byte of a character beyond ASCII.
+private is_name_start(c: u8) -> bool = is_ident_start(c) || c >= 0x80
+
+private is_name_cont(c: u8) -> bool = is_ident_cont(c) || c >= 0x80
+
+private scan_word(s: *Scanner, out: *Buf[Spanned[Tok]], m: usize) -> Result[unit, Diagnostic]
+    s.accept_while(is_name_cont)
+
+    val text = from_utf8_unchecked(s.text_from(m))
+
+    if s.peek() == Some(u8('"')) && (text == "s" || text == "f")
+        val parts = read_interp(s, text == "f")?
+
+        out.push(Spanned(Interp(parts, text == "f"), s.span_from(m)))
+        return Ok(())
+
+    out.push(Spanned(if is_reserved(text) then Keyword(text) else Ident(text), s.span_from(m)))
+    Ok(())
+end scan_word
+
+// An operator by longest match. The brackets keep the layout's count, and two tokens close blocks
+// that opened inside brackets before they are emitted: a closing bracket, and a `,` at such a block's
+// own level, which ends a block-form lambda written as an argument.
+private scan_punct(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]], m: usize) -> Result[unit, Diagnostic]
+    for op in operators
+        if s.accept_seq(op.bytes)
+            val at = s.span_from(m)
+
+            if op == "(" || op == "[" || op == "{"
+                lay.open_bracket()
+            elif op == ")" || op == "]" || op == "}"
+                drain(out, lay.close_bracket(), at)
+            elif op == ","
+                drain(out, lay.close_blocks_in_bracket(), at)
+
+            out.push(Spanned(Keyword(op), at))
+            return Ok(())
+
+    Err(error(Span(m, m + 1), "illegal character"))
+end scan_punct
+
+private drain(out: *Buf[Spanned[Tok]], closed: usize, at: Span)
+    if closed == 0 then return
+
+    out.push(Spanned(Newline, at))
+
+    for _ in 0..<closed
+        out.push(Spanned(Dedent, at))
+end drain
+
+// -- numbers ----------------------------------------------------------------------------------------
+
+// Digits answering `digit`, with runs of `_` allowed between two of them, appended without the
+// separators. The cursor is on the first digit.
+private read_digits(s: *Scanner, digit: u8 -> bool, into: *Buf[u8])
+    loop
+        s.peek() match
+            Some(c) ->
+                if digit(c)
+                    into.push(c)
+                    s.bump()
+                    continue
+            None -> ()
+
+        // A separator counts only where a digit follows the run of them.
+        var n: usize = 0
+
+        while s.peek_at(n) == Some(u8('_'))
+            n += 1
+
+        if n == 0 then break
+
+        s.peek_at(n) match
+            Some(c) ->
+                if !digit(c) then break
+            None -> break
+
+        s.skip(n)
+    end loop
+end read_digits
+
+private is_dec(c: u8) -> bool = c.is_digit()
+
+private is_digit_of(base: int, c: u8) -> bool = c.digit_value(base).is_some()
+
+// Whether the byte `n` ahead answers `p`.
+private ahead(s: *Scanner, n: usize, p: u8 -> bool) -> bool = s.peek_at(n) match
+    Some(c) -> p(c)
+    None -> false
+
+// A number, with the cursor on its first digit: `0x`/`0b`/`0o` and a digit of that base, a decimal
+// with a fraction and an optional exponent, a decimal with an exponent, or a decimal integer. A `.`
+// is a fraction only with a digit after it, so `0..10` is a range.
+private read_number(s: *Scanner) -> string
+    var b: Buf[u8] = buf()
+
+    if s.peek() == Some(u8('0'))
+        val bases = [(u8('x'), "0x", 16), (u8('X'), "0x", 16), (u8('b'), "0b", 2), (u8('B'), "0b", 2), (u8('o'), "0o", 8), (u8('O'), "0o", 8)]
+
+        for (letter, prefix, base) in bases
+            if s.peek_at(1) == Some(letter) && ahead(s, 2, (c) -> is_digit_of(base, c))
+                s.skip(2)
+                b.extend(prefix.bytes)
+                read_digits(s, (c) -> is_digit_of(base, c), &b)
+                return from_utf8_unchecked(b.view()).copy()
+    end if
+
+    read_digits(s, is_dec, &b)
+
+    if s.peek() == Some(u8('.')) && ahead(s, 1, is_dec)
+        s.bump()
+        b.push(u8('.'))
+        read_digits(s, is_dec, &b)
+
+    read_exponent(s, &b)
+    from_utf8_unchecked(b.view()).copy()
+end read_number
+
+private read_field_number(s: *Scanner) -> string
+    var b: Buf[u8] = buf()
+
+    read_digits(s, is_dec, &b)
+    from_utf8_unchecked(b.view()).copy()
+
+// `e`, an optional sign and digits -- all three, or nothing is consumed.
+private read_exponent(s: *Scanner, b: *Buf[u8])
+    val e = s.peek()
+
+    if e != Some(u8('e')) && e != Some(u8('E')) then return
+
+    val signed = s.peek_at(1) == Some(u8('+')) || s.peek_at(1) == Some(u8('-'))
+    val first: usize = if signed then 2 else 1
+
+    if !ahead(s, first, is_dec) then return
+
+    b.push(e.unwrap())
+
+    if signed then b.push(s.peek_at(1).unwrap())
+
+    s.skip(first)
+    read_digits(s, is_dec, b)
+end read_exponent
+
+// -- strings ----------------------------------------------------------------------------------------
+
+// Whether the byte after a backslash begins one of nex's escapes: `\n \t \r \\ \" \' \0`, `\xNN` and
+// `\u{N...}`. A backslash before anything else is an ordinary character.
+private nex_escape(c: u8) -> bool
+    for e in "ntr\\\"'0xu".bytes
+        if c == e then return true
+
+    false
+
+// A `"..."` literal with the cursor on the opening quote, escapes decoded.
+private read_string(s: *Scanner) -> Result[string, Diagnostic]
+    val start = s.mark()
+    var b: Buf[u8] = buf()
+
+    s.bump()
+
+    loop
+        s.peek() match
+            None -> return Err(error(point(start), "unterminated string literal"))
+            Some(c) ->
+                if c == u8('"')
+                    s.bump()
+                    break
+
+                if c == u8('\n') then return Err(error(point(start), "unterminated string literal"))
+
+                if c == u8('\\') && ahead(s, 1, nex_escape)
+                    val m = s.mark()
+
+                    read_escape(s) match
+                        Ok(ch) ->
+                            b.extend(ch.to_string().bytes)
+                            continue
+                        Err(_) -> s.reset(m)
+
+                b.push(c)
+                s.bump()
+    end loop
+
+    Ok(from_utf8_unchecked(b.view()).copy())
+end read_string
+
+// The body of an `s"..."` or `f"..."` literal, with the cursor on its quote. A hole written `$name`
+// is told from one written `${expr}` by the byte before it. In an `f"..."` literal the printf
+// specifier written straight after a hole (`$x%5d`, `${y}%.3f`) belongs to the hole; a `%` anywhere
+// else is text.
+private read_interp(s: *Scanner, format: bool) -> Result[Buf[Piece], Diagnostic]
+    val start = s.mark()
+    val got: Interpolation = read_interpolated_named(s, u8('"'), "${".bytes, u8('}'), is_ident_start, is_ident_cont) match
+        Ok(i) -> i
+        Err(_) -> return Err(error(point(start), "malformed interpolated string literal"))
+
+    var parts: Buf[Piece] = buf()
+
+    for i in 0..<got.chunks.len()
+        var text = got.chunks[i]
+
+        if i > 0
+            val hole = got.holes[i - 1]
+            var spec = ""
+
+            if format
+                val n = spec_length(text)
+
+                spec = text[0..<n].copy()
+                text = text[n..<text.len].copy()
+            end if
+
+            parts.push(if s.src[hole.start - 1] == u8('{') then ExprHole(hole, spec) else NameHole(hole, spec))
+        end if
+
+        if text.len > 0 then parts.push(Chunk(text))
+    end for
+
+    Ok(parts)
+end read_interp
+
+// How long the printf specifier at the start of `text` is: `%`, flags from `-+0 `, a width, a
+// `.precision`, and a conversion from `defgsxXob` -- or 0 where `text` does not start with one.
+private spec_length(text: string) -> usize
+    val b = text.bytes
+    var i: usize = 1
+
+    if b.len == 0 || b[0] != u8('%') then return 0
+
+    while i < b.len && (b[i] == u8('-') || b[i] == u8('+') || b[i] == u8('0') || b[i] == u8(' '))
+        i += 1
+
+    while i < b.len && b[i].is_digit()
+        i += 1
+
+    if i < b.len && b[i] == u8('.')
+        val dot = i
+
+        i += 1
+
+        while i < b.len && b[i].is_digit()
+            i += 1
+
+        if i == dot + 1 then return 0
+    end if
+
+    if i < b.len
+        for c in "defgsxXob".bytes
+            if b[i] == c then return i + 1
+
+    0
+end spec_length
