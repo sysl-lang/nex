@@ -404,3 +404,16 @@ An array literal has a dynamic shape unless its binding is annotated: `val v = [
 {{< note >}}
 That an unannotated array literal is dynamically shaped may change.
 {{< /note >}}
+
+## 3.17 Types with units
+
+A real or complex type may carry a unit of measure, written in angle brackets directly after the
+type name: `real<m>`, `real32<m/s>`, `complex<V>`, and as an array's element type,
+`[real<Pa>; :, :]`. Plain `real` is dimensionless. A value of one unit converts to another unit of
+the same dimension (`mm` to `in`), never to another dimension (`in` to `lbf`), and the units vanish
+before code is generated. [Units of measure](/spec/13-units/) has the rules.
+
+```nex
+val g: real<m/s^2> = 9.81<m/s^2>
+val heights: [real<mm>] = [12.0, 15.5, 9.25] * 1.0<mm>
+```

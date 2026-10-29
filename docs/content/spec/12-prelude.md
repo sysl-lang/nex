@@ -388,6 +388,26 @@ val bytes = uint8([72, 105])               // [uint8]
 val codes = int64(bytes)                   // [integer]
 ```
 
+**Units.** Two more functions convert between units of measure, on a scalar and element by element
+on an array:
+
+| Signature | Meaning |
+|---|---|
+| `to<u>(x)` | `x` converted to unit `u` of the same dimension: `to<mm>(1.0<in>)` is `25.4<mm>` |
+| `strip(x)` | the number in `x`'s own unit, without the unit; on an array a view, with no copy |
+
+The prelude declares these units, each exactly:
+
+| Units | Definitions |
+|---|---|
+| SI base | `m` `kg` `s` `A` `K` `mol` `cd` |
+| SI derived | `N = kg m / s^2`, `J = N m`, `W = J / s`, `Pa = N / m^2`, `Hz = 1 / s`, `C = A s`, `V = W / A`, `ohm = V / A`, `rad = 1` |
+| SI scaled | `mm = 0.001 m`, `cm = 0.01 m`, `km = 1000 m`, `g = 0.001 kg`, `ms = 0.001 s`, `us = 0.000001 s`, `ns = 0.000000001 s`, `kPa = 1000 Pa`, `MPa = 1000000 Pa`, `GPa = 1000000000 Pa`, `kN = 1000 N`, `kJ = 1000 J`, `kW = 1000 W` |
+| Imperial and US customary | `in = 0.0254 m`, `ft = 12 in`, `yd = 3 ft`, `mi = 5280 ft`, `lb = 0.45359237 kg`, `oz = 0.0625 lb`, `lbf = 4.4482216152605 N`, `slug = lbf s^2 / ft`, `psi = lbf / in^2`, `ksi = 1000 psi`, `BTU = 1055.05585262 J`, `hp = 550 ft lbf / s`, `usgal = 231 in^3`, `ukgal = 0.00454609 m^3` |
+
+There is no `gal`: write `usgal` or `ukgal`. How units pass through the other prelude functions is
+in [Units of measure](/spec/13-units/).
+
 ## 12.11 Input and output
 
 | Signature | Meaning | Fortran |

@@ -108,6 +108,17 @@ val n = size(x)                       // integer
 val d = cblas_ddot(int32(n), x, 1, y, 1)
 ```
 
+**Units of measure do not cross.** An `extern` parameter is a plain number, so a value with a unit
+is passed through `strip`, which gives the number in the value's own unit; on an array it is a view
+and copies nothing. The result gets its unit back by multiplying
+([Units of measure](/spec/13-units/)):
+
+```nex
+val p = [101.3, 98.6, 102.1] * 1.0<kPa>
+val q = [1.0, 2.0, 1.0] * 1.0<m^3>
+val work = cblas_ddot(3, strip(p), 1, strip(q), 1) * 1.0<kJ>   // kPa m^3 is kJ
+```
+
 **An `inout` scalar is how C writes back.** The argument must be a mutable place, as for any
 `inout` parameter ([Functions](/spec/06-functions/)); the C function receives its address:
 

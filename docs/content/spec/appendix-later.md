@@ -23,6 +23,14 @@ Each of these is a settled direction, kept here so it is not lost. None of them 
   (see [The Prelude](/spec/12-prelude/)).
 - **Generalized eigenproblems** (`A x = λ B x`), after `eig` and `eigh`.
 - **`rcond` and `cond`**, condition-number estimates, with the rest of the second LAPACK set.
+- **Celsius and Fahrenheit**, `degC` and `degF` (see [Units of measure](/spec/13-units/)). Until
+  then temperatures are in kelvin. They are not scaled units like `mm` or `ft`: 20 °C is 293.15 K,
+  which is an added offset and not a multiplication. And a temperature *difference* converts without
+  the offset — warming by 20 °C is warming by 20 K — so these units need a temperature type and a
+  temperature-difference type, with one temperature minus another giving a difference and the sum of
+  two temperatures refused.
+- **Units in `extern` declarations**, so a C or Fortran routine is given its units once, where it
+  is declared, instead of `strip` at every call.
 
 ## Not planned
 

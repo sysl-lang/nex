@@ -422,6 +422,39 @@ summation's rounding error grows as O(log n) rather than O(n). A loop you write 
 A product dispatched to BLAS follows the BLAS library's own order, so a large `@` may differ in the
 last bits from a small one.
 
+### Units of measure — something Fortran does not have
+
+A Fortran `real` is a bare number, and whether it holds metres, millimetres or inches lives in a
+comment or a variable name. In nex a real can carry its unit, and the compiler checks it. Units of
+one dimension convert by themselves — the result takes the left operand's unit — so a metric
+drawing and inch-sized tooling mix without a hand-written factor:
+
+```nex
+def main() =
+  val plate = 150.0<mm>
+  val margin = 12.0<mm>
+  val pitch = 1.5<in>                              // hole spacing, in inches
+  val hole = 0.25<in>                              // drill diameter
+  val n = 4
+  val used = 2.0 * margin + (n - 1) * pitch + hole // real<mm>
+  print(used)                                      // 144.65 mm
+  print(used <= plate)                             // true
+```
+
+Units of different dimensions never mix, and that is where they catch real mistakes:
+
+```nex
+def kinetic_energy(m: real<kg>, v: real<m/s>): real<J> = 0.5 * m * v^2
+
+val e1 = kinetic_energy(1200.0<kg>, 27.0<m/s>)     // 437400.0 J
+val e2 = kinetic_energy(1200.0<kg>, 27.0<km>)
+// error: argument v of kinetic_energy is a real<m/s>; a real<km> was given
+```
+
+Units cost nothing at run time: they are checked and then removed, and a conversion between scales
+is one multiplication by a constant, the same one you would have written. `strip(x)` hands a plain
+number to a C or Fortran routine. The whole story is in [Units of measure](/spec/13-units/).
+
 ### `i` is the imaginary unit — until you name a loop index `i`
 
 `3 + 2i` is a complex number, since a number written directly before a name multiplies it. Inside
