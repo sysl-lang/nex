@@ -1,5 +1,5 @@
 
 def main() =
   val n = 8
-  print(range(0, n)[3..6])
+  print((0..<n)[3..6])
       

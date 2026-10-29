@@ -1066,7 +1066,10 @@ nothing. `by` (slices) and `reduce` (the `parallel for` clause) are contextual, 
 prelude name. The type names of §2.1 are prelude type names, not keywords.
 
 **Ranges**: `..` is the inclusive range operator and `..<` the half-open one (§5.1); there is no
-`..=`. Both serve slices and `for` headers alike: `for k in 1..n` runs `n` times.
+`..=`. Both serve slices and `for` headers alike: `for k in 1..n` runs `n` times. There is no `range()` function: `lo..hi` and `lo..<hi` are the only
+range spellings, and each is an integer array wherever an expression may stand (`sum(0..<n)`). A
+range binds looser than `+` and tighter than a comparison, so `2 * (0..<n)` and `(0..<n)[3..6]`
+need their parentheses and `0..<n < 3` does not.
 
 **`end`** is both the block terminator of ref §2.7 and the index expression of §5.2, told apart by
 bracket depth and line position as §5.2 specifies.
@@ -1103,6 +1106,7 @@ Inside a scope that binds `i`, write the unit some other way (`complex(0.0, 1.0)
 | Promotion | §3.2, §4.4 | §2.2 | a lattice across widths; integer meets real gives the real's width; a typed scalar promotes an array |
 | Index base | §4.14 (0-based) | §3.2, §5.1 | **1-based**, as Fortran; axis numbers (`extent(a, k)`, `sum_axis`) are 1-based too |
 | Range syntax | §4.14 (`..` half-open, `..=` inclusive) | §5.1 | `a..b` is **inclusive** (Fortran `a:b`); `a..<b` is half-open; `..=` is gone |
+| `range(lo, hi)` | §10 (prelude) | §5.1, §11 | gone: a range is written `lo..hi` or `lo..<hi`, and is an array value anywhere an expression may stand |
 | Literal typing | §2.4 | §2.3 | literals and `pi`/`e`/`inf`/`nan`/`i` take their context's width |
 | Conversions | §10.7 | §2.4 | a conversion function per type name |
 | Generic constraints | §6.10 | §2.6 | widened to sized types; `Integral`, `Rank` added |

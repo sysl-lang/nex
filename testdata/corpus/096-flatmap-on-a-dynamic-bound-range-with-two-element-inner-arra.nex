@@ -1,5 +1,5 @@
 
 def main() =
   val n = 4
-  print(flatMap(range(1, n), x -> [x, x + 10]))
+  print(flatMap(1..<n, x -> [x, x + 10]))
       

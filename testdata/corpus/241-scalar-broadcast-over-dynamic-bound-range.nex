@@ -1,4 +1,4 @@
 def main() =
   val n = 4
-  print(2 * range(0, n))
+  print(2 * (0..<n))
       

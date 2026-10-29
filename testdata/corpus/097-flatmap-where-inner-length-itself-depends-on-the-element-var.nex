@@ -1,5 +1,5 @@
 
 def main() =
   val xs = [1, 2, 3]
-  print(flatMap(xs, x -> range(0, x)))
+  print(flatMap(xs, x -> 0..<x))
       

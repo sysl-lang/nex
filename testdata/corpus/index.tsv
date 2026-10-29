@@ -44,7 +44,7 @@ file	category	name	mlir	pending	v3
 043-while-loop	control flow	while loop	true		same
 044-for-over-array	control flow	for over array	true		same
 045-for-over-val-bound-array	control flow	for over val-bound array	true		same
-046-for-over-array-produced-by-range	control flow	for over array produced by range()	true		same
+046-for-over-array-produced-by-range	control flow	for over array produced by a half-open range	true		syntax
 047-for-over-range	control flow	for over range	true		syntax
 048-for-over-inclusive-range	control flow	for over inclusive range	true		syntax
 049-for-over-range-computes-a-running-sum	control flow	for over range computes a running sum	true		syntax
@@ -88,14 +88,14 @@ file	category	name	mlir	pending	v3
 087-filter-prints-the-selected-elements-directly	functions	filter prints the selected elements directly	true		same
 088-filter-where-no-element-matches-returns-an-empty-array	functions	filter where no element matches returns an empty array	true		same
 089-filter-where-every-element-matches-returns-a-full-length-cop	functions	filter where every element matches returns a full-length copy	true		same
-090-filter-on-a-dynamic-bound-range	functions	filter on a dynamic-bound range	true		same
+090-filter-on-a-dynamic-bound-range	functions	filter on a dynamic-bound range	true		syntax
 091-filter-on-real-values-picks-nan-safe-predicate	functions	filter on real values picks NaN-safe predicate	true		same
 092-length-of-filter-result	functions	length of filter result	true		same
 093-prelude-hof-flatmap-concatenates-inner-arrays	functions	prelude HOF `flatMap` concatenates inner arrays	true		same
 094-flatmap-via-method-call-sugar	functions	flatMap via method-call sugar	true		same
 095-flatmap-with-single-element-inner-arrays-acts-like-map	functions	flatMap with single-element inner arrays acts like map	true		same
-096-flatmap-on-a-dynamic-bound-range-with-two-element-inner-arra	functions	flatMap on a dynamic-bound range with two-element inner arrays	true		same
-097-flatmap-where-inner-length-itself-depends-on-the-element-var	functions	flatMap where inner length itself depends on the element (variable inner length)	true		same
+096-flatmap-on-a-dynamic-bound-range-with-two-element-inner-arra	functions	flatMap on a dynamic-bound range with two-element inner arrays	true		syntax
+097-flatmap-where-inner-length-itself-depends-on-the-element-var	functions	flatMap where inner length itself depends on the element (variable inner length)	true		syntax
 098-length-of-flatmap-result	functions	length of flatMap result	true		same
 099-flatmap-on-real-elements-promotes-through-inner-arrays	functions	flatMap on real elements promotes through inner arrays	true		same
 100-sum-of-flatmap-result	functions	sum of flatMap result	true		same
@@ -228,21 +228,21 @@ file	category	name	mlir	pending	v3
 227-abs	prelude	abs	true		same
 228-exp-complex-exp-0-0i-1-0i-exactly	prelude	exp(complex) — exp(0 + 0i) = 1 + 0i exactly	true		same
 229-sqrt-complex-sqrt-1-0i-0-i	prelude	sqrt(complex) — sqrt(-1 + 0i) = 0 + i	true		same
-230-range	prelude	range	true		same
+230-range	prelude	half-open range as a value	true		syntax
 231-linspace	prelude	linspace	true		same
 232-zeros-ones	prelude	zeros + ones	true		same
-233-range-with-runtime-bounds	prelude	range with runtime bounds	true		same
-234-range-with-runtime-bounds-empty-when-hi-lo	prelude	range with runtime bounds — empty when hi <= lo	true		same
+233-range-with-runtime-bounds	prelude	range with runtime bounds	true		syntax
+234-range-with-runtime-bounds-empty-when-hi-lo	prelude	range with runtime bounds — empty when hi <= lo	true		syntax
 235-zeros-with-runtime-length	prelude	zeros with runtime length	true		same
 236-ones-with-runtime-length	prelude	ones with runtime length	true		same
 237-linspace-with-runtime-length	prelude	linspace with runtime length	true		same
 238-linspace-with-runtime-bounds-and-length	prelude	linspace with runtime bounds and length	true		same
-239-length-of-dynamic-bound-range	prelude	length of dynamic-bound range	true		same
-240-sum-of-dynamic-bound-range	prelude	sum of dynamic-bound range	true		same
-241-scalar-broadcast-over-dynamic-bound-range	prelude	scalar broadcast over dynamic-bound range	true		same
-242-map-over-dynamic-bound-range	prelude	map over dynamic-bound range	true		same
-243-for-over-dynamic-bound-range-running-sum	prelude	for over dynamic-bound range — running sum	true		same
-244-comparison-broadcast-over-dynamic-bound-range	prelude	comparison broadcast over dynamic-bound range	true		same
+239-length-of-dynamic-bound-range	prelude	length of dynamic-bound range	true		syntax
+240-sum-of-dynamic-bound-range	prelude	sum of dynamic-bound range	true		syntax
+241-scalar-broadcast-over-dynamic-bound-range	prelude	scalar broadcast over dynamic-bound range	true		syntax
+242-map-over-dynamic-bound-range	prelude	map over dynamic-bound range	true		syntax
+243-for-over-dynamic-bound-range-running-sum	prelude	for over dynamic-bound range — running sum	true		syntax
+244-comparison-broadcast-over-dynamic-bound-range	prelude	comparison broadcast over dynamic-bound range	true		syntax
 245-f-string-without-spec-behaves-like-s-string	string interpolation	f-string without spec behaves like s-string	true		same
 246-f-string-width-left-align-zero-pad-on-integers	string interpolation	f-string width / left-align / zero-pad on integers	true		same
 247-f-string-precision-on-reals	string interpolation	f-string precision on reals	true		same

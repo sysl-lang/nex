@@ -1,5 +1,5 @@
 def main() =
   val lo = 5
   val hi = 5
-  print(range(lo, hi))
+  print(lo..<hi)
       

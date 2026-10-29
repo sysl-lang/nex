@@ -1,4 +1,4 @@
 def main() =
   val n = 5
-  print(map(range(0, n), x -> x * x))
+  print(map(0..<n, x -> x * x))
       

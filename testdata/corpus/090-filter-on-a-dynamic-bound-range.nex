@@ -1,5 +1,5 @@
 
 def main() =
   val n = 10
-  print(filter(range(0, n), x -> x % 3 == 0))
+  print(filter(0..<n, x -> x % 3 == 0))
       
