@@ -1,0 +1,135 @@
+@tests
+
+// The token stream, in the compact form `nex tokens` prints: a keyword or an operator is `K(..)`, a
+// name `ID(..)`, a number `N(..)` with its underscores gone, a string `S(..)`, and the layout is `NL`,
+// `INDENT` and `DEDENT`.
+
+@test("integers keep their radix prefix and lose their underscores")
+integer_literals()
+    assert_eq(lexed("42"), "N(42) NL")
+    assert_eq(lexed("1_000_000"), "N(1000000) NL")
+    assert_eq(lexed("0xFF"), "N(0xFF) NL")
+    assert_eq(lexed("0b1010_1010"), "N(0b10101010) NL")
+    assert_eq(lexed("0o755"), "N(0o755) NL")
+
+@test("reals take a fraction, an exponent, or both")
+real_literals()
+    assert_eq(lexed("3.14"), "N(3.14) NL")
+    assert_eq(lexed("2.5e-3"), "N(2.5e-3) NL")
+    assert_eq(lexed("6e23"), "N(6e23) NL")
+    assert_eq(lexed("1_234.567_89"), "N(1234.56789) NL")
+
+@test("a string's escapes are decoded and printed escaped again")
+string_literals()
+    assert_eq(lexed("\"hello\""), "S(hello) NL")
+    assert_eq(lexed("\"line\\nbreak\""), "S(line\\nbreak) NL")
+    assert_eq(lexed("\"\\x41\""), "S(A) NL")
+    assert_eq(lexed("\"\\u{41}\""), "S(A) NL")
+    assert_eq(lexed("\"\""), "S() NL")
+
+@test("an interpolated string keeps its body whole and says which kind it is")
+interpolated_strings()
+    assert_eq(lexed("s\"hello\""), "S(s:hello) NL")
+    assert_eq(lexed("s\"hi $name, x=${x+1}\""), "S(s:hi $name, x=${x+1}) NL")
+    assert_eq(lexed("print(s\"x = ${x + 1}, name = $name\")"), "ID(print) K(() S(s:x = ${x + 1}, name = $name) K()) NL")
+
+@test("an interpolation hole may hold a string holding a brace")
+interpolation_holes_nest()
+    assert_eq(lexed("s\"a${\"}\"}b\""), "S(s:a${\"}\"}b) NL")
+
+@test("a keyword is a keyword only as a whole word")
+keywords_and_names()
+    assert_eq(lexed("def foo"), "K(def) ID(foo) NL")
+    assert_eq(lexed("defy iffy whilex"), "ID(defy) ID(iffy) ID(whilex) NL")
+    assert_eq(lexed("_foo _ x_y"), "ID(_foo) ID(_) ID(x_y) NL")
+
+@test("every keyword of the language is one")
+every_keyword()
+    val words = "and as const def div do else end false for if import in match module mut not or private return struct then true val var while"
+    val out = lexed(words)
+
+    assert_eq(out, "K(and) K(as) K(const) K(def) K(div) K(do) K(else) K(end) K(false) K(for) K(if) K(import) K(in) K(match) K(module) K(mut) K(not) K(or) K(private) K(return) K(struct) K(then) K(true) K(val) K(var) K(while) NL")
+
+@test("operators are read longest first")
+operators()
+    assert_eq(lexed("a == b != c <= d >= e"), "ID(a) K(==) ID(b) K(!=) ID(c) K(<=) ID(d) K(>=) ID(e) NL")
+    assert_eq(lexed("0..=10 0..10"), "N(0) K(..=) N(10) N(0) K(..) N(10) NL")
+    assert_eq(lexed("a div b"), "ID(a) K(div) ID(b) NL")
+    assert_eq(lexed("(){}[],;:"), "K(() K()) K({) K(}) K([) K(]) K(,) K(;) K(:) NL")
+    assert_eq(lexed("A @ B"), "ID(A) K(@) ID(B) NL")
+    assert_eq(lexed("x -> x * x"), "ID(x) K(->) ID(x) K(*) ID(x) NL")
+    assert_eq(lexed("x += 1"), "ID(x) K(+=) N(1) NL")
+
+@test("a number beside a name is two tokens, left for the parser to join")
+juxtaposition_is_two_tokens()
+    assert_eq(lexed("2x 2pi 3sin"), "N(2) ID(x) N(2) ID(pi) N(3) ID(sin) NL")
+
+@test("an attribute is an at sign and a name")
+attributes()
+    assert_eq(lexed("@test"), "K(@) ID(test) NL")
+    assert_eq(lexed("@strict"), "K(@) ID(strict) NL")
+
+@test("comments leave no token behind")
+comments()
+    assert_eq(lexed("foo // ignored\nbar"), "ID(foo) NL ID(bar) NL")
+    assert_eq(lexed("a // this is a comment\nb"), "ID(a) NL ID(b) NL")
+    assert_eq(lexed("foo /* ignored */ bar"), "ID(foo) ID(bar) NL")
+    assert_eq(lexed("foo /* one\ntwo */ bar"), "ID(foo) ID(bar) NL")
+
+@test("a deeper line opens a block and a shallower one closes it")
+indentation()
+    assert_eq(lexed("a\n  b\nc"), "ID(a) NL INDENT ID(b) NL DEDENT NL ID(c) NL")
+    assert_eq(lexed("a\n  b\n    c\n  d\ne"), "ID(a) NL INDENT ID(b) NL INDENT ID(c) NL DEDENT NL ID(d) NL DEDENT NL ID(e) NL")
+
+@test("blocks still open at the end of the file are closed there")
+dedent_at_end_of_file()
+    assert_eq(lexed("a\n  b\n    c\n"), "ID(a) NL INDENT ID(b) NL INDENT ID(c) NL DEDENT NL DEDENT NL")
+
+@test("blank lines and comment-only lines do not disturb the blocks")
+blank_lines_and_comments_in_blocks()
+    assert_eq(lexed("a\n\n  // a comment\n  b\n\nc"), "ID(a) NL INDENT ID(b) NL DEDENT NL ID(c) NL")
+
+@test("a line break inside brackets is not a line break")
+brackets_suppress_newlines()
+    assert_eq(lexed("f(\n  1,\n  2,\n)"), "ID(f) K(() N(1) K(,) N(2) K(,) K()) NL")
+    assert_eq(lexed("[1,\n 2]"), "K([) N(1) K(,) N(2) K(]) NL")
+
+@test("a trailing binary operator continues the line")
+continuation()
+    assert_eq(lexed("a +\n  b"), "ID(a) K(+) ID(b) NL")
+    assert_eq(lexed("x and\n  y or\n  z"), "ID(x) K(and) ID(y) K(or) ID(z) NL")
+
+@test("an equals sign at the end of a line opens a block rather than continuing")
+equals_opens_a_block()
+    assert_eq(lexed("val x =\n  a\n  b"), "K(val) ID(x) K(=) NL INDENT ID(a) NL ID(b) NL DEDENT NL")
+
+@test("an arrow ending a line inside brackets opens a block")
+arrow_in_brackets_opens_a_block()
+    assert_eq(lexed("f(x ->\n  x + 1\n)"), "ID(f) K(() ID(x) K(->) NL INDENT ID(x) K(+) N(1) NL DEDENT K()) NL")
+
+@test("small programs lex the way they read")
+small_programs()
+    assert_eq(lexed("def main() =\n  print(\"Hello, Nex!\")"), "K(def) ID(main) K(() K()) K(=) NL INDENT ID(print) K(() S(Hello, Nex!) K()) NL DEDENT NL")
+    assert_eq(lexed("struct Point\n  x: real\n  y: real\nend Point"), "K(struct) ID(Point) NL INDENT ID(x) K(:) ID(real) NL ID(y) K(:) ID(real) NL DEDENT NL K(end) ID(Point) NL")
+    assert_eq(lexed("for k, x in enumerate(arr) do\n  print(k)"), "K(for) ID(k) K(,) ID(x) K(in) ID(enumerate) K(() ID(arr) K()) K(do) NL INDENT ID(print) K(() ID(k) K()) NL DEDENT NL")
+    assert_eq(lexed("@test\ndef test_addition() =\n  assert_eq(2 + 2, 4)"), "K(@) ID(test) NL K(def) ID(test_addition) K(() K()) K(=) NL INDENT ID(assert_eq) K(() N(2) K(+) N(2) K(,) N(4) K()) NL DEDENT NL")
+
+@test("empty input, blanks and a lone comment lex to one line end and nothing else")
+trivial_inputs()
+    assert_eq(lexed(""), "NL")
+    assert_eq(lexed("   \n  \n"), "NL")
+    assert_eq(lexed("// just a comment\n"), "NL")
+
+// What the lexer refuses, and where it says so.
+
+@test("a string that is not closed is refused at its opening quote")
+unterminated_string()
+    assert_eq(lexed("val s = \"unterminated\n"), "error: unterminated string literal @1:9")
+
+@test("a character that starts no token is refused")
+illegal_character()
+    assert_eq(lexed("val x = 1 $ 2\n"), "error: illegal character @1:11")
+
+@test("a line that lines up with no open block is refused")
+ragged_dedent()
+    assert_eq(lexed("def f() =\n    a\n  b\n"), "error: this line is indented to column 2, which lines up with no open block — the block it closed starts at column 4 and the one around it at column 0 @3:3")

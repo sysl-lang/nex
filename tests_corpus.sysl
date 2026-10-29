@@ -1,0 +1,46 @@
+@tests
+
+// Every program of the reference corpus lexes and parses. The corpus was written for the reference
+// implementation, so a program the parser refuses is a program the language accepts and this one
+// does not.
+
+import sh.sysl.parsing.source_of
+import sysl.buf.{Buf, buf}
+import sysl.fs.read_text
+import sysl.text.{from_utf8, split}
+
+private val INDEX = from_utf8(embed("testdata/corpus/index.tsv")).unwrap()
+
+private names() -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for line in split(INDEX, "\n")
+        if line.len > 0 && !line.starts_with("file\t") then out.push(split(line, "\t")[0])
+
+    out
+
+@test("all 425 corpus programs lex")
+corpus_lexes()
+    var count = 0
+
+    for name in names()
+        val src = source_of(name, read_text(s"testdata/corpus/${name}.nex").unwrap())
+
+        lex(src) match
+            Ok(_) -> count += 1
+            Err(d) -> assert(false, s"${name}: ${d.message} @${src.locate(d.span.start)}")
+
+    assert_eq(count, 425)
+
+@test("all 425 corpus programs parse")
+corpus_parses()
+    var count = 0
+
+    for name in names()
+        val src = source_of(name, read_text(s"testdata/corpus/${name}.nex").unwrap())
+
+        parse_program(src) match
+            Ok(_) -> count += 1
+            Err(d) -> assert(false, s"${name}: ${d.message} @${src.locate(d.span.start)}")
+
+    assert_eq(count, 425)
