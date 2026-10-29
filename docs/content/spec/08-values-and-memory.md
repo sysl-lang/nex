@@ -94,9 +94,9 @@ the caller keeps using it after the call with no copy:
 
 ```nex
 var a = [3.0, 4.0]
-val n1 = norm(a)                   // borrowed, read, returned
+val n1 = norm2(a)                  // borrowed, read, returned
 scale(a, 1.0 / n1)                 // borrowed inout, written in place
-val n2 = norm(a)                   // a is still a's: 1.0
+val n2 = norm2(a)                  // a is still a's: 1.0
 ```
 
 The full list of places a copy can occur:
@@ -199,7 +199,8 @@ A **trap** stops the computation with a message. It is how nex reports an error 
 running program can detect:
 
 - integer overflow, at every width, signed and unsigned;
-- integer or real division by zero;
+- integer division by zero (real division by zero, an invalid real operation and real overflow give
+  `inf` or `nan` unless the program is built with `--fpe-trap`, which makes them traps too);
 - an index or slice bound outside its axis, including any negative index or an index into an empty
   axis;
 - a shape mismatch between operands, or between a dynamic shape and a static one it is converted to;

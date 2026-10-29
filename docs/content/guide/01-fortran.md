@@ -65,6 +65,7 @@ change it. Both always have a value: there is no uninitialized variable.
 | `real(real64), allocatable :: m(:,:)` then `allocate(m(r, c))` | `var m = fill((r, c), 0.0)` (type `[real; :, :]`) |
 | `real(real64) :: m(3,3)` (fixed shape) | `var m: [real; 3, 3] = fill((3, 3), 0.0)` |
 | `real(real32), allocatable :: t(:,:,:)` | a `[real32; :, :, :]` |
+| `type(point), allocatable :: p(:)` | `var p = fill(n, Point(0.0, 0.0))` (type `[Point]`, stored inline); `p(k)%x` is `p[k].x` |
 | `a = [1.0, 2.0, 3.0]` | `val a = [1.0, 2.0, 3.0]` |
 | `reshape([1,2,3,4,5,6], [2,3])` | `reshape([1, 2, 3, 4, 5, 6], (2, 3))` (column-major, as Fortran) |
 | `size(a)` | `size(a)` |
@@ -107,24 +108,26 @@ Inside a subscript, `end` means the last index of that axis. nex also has a half
 | Fortran | nex |
 |---|---|
 | `c = a + b`, `y = alpha * x + y` | the same, without the declarations |
-| `sqrt(a)` on an array (elemental) | `a.map(t -> sqrt(t))` |
+| `sqrt(a)` on an array (elemental) | `sqrt(a)`: every prelude math function is elemental |
 | `matmul(a, b)` | `a @ b` |
 | `matmul(a, x)` | `a @ x` (matrix–vector) |
-| `dot_product(x, y)` (real) | `x @ y` or `dot(x, y)` |
+| `dot_product(x, y)` | `dot(x, y)` (conjugates `x` when complex); for real vectors also `x @ y` |
 | `transpose(m)` | `transpose(m)` |
 | `sum(a)`, `product(a)` | `sum(a)`, `product(a)` |
-| `sum(m, dim=1)`, `sum(m, dim=2)` | `sum_axis(m, 1)`, `sum_axis(m, 2)` |
-| `maxval(a)`, `minval(a)` | `max(a)`, `min(a)` |
-| `norm2(a)` | `norm(a)` |
-| `x**2`, `x**n` | `x^2`, `x^n` |
+| `sum(m, dim=1)`, `sum(m, dim=2)` | `sum(m, dim = 1)`, `sum(m, dim = 2)` |
+| `maxval(a)`, `minval(a)` | `maxval(a)`, `minval(a)` |
+| `maxloc(a)`, `minloc(a)` | `maxloc(a)`, `minloc(a)` — an index, or a tuple of indices for rank ≥ 2 |
+| `any`, `all`, `count`, `norm2` | the same names |
+| `max(a, 0.0)` (elemental) | `max(a, 0.0)` |
+| `x**2`, `x**n`, `-x**2` | `x^2`, `x^n`, `-x^2` (also `-(x^2)`) |
 | `mod(a, b)` | `a % b` |
 | `a / b` on two integers | `a div b` (`a / b` on two integers gives a `real`) |
 | `a /= b`, `.and.`, `.or.`, `.not.` | `a != b`, `and`, `or`, `not` |
 
 `@` is matrix multiplication on ranks 1 and 2 and calls BLAS when the product is large enough to
 pay for it ([Array expressions](/spec/05-array-expressions/)). Note that `@` on two complex
-vectors does **not** conjugate, where Fortran's `dot_product` conjugates its first argument; write
-`x.map(t -> conj(t)) @ y` for the Hermitian product.
+vectors does **not** conjugate; `dot(x, y)` does, exactly as Fortran's `dot_product` conjugates its
+first argument.
 
 ### Control flow
 
@@ -132,6 +135,10 @@ vectors does **not** conjugate, where Fortran's `dot_product` conjugates its fir
 |---|---|
 | `do i = 1, n` … `end do` | `for i in 1..n` (indented body) |
 | `do i = 1, n-1` | `for i in 1..n-1`, or `for i in 1..<n` |
+| `do i = n, 1, -1` | `for i in n..1 by -1` |
+| `exit`, `cycle` | `exit`, `cycle` |
+| `outer: do j = 1, n` … `exit outer` | `outer: for j in 1..n` … `exit outer` |
+| `stop`, `stop 2` | `stop`, `stop 2` |
 | `do while (err > tol)` | `while err > tol` |
 | `if (x > 0) then` … `else if` … `else` … `end if` | `if x > 0` … `else if` … `else` (indented bodies) |
 | `y = merge(a, b, x > 0)` | `val y = if x > 0 then a else b` (`if` is an expression) |
@@ -141,8 +148,10 @@ vectors does **not** conjugate, where Fortran's `dot_product` conjugates its fir
 | `!$omp parallel do reduction(+:s)` | `parallel for i in 1..n reduce s: +` |
 | `reduction(max:m)` | `reduce m: max` |
 
-A one-line body follows `do`: `for i in 1..n do y[i] = 2.0 * x[i]`. nex has no `exit` or `cycle`;
-put the stopping test in a `while` condition, or `return` from a function.
+A one-line body follows `do`: `for i in 1..n do y[i] = 2.0 * x[i]`. An indented body takes no `do`.
+`exit` leaves the innermost loop and `cycle` starts its next iteration; a named loop
+(`outer: for j in 1..n`) is the target of `exit outer` and `cycle outer`. See
+[Control flow](/spec/07-control-flow/).
 
 ### Parallel loops and reductions
 
@@ -168,7 +177,9 @@ rejects it with an error naming the offending line otherwise. Nothing runs in pa
 wrote `parallel`, so an MPI code with one rank per core is never oversubscribed. See
 [Parallelism](/spec/10-parallelism/).
 
-`maxloc` and `minloc` are reduction operators, with Fortran's tie rule (the lowest index wins):
+`maxloc(abs(r))` is the index of the largest residual, as in Fortran. Inside a parallel loop,
+`maxloc` and `minloc` are also reduction operators, with Fortran's tie rule (the lowest index
+wins):
 
 ```fortran
 loc = maxloc(abs(r), dim=1)
@@ -189,10 +200,10 @@ val (largest, loc) = worst
 | `subroutine s(a, b)` | `def s(a: …, b: …) = …` |
 | `intent(in)` | the default: no keyword |
 | `intent(inout)` | `inout` |
-| `intent(out)` | `inout`, or better, return the value (a tuple returns several) |
+| `intent(out)` | return the value; a tuple returns several, taken apart with `val (q, r) = f(…)`; there is no `out` mode |
 | `call s(a, b)` | `s(a, b)` |
 | `pure function` | an ordinary `def` |
-| `elemental function f(x)` | a scalar `def f`, applied with `map(a, f)` or `a.map(f)` |
+| `elemental function f(x)` | `@elemental def f(x: real) = …`, then `f(a)` on an array |
 | `optional` argument | a default value: `def f(x: real, tol: real = 1.0e-8)` |
 | `f(x, tol=1.0e-6)` (keyword argument) | `f(x, tol = 1.0e-6)` |
 
@@ -229,6 +240,10 @@ the effects that would make it unsafe. See [Functions](/spec/06-functions/).
 | `print *, x` | `print(x)` |
 | `print *, 'n =', n, ' err =', err` | `print(s"n = $n err = $err")` |
 | `write(*, '(F10.3)') x` | `print(f"$x%10.3f")` |
+| `write(error_unit, *) msg` | `eprint(msg)` |
+| `program p` … `end program` | `def main() =` … |
+| `get_command_argument(1, arg)` | `def main(args: [string])`, then `args[1]` |
+| `stop 1` | `stop 1` |
 
 See [Modules](/spec/09-modules/) and [The prelude](/spec/12-prelude/).
 
@@ -273,7 +288,7 @@ def main() =
 
   while diff >= tol and iter < 100000
     val unew = 0.5 * (u[1..end-2] + u[3..end] + h * h * f)
-    diff = max(map(unew - u[2..end-1], t -> abs(t)))
+    diff = maxval(abs(unew - u[2..end-1]))
     u[2..end-1] = unew
     iter += 1
 
@@ -295,7 +310,7 @@ becomes:
   while diff >= tol and iter < 100000
     val g = origin(u, 0)              // g[0] .. g[n+1] are u[1] .. u[n+2]
     parallel for k in 1..n do unew[k] = 0.5 * (g[k - 1] + g[k + 1] + h * h * f[k])
-    diff = max(map(unew - u[2..end-1], t -> abs(t)))
+    diff = maxval(abs(unew - u[2..end-1]))
     u[2..end-1] = unew
     iter += 1
 ```
@@ -327,7 +342,8 @@ axpy(2.0, a, a)          // error: `a` is borrowed inout and read in the same ca
 Two sections of one array may both be passed `inout` to one call only when the compiler can see
 from the source that they do not overlap: different constant windows (`a[1..4]` and `a[5..8]`), or
 a split at one point (`a[1..k]` and `a[k+1..]`). Everything else is rejected with a message
-suggesting the split form.
+suggesting the split form. The same forms let one section be passed `inout` and another read:
+`axpy(2.0, a[1..4], a[5..8])` is accepted.
 
 Assignment copies the value, as in Fortran: after `var b = a`, changing `b` does not change `a`.
 The compiler avoids the copy whenever `a` is not used again.
@@ -390,11 +406,12 @@ unsigned. Fortran leaves overflow undefined, and gfortran wraps. A loop counter 
 | `real` → integer conversion of NaN or an out-of-range value | stops the program |
 
 Floating-point arithmetic is ordinary IEEE: dividing by zero gives an infinity or a NaN and does not
-stop the program.
+stop the program. `nex build --fpe-trap` stops it instead on division by zero, an invalid operation
+and overflow, as gfortran's `-ffpe-trap=zero,invalid,overflow` does.
 
 ### Reproducible reductions
 
-`sum`, `product`, `dot`, `norm` and every `parallel for … reduce` give **the same bits for every
+`sum`, `product`, `dot`, `norm2` and every `parallel for … reduce` give **the same bits for every
 thread count**: `OMP_NUM_THREADS=1` and `OMP_NUM_THREADS=64` agree exactly, and adding or removing
 `parallel` never changes a result. They get this by summing in fixed blocks combined in a fixed
 pairwise tree. The price is that `sum(x)` differs in its last bits from a Fortran `DO` loop that
@@ -424,11 +441,16 @@ extern def dgtsv(n: int32, nrhs: int32, dl: inout [real], d: inout [real], du: i
 ```
 
 {{< note >}}
-The `@fortran` and `@link` spellings may change before they are final.
+The `@fortran` spelling may change before it is final.
 {{< /note >}}
+
+`nex build -L dir` finds `libmylib.a` in `dir`, and the gfortran runtime is linked automatically
+whenever a program declares a `@fortran` extern. A callback that captures local values passes
+through a `c_ptr` user-data parameter, which the compiler fills in for you
+([Interoperability](/spec/11-interop/)).
 
 Arrays cross with no copy, since both languages are column-major and 1-based; a column block such
 as `m[2..6, 1..4]` crosses with the original leading dimension. Assumed-shape dummies (`a(:)`),
 derived types and `optional` arguments need a small `bind(c)` wrapper on the Fortran side. LAPACK
-itself is already in the prelude as `solve`, `lu`, `chol`, `qr`, `eig`, `svd` and friends. See
+itself is already in the prelude as `solve`, `lu`, `chol`, `qr`, `eig`, `eigh`, `svd` and friends. See
 [Interoperability](/spec/11-interop/).

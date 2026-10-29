@@ -109,8 +109,25 @@ def main() =
   print(s"mean = ${mean(data)}, sd = ${stddev(data)}")
 ```
 
-`main` takes no arguments and returns `unit`. The program ends when `main` returns. A trap anywhere
-ends it at once, with the trap's message on standard error and a failing exit status.
+`main` is declared in one of two forms, `def main()` or `def main(args: [string])`, and returns
+`unit`; any other signature is a compile error. `args` holds the command-line arguments the user
+gave, without the program's name, and is 1-based like every array: `args[1]` is the first.
+
+```nex
+def main(args: [string]) =
+  if length(args) != 1
+    eprint("usage: heat <steps>")
+    stop 2
+  print(s"running ${args[1]} steps")
+```
+
+The top level of a source file holds only declarations — `import`, `const`, module-level `val` and
+`var`, `def`, `struct`, `enum`, `extern` — and no statements; the work starts in `main`.
+
+The program ends when `main` returns, with exit status 0, or at a `stop` statement: `stop` ends it
+with status 0 and `stop n` with status `n` ([Control flow](/spec/07-control-flow/)). `print` writes
+to standard output and `eprint` to standard error. A trap anywhere ends the program at once, with the
+trap's message on standard error and a failing exit status.
 
 nex is always compiled. `nex run main.nex` compiles the program to a native binary and runs it;
 there is no interpreter, so what `nex run` runs is the native code itself.
@@ -140,9 +157,10 @@ def test_centred_sums_to_zero() =
 A test written in a module sees everything in that module, `private` declarations included, so an
 internal helper can be tested without making it public.
 
-`nex test main.nex` finds every `@test` function in the project rooted at `main.nex`'s directory,
-compiles them, runs each one, and reports which passed and which failed with each failure's message.
-A test that traps does not stop the others.
+`nex test` finds every `@test` function in the project, compiles them and runs each one. It prints
+one line for each failure, with the failure's message, then a summary of how many passed and failed.
+A test that traps fails on its own; the others still run. `nex test <substring>` runs only the tests
+whose names contain the substring ([Command Line](/tooling/01-cli/)).
 
 Tests are left out of every other build: the binary `nex run` makes contains no test code.
 

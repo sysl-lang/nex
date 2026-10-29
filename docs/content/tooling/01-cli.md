@@ -22,6 +22,15 @@ nex build program.nex
 
 Compiles the program to a native executable and leaves it on disk.
 
+| option | effect |
+|---|---|
+| `--fpe-trap` | real division by zero, invalid operations and overflow trap instead of giving `inf` or `nan` (gfortran's `-ffpe-trap=zero,invalid,overflow`); `nex run` takes it too |
+| `-L dir` | adds `dir` to the library search path |
+| `-l name` | links the library `name`, beside those named by `@link("name")` |
+
+A program with a `@fortran` extern is linked against the gfortran runtime automatically
+([Interoperability](/spec/11-interop/)).
+
 {{< note >}}
 `nex build --no-blas` disables the dispatch of `@` to BLAS and is a proposed flag. The compiler's own
 loops are then used for every product.
@@ -33,8 +42,15 @@ loops are then used for every product.
 nex test
 ```
 
-Finds the functions marked `@test` in the project's modules, compiles them and runs each, reporting
-which pass.
+Finds every function marked `@test` in the project's test modules, compiles them and runs each. It
+prints one line for each failing test and then a summary of how many passed and failed, and exits
+non-zero when any failed. A trap inside a test fails that test only; the others still run.
+
+```
+nex test axpy
+```
+
+runs only the tests whose names contain the given substring.
 
 ```nex
 @test
@@ -44,8 +60,7 @@ def axpy_adds() =
 ```
 
 {{< note >}}
-`nex test` and the `@test` attribute are planned but not yet implemented, and the exact name of the
-assertion function may change.
+`nex test` is not yet implemented.
 {{< /note >}}
 
 ## 1.4 Finding the prelude

@@ -153,6 +153,37 @@ recurse.
 closest match, ranking numeric promotions as [chapter 3](/spec/03-types/) does. A concrete overload
 is always preferred to a generic one (§6.6).
 
+**Several results.** A function returns all of its results; there is no `intent(out)`. Several
+results are returned as a tuple and taken apart where they arrive:
+
+```nex
+def min_and_max(v: [real]) = (minval(v), maxval(v))
+
+val (lo, hi) = min_and_max(samples)
+```
+
+A tuple's fields may also be read by position, from 1: `t.1`, `t.2`. Destructuring is the clearer
+form and the usual one.
+
+**Elemental functions.** A scalar function marked `@elemental` applies to arrays element by element,
+as Fortran's `ELEMENTAL` procedures and every math function of the prelude do. Called on an array of
+any rank it returns an array of the same shape, and the call fuses into the surrounding whole-array
+expression:
+
+```nex
+@elemental
+def smoothstep(x: real) =
+  val t = min(max(x, 0.0), 1.0)
+  t * t * (3.0 - 2.0 * t)
+
+val s = smoothstep(2.0 * u - 0.5)   // one loop over u
+```
+
+The body of an `@elemental` function obeys the rules of a `parallel for` body
+([Parallelism](/spec/10-parallelism/)): no `inout` parameters, no writes to module-level `var`s, and
+no I/O except `print`. Applying an unmarked scalar function to an array is a compile error, and the
+message suggests marking it `@elemental` or calling `map`.
+
 ## 6.5 Parameters, defaults and named arguments
 
 Each parameter is `name: type`, optionally followed by a mode (§6.8) and a default. Parameters with
@@ -433,24 +464,29 @@ The two halves are borrowed together by `butterfly` because both bounds are writ
 same `h`. Each recursive call borrows a slice of an `inout` parameter, which is itself a place. Nothing
 is copied at any level.
 
-**2. An `inout` argument and another argument reading the same root.** A read-mode array argument is
-borrowed, not copied, so it would see the callee's writes as they happen. The checker rejects the
-pair:
+**2. An `inout` argument and another argument reading an overlapping place of the same root.** A
+read-mode array argument is borrowed, not copied, so it would see the callee's writes as they happen.
+An `inout` window and a read-mode window of one array may go to the same call only when they are
+visibly disjoint, by exactly the three forms of rule 1 — non-overlapping constant windows or indices,
+a split at one expression `e`, or distinct constant indices on one axis:
 
 ```nex
-def add_into(y: inout [real], x: [real]) =
-  y = y + x
+def axpy(alpha: real, x: [real], y: inout [real]) =
+  y = y + alpha * x
 
-add_into(a, a)                     // error: a is borrowed inout and read in the same call
-add_into(a[1..3], a[4..6])         // error: the read of a overlaps the call
+axpy(2.0, a[1..4], a[5..8])        // accepted: constant windows that do not overlap
+axpy(2.0, a[..<e], a[e..])         // accepted: a split at e
+axpy(2.0, m[:, 1], m[:, 2])        // accepted: distinct constant columns
+axpy(2.0, a, a)                    // error: a is borrowed inout and read in the same call
+axpy(2.0, a[1..k], a[j..n])        // error: the read may overlap the inout window
 ```
 
 An argument that is evaluated to a scalar before the call starts does not conflict, since it has
 nothing left to read: `scale(a, a[1])` and `scale(a, 1.0 / sum(a))` are legal. Arguments are
-evaluated left to right, and the exclusive access starts after the last one. To combine two windows
-of one array, take a copy explicitly — `val x = a[4..6]` is a view, so bind `var x = a[4..6]` — or
-write the update as slice assignment, `a[1..3] += a[4..6]`, whose right-hand side is evaluated before
-anything is written.
+evaluated left to right, and the exclusive access starts after the last one. Where the windows are
+not visibly disjoint, take a copy explicitly — `val x = a[j..n]` is a view, so bind
+`var x = a[j..n]` — or write the update as slice assignment, `a[1..3] += a[4..6]`, whose right-hand
+side is evaluated before anything is written.
 
 **3. No access by another route inside the callee.** Passing a module-level `var` as an `inout`
 argument to a function that reads or writes that same `var` by name, directly or through anything it

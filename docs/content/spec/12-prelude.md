@@ -78,7 +78,7 @@ of its argument (an integer argument to a transcendental function gives `real64`
 | `floor(x)`, `ceil(x)` | round down, round up | `FLOOR`, `CEILING` |
 | `round(x)` | round to nearest, halves away from zero | `ANINT` |
 | `trunc(x)` | round toward zero | `AINT` |
-| `min(x, y)`, `max(x, y)` | the smaller, the larger of two scalars | `MIN`, `MAX` |
+| `min(x, y, …)`, `max(x, y, …)` | the smallest, the largest of the arguments, element by element | `MIN`, `MAX` |
 
 A `real32` argument is computed in `real32` arithmetic, never widened to `real64` and rounded back.
 For a `real16` argument, `sqrt` is computed natively and the transcendental functions compute in
@@ -88,19 +88,24 @@ For a `real16` argument, `sqrt` is computed natively and the transcendental func
 The `real16` evaluation rule for transcendental functions is proposed and may change.
 {{< /note >}}
 
-**On arrays.** To apply an elementary function to every element of an array, pass it to `map`
-(§12.8). `map` keeps the shape, and inside a whole-array expression the call fuses into the same
-loop as the surrounding arithmetic:
+**On arrays.** Every function in this section and in §12.3 is **elemental**, as Fortran's
+intrinsics are: given an array of any rank it applies to every element and returns an array of the
+same shape. Inside a whole-array expression the call fuses into the same loop as the surrounding
+arithmetic, so no temporary is made for it:
 
 ```nex
-val y = map(x, t -> exp(-t * t))
-val r = x.map(t -> sqrt(t)) + 1.0
+val y = exp(-x * x)
+val r = sqrt(x) + 1.0
+val c = max(a, 0.0)          // clamps every element at zero
 ```
 
-{{< note >}}
-Calling an elementary function directly on an array, Fortran's elemental style (`sqrt(x)` for an
-array `x`), is not yet fixed by the design. `map` is the settled spelling.
-{{< /note >}}
+`min` and `max` are elemental over their arguments: a scalar argument is broadcast, and arrays must
+agree in shape. They are not reductions — `max(a)` of one array is a compile error. The extremes of
+an array are `minval` and `maxval` (§12.6).
+
+A user function is elemental when it is marked `@elemental` (see
+[Functions](/spec/06-functions/)). Applying an unmarked scalar function to an array is a compile
+error that suggests `@elemental` or `map`.
 
 ## 12.3 Complex numbers
 
@@ -195,31 +200,42 @@ flatten(m)            // [1.0, 4.0, 2.0, 5.0, 3.0, 6.0] — column-major
 |---|---|---|
 | `sum(a: [T; R]): T` | the sum of every element | `SUM(a)` |
 | `product(a: [T; R]): T` | the product of every element | `PRODUCT(a)` |
-| `min(a: [T; R]): T` | the smallest element (ordered types) | `MINVAL(a)` |
-| `max(a: [T; R]): T` | the largest element (ordered types) | `MAXVAL(a)` |
-| `dot(a: [T], b: [T]): T` | Σ aₖ bₖ; lengths must match, else trap. No conjugation | `DOT_PRODUCT(a, b)` for real `a` |
-| `norm(a)` | the Euclidean norm √(Σ \|aₖ\|²) | `NORM2(a)` |
-| `sum_axis(a, k)` | the sum over axis `k`: rank R − 1 | `SUM(a, DIM=k)` |
-| `minloc(acc, x, k)`, `maxloc(acc, x, k)` | combine a running `(value, index)` pair with the candidate `x` at index `k`; ties go to the lower index | `MINLOC`, `MAXLOC` |
+| `minval(a: [T; R]): T` | the smallest element (ordered types) | `MINVAL(a)` |
+| `maxval(a: [T; R]): T` | the largest element (ordered types) | `MAXVAL(a)` |
+| `minloc(a)`, `maxloc(a)` | the index of the smallest, the largest element; a tuple of indices for rank ≥ 2; ties go to the first in storage order | `MINLOC(a)`, `MAXLOC(a)` |
+| `any(a: [bool; R])`, `all(a: [bool; R])` | whether any, every element is `true` | `ANY(a)`, `ALL(a)` |
+| `count(a: [bool; R]): integer` | the number of `true` elements | `COUNT(a)` |
+| `norm2(a)` | the Euclidean norm √(Σ \|aₖ\|²); the Frobenius norm of a matrix | `NORM2(a)` |
+| `dot(x: [T], y: [T]): T` | Σ conj(xₖ) yₖ — `x` is conjugated when complex; lengths must match, else trap | `DOT_PRODUCT(x, y)` |
+| `minloc(acc, x, k)`, `maxloc(acc, x, k)` | combine a running `(value, index)` pair with the candidate `x` at index `k`; ties go to the lower index | — |
 
-For a matrix, `sum_axis(m, 1)` sums down each column (a vector of length `cols(m)`) and
-`sum_axis(m, 2)` sums along each row (length `rows(m)`), exactly as Fortran's `SUM(m, DIM=1)` and
-`SUM(m, DIM=2)`.
+**Every reduction takes a named `dim =` argument** and then reduces along that axis only, giving an
+array of rank R − 1, as Fortran's `DIM=` does. For a matrix, `sum(m, dim = 1)` sums down each column
+(a vector of length `cols(m)`) and `sum(m, dim = 2)` sums along each row (length `rows(m)`);
+`maxloc(m, dim = 1)` is the row index of the largest element of each column.
 
 ```nex
 val m = [[1, 2, 3],
          [4, 5, 6]]
-sum(m)              // 21
-sum_axis(m, 1)      // [5, 7, 9]
-sum_axis(m, 2)      // [6, 15]
+sum(m)                 // 21
+sum(m, dim = 1)        // [5, 7, 9]
+sum(m, dim = 2)        // [6, 15]
+maxval(m, dim = 2)     // [3, 6]
+maxloc([3, 9, 4])      // 2
+maxloc(m)              // (2, 3)
+count(m > 2)           // 4
 ```
 
-`dot` does **not** conjugate, matching `@`. Fortran's `DOT_PRODUCT` conjugates its first argument
-when it is complex; the nex spelling of that is `sum(conj(a) * b)`.
+`dot` conjugates its first argument when it is complex, as Fortran's `DOT_PRODUCT` and BLAS's
+`zdotc` do, so `dot(z, z)` is the squared norm of `z`. `@` never conjugates: `x @ y` of two complex
+vectors is Σ xₖ yₖ.
 
-`minloc` and `maxloc` are the location reductions. Their main use is as the operator of a
-`parallel for … reduce` (see [Parallelism](/spec/10-parallelism/)); sequentially they fold the same
-way:
+`min` and `max` are not reductions: they are elemental over their arguments (§12.2). The extremes of
+an array are `minval` and `maxval`.
+
+The three-argument `minloc` and `maxloc` combine a running `(value, index)` pair with one candidate.
+They are the operator form used by `parallel for … reduce` (see
+[Parallelism](/spec/10-parallelism/)); sequentially they fold the same way:
 
 ```nex
 var worst = (0.0, 0)
@@ -228,17 +244,14 @@ for k in 1..length(r)
 val (largest, where) = worst
 ```
 
-**Order of summation.** `sum`, `product`, `dot`, `norm` and `sum_axis` combine their elements in a
+**Order of summation.** `sum`, `product`, `dot` and `norm2`, with or without `dim =`, combine their elements in a
 fixed blocked pairwise tree, not left to right. The result is identical with or without
 `parallel` and for every thread count, and the rounding error grows as O(log n) rather than O(n). A
 floating-point `sum` can therefore differ in its last bits from a Fortran `DO` loop that accumulates
 one element at a time; a loop written that way in nex accumulates in source order, as written.
-Integer reductions are exact and trap on overflow.
-
-{{< note >}}
-`norm` is named among the reductions in the design record, but its exact definition (the 2-norm
-here) and its axis form are not yet spelled out, and may change.
-{{< /note >}}
+Integer reductions are exact and trap on overflow. The `minval` and `maxval` of an empty integer
+array are the type's largest and smallest values, and of an empty real array `+inf` and `-inf`, as
+in Fortran.
 
 ## 12.7 Linear algebra
 
@@ -250,13 +263,16 @@ here) and its axis form are not yet spelled out, and may change.
 | `solve(A, b)` | `x` with `A @ x == b`; `b` a vector or a matrix of right-hand sides | `?GESV` |
 | `lstsq(A, b)` | the least-squares solution | `?GELSD` |
 | `inv(A)` | the inverse | `?GETRF` + `?GETRI` |
-| `det(A)` | the determinant | `?GETRF` |
+| `det(A)` | the determinant; `0.0` for a singular matrix | `?GETRF` |
 | `lu(A)` | `(L, U, p)`, the pivoted LU factors | `?GETRF` |
-| `chol(A)` | the Cholesky factor of a symmetric or Hermitian positive-definite `A` | `?POTRF` |
+| `chol(A)` | the lower Cholesky factor `L` of a symmetric or Hermitian positive-definite `A`: `A == L @ conj(transpose(L))` | `?POTRF` |
+| `chol(A, upper = true)` | the upper factor `U`: `A == conj(transpose(U)) @ U` | `?POTRF` |
 | `qr(A)` | `(Q, R)` | `?GEQRF` + `?ORGQR` |
-| `eig(A)` | eigenvalues (and vectors) of a general matrix, always complex | `?GEEV` |
-| `eigh(A)` | real eigenvalues and the eigenvectors of a symmetric or Hermitian matrix | `?SYEVD` / `?HEEVD` |
-| `svd(A)` | `(U, s, Vt)` | `?GESDD` |
+| `eigvals(A)` | the eigenvalues of a general matrix, always complex | `?GEEV` |
+| `eig(A)` | `(values, vectors)` of a general matrix, always complex; the vectors are the columns | `?GEEV` |
+| `eigh(A)` | `(values, vectors)` of a symmetric or Hermitian matrix; the values are real, in ascending order | `?SYEVD` / `?HEEVD` |
+| `svd(A)` | `(U, s, V)` with `A == U @ diag(s) @ conj(transpose(V))` | `?GESDD` |
+| `svdvals(A)` | the singular values `s`, in descending order | `?GESDD` |
 
 `@` takes operands of rank 1 and 2 only; an operand of rank 3 or more is a compile error. The inner
 extents must agree: a compile error when both are static, a trap otherwise. Large products of
@@ -264,7 +280,8 @@ extents must agree: a compile error when both are static, a trap otherwise. Larg
 
 The LAPACK functions take and return values: they copy their inputs, because LAPACK overwrites
 them, and they **trap** when LAPACK reports failure, with a message in the problem's terms and
-1-based indices — *"solve: matrix is singular (U[3,3] = 0)"*. In-place forms that return LAPACK's
+1-based indices — *"solve: matrix is singular (U[3,3] = 0)"*. Only the solvers (`solve`, `inv`)
+trap on a singular matrix; `det` of one is `0.0`. In-place forms that return LAPACK's
 `info` instead of trapping (`lu_inplace`, `chol_inplace`, `qr_inplace`, …), BLAS dispatch and the
 leading-dimension rules are in [Interop](/spec/11-interop/).
 
@@ -280,7 +297,7 @@ assert_approx(A @ x, b, 1e-12)
 
 | Signature | Meaning | Fortran |
 |---|---|---|
-| `map(a: [T; R], f: T -> U): [U; R]` | `f` applied to every element; shape kept | an `ELEMENTAL` function |
+| `map(a: [T; R], f: T -> U): [U; R]` | `f` applied to every element; shape kept | an `ELEMENTAL` function applied to an array |
 | `filter(a: [T], p: T -> bool): [T]` | the elements for which `p` holds, in order | `PACK(a, mask)` |
 | `flatMap(a: [T], f: T -> [U]): [U]` | `f` applied to every element, the results concatenated | — |
 | `reduce(a: [T], init: U, f: (U, T) -> U): U` | left fold: `f(… f(f(init, a[1]), a[2]) …, a[n])` | `REDUCE` (Fortran 2018) |
@@ -296,14 +313,12 @@ for k, x in enumerate(xs)
   print(k, x)                                    // 1 1, 2 2, … 5 5
 ```
 
-`map`, `sum`, `product`, `min`, `max` and `dot` have parallel forms, written with the `parallel`
+`map`, `sum`, `product`, `minval`, `maxval` and `dot` have parallel forms, written with the `parallel`
 prefix (`parallel map(x, t -> exp(-t * t))`); `reduce` has none. See
 [Parallelism](/spec/10-parallelism/).
 
-{{< note >}}
-An array element is a scalar, so the pairs `enumerate` and `zip` produce cannot be stored as an
-array. They are iterated, as above; the type of their result as a value is not yet fixed.
-{{< /note >}}
+`enumerate` and `zip` give arrays of tuples — `enumerate(xs)` is an `[(integer, T)]` — which may be
+iterated, as above, or stored like any other array (see [Types](/spec/03-types/)).
 
 ## 12.9 Views
 
@@ -326,8 +341,7 @@ an access costs exactly what an access to the source costs:
 
 ```nex
 val w = origin(kernel, -r)          // w[-r] .. w[r] are kernel[1] .. kernel[2r + 1]
-for k in -r..r do
-  acc += w[k] * x[i - k]
+for k in -r..r do acc += w[k] * x[i - k]
 ```
 
 An offset view is **local**: it cannot be passed, returned, stored or captured by an escaping
@@ -378,8 +392,9 @@ val codes = int64(bytes)                   // [integer]
 
 | Signature | Meaning | Fortran |
 |---|---|---|
-| `print(x, …)` | prints its arguments on one line, then a newline | `PRINT *, x, …` |
+| `print(x, …)` | prints its arguments on one line to standard output, then a newline | `PRINT *, x, …` |
 | `print()` | prints an empty line | `PRINT *` |
+| `eprint(x, …)` | as `print`, to standard error | `WRITE(ERROR_UNIT, *) x, …` |
 | `read_bytes(path: string): [uint8]` | the whole file's contents | `OPEN(…, ACCESS='stream')` + `READ` |
 | `write_bytes(path: string, data: [uint8])` | writes `data` as the file's contents | `OPEN(…, ACCESS='stream')` + `WRITE` |
 
@@ -418,7 +433,8 @@ For test functions and test modules (see [Functions](/spec/06-functions/) and
 | `assert_traps(thunk, text)` | as above, and the trap message must contain `text` |
 
 Every failed assertion traps with a message naming the assertion and any `msg`; the test runner
-reports it and carries on with the rest of the suite. For `real` and `complex` values prefer
+(`nex test`, see [Command Line](/tooling/01-cli/)) reports it as that test's failure and carries on
+with the rest of the suite. For `real` and `complex` values prefer
 `assert_approx`: exact floating-point equality is almost never what a test means. For a complex the
 distance is the modulus of the difference.
 

@@ -30,7 +30,7 @@ def main() =
   for k in 1..500
     sweep(u, unew)
     u[2..99, 2..99] = unew[2..99, 2..99]
-  print(norm(u))
+  print(norm2(u))
 ```
 
 `2..n-1` is Fortran's `2:n-1`. `inout` is Fortran's `intent(inout)`. Each `parallel for` iteration owns

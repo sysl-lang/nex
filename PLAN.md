@@ -213,10 +213,13 @@ before `convert-func-to-llvm`, `convert-openmp-to-llvm`; the program links `libo
   memref's axis-0 stride), handed to `cblas_dgemm` with no copy (`blas.mlir`, Accelerate).
 - **There are no pointer element types.** `memref<4x!llvm.ptr>` is an invalid memref element type,
   and a `tensor` of `!llvm.ptr` cannot be bufferized. An array of strings, closures, enums with
-  payloads or structs holding them is an array of `i64` handles into runtime tables; an array of
-  plain-scalar structs is stored as one array per field.
-- **Division traps.** Integer division by zero and real `/` by zero both trap in nex, so every
-  division is emitted behind a check that calls the runtime's trap.
+  payloads or structs holding them is an array of `i64` handles into runtime tables. An array of
+  structs or tuples of scalars is stored inline (DESIGN §3.1), as a memref of a packed element type
+  or as a byte buffer with computed field offsets, so `p[k].x` is one load.
+- **Integer division traps.** Integer division by zero traps in nex, so every integer division is
+  emitted behind a check that calls the runtime's trap. Real division is IEEE (`1.0 / 0.0` is `inf`)
+  and needs no check; `--fpe-trap` enables the floating-point exception traps for division by zero,
+  invalid and overflow in the generated code instead.
 - **Traps are catchable.** `assert_traps` (corpus 252–254) runs a lambda and passes when it traps,
   so a trap is a `longjmp` to the innermost `setjmp` the runtime armed, and an uncaught one prints
   its message and exits. Every trap goes through one runtime entry for that reason. A `longjmp` may
@@ -254,10 +257,14 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    each narrowing that §2.2 refuses (same-width signed/unsigned mixing, a promoted `[real64]` stored
    into a `[real32]`); §8.3 rule 1's disjoint borrows accepted in each listed form (constant
    windows, a split at one `e`, distinct constant indices) and rejected otherwise with the
-   split-form suggestion.
+   split-form suggestion, and the same three forms accepted for an `inout` window beside a read-mode
+   window of one array under rule 2 (`axpy(2.0, a[1..4], a[5..8])`); a negative case for an
+   unmarked scalar function applied to an array, for a `main` of any other signature, for a
+   top-level statement, and for `exit` and a nested `parallel` in a parallel body.
 3. **M3 — scalars and the pipeline: 151.** Emission for scalars of every width, control flow,
    functions, strings and printing; the driver and the runtime's printing per width and trapping
-   division and overflow at every width; `inout` scalars. `precision.mlir` joins the toolchain tests.
+   integer division and overflow at every width, IEEE real division and `--fpe-trap`; `exit`,
+   `cycle`, named loops, stepped `for` headers and `stop n`; `main(args)` and `eprint`; `inout` scalars. `precision.mlir` joins the toolchain tests.
    *Exit*: top-level bindings (4), scalar arithmetic (13), comparison + logical (12), chained
    comparison (7), control flow (27), blocks + scoping (4), top-level initialization (3), compound
    assignment (8), functions (43), string interpolation (19), const fn calls (5), `inout` by-ref (6)
@@ -275,7 +282,7 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    `inout` arrays through `drop-equivalent-buffer-results`, the shape functions of DESIGN §4.3.
    `pipeline.txt` becomes the revised sequential list. *Exit*: arrays (96), auto-clone (14), byte
    buffers (5) pass; 313-02's emitted loop count is one; `v2` **rank-N** programs (rank-3 literals,
-   indexing, element-wise, `sum_axis` on axis 2, `reshape`/`flatten` round trips at rank 3, static
+   indexing, element-wise, `sum(a, dim = 2)`, `reshape`/`flatten` round trips at rank 3, static
    shape compile errors) pass; and an `inout` array call emits no `memref.copy`.
 7. **M7 — views: 35 more, 375.** Every slice a `tensor.extract_slice`, the runtime's `memrefCopy`,
    `end`, bounds and stride traps, `by` on every axis, slice assignment in place, the escape and
@@ -303,7 +310,7 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    relay out of a parallel region. `parallel.mlir` joins the toolchain tests (skipped without
    `libomp`). **Reductions are reproducible** (DESIGN §9.2.1): fixed 4096-iteration blocks, each
    reduced sequentially, partials combined in a fixed pairwise tree that nex emits itself, and the
-   sequential whole-array reductions (`sum`, `product`, `dot`, `norm`, axis forms) lowered through
+   sequential whole-array reductions (`sum`, `product`, `dot`, `norm2`, `dim =` forms) lowered through
    the same tree. The operators are `+ * min max and or`, the location reductions `minloc` /
    `maxloc`, and user-defined `(T, T) -> T` functions. The OpenMP pipeline is chosen by the presence
    of a `parallel` construct, with no flag, and a program without one links no OpenMP runtime.
@@ -322,13 +329,14 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     `@pure`; arrays and views crossing per DESIGN §10.3 (with the copies it requires); **complex
     scalars by value** mirroring clang's ABI per target (arm64 HFA in two FP registers, x86-64 SysV
     SSE); **`@c` structs by reference**; **C callbacks** (a nex `def` as a function pointer, a
-    capturing closure through `void *user_data`, by-reference callback arguments for a Fortran
+    capturing closure through a `@data(f) c_ptr` parameter, with the trampoline generated, by-reference callback arguments for a Fortran
     extern); **calling Fortran** (DESIGN §10.6) — `bind(c)` procedures and plain gfortran objects
     through `@fortran`: `name_` mangling, every argument by reference, hidden trailing string
-    lengths, column-major arrays crossing with no copy. This is the product case against Julia, and
+    lengths, column-major arrays crossing with no copy, the gfortran runtime linked automatically
+    when a `@fortran` extern is present; `@link("name")` and `-L` / `-l` on the command line. This is the product case against Julia, and
     it is first-class here, not a later extra. `@` dispatches to `gemm`, `gemv` and `dot` by
-    threshold and by shape; the LAPACK prelude's first set (`solve lstsq inv det lu chol qr eig eigh
-    svd`), whose value forms trap with a message naming the routine and cause and whose `inout`
+    threshold and by shape; the LAPACK prelude's first set (`solve lstsq inv det lu chol qr eigvals eig
+    eigh svd svdvals`, DESIGN §10.5), whose value forms trap with a message naming the routine and cause and whose `inout`
     forms return `info`. `blas.mlir` joins the toolchain tests (skipped without a BLAS). *Exit*: `v2`
     **FFI** programs pass — a libm function, `cblas_ddot` on a strided view with `incx = 2`, `dgemm`
     on a sub-block view with its leading dimension, an `inout` LAPACK `dgesv` solve,
@@ -343,7 +351,8 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     eigenvalues; `A @ B` above the threshold emits a call and below it a `linalg.matmul`, checked in
     the emitted MLIR; and the BLAS gemm kernel below meets its bar.
 11. **M11 — modules and `nex test`.** The module loader, the source prelude found by
-    `--prelude-path` / `NEX_HOME`, `@test` discovery. *Exit*: the reference's module loader,
+    `--prelude-path` / `NEX_HOME`, `@test` discovery; `nex test` prints a line per failure and a
+    summary, filters by a name substring, and keeps running after a test traps. *Exit*: the reference's module loader,
     sysroot, prelude integration and test runner cases ported.
 12. **M12 — performance.** *Exit*: the perf oracle below, met on every kernel.
 

@@ -50,9 +50,15 @@ The annotations:
 | `@strided` | on an array parameter: pass any view as is (§11.5) |
 | `@c` | on a `struct`: lay it out as C does (§11.4) |
 | `@fortran` | apply gfortran's calling conventions (§11.7.2) |
+| `@data(f)` | on a `c_ptr` parameter: it carries the environment of the callback `f` (§11.6) |
+
+**Linking.** `nex build` links every library named by an `@link("name")` in the program, plus any
+given on the command line with `-l name`, searching the directories given with `-L dir`
+([Command Line](/tooling/01-cli/)). A program with a `@fortran` extern is linked against the
+gfortran runtime automatically.
 
 {{< note >}}
-The spellings `@link("…")` and `@link(framework = "…")` may change before they are final.
+The spelling `@link(framework = "…")` may change before it is final.
 {{< /note >}}
 
 **`@pure` is believed, not checked.** An `extern` function is assumed to have effects unless it is
@@ -89,6 +95,7 @@ Each nex parameter type has one C meaning:
 | a `@c` struct, read mode | `const S *` |
 | a `@c` struct, `inout` | `S *` |
 | a function type `(A, B) -> R` | a C function pointer (§11.6) |
+| `c_ptr` | `void *`, opaque; only as the `@data` partner of a callback (§11.6) |
 | return: a scalar, a complex, or `unit` | the value, or `void` |
 
 Remember the aliases: `integer` is `int64`, `real` is `real64`, `complex` is `complex[real64]`. A
@@ -111,7 +118,7 @@ var ipiv: [int32] = zeros(4)
 var info: int32 = 0
 lapack_dgesv(4, 1, A, 4, ipiv, b, 4, info)
 if info != 0
-  print("dgesv failed")
+  eprint("dgesv failed")
 ```
 
 **Strings** cross as a NUL-terminated copy that lives for the duration of the call. A C function
@@ -286,30 +293,43 @@ and to module-level constants passes directly, as both calls above do. A lambda 
 local binding has no C function pointer to stand for it, because a C function pointer carries no
 environment.
 
-**The `user_data` route.** Many C libraries — QUADPACK wrappers, GSL, most C ODE solvers — pass an
-opaque `void *user_data` beside the function pointer and hand it back to every call of the callback:
+**Callbacks with user data: `c_ptr` and `@data`.** Many C libraries — QUADPACK wrappers, GSL, most
+C ODE solvers — pass an opaque `void *` beside the function pointer and hand it back to every call of
+the callback:
 
 ```c
-typedef void (*ode_rhs)(double t, const double *y, double *dydt, void *user_data);
-int32_t ode_integrate(ode_rhs f, void *user_data, int32_t n, double *y,
-                      double t0, double t1, double rtol);
+double integrate(double (*f)(double x, void *data), void *data,
+                 double a, double b, double epsabs, double epsrel);
 ```
 
-Where the extern has such a parameter, a capturing closure is allowed: nex passes the closure's
-environment through `user_data`, and the entry point it gives C unpacks it before calling the
-closure. So a right-hand side that captures a model parameter needs no global variable:
+nex spells that pointer **`c_ptr`**, the name Fortran's `iso_c_binding` gives it. `c_ptr` is an
+opaque type: it is legal only in `extern` declarations, and it has no arithmetic and cannot be
+dereferenced. The extern pairs the data parameter with its callback by writing `@data(f)` before
+the type:
 
 ```nex
-val omega = 2.0 * pi * freq
-// the rhs lambda captures omega; nex passes it through user_data
+@link("quad")
+extern def integrate(f: (real, c_ptr) -> real, data: @data(f) c_ptr,
+                     a: real, b: real, epsabs: real, epsrel: real): real
 ```
 
-Passing a capturing closure to an extern **with no** `user_data` parameter is a compile error.
+A call passes an ordinary closure for `f` and **leaves `data` out**:
 
-{{< note >}}
-How an `extern def` declares its `user_data` parameter, so the compiler knows where the environment
-goes, is not yet settled; the spelling may change.
-{{< /note >}}
+```nex
+def main() =
+  val k = 3.0
+  val area = integrate(x -> sin(k * x), 0.0, pi, 0.0, 1.0e-10)   // captures k
+  print(area)
+```
+
+The compiler generates the C entry point (a trampoline of the callback's C type), passes the
+closure's environment as `data`, and the trampoline unpacks it and calls the closure. So a callback
+that captures a model parameter needs no module-level variable. The closure is **borrowed for the
+call**: it may be used only while the extern runs, and the extern must not keep it for later — a C
+library that stores the pointer and calls it after returning is outside what nex supports.
+
+Without `@data`, a callback must not capture, as Fortran requires of a procedure argument: passing
+a capturing closure for a callback parameter that has no `@data` partner is a compile error.
 
 **A trap inside a callback** — an out-of-bounds index, an integer overflow — unwinds to the nex
 frame that made the extern call; the C frames between are abandoned.
@@ -433,24 +453,24 @@ The nex side declares the interface and calls it. This solves `-u'' = 1` on (0, 
 @fortran @link("tridiag")
 extern def trisolve(n: int32, dl: [real], d: inout [real], du: [real], b: inout [real])
 
-val n = 99
-val h = 1.0 / (n + 1)
-val off = fill(n - 1, -1.0)
-var diag = fill(n, 2.0)
-var u = fill(n, h * h)
+def main() =
+  val n = 99
+  val h = 1.0 / (n + 1)
+  val off = fill(n - 1, -1.0)
+  var diag = fill(n, 2.0)
+  var u = fill(n, h * h)
 
-trisolve(int32(n), off, diag, off, u)    // u now holds the solution
-print(u[50])                             // 0.125: u(x) = x(1 - x)/2 at x = 0.5
+  trisolve(int32(n), off, diag, off, u)    // u now holds the solution
+  print(u[50])                             // 0.125: u(x) = x(1 - x)/2 at x = 0.5
 ```
 
 `dl` and `du` are read-mode, so the same array `off` is passed for both; `diag` and `u` are `inout`,
 so they must be `var` bindings, and two distinct ones. `trisolve` overwrites `diag` with its
 elimination, exactly as the Fortran caller would expect.
 
-{{< note >}}
-How `nex build` is told which directory holds `libtridiag.a`, and whether gfortran's runtime library
-must be named with `@link("gfortran")` when the Fortran code uses Fortran I/O, are not yet settled.
-{{< /note >}}
+Build it with the library's directory on the search path: `nex build -L . solve.nex`. Because the
+program has a `@fortran` extern, `nex build` links the gfortran runtime itself, so Fortran code that
+does its own I/O needs nothing more ([Command Line](/tooling/01-cli/)).
 
 ### 11.7.4 What does not cross
 
@@ -493,7 +513,7 @@ other than macOS has not yet been verified.
 
 The routine follows the shape: `gemm` for matrix–matrix, `gemv` for matrix–vector (with the `T`
 flag for vector–matrix), and `dot` for two vectors — `dotu` for complex, because `@` does not
-conjugate. With static extents the decision is made at compile time; with dynamic extents the
+conjugate. The prelude's `dot(x, y)`, which conjugates `x`, uses `dotc`. With static extents the decision is made at compile time; with dynamic extents the
 compiler emits both paths and a run-time test. Operands that break §11.5's stride rules are copied
 first.
 
@@ -534,13 +554,18 @@ its element type (`s`, `d`, `c`, `z`):
 | `solve(A, b)` | `?gesv` | `x` with `A @ x == b`; `b` a vector or a matrix of right-hand sides |
 | `lstsq(A, b)` | `?gelsd` | the least-squares solution `x` |
 | `inv(A)` | `?getrf` + `?getri` | the inverse |
-| `det(A)` | `?getrf` | the determinant |
+| `det(A)` | `?getrf` | the determinant; `0.0` for a singular matrix |
 | `lu(A)` | `?getrf` | `(L, U, p)`, the pivoted factors |
-| `chol(A)` | `?potrf` | the Cholesky factor of a symmetric (Hermitian) positive-definite `A` |
+| `chol(A)` | `?potrf` | the lower factor `L` of a symmetric (Hermitian) positive-definite `A`: `A == L @ conj(transpose(L))` |
+| `chol(A, upper = true)` | `?potrf` | the upper factor `U`: `A == conj(transpose(U)) @ U` |
 | `qr(A)` | `?geqrf` + `?orgqr` | `(Q, R)` |
-| `eig(A)` | `?geev` | eigenvalues (and vectors) of a general matrix, **always complex** |
-| `eigh(A)` | `?syevd` / `?heevd` | real eigenvalues and the eigenvectors of a symmetric (Hermitian) matrix |
-| `svd(A)` | `?gesdd` | `(U, s, Vt)` |
+| `eigvals(A)` | `?geev` | the eigenvalues of a general matrix, **always complex** |
+| `eig(A)` | `?geev` | `(values, vectors)` of a general matrix, **always complex**; the vectors are the columns |
+| `eigh(A)` | `?syevd` / `?heevd` | `(values, vectors)` of a symmetric (Hermitian) matrix; the values real, in ascending order |
+| `svd(A)` | `?gesdd` | `(U, s, V)` with `A == U @ diag(s) @ conj(transpose(V))` |
+| `svdvals(A)` | `?gesdd` | the singular values `s`, in descending order |
+
+Pivot indices, as `lu_inplace` takes them, are `[int32]`, LAPACK's own integer type.
 
 Column-major storage means LAPACK receives the arrays as they are, with no transposes, and views
 follow §11.5's leading-dimension rules.
@@ -567,18 +592,17 @@ val b = [1.0, 2.0, 3.0]
 
 val x = solve(A, b)
 val (Q, R) = qr(A)
-val (U, s, Vt) = svd(A)
+val (U, s, V) = svd(A)
+val L = chol(A)                     // A == L @ transpose(L)
+val (lambda, X) = eigh(A)           // lambda ascending; A @ X[:, k] == lambda[k] * X[:, k]
 ```
 
-`eig` returns complex eigenvalues even for a real matrix, since a general real matrix may have
-complex ones; for a symmetric matrix such as this `A`, `eigh` is the right call and its eigenvalues
-are real.
+`eig` and `eigvals` return complex eigenvalues even for a real matrix, since a general real matrix
+may have complex ones; for a symmetric matrix such as this `A`, `eigh` is the right call and its
+eigenvalues are real.
 
-{{< note >}}
-Some details of the value forms are not yet settled and may change: whether `chol` returns the upper
-or the lower factor; how `eig` and `eigh` are asked for eigenvectors as well as eigenvalues; and
-whether `det` of an exactly singular matrix traps or returns zero.
-{{< /note >}}
+Only the solvers trap on a singular matrix. `det` of a singular matrix is `0.0`, since zero is the
+right answer and not a failure.
 
 ### 11.9.2 `inout` forms return `info`
 
@@ -608,7 +632,7 @@ When the factor itself is wanted, keep it and read `info`:
 var L = K
 val info = chol_inplace(L)
 if info > 0
-  print("not positive definite: leading minor", info)
+  eprint("not positive definite: leading minor", info)
 ```
 
 ## 11.10 Not yet

@@ -18,12 +18,12 @@ variables an HPC batch script already sets.
 parallel for i in 1..n do y[i] = a * x[i] + y[i]
 
 parallel for j in 1..cols(m)
-  m[:, j] = m[:, j] / norm(m[:, j])        // each iteration owns column j
+  m[:, j] = m[:, j] / norm2(m[:, j])       // each iteration owns column j
 ```
 
-The header is `parallel for` *index* `in` *range*, the same as a sequential `for`, with `do`
-required for an inline body and optional when the body starts on a new indented line. The range
-is an integer range, `lo..hi` or `lo..<hi`. A `parallel for` iterates over indices only, never
+The header is `parallel for` *index* `in` *range*, the same as a sequential `for`: `do` introduces a
+one-line body, and a body on the following indented lines takes no `do`. The range is an integer
+range, `lo..hi` or `lo..<hi`, with an optional step (`1..n by 2`). A `parallel for` iterates over indices only, never
 directly over an array's elements. The iterations may run in any order, at the same time. The loop
 ends when every iteration has finished.
 
@@ -34,9 +34,8 @@ parallel for i in 1..rows(c), j in 1..cols(c)
   c[i, j] = dot(a[i, :], b[:, j])
 ```
 
-{{< note >}}
-The multi-index header (`i in …, j in …`) is proposed and may change.
-{{< /note >}}
+This is how a loop nest is made parallel. A `parallel` construct inside a parallel body is a compile
+error, and the message suggests the two-axis header (`parallel for j in 1..n, i in 1..m`).
 
 **Compared with Fortran.** `parallel for` is what `do concurrent` and `!$omp parallel do` both
 express, with one difference: in Fortran it is your *promise* that the iterations are independent.
@@ -89,8 +88,8 @@ spells it `do concurrent (i = 1:n) reduce(+:total) reduce(max:peak)`.
 |---|---|---|
 | `+` | integer, real, complex | `0` |
 | `*` | integer, real, complex | `1` |
-| `min` | integer, real | `+inf` for reals |
-| `max` | integer, real | `-inf` for reals |
+| `min` | integer, real | `+inf` for reals; the type's largest value for integers |
+| `max` | integer, real | `-inf` for reals; the type's smallest value for integers |
 | `and` | `bool` | `true` |
 | `or` | `bool` | `false` |
 | `minloc`, `maxloc` | a `(value, index)` tuple | see §10.2.3 |
@@ -114,10 +113,10 @@ The variable is not read anywhere else in the body. Its value before the loop is
 value**. After the loop it holds the starting value combined with every iteration's contribution.
 
 ```nex
-var count = 0
+var above = 0
 var all_positive = true
-parallel for i in 1..n reduce count: +, all_positive: and
-  count += if x[i] > threshold then 1 else 0
+parallel for i in 1..n reduce above: +, all_positive: and
+  above += if x[i] > threshold then 1 else 0
   all_positive = all_positive and x[i] > 0.0
 ```
 
@@ -139,8 +138,8 @@ parallel for i in 1..n do s += x[i]
 ### 10.2.3 `minloc` and `maxloc`
 
 `minloc` and `maxloc` reduce a (value, index) pair, as Fortran's `MINLOC`/`MAXLOC` intrinsics and
-OpenMP's `minloc`/`maxloc` reductions do. The variable holds both. The contribution names the
-candidate value and its index:
+OpenMP's `minloc`/`maxloc` reductions do. The operator keeps the prelude function's name, and the
+contribution is its three-argument form: the running pair, the candidate value and its index:
 
 ```nex
 var worst = (0.0, 0)
@@ -201,8 +200,8 @@ contributions are combined:
 Threads only decide *who* computes which block, never the order of combination. So
 `OMP_NUM_THREADS=1` and `OMP_NUM_THREADS=64` give **identical bits**.
 
-**The whole-array reductions use the same tree.** `sum(x)`, `product(x)`, `dot(x, y)`, `norm(x)`
-and their axis forms block and combine exactly as `parallel sum(x)` does. Adding or removing
+**The whole-array reductions use the same tree.** `sum(x)`, `product(x)`, `dot(x, y)`, `norm2(x)`
+and their `dim =` forms block and combine exactly as `parallel sum(x)` does. Adding or removing
 `parallel` never changes a result.
 
 **The order is not left to right.** A floating-point `sum(x)` therefore differs in its last bits
@@ -226,7 +225,7 @@ count. In nex, it does not.
 ## 10.4 What the compiler proves
 
 Inside the body of a `parallel for`, or the function passed to `parallel map` (§10.5), the
-compiler proves four things. A body it cannot prove is a compile error that names the offending
+compiler proves the six things below. A body it cannot prove is a compile error that names the offending
 write or read.
 
 {{< note >}}
@@ -298,7 +297,7 @@ A function called in the body:
 
 ```nex
 def normalize(v: inout [real]) =
-  v = v / norm(v)
+  v = v / norm2(v)
 
 parallel for j in 1..cols(m) do normalize(m[:, j])      // accepted: column j is owned
 
@@ -338,6 +337,30 @@ parallel for i in 1..n
 
 Each reduction variable is contributed to in one of the forms of §10.2.2 and read nowhere else.
 
+### 5. No nested `parallel`
+
+A `parallel for` or a `parallel` expression inside a parallel body is a compile error. A loop nest
+is made parallel with one header over several indices (§10.1):
+
+```nex
+parallel for j in 1..n
+  parallel for i in 1..m do c[i, j] = 0.0
+// error: `parallel` inside a parallel body; write `parallel for j in 1..n, i in 1..m`
+```
+
+### 6. `cycle`, but not `exit`
+
+`cycle` in a parallel body ends the current iteration and is allowed. `exit` is a compile error: the
+iterations run in no order, so there is no "rest of the loop" to leave.
+
+```nex
+parallel for i in 1..n
+  if mask[i] then cycle                // accepted: skips this iteration
+  y[i] = f(x[i])
+```
+
+The same rules bind the body of an `@elemental` function ([Functions](/spec/06-functions/)).
+
 ### Traps in a parallel body
 
 A trap inside a parallel body, such as an out-of-bounds index, ends the loop. Every iteration
@@ -354,7 +377,8 @@ This trap behaviour is proposed and may change.
 `parallel` also prefixes an expression whose value is computed element by element:
 
 ```nex
-val y = parallel map(x, t -> exp(-t * t))       // or parallel x.map(t -> exp(-t * t))
+val y = parallel exp(-x * x)                    // elemental calls fuse into the loop
+val w = parallel map(x, t -> if t > 0.0 then t else 0.0)   // or parallel x.map(…)
 val d = parallel sum(x * y)
 val r = parallel 2a + b                          // a whole-array expression
 ```
@@ -362,9 +386,9 @@ val r = parallel 2a + b                          // a whole-array expression
 The forms are:
 
 - `map`;
-- the reductions `sum`, `product`, `min`, `max` and `dot`, which give the same bits as their
-  sequential forms (§10.3);
-- any whole-array element-wise expression.
+- the reductions `sum`, `product`, `minval`, `maxval` and `dot`, with or without `dim =`, which give
+  the same bits as their sequential forms (§10.3);
+- any whole-array element-wise expression, elemental calls included.
 
 {{< note >}}
 `parallel` before a whole-array element-wise expression (`parallel 2a + b`) is proposed and may

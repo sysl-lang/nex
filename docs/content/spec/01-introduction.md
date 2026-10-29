@@ -106,11 +106,11 @@ def main() =
   val dt = 0.4 * dx^2                 // r = dt / dx^2 = 0.4; the scheme is stable for r <= 1/2
   val steps = 500
 
-  var u = map(x, t -> sin(pi * t))
+  var u = sin(pi * x)
   for k in 1..steps do step(u, dt / dx^2)
 
-  val exact = map(x, t -> exp(-steps * dt * pi^2) * sin(pi * t))
-  val err = max(map(u - exact, d -> abs(d)))
+  val exact = exp(-steps * dt * pi^2) * sin(pi * x)
+  val err = maxval(abs(u - exact))
   print(s"max error after $steps steps: $err")
 ```
 
@@ -126,7 +126,9 @@ Points to notice, each explained in its own chapter:
 - The update is one whole-array expression: it compiles to a single loop with no temporaries
   ([chapter 5](/spec/05-array-expressions/)).
 - `1.0 / (n - 1)` divides a real by an integer and gives a real; `dx^2` raises to an integer power.
-- `t -> sin(pi * t)` is a function literal; `pi` is a prelude constant.
+- `sin`, `exp` and `abs` are elemental: applied to an array they apply to every element, and fuse
+  into the surrounding expression ([chapter 12](/spec/12-prelude/)); `pi` is a prelude constant.
+- `maxval` is the largest element, Fortran's `MAXVAL`.
 - `s"…"` is an interpolated string.
 
 `nex run heat.nex` compiles this file and runs the result.
@@ -136,7 +138,7 @@ Points to notice, each explained in its own chapter:
 Every program and module sees the **prelude** without importing it: the constants `pi`, `e`,
 `inf`, `nan` and `i`; the numeric type names and their conversion functions (`real32(x)`,
 `int64(n)`); the mathematical functions (`sqrt`, `exp`, `sin`, …); the array constructors and shape
-functions (`zeros`, `linspace`, `extent`, `reshape`, …); the reductions (`sum`, `max`, …); and
+functions (`zeros`, `linspace`, `extent`, `reshape`, …); the reductions (`sum`, `maxval`, …); and
 `print`. [Chapter 12](/spec/12-prelude/) lists it.
 
 Prelude names are ordinary names, not keywords. A local binding with the same name shadows the

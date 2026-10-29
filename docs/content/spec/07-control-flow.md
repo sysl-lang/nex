@@ -4,8 +4,10 @@ summary: if/then/else as expressions, match over sum types, for loops over range
 weight: 70
 ---
 
-nex has four control-flow constructs: `if`, `match`, `for` and `while`. Each one is an expression,
-each body is an indented block, and each block may be closed by an optional `end` marker. The
+nex has four control-flow constructs: `if`, `match`, `for` and `while`, and four statements that
+leave them early: `exit`, `cycle`, `return` and `stop`. Each construct is an expression, each body is
+an indented block (or a one-line body after `then` or `do`), and each block may be closed by an
+optional `end` marker. The
 parallel form of `for` is in [Parallelism](/spec/10-parallelism/).
 
 ## 7.1 `if` / `then` / `else`
@@ -118,8 +120,9 @@ destructuring instead — in a `val` or `var` binding (`val lo, hi = bracket(f, 
 
 ## 7.3 `for` loops
 
-`for` runs its body once for each value of a range or element of an array. `do` is **required when
-the body is on the same line** and optional when the body starts on a new, indented line:
+`for` runs its body once for each value of a range or element of an array. `do` introduces a
+**one-line body** on the same line as the header, and only that; a body that starts on a new,
+indented line takes no `do`:
 
 ```nex
 for k in 1..n do x[k] = k * h
@@ -183,12 +186,9 @@ for k in n..1 by -1                          // n, n-1, …, 1
 Without the `by -1`, `n..1` is an empty range when `n > 1`, and the loop does not run — the same
 answer Fortran gives for `DO k = n, 1`. A step of `0` traps.
 
-{{< note >}}
-The rules for `by` in a subscript, including negative steps and reading the bounds in the direction
-of travel, are settled ([Arrays](/spec/04-arrays/)). That a `for` header follows exactly the same
-rules, and that `by` attaches to a range held in a variable (`val r = 1..n by 2`), is how the design
-reads but is not yet written down there; this detail may change.
-{{< /note >}}
+A `for` header follows exactly the rules of `by` in a subscript ([Arrays](/spec/04-arrays/)). A
+stepped range is a value like any other range: `val odd = 1..n by 2` may be bound, passed, looped
+over and used as a subscript.
 
 ### 7.3.3 Looping over an array
 
@@ -235,7 +235,7 @@ loop index `j`, `k`, `m` or `n` in code that also uses complex numbers. The rule
 ## 7.4 `while` loops
 
 `while` runs its body as long as its condition is true, testing before each pass. The `do` rule is
-the same as `for`'s:
+the same as `for`'s — `do` for a one-line body, none for an indented block:
 
 ```nex
 while abs(dx) > tol do dx = newton_step(x, dx)
@@ -250,9 +250,30 @@ A `while` loop is an expression of type `unit`. It is Fortran's `DO WHILE (…)`
 
 ## 7.5 Leaving a loop early
 
-nex has no `break` or `continue` (Fortran's `EXIT` and `CYCLE`). A loop that must stop early is
-written as a `while` whose condition says why it stops, or the search is put in a function and left
-with `return`, which ends the whole function from inside any loop:
+`exit` leaves the innermost enclosing loop, and `cycle` skips the rest of the body and goes to that
+loop's next iteration. They are Fortran's `EXIT` and `CYCLE`, under the same names:
+
+```nex
+var found = 0
+for k in 1..length(v)
+  if v[k] == 0.0 then cycle            // skip zeros
+  if v[k] < 0.0
+    found = k
+    exit                               // stop at the first negative
+```
+
+A loop may be **named** with a label before `for` or `while`; `exit` and `cycle` followed by the
+name act on that loop rather than the innermost one, as Fortran's named `DO` constructs do:
+
+```nex
+outer: for j in 1..n
+  for k in 1..m
+    if a[k, j] < 0.0 then cycle outer  // next column
+    if a[k, j] > limit then exit outer // stop the whole search
+    total += a[k, j]
+```
+
+`return` ends the whole function from inside any loop:
 
 ```nex
 def first_negative(v: [real]): integer =
@@ -261,7 +282,17 @@ def first_negative(v: [real]): integer =
   0                                    // none found
 ```
 
-To skip the rest of one iteration, put the rest of the body under an `if`.
+**`stop`** ends the program, from anywhere, with exit status 0; `stop n` ends it with exit status
+`n`. It is Fortran's `STOP` and `STOP n`:
+
+```nex
+if not converged
+  eprint(s"no convergence after $max_iter iterations")
+  stop 1
+```
+
+Inside the body of a `parallel for`, `cycle` is allowed (it ends that iteration) and `exit` is a
+compile error, since the iterations have no order to leave ([Parallelism](/spec/10-parallelism/)).
 
 ## 7.6 Blocks, scope and `end` markers
 

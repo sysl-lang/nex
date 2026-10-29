@@ -61,7 +61,7 @@ A block is opened by a line that ends with:
 
 - `=` in a `def`, `val` or `var`;
 - `then` or `else` in an `if`;
-- `do` in a `for` or `while` (the `do` may be left out when the body starts on the next line);
+- the header of a `for` or `while` (no `do`: `do` introduces only a body on the same line);
 - `->` in a function literal or a `match` arm;
 - `match` after its scrutinee.
 
@@ -169,11 +169,11 @@ destructuring binding.
 These words are reserved and cannot be used as identifiers:
 
 ```
-and       as        const     def       div       do        else
-end       enum      extern    false     for       if        import
-in        inout     match     module    mut       not       or
-parallel  private   return    struct    then      true      val
-var       while
+and       as        const     cycle     def       div       do
+else      end       enum      exit      extern    false     for
+if        import    in        inout     match     module    mut
+not       or        parallel  private   return    stop      struct
+then      true      val       var       while
 ```
 
 `mut` is reserved and has no meaning; a parameter that the callee may modify is `inout`.
@@ -187,7 +187,8 @@ pub       trait     type      where     yield
 
 **Contextual words** are keywords only in one position and ordinary names everywhere else:
 
-- `by` introduces the stride of a slice: `a[1..n by 2]`.
+- `by` introduces the step of a range, in a subscript or anywhere else: `a[1..n by 2]`,
+  `for k in n..1 by -1`.
 - `reduce` introduces the reduction clause of a `parallel for`
   ([chapter 10](/spec/10-parallelism/)). Everywhere else `reduce` is the prelude function of that
   name.
@@ -302,8 +303,8 @@ Operators, from the most tightly binding to the least:
 |---|---|---|---|
 | 1 | `.` | left | field access |
 | 2 | `f(…)`, `a[…]` | left | call, subscript |
-| 3 | unary `-`, `not` | right | negation |
-| 4 | `^` | right | power (Fortran's `**`) |
+| 3 | `^` | right | power (Fortran's `**`) |
+| 4 | unary `-`, `not` | right | negation |
 | 5 | juxtaposition | left | `2x`, `2pi`, `2(x + 1)` |
 | 6 | `*`, `/`, `div`, `%`, `@` | left | product, quotient, integer quotient, remainder, matrix product |
 | 7 | `+`, `-` | left | sum, difference |
@@ -316,8 +317,10 @@ Operators, from the most tightly binding to the least:
 
 Comparisons chain: `0 <= k < n` means `0 <= k and k < n`, with `k` evaluated once.
 
-Unary minus binds tighter than `^`, so `-x^2` is `(-x)^2`, where Fortran's `-x**2` is `-(x**2)`.
-Write `-(x^2)` for the negated square.
+`^` binds tighter than unary minus, so `-x^2` is `-(x^2)`, as in mathematics and as Fortran's
+`-x**2` is; write `(-x)^2` for the square of the negation. `^` is right-associative: `2^3^2` is
+`2^(3^2)`, which is 512. An exponent may itself be negated: `x^-1` is `x^(-1)`. The power operator is
+`^` only; there is no `**`.
 
 **Ranges.** `lo..hi` is the **inclusive** range from `lo` to `hi`, Fortran's `lo:hi`: `1..n` has
 `n` elements and `for k in 1..n` runs `n` times. `lo..<hi` is the **half-open** range that stops

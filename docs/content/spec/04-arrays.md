@@ -29,12 +29,31 @@ The rank is the number of axes, and it is always known at compile time. `[T]` is
 `[T; :]`, the rank-1 array, which is the most common array in numerical code:
 
 ```nex
-def norm2(x: [real]): real = sqrt(sum(x * x))
+def rms(x: [real]): real = sqrt(sum(x * x) / length(x))
 ```
 
-An array's element is a scalar: any numeric type of [Types](/spec/03-types/), or `bool`. There are no
-arrays of arrays — `[[real]]` is rejected with *"an array element is a scalar; a matrix is
-`[real; :, :]`"*. Raw bytes are `[uint8]`, an ordinary array.
+**An array may hold any element type but an array.** Numeric types of [Types](/spec/03-types/) and
+`bool` are the usual case. A struct or tuple whose fields are all scalars is stored **inline**, every
+element's fields side by side, as a Fortran array of a derived type is, so `p[k].x` is a plain load.
+Strings and other heap values (a struct holding an array, an enum with a payload, a closure) are
+stored as handles. Element-wise arithmetic and
+fusion ([Array expressions](/spec/05-array-expressions/)) apply only to numeric elements; indexing,
+slicing, views, `map` and `parallel for` work on every element type.
+
+```nex
+struct Point
+  x: real
+  y: real
+
+var p = fill(1000, Point(0.0, 0.0))     // [Point], stored inline
+p[3].x = 1.5
+val names = ["alpha", "beta"]            // [string], an array of handles
+val pairs = [(1, 2.0), (2, 4.0)]         // [(integer, real)], stored inline
+```
+
+An element may not itself be an array: a nested literal is always one array of higher rank, and
+`[[real]]` is rejected with *"an array element is not an array; a matrix is `[real; :, :]`"*. Raw
+bytes are `[uint8]`, an ordinary array.
 
 {{< note >}}
 Mixing static and run-time axes in one type (`[real32; 3, :]`), and the absence of any upper limit on
@@ -183,15 +202,16 @@ also written in method form, `a.map(f)`.
 
 ```nex
 val x = linspace(0.0, 1.0, 101)
-val y = x.map(t -> exp(-t * t))                 // [real; :], same shape as x
+val y = x.map(t -> if t < 0.5 then 0.0 else t)  // [real; :], same shape as x
 val evens = [3, 8, 1, 6, 4].filter(k -> k % 2 == 0)   // [8, 6, 4]
 val m2 = m.map(v -> v * v)                      // rank 2 in, rank 2 out
 ```
 
-{{< note >}}
-How a range becomes an array when one is needed — passing a range to `map`, or binding it where an
-`[integer]` is expected — is not yet settled; the detail may change.
-{{< /note >}}
+The prelude's math functions need no `map`: they are elemental, so `exp(-x * x)` is already an
+array of the same shape as `x` ([Prelude §12.2](/spec/12-prelude/)).
+
+A range is an `[integer]` array wherever an expression may stand, so it may be passed to `map` or
+`sum` directly: `sum(1..n)` is n(n + 1)/2, and `map(1..n, k -> k * h)` is the grid.
 
 ## 4.4 Indexing
 

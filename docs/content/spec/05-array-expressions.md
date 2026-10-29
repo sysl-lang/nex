@@ -45,10 +45,15 @@ val mid = (a > 1.5) and (a < 2.5)   // [false, true, false]
 
 `and` and `or` short-circuit only on scalar `bool`s; on arrays both sides are computed.
 
-A scalar function applies to every element through `map` ([Arrays §4.3.4](/spec/04-arrays/)):
+The prelude's math functions are **elemental**: applied to an array they apply to every element, and
+the call fuses into the expression's loop like any operator ([Prelude §12.2](/spec/12-prelude/)). A
+user function marked `@elemental` behaves the same way ([Functions](/spec/06-functions/)); any other
+function reaches every element through `map` ([Arrays §4.3.4](/spec/04-arrays/)):
 
 ```nex
-val g = x.map(t -> exp(-t * t))
+val g = exp(-x * x)
+val clipped = max(a, 0.0)                 // elemental over both arguments
+val h = x.map(t -> if t < 0.0 then 0.0 else t)
 ```
 
 ## 5.2 Broadcasting is scalar-only
@@ -136,7 +141,8 @@ v @ v                               // 61.0
 - **Static extents carry into the result**: `[real; 3, 4] @ [real; 4, :]` is a `[real; 3, :]`.
 - Mixed element types promote as in §5.3.
 - The rank-1 product does **not** conjugate, for complex operands as for real: `u @ v` is
-  `Σ u[k] * v[k]`. The Hermitian inner product is `conj(u) @ v`.
+  `Σ u[k] * v[k]`. The Hermitian inner product is `dot(u, v)`, which conjugates `u` as Fortran's
+  `dot_product` does (§5.7), or `conj(u) @ v`.
 
 ### 5.5.1 BLAS
 
@@ -191,40 +197,48 @@ formed: it becomes BLAS's transpose flag (§5.5.1). `permute` reorders the axes 
 |---|---|
 | `sum(a)` | the sum of every element |
 | `product(a)` | the product of every element |
-| `min(a)`, `max(a)` | the smallest and largest element (Fortran's `minval`, `maxval`) |
-| `dot(a, b)` | `Σ a[k] * b[k]`; the lengths must agree, or it traps |
-| `norm(a)` | the Euclidean (2-) norm |
+| `minval(a)`, `maxval(a)` | the smallest and largest element |
+| `minloc(a)`, `maxloc(a)` | the index of the smallest and largest element; a tuple of indices for rank ≥ 2 |
+| `any(a)`, `all(a)`, `count(a)` | on a `bool` array: whether any, whether all, how many are `true` |
+| `dot(x, y)` | `Σ conj(x[k]) * y[k]` (`x` conjugated when complex); the lengths must agree, or it traps |
+| `norm2(a)` | the Euclidean (2-) norm; for a matrix, the Frobenius norm |
 | `reduce(a, init, f)` | a left fold with your own function: `f(…f(f(init, a[1]), a[2])…, a[n])` |
 
-Each takes an array of any rank, or a view, and gives a scalar:
+The names and meanings are Fortran's. Each takes an array of any rank, or a view, and gives a scalar
+(an index tuple for `minloc` and `maxloc` at rank ≥ 2):
 
 ```nex
 val m = [[1.0, 2.0, 3.0],
          [4.0, 5.0, 6.0]]
 sum(m)                              // 21.0
-max(m)                              // 6.0
+maxval(m)                           // 6.0
+maxloc(m)                           // (2, 3)
 sum(m[:, 2..])                      // 16.0: a window, no copy
+count(m > 2.5)                      // 4
 dot([1.0, 2.0], [3.0, 4.0])         // 11.0
 [1, 2, 3, 4].reduce(0, (s, k) -> s + k * k)   // 30
 ```
 
-`min` and `max` with two scalar arguments are the ordinary two-argument functions; with one array they
-reduce it.
+`min` and `max` are not reductions. They are elemental functions of two or more arguments —
+`max(a, 0.0)` clamps every element of `a` at zero — and `max(a)` of one array is a compile error
+that suggests `maxval`.
 
-### 5.7.2 Axis reductions
+### 5.7.2 Axis reductions: `dim =`
 
-`sum_axis(a, k)` sums along axis `k` and returns an array of rank one less, as Fortran's
-`sum(a, dim=k)` does. Axes are numbered from 1:
+Every reduction takes a named `dim =` argument, and then reduces along that axis only and returns an
+array of rank one less, as Fortran's `DIM=` does. Axes are numbered from 1:
 
 ```nex
-sum_axis(m, 1)                      // [5.0, 7.0, 9.0]: down each column
-sum_axis(m, 2)                      // [6.0, 15.0]: along each row
+sum(m, dim = 1)                     // [5.0, 7.0, 9.0]: down each column
+sum(m, dim = 2)                     // [6.0, 15.0]: along each row
+maxval(m, dim = 1)                  // [4.0, 5.0, 6.0]
+maxloc(m, dim = 2)                  // [3, 3]: the column of each row's largest
 ```
 
 ### 5.7.3 Summation order
 
 **A reduction's result does not depend on how many threads ran it, and is the same with or without
-`parallel`.** `sum`, `product`, `dot`, `norm` and their axis forms all add in one fixed order: the
+`parallel`.** `sum`, `product`, `dot`, `norm2` and their `dim =` forms all add in one fixed order: the
 elements are cut into fixed-size blocks, each block is reduced in sequence, and the block results are
 combined in a fixed pairwise tree. `parallel sum(x)` uses the same blocks and the same tree, so adding
 or removing `parallel`, or changing `OMP_NUM_THREADS`, never changes a bit of the answer
@@ -241,11 +255,12 @@ To compare a result with a Fortran program bit for bit, write the Fortran progra
 get the more accurate answer, call `sum`.
 {{< /tip >}}
 
-### 5.7.4 `minloc` and `maxloc`
+### 5.7.4 `minloc` and `maxloc` in a loop
 
-`minloc` and `maxloc` find the value and the index of the smallest or largest candidate, as Fortran's
-`MINLOC` and `MAXLOC` do. They reduce a (value, index) pair: the accumulator holds both, and each step
-offers a candidate and its index.
+`minloc(a)` and `maxloc(a)` find the index of the extreme element of an array. Inside a loop, their
+three-argument forms find the value and the index of the smallest or largest **candidate**, as
+OpenMP's `minloc` and `maxloc` reductions do. They reduce a (value, index) pair: the accumulator holds
+both, and each step offers a candidate and its index.
 
 ```nex
 val r = residual(x)
@@ -256,11 +271,5 @@ val (largest, where) = worst
 ```
 
 **Ties go to the lowest index**, as in Fortran, whatever the thread count. The candidate need not be
-an element: here it is the absolute value, which Fortran would write `maxloc(abs(r))`. The loop and
-its `reduce` clause are described in [Parallelism](/spec/10-parallelism/).
-
-{{< note >}}
-A whole-array form taking just the array (`maxloc(a)`, Fortran's `MAXLOC(A)`) and axis forms of the
-other reductions (`product`, `min`, `max` along one axis) are not yet settled; the details may
-change.
-{{< /note >}}
+an element: here it is the absolute value, and `where` equals `maxloc(abs(r))`. The loop and its
+`reduce` clause are described in [Parallelism](/spec/10-parallelism/).

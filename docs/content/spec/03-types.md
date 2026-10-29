@@ -73,8 +73,12 @@ storage width for large data sets.
 
 **Arithmetic is IEEE 754 at the operands' own width.** A `real32` operation is a binary32 operation;
 it is never computed in 64 bits and rounded afterwards. Overflow gives infinity and an invalid
-operation gives NaN, as IEEE specifies; these are values, not traps. Division by zero, however,
-traps, for reals as for integers.
+operation gives NaN, as IEEE specifies; these are values, not traps. Real division by zero gives an
+infinity (`1.0 / 0.0` is `inf`, `0.0 / 0.0` is `nan`); only integer division by zero traps.
+
+`nex build --fpe-trap` turns the three IEEE exceptions that usually mean a bug — division by zero,
+an invalid operation and overflow — into traps, like gfortran's `-ffpe-trap=zero,invalid,overflow`
+([Command Line](/tooling/01-cli/)).
 
 {{< note >}}
 `sqrt` of a `real16` is computed natively. The other transcendental functions of a `real16` are
@@ -227,14 +231,20 @@ part of a Fortran `subroutine`.
 ## 3.11 Tuples
 
 A tuple type is a fixed list of two or more types, written with commas: `real, real` or
-`(integer, [real], complex)`. Tuples are chiefly how a function returns several values, where
-Fortran would use several `intent(out)` arguments:
+`(integer, [real], complex)`. Tuples are how a function returns several values, where Fortran would
+use several `intent(out)` arguments; nex has no `out` mode:
 
 ```nex
-def minmax(a: [real]): (real, real) = min(a), max(a)
+def minmax(a: [real]): (real, real) = (minval(a), maxval(a))
 
-val lo, hi = minmax(samples)
+val (lo, hi) = minmax(samples)
+val t = minmax(samples)
+t.1                               // the first field, lo
+t.2                               // the second, hi
 ```
+
+Destructuring, `val (lo, hi) = …`, is the usual way to take a tuple apart. A field may also be read by
+position with `.` and a number, counted from 1 like every index in nex.
 
 The parentheses around a tuple type are optional except where commas already separate something
 else, as in a parameter list: `def join(p: (real, real), q: (real, real))` takes two tuples.
@@ -347,8 +357,9 @@ only at run time, or an integer (or a `const` name) for an extent known at compi
 ```
 
 The rank is the number of axes, and it is always known at compile time. Arrays are 1-based on every
-axis and stored in column-major order, as in Fortran. The element type is a numeric type or `bool`;
-`[[real]]` is not a type, since a matrix is `[real; :, :]`. The full treatment of arrays, their
+axis and stored in column-major order, as in Fortran. The element type may be any type but an
+array: numeric types, `bool`, and structs and tuples of scalars are stored inline, strings and other
+heap values as handles. `[[real]]` is not a type, since a matrix is `[real; :, :]`. The full treatment of arrays, their
 literals, indexing and views is in [chapter 4](/spec/04-arrays/).
 
 {{< note >}}

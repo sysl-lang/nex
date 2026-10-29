@@ -17,7 +17,9 @@ produces a native executable. Run it directly:
 ```
 
 The binary does not need nex installed. See [the command-line reference](/tooling/01-cli/) for the
-options.
+options: `--fpe-trap` to stop on a floating-point division by zero, invalid operation or overflow,
+as gfortran's `-ffpe-trap` does, and `-L dir` / `-l name` to link a library of your own. A program
+that calls Fortran through `@fortran` gets the gfortran runtime linked automatically.
 
 ## 3.2 Parallel programs
 
