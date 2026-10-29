@@ -1,0 +1,21 @@
+// nex's runtime, the library every compiled nex program links: printing every value as the reference
+// interpreter spells it, and the trap machinery `assert_traps` catches through.
+//
+//     sysl build-c runtime -o libnex_rt.a
+//
+// A project of its own rather than a module of the compiler, because it is a different artifact: an
+// archive a C link line takes, beside an object MLIR wrote, where the compiler is a program. The
+// interpreter will call the same functions directly.
+
+package {
+  name    = "nex-runtime"
+  version = "0.0.1"
+  sysl    = "0.8.0"
+}
+
+// **`os`** for standard output and error and for `abort`; **`heap`** because the formatter builds its
+// digits as strings. The allocator is libc's `malloc`, the one MLIR's lowered `memref.alloc` calls.
+requires {
+  os   = true
+  heap = true
+}

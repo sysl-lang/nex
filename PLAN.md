@@ -138,7 +138,7 @@ source ──parse──▶ AST ──elaborate──▶ typed IR ──emit─�
    `sysl.process.capture`: a module goes to `mlir-opt` as a file in a `make_temp_dir` directory, or
    on its stdin through `Stdio.FromPath` or a `pipe` and `Stdio.FromFile`. LLVM is found at
    `NEX_LLVM_HOME`, else Homebrew's `opt/llvm` (LLVM 23).
-5. **The runtime** (`runtime/nex_rt.c`), linked into every program: printing every value as the
+5. **The runtime** (`runtime/`, a sysl archive from `sysl build-c`), linked into every program: printing every value as the
    reference spells it — reals as Java's `Double.toString` (`1.0E20`, `4.9E-324`), complex numbers,
    arrays read through `llvm.emit_c_interface` memref descriptors honouring their strides — plus the
    string, handle and trap machinery below. `libomp` is linked when, and only when, a program has a
@@ -406,16 +406,19 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
   with a transform and a point array, re-runs an edited script within the latency target, and
   refuses a sandboxed script with an `extern`.
 
-**The runtime in sysl** (its own item, now: a proof before M3 depends on the C runtime). Replace
-`experiments/mlir/runtime/nex_rt.c` with a runtime written in sysl, built as a host archive
-(`sysl build-c`) and linked into the three existing MLIR proofs — 316, 313 and 145 — each printing
-its `.out` byte for byte. It proves three things: one `main` and one allocator across the sysl
-archive and the MLIR-generated code; `@export` functions that take an MLIR memref descriptor by
-pointer (what `llvm.emit_c_interface` passes); and traps that are catchable from MLIR-generated
-frames, as `assert_traps` needs. The interpreter later calls this same runtime directly. A wall in
-sysl is reported to sysl as a gap (org rule 9), never routed around in C. *Exit*: the three proofs
-link only the sysl archive and print their `.out`; `nex_rt.c` is gone; and a proof that traps
-inside an MLIR function is caught and resumed by the runtime.
+**The runtime in sysl.** The runtime is written in sysl: `runtime/`, a project of its own (its own
+`sysl.hocon`, so the compiler's tree stops there), built by `sysl build-c runtime` into
+`libnex_rt.a` and its header. The three MLIR proofs — 316, 313 and 145 — and `real-spelling` link
+that archive and nothing else, and each prints its `.out` byte for byte. `tests_toolchain.sysl`
+holds it to account: **one `main` and one allocator** — the archive defines neither, so `main` is the
+one MLIR generated and the runtime's heap is the libc `malloc` and `free` that lowered memrefs call;
+**memref descriptors by pointer** — `@export` functions named `_mlir_ciface_*` take a struct laid out
+as MLIR's rank-1 descriptor, and `trap-catch.mlir` prints a stride-2 view from offset 1 through one;
+and **catchable traps** — `nex_catch_trap` takes a body's address and runs it under `setjmp`, a
+`nex_trap_*` called two MLIR frames down `longjmp`s back to it (an `@abandons` extern), the catch
+answers true and the program goes on, twice; with nothing catching, the trap writes its message to
+standard error and aborts with what was printed kept. The interpreter later calls this same runtime
+directly.
 
 **The playground** (its own item, any time after M3). A page in `docs/` with an editor; **Run**
 sends the source to a small service that compiles it with the ordinary pipeline and **runs the

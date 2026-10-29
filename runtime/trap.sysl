@@ -1,0 +1,65 @@
+// Traps, and the catching `assert_traps` needs.
+//
+// A nex trap is raised by generated code calling one of the `nex_trap_*` functions here. With nothing
+// catching, it writes its message to standard error and aborts, as the reference's runtime does. Under
+// `nex_catch_trap` it returns to the catch instead: the frames between — MLIR-generated ones among
+// them — are abandoned, the message is kept for the catcher to read, and the program goes on.
+//
+// The return is C's `setjmp` and `longjmp`, which is how a nex program's trap crosses frames no
+// unwinding table describes. Nothing a sysl frame owns is held across it: the frames abandoned are
+// generated code, which holds no counts, and the catcher keeps its state in module storage.
+
+@include("<setjmp.h>")
+
+c const
+    JMP_BUF_WORDS: usize = "(sizeof(jmp_buf) + sizeof(long long) - 1) / sizeof(long long)"
+
+@needs(os)
+extern setjmp(env: *u64) -> int
+
+@abandons
+@needs(os)
+extern longjmp(env: *u64, v: int) -> never
+
+@needs(os)
+extern abort() -> never
+
+// The innermost catch's saved context, and how deep the catches are nested; at depth zero a trap
+// aborts. Each catch saves the context it replaces and restores it on the way out.
+private var catch_env: [JMP_BUF_WORDS]u64 = [0; JMP_BUF_WORDS]
+private var depth = 0
+private var last_message = ""
+
+private trap(message: string) -> never
+    if depth == 0 then
+        flush()
+        eprints(s"trap: $message\n")
+        abort()
+
+    last_message = message
+    longjmp(&catch_env[0], 1)
+
+@export("nex_trap_complex_div_zero")
+trap_complex_div_zero() -> never
+    trap("complex division by zero")
+
+// Run `body`, answering true if it trapped and false if it returned. What it printed before the trap
+// stays printed; the trap's message is not written, and `nex_last_trap_message` answers it.
+@export("nex_catch_trap")
+catch_trap(body: *extern() -> unit) -> bool
+    val saved = catch_env
+
+    depth += 1
+
+    val trapped = setjmp(&catch_env[0]) != 0
+
+    if !trapped then body()
+
+    depth -= 1
+    catch_env = saved
+    trapped
+
+// The message of the last trap a catch caught, written to standard output on a line of its own.
+@export("nex_print_last_trap")
+print_last_trap()
+    print(s"trap: $last_message")

@@ -2,7 +2,8 @@
 
 // The toolchain the compiler will drive, driven from sysl: each hand-written MLIR proof in
 // `experiments/mlir/` goes through `mlir-opt` with the pipeline in `pipeline.txt`, `mlir-translate`
-// and `clang` with the runtime, and the program it makes must print its corpus output byte for byte.
+// and `clang`, linked against the runtime in `runtime/` (a sysl archive `sysl build-c` writes), and the
+// program it makes must print its corpus output byte for byte.
 // The same tests pin the library calls the driver is built from: a child's stdin from a path and from
 // a pipe this program wrote, a temporary directory, and a large text gathered in a `StrBuilder`.
 //
@@ -10,9 +11,10 @@
 
 import sysl.env.get_or
 import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
-import sysl.process.{Stdio, capture, pipe}
-import sysl.testing.skip
-import sysl.text.str_builder
+import sysl.buf.{Buf, buf}
+import sysl.process.{Status, Stdio, capture, pipe}
+import sysl.testing.{compiler, skip}
+import sysl.text.{fields, split, str_builder}
 import sysl.time.monotonic
 
 private llvm_bin() -> string
@@ -28,8 +30,15 @@ private tool(program: string, args: []const string, stdin: Stdio = Inherit) -> s
     assert(out.status.ok(), s"$program: ${out.status}\n${out.err.unwrap_or("")}")
     out.text
 
-// Lower one proof to a native program in `work` and answer what it prints.
-private lower_and_run(bin: string, work: string, proof: string) -> string
+// The runtime, built by the compiler running these tests as the archive a C link line takes.
+private runtime_archive(work: string) -> string
+    val archive = s"$work/libnex_rt.a"
+
+    tool(compiler(), ["build-c", "runtime", "-o", archive])
+    archive
+
+// Lower one proof to a native program in `work`, linked against the runtime alone, and answer its path.
+private lower(bin: string, work: string, proof: string) -> string
     val pipeline = read_text("experiments/mlir/pipeline.txt").unwrap().trim()
     val lowered = s"$work/$proof.llvm.mlir"
 
@@ -38,14 +47,14 @@ private lower_and_run(bin: string, work: string, proof: string) -> string
     // `mlir-translate` reads the lowered module on its stdin and writes LLVM IR to its stdout.
     write_text(s"$work/$proof.ll", tool(s"$bin/mlir-translate", ["--mlir-to-llvmir"],
                                         stdin = Stdio.FromPath(lowered))).unwrap()
-    tool(s"$bin/clang", ["-Wno-override-module", "-O2", s"$work/$proof.ll",
-                         "experiments/mlir/runtime/nex_rt.c", "-o", s"$work/$proof"])
-    tool(s"$work/$proof", [])
+    tool(s"$bin/clang", ["-Wno-override-module", "-O2", s"$work/$proof.ll", runtime_archive(work),
+                         "-lm", "-o", s"$work/$proof"])
+    s"$work/$proof"
 
 private check_proof(proof: string, oracle: string)
     val bin = llvm_bin()
     val work = make_temp_dir("nex-toolchain").unwrap()
-    val got = lower_and_run(bin, work, proof)
+    val got = tool(lower(bin, work, proof), [])
 
     remove_dir_all(work).unwrap()
     assert_eq(got, read_text(oracle).unwrap())
@@ -65,6 +74,50 @@ proof_complex()
 @test("the runtime spells reals as the reference interpreter does, at 22 boundary values")
 proof_real_spelling()
     check_proof("real-spelling", "experiments/mlir/real-spelling.out")
+
+@test("a trap inside MLIR-generated frames is caught and resumed by the runtime, and aborts uncaught")
+proof_trap_catch()
+    val bin = llvm_bin()
+    val work = make_temp_dir("nex-toolchain").unwrap()
+    val out = capture(lower(bin, work, "trap-catch"), [], stderr = true).unwrap()
+
+    remove_dir_all(work).unwrap()
+    assert_eq(out.text, read_text("experiments/mlir/trap-catch.out").unwrap())
+    assert_eq(out.err.unwrap_or(""), "trap: complex division by zero\n")
+    assert(out.status == Status.Signalled(6), s"${out.status}")
+
+// One `main` and one allocator: the archive defines neither, so the program's `main` is the one MLIR
+// generated and the runtime's heap is the libc `malloc` and `free` lowered memrefs call.
+@test("the runtime archive defines no main and no allocator of its own, and takes libc's malloc")
+runtime_one_main_one_allocator()
+    val bin = llvm_bin()
+    val work = make_temp_dir("nex-toolchain").unwrap()
+    val symbols = tool(s"$bin/llvm-nm", ["-g", runtime_archive(work)])
+
+    remove_dir_all(work).unwrap()
+
+    var defined: Buf[string] = buf()
+    var undefined: Buf[string] = buf()
+
+    for line in split(symbols, "\n")
+        val words = fields(line)
+
+        if words.len == 2 && words[0] == "U" then undefined.push(words[1])
+        else if words.len == 3 && words[1] != "U" then defined.push(words[2])
+
+    for name in ["main", "malloc", "free", "calloc", "realloc"]
+        assert(!names(defined, name), s"the archive defines $name")
+
+    assert(names(undefined, "malloc"), "the runtime allocates through libc's malloc")
+    assert(names(defined, "_mlir_ciface_nex_print_array_real"), symbols)
+    assert(names(defined, "nex_catch_trap"), symbols)
+
+// A C symbol as `nm` lists it: with the leading underscore Mach-O adds, or without, as ELF has it.
+private names(symbols: Buf[string], name: string) -> bool
+    for s in symbols
+        if s == name || s == "_" + name then return true
+
+    false
 
 @test("the module named at a FromPath stdin is the one mlir-opt reads")
 stdin_from_path()

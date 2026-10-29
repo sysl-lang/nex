@@ -1,0 +1,152 @@
+// Printing, in nex's spelling.
+//
+// nex prints a real the way its reference interpreter's `formatValue` does:
+//
+//   nan, inf, -inf                  for the non-finite values;
+//   <integer>.0                     for a whole value below 1e15 in magnitude (so -0.0 is 0.0);
+//   Java's Double.toString          otherwise: shortest round-trip digits, plain decimal for
+//                                   1e-3 <= |x| < 1e7, else d.dddE<exp>.
+//
+// A complex is <re><sign><|im|>i, with the sign taken from im >= 0.
+//
+// Arrays arrive as MLIR memref descriptors by pointer, which is what `llvm.emit_c_interface` passes,
+// so the printer honours the descriptor's offset and stride and a strided view prints with no copy.
+
+import sysl.fmt.format_real
+import sysl.text.parse_real
+
+// The descriptor MLIR lays out for a rank-1 memref of `f64`: the allocation, the aligned base the
+// elements are read from, and an offset, size and stride counted in elements.
+@export("nex_memref_1d_f64")
+struct MemrefReal
+    allocated: *real
+    aligned: *real
+    offset: long
+    sizes: [1]long
+    strides: [1]long
+
+@export("nex_complex")
+struct Complex
+    re: real
+    im: real
+
+// The same descriptor over `complex<f64>`, whose element is two reals side by side.
+@export("nex_memref_1d_c64")
+struct MemrefComplex
+    allocated: *Complex
+    aligned: *Complex
+    offset: long
+    sizes: [1]long
+    strides: [1]long
+
+// The shortest decimal digits that read back as `v` (finite, non-zero), with no point, and the
+// decimal exponent of the first digit: 0.001 is ("1", -3).
+//
+// The search starts at two digits because Java's does: its output always has two ("5.0"), so among
+// the candidates it picks the closest two-digit one, which is why the smallest subnormal is 4.9E-324
+// and not 5.0E-324. A trailing zero is dropped afterwards, so 0.5 is still ("5", -1).
+//
+// A correctly rounded `%.*e` is the closest decimal of each length, which is Java's choice except
+// where the rounding interval is lopsided (at a power of two) and a farther decimal of the same length
+// fits when the closest does not.
+private shortest_digits(v: real) -> (string, int)
+    var text = format_real(v, "%.*e", 0, 16)
+
+    for p in 2..17
+        val candidate = format_real(v, "%.*e", 0, p - 1)
+
+        if parse_real(candidate).unwrap() == v then
+            text = candidate
+            break
+
+    val b = text.bytes
+    var digits = ""
+    var i = if b[0] == u8('-') then 1 else 0
+
+    while b[i] != u8('e')
+        if b[i] != u8('.') then digits += text[i..<i + 1]
+        i += 1
+
+    while digits.len > 1 && digits.bytes[digits.len - 1] == u8('0')
+        digits = digits[0..<digits.len - 1]
+
+    (digits, parse_int_signed(text[i + 1..<text.len]))
+
+// `e-05` and `e+20` as `%e` writes an exponent.
+private parse_int_signed(s: string) -> int
+    val negative = s.bytes[0] == u8('-')
+    var n = 0
+
+    for c in s.bytes[1..]
+        n = n * 10 + int(c - u8('0'))
+
+    if negative then -n else n
+
+private zeros(n: int) -> string
+    var out = ""
+
+    for _ in 0..<n
+        out += "0"
+
+    out
+
+private format_real_nex(v: real) -> string
+    if v != v then return "nan"
+    if v == 1.0 / 0.0 then return "inf"
+    if v == -1.0 / 0.0 then return "-inf"
+    if (if v < 0.0 then -v else v) < 1e15 && v == real(long(v)) then return s"${long(v)}.0"
+
+    val (digits, e) = shortest_digits(v)
+    val n = int(digits.len)
+    val sign = if v < 0.0 then "-" else ""
+
+    if e >= -3 && e < 7 then
+        if e < 0 then return s"${sign}0.${zeros(-1 - e)}$digits"
+        if n > e + 1 then return s"$sign${digits[0..<e + 1]}.${digits[e + 1..<n]}"
+        return s"$sign$digits${zeros(e + 1 - n)}.0"
+
+    val fraction = if n > 1 then digits[1..<n] else "0"
+
+    s"$sign${digits[0..<1]}.${fraction}E$e"
+
+private put_complex(re: real, im: real)
+    prints(format_real_nex(re))
+    prints(if im >= 0.0 then "+" else "-")
+    prints(format_real_nex(if im < 0.0 then -im else im))
+    prints("i")
+
+@export("nex_print_int")
+print_int(v: long)
+    print(v)
+
+@export("nex_print_real")
+print_real(v: real)
+    print(format_real_nex(v))
+
+@export("nex_print_complex")
+print_complex(re: real, im: real)
+    put_complex(re, im)
+    prints("\n")
+
+@export("_mlir_ciface_nex_print_array_real")
+print_array_real(a: *MemrefReal)
+    prints("[")
+
+    for i in 0..<a.sizes[0]
+        if i > 0 then prints(", ")
+        prints(format_real_nex(a.aligned[a.offset + i * a.strides[0]]))
+
+    prints("]\n")
+
+@export("_mlir_ciface_nex_print_array_complex")
+print_array_complex(a: *MemrefComplex)
+    prints("[")
+
+    for i in 0..<a.sizes[0]
+        if i > 0 then prints(", ")
+
+        val z = a.aligned[a.offset + i * a.strides[0]]
+
+        put_complex(z.re, z.im)
+
+    prints("]\n")
