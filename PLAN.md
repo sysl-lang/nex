@@ -248,7 +248,11 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    pass; `v2` view programs (rule 4, a returned view, a view stored in a struct, a strided rank-3
    plane) pass; and **passing a slice to a function allocates nothing**: the bufferized IR of each
    view program in the four categories has no `memref.alloc` or `memref.copy` the program's own
-   arrays do not account for.
+   arrays do not account for. Also DESIGN §5.4 and §6.4: `v2` programs for negative strides (every
+   row of §5.4's example, a reversed column, reversed slice assignment, `reverse(a, k)`) and for
+   `origin` (a symmetric kernel, a ghost-cell grid, `end` on an offset view, an out-of-range index
+   trapping, an offset view arriving 0-based in a callee) pass with no copy; the negative-stride
+   `memref` question of §5.4 is settled by a probe in `experiments/mlir/`.
 8. **M8 — the prelude and catchable traps: 50 more, 425.** The array and matrix prelude at every
    rank, `assert_approx`, `assert_traps` over `setjmp`/`longjmp`. *Exit*: prelude (38) and
    docs/examples (12) pass: **the whole corpus, 425 of 425**; `examples/fft` compiles and runs.
@@ -274,6 +278,18 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     `--prelude-path` / `NEX_HOME`, `@test` discovery. *Exit*: the reference's module loader,
     sysroot, prelude integration and test runner cases ported.
 12. **M12 — performance.** *Exit*: the perf oracle below, met on every kernel.
+
+**The playground** (its own item, any time after M3). A page in `docs/` with an editor; **Run**
+sends the source to a small service that compiles it with the ordinary pipeline and **runs the
+native binary on the server**, returning its output, stdout and the trap message alike. One
+compiler, one target: the playground cannot disagree with `nex compile`. The service runs on its
+own small VM, never beside another deploy, and every run is sandboxed: a fresh `nsjail` per run,
+no network, a read-only filesystem but a private tmpfs, and limits on CPU time (2 s), wall time
+(5 s), memory (256 MB), processes and output size (64 KB), plus a per-client rate limit. *Exit*: the
+docs' examples run from the page and print what `nex compile` prints; an infinite loop, a fork bomb,
+a memory hog, a 1 GB print, a network connect and (after M10) an `extern def system` call are each
+stopped or refused, one test apiece against the deployed sandbox; a probe page is checked in
+headless Chrome.
 
 ## The perf oracle
 

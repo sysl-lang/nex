@@ -331,8 +331,8 @@ is cannot be observed; the lowering is *(unverified)*).
 - The result's rank is the number of kept axes. With every axis collapsed the result is the element
   itself, a scalar; otherwise it is a view (§6).
 - **`by k` is legal on every axis** of every rank (`m[0..4 by 2, 1..]`, `t[:, :, 0..10 by 3]`), on
-  read and as an assignment target. `k` must be positive; `0` or a negative stride traps (ref §4.14).
-  Negative (reversing) strides are not part of this design.
+  read and as an assignment target. `k` may be **negative**, which walks the window downward (§5.4);
+  a stride of `0` traps.
 - Indexing is 0-based. **Every index and bound is checked**: an index `i` on an axis of extent `n`
   must satisfy `0 ≤ i < n`, a window `lo..hi` must satisfy `0 ≤ lo ≤ hi ≤ n`, and anything else
   **traps** `out of bounds`. **There is no negative-index wrap**: `a[-1]` traps like `a[n]`.
@@ -401,6 +401,35 @@ evaluated as a value before the first element is written, so an overlapping self
 
 ---
 
+### 5.4 Negative strides
+
+With a negative `by k`, a range's bounds are read **in the direction of travel**: the first bound is
+where the walk starts, the second where it stops, and a range stays half-open (`..`) or closed
+(`..=`) exactly as it is going forward.
+
+```nex
+val a = [0, 1, 2, 3, 4, 5, 6]
+a[5..2 by -1]          // [5, 4, 3]       — half-open: stops before 2
+a[5..=2 by -1]         // [5, 4, 3, 2]
+a[.. by -1]            // [6, 5, 4, 3, 2, 1, 0] — open bounds fill from the stride's direction
+a[end..=0 by -1]       // the same, spelled out
+a[.. by -2]            // [6, 4, 2, 0]
+m[:, end..=0 by -1]    // the columns of m in reverse order
+```
+
+- An open start is the last index of the axis (`end`); an open stop runs past index `0`. Since no
+  index is negative (§5.1), a closed `..=0` is the only spelled way to name index `0` as the stop.
+- Bounds are checked as going forward: the start must be a valid index of a non-empty window, the
+  stop must lie in `0..=n`, and a window whose start is below its stop is empty.
+- A reversed slice is a view like any other (§6): **nothing is copied**. It is valid as an
+  assignment target (`a[.. by -1] = b` writes `b` into `a` back to front).
+- The prelude's `reverse(a)` is `a[.. by -1]`, and `reverse(a, k)` reverses axis `k` only.
+
+**Lowering, unverified:** a negative stride in a `memref` strided layout must be probed. If the
+layout refuses it, a reversed axis lowers as an offset at the far end plus index arithmetic in the
+loop, and a reversed view crossing the FFI to BLAS (`incx < 0`) passes the pointer to the
+lowest-addressed element, since BLAS starts a negative-increment vector from that end.
+
 ## 6. Views
 
 ### 6.1 What a view is
@@ -452,6 +481,30 @@ and bufferization copies only when a later write would be visible (`view-then-wr
 
 Element access through a dynamic strided view needs `lower-affine` after `expand-strided-metadata`,
 which the pipeline gains (PLAN.md).
+
+### 6.4 Offset views: `origin`
+
+Arrays are 0-based, always; there are no declared lower bounds. Where a computation reads better
+with other bounds — a symmetric domain (`-n..=n` for FFT frequencies, a convolution kernel), a grid
+with ghost cells — `origin` takes an **offset view**:
+
+```nex
+val w = origin(kernel, -r)          // w[-r] .. w[r] are kernel[0] .. kernel[2r]
+val g = origin(grid, -1, -1)        // one origin per axis: g[-1, -1] is grid[0, 0]
+for k in -r..=r do
+  acc += w[k] * x[i - k]
+```
+
+- `origin(a, o0, o1, …)` takes one first-index per axis (fewer leaves the rest at `0`). Indexing,
+  slicing and `end` on the view are relative to it: on `w`, `end` is `r`, and an index outside
+  `-r..=r` traps.
+- It is a view (§6.2): read-only, no allocation, no copy — the offset is folded into the view's base
+  address, so an access costs exactly what an access to `kernel` costs.
+- **PROPOSED: the origin belongs to the binding, not to the array.** When an offset view is passed
+  to a function, returned, or stored, it arrives **0-based**: a function parameter's first index is
+  always `0`, so no function ever has to ask what its array's bounds are. (Fortran resets an
+  assumed-shape dummy to `1` the same way; here the rule is stated rather than discovered.) A
+  function that wants the offset takes it as an ordinary argument and calls `origin` itself.
 
 ---
 
@@ -824,6 +877,8 @@ Inside a scope that binds `i`, write the unit some other way (`complex(0.0, 1.0)
 | Negative indices | §4.14 | §5.1 | removed: a negative index traps |
 | End-relative indexing | — | §5.2 | `end` in subscripts |
 | Strided slices on every axis; strided assignment | §4.14, §4.15 | §5.1, §5.3 | `by` on any axis, read and write |
+| Negative strides | §4.14 (deferred) | §5.4 | `by -k` reverses; `reverse(a)`; a view, no copy |
+| Offset views | — | §6.4 | `origin(a, o0, …)`: a view with other first indices; arrays stay 0-based |
 | Slices | §4.14 ("freshly owned") | §6 | a slice is a read-only view |
 | `a.view(…)` | §10.5 (view-style slicing) | §6 | gone; a slice is the view, and writing goes through slice assignment or `inout` |
 | Writes to a source visible through an earlier view | §10.5 | §6.2 rule 4 | a view keeps the value it was taken with |
