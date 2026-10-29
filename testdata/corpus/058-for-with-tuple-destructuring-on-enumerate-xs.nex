@@ -1,0 +1,6 @@
+
+def main() =
+  val xs = [10, 20, 30]
+  for i, x in enumerate(xs) do
+    print(s"$i: $x")
+      

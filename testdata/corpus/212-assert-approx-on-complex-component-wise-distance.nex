@@ -1,0 +1,5 @@
+
+def main() =
+  assert_approx(1.0 + 2.0i, 1.0 + 2.0i + 1.0e-13 * i, 1.0e-12)
+  print("ok")
+      

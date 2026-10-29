@@ -1,0 +1,10 @@
+
+def main() =
+  val x = nan
+  print(x < x)
+  print(x <= x)
+  print(x > x)
+  print(x >= x)
+  print(x == x)
+  print(x != x)
+      

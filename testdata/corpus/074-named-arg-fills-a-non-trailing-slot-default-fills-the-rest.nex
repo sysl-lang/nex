@@ -1,0 +1,7 @@
+
+def scale(x: real, factor: real = 2.0, offset: real = 0.0) =
+  print(factor * x + offset)
+def main() =
+  scale(10.0, offset = 5.0)
+  scale(10.0, factor = 7.0)
+      

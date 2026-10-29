@@ -1,0 +1,7 @@
+
+def main() =
+  var xs = [10, 20, 30]
+  xs[-1] = 999
+  xs[-3] = 111
+  print(xs)
+      

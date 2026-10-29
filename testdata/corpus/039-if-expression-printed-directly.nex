@@ -1,0 +1,5 @@
+
+def main() =
+  val n = 7
+  print(if n > 5 then n * 2 else n)
+      

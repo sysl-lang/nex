@@ -1,0 +1,7 @@
+
+def square(x: integer) = x * x
+
+def main() =
+  val f = square
+  print(f(9))
+      

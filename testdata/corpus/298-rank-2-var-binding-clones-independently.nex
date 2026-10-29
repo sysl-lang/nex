@@ -1,0 +1,8 @@
+
+def main() =
+  var m = [[1, 2], [3, 4]]
+  var n = m
+  n[0, 0] = 99
+  print(m[0, 0])
+  print(n[0, 0])
+      

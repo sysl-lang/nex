@@ -1,0 +1,6 @@
+
+def main() =
+  val a = 1 + 1i
+  val b = 1 - 1i
+  print(a * b)
+      

@@ -1,0 +1,5 @@
+
+def main() =
+  val r = 0..5
+  print(r)
+      

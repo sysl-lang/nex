@@ -1,0 +1,8 @@
+
+def main() =
+  val a = [10, 20, 30, 40, 50, 60, 70]
+  val lo = 1
+  val hi = 7
+  val k = 3
+  print(a[lo..hi by k])
+      

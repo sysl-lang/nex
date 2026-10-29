@@ -1,0 +1,8 @@
+
+def zero_first(xs: mut [integer]) = xs[0] = 0
+
+def main() =
+  var a = [10, 20, 30]
+  zero_first(a)
+  print(a[0])
+      

@@ -1,0 +1,10 @@
+
+def main() =
+  var m = [[1, 2, 3], [4, 5, 6]]
+  var n = m
+  n[1, 2] = 999
+  print(m[1, 2])
+  print(n[1, 2])
+  print(m[0, 0])
+  print(n[0, 0])
+      

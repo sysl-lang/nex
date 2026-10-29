@@ -1,0 +1,9 @@
+
+def harmonic(t: real, y: [real]) = [y[1], -y[0]]
+
+def call_with(f: (real, [real]) -> [real], t: real, y: [real]) =
+  f(t, y)
+
+def main() =
+  print(call_with(harmonic, 0.0, [1.0, 0.0]))
+      

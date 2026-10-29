@@ -1,0 +1,7 @@
+
+def main() =
+  var x = 8.0
+  x /= 2.0
+  x /= 2.0
+  print(x)
+      

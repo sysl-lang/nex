@@ -1,0 +1,5 @@
+def main() =
+  val lo = 1
+  val hi = 8
+  print(length(range(lo, hi)))
+      

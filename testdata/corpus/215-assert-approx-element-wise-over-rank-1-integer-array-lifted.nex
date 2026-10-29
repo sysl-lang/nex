@@ -1,0 +1,5 @@
+
+def main() =
+  assert_approx([1, 2, 3], [1, 2, 3], 1.0e-12)
+  print("ok")
+      

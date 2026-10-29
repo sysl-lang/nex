@@ -1,0 +1,13 @@
+
+def swap(a: mut integer, b: mut integer) =
+  val tmp = a
+  a = b
+  b = tmp
+
+def main() =
+  var x = 1
+  var y = 2
+  swap(x, y)
+  print(x)
+  print(y)
+      

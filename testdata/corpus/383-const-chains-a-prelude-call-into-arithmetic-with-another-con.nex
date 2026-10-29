@@ -1,0 +1,5 @@
+
+const HALF_PI = pi / 2.0
+const COS_HP  = cos(HALF_PI)
+def main() = print(abs(COS_HP) < 1.0e-10)
+      

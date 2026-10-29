@@ -1,0 +1,9 @@
+
+struct Box[T]
+  value: T
+end Box
+
+def main() =
+  val b = Box(42)
+  print(b.value)
+      

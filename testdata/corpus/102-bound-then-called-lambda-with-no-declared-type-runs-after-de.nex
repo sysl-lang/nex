@@ -1,0 +1,6 @@
+
+def apply(f: (integer -> integer), x: integer) = f(x)
+def main() =
+  val f = x -> x * 2
+  print(apply(f, 3))
+      

@@ -1,0 +1,4 @@
+def main() =
+  val n = 5
+  print(ones(n))
+      

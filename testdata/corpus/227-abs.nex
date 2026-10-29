@@ -1,0 +1,1 @@
+def main() = print(abs(-7))

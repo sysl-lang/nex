@@ -1,0 +1,9 @@
+
+def main() =
+  val n = 255
+  print(f"$n%x")
+  print(f"$n%X")
+  print(f"$n%o")
+  print(f"$n%b")
+  print(f"$n%016b")
+      

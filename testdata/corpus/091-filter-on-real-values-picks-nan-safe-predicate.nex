@@ -1,0 +1,5 @@
+
+def main() =
+  val xs = [1.0, 2.5, 3.5, 4.5]
+  print(filter(xs, x -> x > 2.0))
+      

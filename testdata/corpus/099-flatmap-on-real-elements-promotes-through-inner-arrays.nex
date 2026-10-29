@@ -1,0 +1,5 @@
+
+def main() =
+  val xs = [1.0, 2.0, 3.0]
+  print(flatMap(xs, x -> [x, x * 2.0]))
+      

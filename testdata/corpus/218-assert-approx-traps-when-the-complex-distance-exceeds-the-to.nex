@@ -1,0 +1,5 @@
+
+def main() =
+  assert_traps(() -> assert_approx(1.0 + 0i, 1.0 + 5.0i, 1.0e-6), "assert_approx")
+  print("caught")
+      

@@ -1,0 +1,10 @@
+
+struct Item
+  name: string
+end Item
+
+def main() =
+  var it = Item("hello" + " world")
+  it.name = "foo" + "bar"
+  print(it.name)
+      

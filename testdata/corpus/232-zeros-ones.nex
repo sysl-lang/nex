@@ -1,0 +1,5 @@
+def main() =
+  val xs = zeros(3)
+  print(xs)
+  print(ones(3))
+      

@@ -1,0 +1,10 @@
+
+struct OrdBox[T: Ord]
+  value: T
+end OrdBox
+
+def main() =
+  val a = OrdBox(3)
+  val b = OrdBox(7)
+  print(if a.value < b.value then "less" else "geq")
+      

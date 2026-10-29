@@ -1,0 +1,13 @@
+
+enum Opt[T] =
+  Some(value: T)
+  None
+end Opt
+
+def main() =
+  val x = Some(42)
+  val msg: string = x match
+    Some(v) -> "got"
+    None    -> "none"
+  print(msg)
+      

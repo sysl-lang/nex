@@ -1,0 +1,6 @@
+
+def main() =
+  val fs = [(x: integer) -> x + 1, (x: integer) -> x * 2, (x: integer) -> x - 1]
+  for f in fs do
+    print(f(10))
+      

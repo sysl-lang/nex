@@ -1,0 +1,7 @@
+
+def square(n: integer): integer = n * n
+
+val s: integer = square(7)
+
+def main() = print(s)
+      

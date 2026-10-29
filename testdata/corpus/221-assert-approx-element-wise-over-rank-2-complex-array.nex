@@ -1,0 +1,6 @@
+
+def main() =
+  val a = [[1.0 + 0i, 0.0 + 1.0i], [2.0 + 0i, 0.0 + 2.0i]]
+  assert_approx(a, a, 1.0e-12)
+  print("ok")
+      

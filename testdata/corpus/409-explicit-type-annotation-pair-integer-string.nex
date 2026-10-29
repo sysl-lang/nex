@@ -1,0 +1,11 @@
+
+struct Pair[A, B]
+  fst: A
+  snd: B
+end Pair
+
+def main() =
+  val p: Pair[integer, string] = Pair(1, "hi")
+  print(p.fst)
+  print(p.snd)
+      

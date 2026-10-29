@@ -1,0 +1,8 @@
+
+def main() =
+  val b = bytes(3)
+  b[0] = 18
+  b[1] = 255
+  b[2] = 0
+  print(b)
+      

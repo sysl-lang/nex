@@ -1,0 +1,11 @@
+
+enum Cmd =
+  Echo(msg: string)
+  Quit
+
+def main() =
+  val c: Cmd = Echo("hello")
+  c match
+    Echo(s) -> print(s)
+    Quit    -> print("bye")
+      

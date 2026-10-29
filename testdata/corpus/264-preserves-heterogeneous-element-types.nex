@@ -1,0 +1,5 @@
+
+def main() =
+  val n, s = (42, "hi")
+  print(s"n=$n s=$s")
+      

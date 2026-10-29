@@ -1,0 +1,13 @@
+
+var counter = 0
+def next_id(): integer =
+  counter = counter + 1
+  counter
+def tag(prefix: string, id: integer = next_id()) =
+  print(s"${prefix}-${id}")
+def main() =
+  tag("a")
+  tag("b")
+  tag("c", 99)
+  tag("d")
+      

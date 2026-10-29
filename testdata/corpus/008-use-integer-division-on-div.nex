@@ -1,0 +1,1 @@
+def main() = print(7 div 2)

@@ -1,0 +1,7 @@
+
+def main() =
+  val a = nan
+  val b = inf
+  val c = -inf
+  print(s"$a $b $c")
+      

@@ -1,0 +1,7 @@
+
+def main() =
+  val pi = 3.14159265
+  print(f"$pi%.3f")
+  print(f"$pi%.10f")
+  print(f"$pi%10.3f")
+      

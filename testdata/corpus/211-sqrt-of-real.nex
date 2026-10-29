@@ -1,0 +1,1 @@
+def main() = print(sqrt(9.0))

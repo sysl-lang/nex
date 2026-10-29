@@ -1,0 +1,5 @@
+
+def square(x: integer) = x * x
+def main() =
+  print(s"5^2 = ${square(5)}")
+      

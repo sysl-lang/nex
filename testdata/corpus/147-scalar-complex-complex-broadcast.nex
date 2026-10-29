@@ -1,0 +1,7 @@
+
+def main() =
+  val a: [complex] = [1.0 + 2i, 3.0 + 4i]
+  print((1.0 + 1i) * a)
+  print(2.0 * a)
+  print(a + (10.0 + 0i))
+      

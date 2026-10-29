@@ -1,0 +1,8 @@
+
+def split(x: integer) =
+  val y = x * 2
+  y, -y
+def main() =
+  val a, b = split(3)
+  print(s"$a $b")
+      

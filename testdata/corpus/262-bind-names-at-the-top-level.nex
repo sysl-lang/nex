@@ -1,0 +1,4 @@
+
+val a, b = (10, 20)
+def main() = print(a + b)
+      

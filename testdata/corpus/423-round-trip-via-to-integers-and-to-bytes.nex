@@ -1,0 +1,11 @@
+
+def main() =
+  val b = bytes(3)
+  b[0] = 7
+  b[1] = 11
+  b[2] = 200
+  val ints = to_integers(b)
+  print(ints)
+  val back = to_bytes(ints)
+  print(back == b)
+      

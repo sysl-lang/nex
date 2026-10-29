@@ -1,0 +1,10 @@
+
+def wave(t: real) =
+  3sin(2pi*t) + 2cos(4pi*t) - sin(6pi*t)
+
+def main() =
+  print(s"wave(0.0)  = ${wave(0.0)}")
+  print(s"wave(0.25) = ${wave(0.25)}")
+  print(s"wave(0.5)  = ${wave(0.5)}")
+  print(s"wave(0.75) = ${wave(0.75)}")
+      

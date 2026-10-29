@@ -1,0 +1,4 @@
+
+def main() =
+  print(diag([1, 2, 3]))
+      

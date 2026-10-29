@@ -1,0 +1,15 @@
+
+enum Flag =
+  Set(v: bool)
+  Unset
+
+def show(f: Flag): bool =
+  f match
+    Set(v) -> v
+    Unset  -> false
+
+def main() =
+  print(show(Set(true)))
+  print(show(Set(false)))
+  print(show(Unset))
+      

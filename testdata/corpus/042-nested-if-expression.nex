@@ -1,0 +1,8 @@
+
+def main() =
+  val x = 5
+  val y = if x > 0 then
+    if x > 10 then 100 else x
+  else 0
+  print(y)
+      

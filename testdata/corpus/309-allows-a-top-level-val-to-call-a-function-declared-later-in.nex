@@ -1,0 +1,7 @@
+
+val x: integer = compute()
+
+def compute(): integer = 42
+
+def main() = print(x)
+      

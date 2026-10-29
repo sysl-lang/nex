@@ -1,0 +1,7 @@
+
+def main() =
+  val a = [1, 2, 3]
+  val b = [10.0, 20.0, 30.0]
+  print(a + b)
+  print(b + a)
+      

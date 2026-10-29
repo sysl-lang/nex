@@ -1,0 +1,9 @@
+
+def use(x: integer) = x + 1
+
+def main() =
+  val n = 10
+  val r = use(n)
+  print(n)
+  print(r)
+      

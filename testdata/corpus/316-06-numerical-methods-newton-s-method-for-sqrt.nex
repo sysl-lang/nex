@@ -1,0 +1,15 @@
+
+def newton_sqrt(x: real, tol: real) =
+  var guess = x / 2.0
+  var delta = guess
+  while abs(delta) > tol do
+    val next = (guess + x / guess) / 2.0
+    delta = next - guess
+    guess = next
+  end while
+  guess
+
+def main() =
+  print(newton_sqrt(2.0,    1.0e-12))
+  print(newton_sqrt(1000.0, 1.0e-9))
+      

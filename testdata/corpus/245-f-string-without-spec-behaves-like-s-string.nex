@@ -1,0 +1,6 @@
+
+def main() =
+  val x = 42
+  print(f"x = $x")
+  print(f"sum = ${1 + 2}")
+      

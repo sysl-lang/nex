@@ -1,0 +1,5 @@
+
+def main() =
+  val n = 5
+  print(if n > 0 then true else false)
+      

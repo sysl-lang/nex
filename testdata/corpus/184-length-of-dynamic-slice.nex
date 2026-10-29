@@ -1,0 +1,7 @@
+
+def main() =
+  val a = [1, 2, 3, 4, 5]
+  val lo = 1
+  val hi = 4
+  print(length(a[lo..hi]))
+      

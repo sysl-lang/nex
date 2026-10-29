@@ -1,0 +1,16 @@
+
+var inner_calls = 0
+var rhs_calls   = 0
+def inner(): integer =
+  inner_calls = inner_calls + 1
+  100
+def rhs(): integer =
+  rhs_calls = rhs_calls + 1
+  100
+
+def main() =
+  val x = -1
+  print(0 < x < inner() < rhs())
+  print(inner_calls)
+  print(rhs_calls)
+      

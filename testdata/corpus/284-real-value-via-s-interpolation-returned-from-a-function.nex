@@ -1,0 +1,10 @@
+
+def fmt(x: real): string = s"x=${x}"
+def main() =
+  print(fmt(1.4142135623730951))
+  print(fmt(1.0))
+  print(fmt(0.0))
+  print(fmt(-3.5))
+  print(fmt(1.0e-20))
+  print(fmt(1.0e20))
+      

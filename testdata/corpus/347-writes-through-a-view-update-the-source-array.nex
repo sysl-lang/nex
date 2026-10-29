@@ -1,0 +1,8 @@
+
+def main() =
+  var a = [10, 20, 30, 40, 50]
+  val v = a.view(1..4)
+  v[0] = 99
+  v[2] = 77
+  print(a)
+      

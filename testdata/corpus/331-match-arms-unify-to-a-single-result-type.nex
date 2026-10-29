@@ -1,0 +1,12 @@
+
+enum Step =
+  Continue(n: integer)
+  Done(total: integer)
+
+def main() =
+  val s: Step = Continue(7)
+  val v: integer = s match
+    Continue(n) -> n
+    Done(t)     -> t
+  print(v)
+      

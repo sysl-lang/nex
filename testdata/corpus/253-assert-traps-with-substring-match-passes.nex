@@ -1,0 +1,5 @@
+
+def main() =
+  assert_traps(() -> assert(false, "division by zero"), "division")
+  print("ok")
+      

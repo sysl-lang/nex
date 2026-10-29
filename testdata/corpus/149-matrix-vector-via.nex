@@ -1,0 +1,6 @@
+
+def main() =
+  val a = [[1, 0], [0, 1]]
+  val b = [3, 5]
+  print(a @ b)
+      

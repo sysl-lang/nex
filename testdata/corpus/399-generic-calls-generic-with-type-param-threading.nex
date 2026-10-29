@@ -1,0 +1,7 @@
+
+def id[T](x: T): T = x
+def applyTwice[T](x: T, f: T -> T): T = f(f(x))
+def main() =
+  print(applyTwice(5, y -> id(y) + 1))
+  print(applyTwice("a", s -> id(s)))
+      

@@ -1,0 +1,9 @@
+
+def same[T: Eq](a: T, b: T): bool = a == b
+def main() =
+  print(same(1, 1))
+  print(same(1, 2))
+  print(same("hi", "hi"))
+  print(same("hi", "bye"))
+  print(same(true, true))
+      

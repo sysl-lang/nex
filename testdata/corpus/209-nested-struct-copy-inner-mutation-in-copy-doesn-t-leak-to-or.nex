@@ -1,0 +1,16 @@
+
+struct Inner
+  v: integer
+end Inner
+
+struct Outer
+  i: Inner
+end Outer
+
+def main() =
+  var a = Outer(Inner(1))
+  var b = a
+  b.i.v = 99
+  print(a.i.v)
+  print(b.i.v)
+      

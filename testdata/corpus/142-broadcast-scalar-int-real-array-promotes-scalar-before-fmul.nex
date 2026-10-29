@@ -1,0 +1,8 @@
+
+def main() =
+  val a = [1.0, 2.0, 3.0]
+  print(2 * a)
+  print(2a)
+  print(2 + a)
+  print(a - 1)
+      

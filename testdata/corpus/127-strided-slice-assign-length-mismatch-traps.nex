@@ -1,0 +1,7 @@
+
+def assign5by2(v: mut [integer]) = v[0..5 by 2] = [1, 2]
+def main() =
+  var v = [10, 20, 30, 40, 50]
+  assert_traps(() -> assign5by2(v), "length mismatch")
+  print("ok")
+      

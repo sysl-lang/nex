@@ -1,0 +1,17 @@
+
+enum Solver =
+  Converged(x: real)
+  Diverged
+  MaxIters(iters: integer, last: real)
+
+def describe(s: Solver): real =
+  s match
+    Converged(x)       -> x
+    Diverged           -> -1.0
+    MaxIters(n, last)  -> last
+
+def main() =
+  print(describe(Converged(3.14)))
+  print(describe(Diverged))
+  print(describe(MaxIters(100, 2.5)))
+      

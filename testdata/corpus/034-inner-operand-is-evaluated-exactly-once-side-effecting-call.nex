@@ -1,0 +1,11 @@
+
+var count = 0
+def bumped(): integer =
+  count = count + 1
+  5
+
+def main() =
+  val ok = 0 < bumped() < 10
+  print(ok)
+  print(count)
+      

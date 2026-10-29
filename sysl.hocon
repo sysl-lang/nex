@@ -1,0 +1,19 @@
+// nex, an AOT-compiled array-first numerical language, implemented in sysl.
+//
+//     sysl run . -- run program.nex
+//
+// The reference implementation is the Scala one at github.com/edadma/nex; PORT-PLAN.md says how this
+// one reaches it. `testdata/corpus/` holds the reference's program corpus, each program beside the
+// exact output it must print.
+
+package {
+  name    = "nex"
+  version = "0.0.1"
+  sysl    = "0.7.9"
+}
+
+// **`os`** to read source files and the corpus; **`heap`** for every tree the compiler builds.
+requires {
+  os   = true
+  heap = true
+}

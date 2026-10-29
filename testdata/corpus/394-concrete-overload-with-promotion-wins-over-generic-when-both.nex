@@ -1,0 +1,8 @@
+
+def f(x: real): integer = 1
+def f[T](x: T): integer = 2
+def main() =
+  print(f(3.14))
+  print(f(42))
+  print(f("x"))
+      

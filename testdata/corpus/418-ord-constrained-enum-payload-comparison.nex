@@ -1,0 +1,18 @@
+
+enum Opt[T: Ord] =
+  Some(value: T)
+  None
+end Opt
+
+def main() =
+  val a = Some(3)
+  val b = Some(7)
+  val aOk: bool = a match
+    Some(n) -> n < 5
+    None    -> false
+  val bOk: bool = b match
+    Some(n) -> n < 5
+    None    -> false
+  print(aOk)
+  print(bOk)
+      

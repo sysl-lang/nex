@@ -1,0 +1,13 @@
+
+def make_counter(): () -> integer =
+  var n = 0
+  () ->
+    n = n + 1
+    n
+
+def main() =
+  val c = make_counter()
+  print(c())
+  print(c())
+  print(c())
+      

@@ -1,0 +1,4 @@
+def main() =
+  val n = 5
+  print(sum(range(0, n)))
+      

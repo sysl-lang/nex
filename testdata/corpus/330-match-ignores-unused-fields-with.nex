@@ -1,0 +1,14 @@
+
+enum Step =
+  Continue(n: integer)
+  Halt
+
+def kind(s: Step): string =
+  s match
+    Continue(_) -> "continue"
+    Halt        -> "halt"
+
+def main() =
+  print(kind(Continue(99)))
+  print(kind(Halt))
+      

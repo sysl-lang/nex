@@ -1,0 +1,7 @@
+
+def fmt(x: real): string = s"x=${x}"
+def main() =
+  print(fmt(nan))
+  print(fmt(inf))
+  print(fmt(-inf))
+      

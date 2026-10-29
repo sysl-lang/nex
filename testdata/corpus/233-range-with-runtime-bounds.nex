@@ -1,0 +1,5 @@
+def main() =
+  val lo = 2
+  val hi = 7
+  print(range(lo, hi))
+      

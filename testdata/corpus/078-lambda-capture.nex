@@ -1,0 +1,6 @@
+
+def main() =
+  val k = 10
+  val f = x -> x + k
+  print(f(5))
+      

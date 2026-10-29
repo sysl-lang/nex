@@ -1,0 +1,9 @@
+
+def greet(name: string, greeting: string = "Hello") =
+  print(s"${greeting}, ${name}!")
+def main() =
+  greet("World")
+  greet(name = "Nex")
+  greet(greeting = "Hi", name = "Foo")
+  greet("Bar", greeting = "Yo")
+      

@@ -1,0 +1,5 @@
+
+def main() =
+  val p, q, r = (1.5, 2.5, 3.5)
+  print(p + q + r)
+      

@@ -1,0 +1,8 @@
+
+def show(x: bool): string = if x then "yes" else "no"
+def show[T: Ord](x: T): string = "ord"
+def main() =
+  print(show(true))
+  print(show(7))
+  print(show(2.5))
+      

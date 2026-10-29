@@ -1,0 +1,7 @@
+
+def main() =
+  val a = [10, 20, 30, 40, 50]
+  val v = a.view(1..5)
+  val w = v.view(1..3)
+  print(w)
+      

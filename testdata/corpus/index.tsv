@@ -1,0 +1,426 @@
+file	category	name	mlir	pending
+001-evaluate-integer-literal	top-level bindings + print	evaluate integer literal	true	
+002-evaluate-real-literal	top-level bindings + print	evaluate real literal	true	
+003-evaluate-bool-literal	top-level bindings + print	evaluate bool literal	true	
+004-evaluate-string-literal	top-level bindings + print	evaluate string literal	true	
+005-add-integers	scalar arithmetic	add integers	true	
+006-promote-int-real-to-real	scalar arithmetic	promote int + real to real	true	
+007-use-real-division-on	scalar arithmetic	use real division on `/`	true	
+008-use-integer-division-on-div	scalar arithmetic	use integer division on `div`	true	
+009-modulo-on-integers	scalar arithmetic	modulo on integers	true	
+010-power-integer	scalar arithmetic	power (integer)	true	
+011-power-integer-odd-exponent-path	scalar arithmetic	power (integer) — odd exponent path	true	
+012-power-integer-zero-exponent-is-one	scalar arithmetic	power (integer) — zero exponent is one	true	
+013-power-real-real-routes-through-libm	scalar arithmetic	power (real ^ real) routes through libm	true	
+014-unary-minus	scalar arithmetic	unary minus	true	
+015-complex-from-i	scalar arithmetic	complex from `i`	true	
+016-complex-multiply	scalar arithmetic	complex multiply	true	
+017-unary-minus-binds-tighter-than-power	scalar arithmetic	unary minus binds tighter than power	true	
+018-	comparison + logical	==	true	
+019-	comparison + logical	!=	true	
+020-	comparison + logical	<	true	
+021-and-short-circuits	comparison + logical	and short-circuits	true	
+022-or-short-circuits	comparison + logical	or short-circuits	true	
+023-not	comparison + logical	not	true	
+024-string-compares-by-content	comparison + logical	string == compares by content	true	
+025-string-is-the-negation-of	comparison + logical	string != is the negation of ==	true	
+026-string-works-on-concatenated-descriptors	comparison + logical	string == works on concatenated descriptors	true	
+027-ieee-every-relational-op-with-nan-returns-false	comparison + logical	IEEE: every relational op with NaN returns false	true	
+028-ieee-0-0-and-0-0-compare-equal-neither-less-nor-greater	comparison + logical	IEEE: -0.0 and +0.0 compare equal, neither less nor greater	true	
+029-bool-bool-spec-4-6-only-allowed-on-bool	comparison + logical	bool == bool (spec §4.6: only `==` / `!=` allowed on bool)	true	
+030-3-way-chain-returns-true-when-in-range	chained comparison	3-way `<` chain returns true when in range	true	
+031-3-way-chain-returns-false-when-out-of-range	chained comparison	3-way `<` chain returns false when out of range	true	
+032-mixed-operators-0-x-10-100	chained comparison	mixed operators: `0 <= x < 10 <= 100`	true	
+033-agrees-with-the-equivalent-explicit-and-form	chained comparison	agrees with the equivalent explicit `and` form	true	
+034-inner-operand-is-evaluated-exactly-once-side-effecting-call	chained comparison	inner operand is evaluated exactly once (side-effecting call)	false	
+035-4-way-chain-with-all-distinct-comparison-operators	chained comparison	4-way chain with all distinct comparison operators	true	
+036-short-circuit-side-effecting-inner-operand-skipped-when-earl	chained comparison	short-circuit: side-effecting inner operand skipped when earlier cmp fails	false	
+037-if-else	control flow	if/else	true	
+038-if-expression-yields-a-value	control flow	if expression yields a value	true	
+039-if-expression-printed-directly	control flow	if expression printed directly	true	
+040-if-expression-yields-a-real-typed-value	control flow	if expression yields a real-typed value	true	
+041-if-expression-yields-a-bool	control flow	if expression yields a bool	true	
+042-nested-if-expression	control flow	nested if expression	true	
+043-while-loop	control flow	while loop	true	
+044-for-over-array	control flow	for over array	true	
+045-for-over-val-bound-array	control flow	for over val-bound array	true	
+046-for-over-array-produced-by-range	control flow	for over array produced by range()	true	
+047-for-over-range	control flow	for over range	true	
+048-for-over-inclusive-range	control flow	for over inclusive range	true	
+049-for-over-range-computes-a-running-sum	control flow	for over range computes a running sum	true	
+050-nested-for-over-range	control flow	nested for over range	true	
+051-range-at-value-position-produces-an-integer-array	control flow	range at value position produces an integer array	true	
+052-inclusive-range-at-value-position	control flow	inclusive range at value position	true	
+053-empty-range-at-value-position	control flow	empty range at value position	true	
+054-direct-call-refines-a-bound-then-called-integer-lambda	control flow	direct call refines a bound-then-called integer lambda	true	
+055-direct-call-refines-a-bound-then-called-real-lambda	control flow	direct call refines a bound-then-called real lambda	true	
+056-second-direct-call-after-refinement-still-works	control flow	second direct call after refinement still works	true	
+057-string-arg-call-refines-a-bound-then-called-lambda-using-for	control flow	string-arg call refines a bound-then-called lambda using `+` for concat	true	
+058-for-with-tuple-destructuring-on-enumerate-xs	control flow	for with tuple destructuring on enumerate(xs)	false	
+059-early-return	control flow	early return	true	
+060-array-of-lambdas-each-closure-fits-in-16-byte-slots	control flow	array of lambdas — each closure fits in 16-byte slots	true	
+061-rank-2-single-index-returns-the-row-as-a-rank-1-array	control flow	rank-2 single-index returns the row as a rank-1 array	true	
+062-rank-2-two-integer-index-returns-a-scalar-element	control flow	rank-2 two-integer index returns a scalar element	true	
+063-rank-2-indexing-through-a-computed-integer-expression	control flow	rank-2 indexing through a computed integer expression	true	
+064-plain-function	functions	plain function	true	
+065-tensor-typed-param-scalar-return	functions	tensor-typed param + scalar return	true	
+066-rank-1-tensor-param-with-prelude-reductions	functions	rank-1 tensor param with prelude reductions	true	
+067-rank-2-tensor-param-integer-return-via-length	functions	rank-2 tensor param + integer return via length	true	
+068-def-returning-a-tensor-rank-1-doubled-via-map	functions	def returning a tensor (rank-1 doubled via map)	true	
+069-tensor-scalar-params-tensor-return-broadcast-scale	functions	tensor + scalar params, tensor return (broadcast scale)	true	
+070-two-tensor-params-element-wise-sum-returned	functions	two tensor params, element-wise sum returned	true	
+071-tensor-returning-if-expression-branches-yield-same-tensor-ty	functions	tensor-returning if-expression branches yield same tensor type	true	
+072-default-parameter-values-are-filled-when-omitted	functions	default parameter values are filled when omitted	true	
+073-named-arguments-resolve-to-positions-in-any-order	functions	named arguments resolve to positions in any order	true	
+074-named-arg-fills-a-non-trailing-slot-default-fills-the-rest	functions	named arg fills a non-trailing slot, default fills the rest	true	
+075-default-expression-is-re-evaluated-at-every-call-site	functions	default expression is re-evaluated at every call site	false	
+076-recursion-fact	functions	recursion (fact)	true	
+077-mutual-recursion	functions	mutual recursion	true	
+078-lambda-capture	functions	lambda + capture	true	
+079-closure-captures-live-cells	functions	closure captures live cells	true	
+080-unannotated-lambda-passed-to-plain-call-infers-param-type-an	functions	unannotated lambda passed to plain call infers param type and runs	true	
+081-unannotated-lambda-passed-via-method-call-sugar-runs	functions	unannotated lambda passed via method-call sugar runs	true	
+082-lambda-bound-to-a-val-with-a-declared-function-type-runs	functions	lambda bound to a val with a declared function type runs	true	
+083-unannotated-multi-arg-lambda-passed-to-plain-call-infers-and	functions	unannotated multi-arg lambda passed to plain call infers and runs	true	
+084-prelude-hof-map-with-unannotated-lambda-infers-and-runs	functions	prelude HOF `map` with unannotated lambda infers and runs	true	
+085-prelude-hof-reduce-with-unannotated-lambda-infers-and-runs	functions	prelude HOF `reduce` with unannotated lambda infers and runs	true	
+086-prelude-hof-filter-with-unannotated-lambda-infers-and-runs	functions	prelude HOF `filter` with unannotated lambda infers and runs	true	
+087-filter-prints-the-selected-elements-directly	functions	filter prints the selected elements directly	true	
+088-filter-where-no-element-matches-returns-an-empty-array	functions	filter where no element matches returns an empty array	true	
+089-filter-where-every-element-matches-returns-a-full-length-cop	functions	filter where every element matches returns a full-length copy	true	
+090-filter-on-a-dynamic-bound-range	functions	filter on a dynamic-bound range	true	
+091-filter-on-real-values-picks-nan-safe-predicate	functions	filter on real values picks NaN-safe predicate	true	
+092-length-of-filter-result	functions	length of filter result	true	
+093-prelude-hof-flatmap-concatenates-inner-arrays	functions	prelude HOF `flatMap` concatenates inner arrays	true	
+094-flatmap-via-method-call-sugar	functions	flatMap via method-call sugar	true	
+095-flatmap-with-single-element-inner-arrays-acts-like-map	functions	flatMap with single-element inner arrays acts like map	true	
+096-flatmap-on-a-dynamic-bound-range-with-two-element-inner-arra	functions	flatMap on a dynamic-bound range with two-element inner arrays	true	
+097-flatmap-where-inner-length-itself-depends-on-the-element-var	functions	flatMap where inner length itself depends on the element (variable inner length)	true	
+098-length-of-flatmap-result	functions	length of flatMap result	true	
+099-flatmap-on-real-elements-promotes-through-inner-arrays	functions	flatMap on real elements promotes through inner arrays	true	
+100-sum-of-flatmap-result	functions	sum of flatMap result	true	
+101-prelude-hof-method-call-sugar-xs-map-x-runs	functions	prelude HOF method-call sugar `xs.map(x -> ...)` runs	true	
+102-bound-then-called-lambda-with-no-declared-type-runs-after-de	functions	bound-then-called lambda with no declared type runs after deferred resolve	true	
+103-bound-then-called-lambda-runs-through-prelude-hof	functions	bound-then-called lambda runs through prelude HOF	true	
+104-top-level-def-passed-as-a-function-value-argument	functions	top-level def passed as a function-value argument	false	
+105-same-top-level-def-passed-twice-in-one-expression	functions	same top-level def passed twice in one expression	true	
+106-top-level-def-bound-to-a-val-then-called-via-the-binding	functions	top-level def bound to a val, then called via the binding	true	
+107-literal-length	arrays	literal + length	true	
+108-index-access	arrays	index access	true	
+109-negative-index-counts-from-the-end-rank-1	arrays	negative index counts from the end (rank-1)	true	
+110-negative-index-on-rank-2-element-and-row	arrays	negative index on rank-2 element and row	true	
+111-negative-index-in-slice-assign-target	arrays	negative index in slice-assign target	true	
+112-negative-out-of-range-index-traps	arrays	negative out-of-range index traps	false	
+113-negative-bounds-on-rank-1-slice-a-3-length-a-a-0-1	arrays	negative bounds on rank-1 slice (`a[-3..length(a)]`, `a[0..-1]`)	true	
+114-negative-bounds-on-rank-2-slice-axes	arrays	negative bounds on rank-2 slice axes	true	
+115-negative-bounds-in-slice-assign-target	arrays	negative bounds in slice-assign target	true	
+116-over-negative-slice-bound-traps	arrays	over-negative slice bound traps	false	
+117-open-ended-slice-bounds-a-lo-a-hi-a	arrays	open-ended slice bounds (`a[lo..]`, `a[..hi]`, `a[..]`)	true	
+118-open-ended-slice-bounds-combine-with-negative-indices	arrays	open-ended slice bounds combine with negative indices	true	
+119-open-ended-axis-bounds-on-rank-2-slices	arrays	open-ended axis bounds on rank-2 slices	true	
+120-open-ended-slice-assign-target-v-2-rhs	arrays	open-ended slice-assign target (`v[-2..] = rhs`)	true	
+121-strided-slice-with-closed-bounds-a-lo-hi-by-k	arrays	strided slice with closed bounds (`a[lo..hi by k]`)	true	
+122-strided-slice-combined-with-open-bounds-and-negative-indices	arrays	strided slice combined with open bounds and negative indices	true	
+123-strided-slice-edge-cases-empty-window-stride-span	arrays	strided slice edge cases (empty window, stride > span)	true	
+124-non-positive-stride-traps	arrays	non-positive stride traps	false	
+125-strided-slice-assign-target-a-lo-hi-by-k-rhs	arrays	strided slice-assign target (`a[lo..hi by k] = rhs`)	true	
+126-strided-slice-assign-combines-with-open-bounds-and-inclusive	arrays	strided slice-assign combines with open bounds and inclusive	true	
+127-strided-slice-assign-length-mismatch-traps	arrays	strided slice-assign length mismatch traps	false	
+128-strided-slice-assign-with-non-positive-stride-traps	arrays	strided slice-assign with non-positive stride traps	false	
+129-sum	arrays	sum	true	
+130-min-over-an-integer-array	arrays	min over an integer array	true	
+131-max-over-an-integer-array	arrays	max over an integer array	true	
+132-min-over-a-real-array	arrays	min over a real array	true	
+133-max-over-a-real-array	arrays	max over a real array	true	
+134-min-max-binary-scalar-form-still-works	arrays	min/max binary scalar form still works	true	
+135-element-wise-add	arrays	element-wise add	true	
+136-broadcast-scalar-array	arrays	broadcast scalar * array	true	
+137-broadcast-arr-scalar-preserves-operand-order-regression	arrays	broadcast `arr - scalar` preserves operand order (regression)	true	
+138-broadcast-scalar-arr-preserves-operand-order-regression	arrays	broadcast `scalar - arr` preserves operand order (regression)	true	
+139-broadcast-arr-scalar-preserves-operand-order-regression	arrays	broadcast `arr / scalar` preserves operand order (regression)	true	
+140-broadcast-arr-scalar-preserves-operand-order-regression	arrays	broadcast `arr < scalar` preserves operand order (regression)	true	
+141-juxtaposition-broadcast	arrays	juxtaposition broadcast	true	
+142-broadcast-scalar-int-real-array-promotes-scalar-before-fmul	arrays	broadcast scalar-int * real-array promotes scalar before fmul	true	
+143-broadcast-scalar-int-real-array-promotes-scalar-before-fcmp	arrays	broadcast scalar-int < real-array promotes scalar before fcmp	true	
+144-elementwise-int-real-promotes-both-elements-to-real	arrays	elementwise [int] + [real] promotes both elements to real	true	
+145-elementwise-complex-via-componentwise-lowering	arrays	elementwise [complex] + - * / via componentwise lowering	false	
+146-elementwise-complex-via-componentwise-compare-and-or	arrays	elementwise [complex] == / != via componentwise compare + and/or	false	
+147-scalar-complex-complex-broadcast	arrays	scalar-complex * [complex] broadcast	false	
+148-rank-2-literal-transpose	arrays	rank-2 literal + transpose	true	
+149-matrix-vector-via	arrays	matrix * vector via @	true	
+150-dot-product-via-on-rank-1-rank-1	arrays	dot product via @ on rank-1 / rank-1	true	
+151-map-sum-chain	arrays	map + sum chain	true	
+152-map-with-inline-lambda-printed-directly	arrays	map with inline lambda printed directly	true	
+153-method-call-sugar-xs-map-printed-directly	arrays	method-call sugar `xs.map(...)` printed directly	true	
+154-map-producing-real-output-from-int-input	arrays	map producing real output from int input	true	
+155-reduce-with-inline-lambda-computes-a-fold	arrays	reduce with inline lambda computes a fold	true	
+156-reduce-with-inline-lambda-computes-product-as-fold	arrays	reduce with inline lambda computes product as fold	true	
+157-map-over-a-rank-2-array-preserves-rank	arrays	map over a rank-2 array preserves rank	true	
+158-method-call-sugar-m-map-on-rank-2-preserves-rank	arrays	method-call sugar `m.map(...)` on rank-2 preserves rank	true	
+159-rank-2-map-producing-real-output-from-int-input	arrays	rank-2 map producing real output from int input	true	
+160-reduce-over-a-rank-2-array-folds-left-to-right-over-all-elem	arrays	reduce over a rank-2 array folds left-to-right over all elements	true	
+161-rank-2-reduce-computes-sum-of-squares-via-inline-lambda	arrays	rank-2 reduce computes sum-of-squares via inline lambda	true	
+162-flatten-produces-column-major-order-spec-10-4	arrays	flatten produces column-major order (spec §10.4)	true	
+163-flatten-on-a-rank-1-array-is-a-copy	arrays	flatten on a rank-1 array is a copy	true	
+164-reshape-interprets-input-column-major-spec-10-4	arrays	reshape interprets input column-major (spec §10.4)	true	
+165-flatten-reshape-round-trip-preserves-shape-spec-10-4	arrays	flatten + reshape round-trip preserves shape (spec §10.4)	true	
+166-sum-axis-m-0-collapses-rows-producing-the-column-totals	arrays	sum_axis(m, 0) collapses rows producing the column totals	true	
+167-sum-axis-m-1-collapses-columns-producing-the-row-totals	arrays	sum_axis(m, 1) collapses columns producing the row totals	true	
+168-product-of-an-integer-array	arrays	product of an integer array	true	
+169-product-of-a-real-array	arrays	product of a real array	true	
+170-diag-arr-builds-a-square-matrix-with-arr-on-the-diagonal	arrays	diag(arr) builds a square matrix with arr on the diagonal	true	
+171-identity-n-is-the-n-n-integer-identity-matrix	arrays	identity(n) is the n×n integer identity matrix	true	
+172-rank-1-slice-with-half-open-range-spec-4-14	arrays	rank-1 slice with half-open range (spec §4.14)	true	
+173-rank-1-slice-with-closed-range	arrays	rank-1 slice with closed range	true	
+174-rank-1-slice-with-empty-range	arrays	rank-1 slice with empty range	true	
+175-rank-1-slice-returns-a-fresh-array-mutation-doesn-t-alias	arrays	rank-1 slice returns a fresh array (mutation doesn't alias)	true	
+176-slicing-computed-bounds-works-spec-4-14-range-expression	arrays	slicing computed bounds works (spec §4.14: range expression)	true	
+177-rank-1-slice-with-runtime-inclusive-bound	arrays	rank-1 slice with runtime inclusive bound	true	
+178-rank-1-leading-open-slice-with-runtime-hi	arrays	rank-1 leading-open slice with runtime hi	true	
+179-rank-1-trailing-open-slice-with-runtime-lo	arrays	rank-1 trailing-open slice with runtime lo	true	
+180-rank-1-fully-open-slice-copies-the-array	arrays	rank-1 fully-open slice copies the array	true	
+181-rank-1-slice-with-runtime-stride	arrays	rank-1 slice with runtime stride	true	
+182-rank-1-slice-with-runtime-lo-hi-stride	arrays	rank-1 slice with runtime lo + hi + stride	true	
+183-rank-1-slice-on-a-dynamic-bound-range	arrays	rank-1 slice on a dynamic-bound range	true	
+184-length-of-dynamic-slice	arrays	length of dynamic slice	true	
+185-rank-2-slice-column-with-spec-4-14	arrays	rank-2 slice column with `:` (spec §4.14)	true	
+186-rank-2-slice-row-with-single-integer-index	arrays	rank-2 slice row with single integer index	true	
+187-rank-2-slice-with-row-range-and-full-column-axis	arrays	rank-2 slice with row range and full column axis	true	
+188-rank-2-sub-matrix-slice-both-axes-ranges	arrays	rank-2 sub-matrix slice (both axes ranges)	true	
+189-rank-2-full-copy-with-m	arrays	rank-2 full copy with `m[:, :]`	true	
+190-rank-2-slice-with-closed-range-axis	arrays	rank-2 slice with closed-range axis	true	
+191-rank-2-slice-with-runtime-row-range	arrays	rank-2 slice with runtime row range	true	
+192-rank-2-slice-with-runtime-column-range	arrays	rank-2 slice with runtime column range	true	
+193-rank-2-slice-with-runtime-ranges-on-both-axes	arrays	rank-2 slice with runtime ranges on both axes	true	
+194-rank-2-slice-with-runtime-row-index-drops-a-dimension	arrays	rank-2 slice with runtime row index drops a dimension	true	
+195-rank-2-slice-with-runtime-column-index-drops-a-dimension	arrays	rank-2 slice with runtime column index drops a dimension	true	
+196-rank-2-leading-open-row-slice-with-runtime-hi	arrays	rank-2 leading-open row slice with runtime hi	true	
+197-rank-2-trailing-open-column-slice-with-runtime-lo	arrays	rank-2 trailing-open column slice with runtime lo	true	
+198-var-array-index-assign	arrays	var array index assign	true	
+199-rank-1-slice-assign-overwrites-underlying-buffer	arrays	rank-1 slice-assign overwrites underlying buffer	true	
+200-rank-1-inclusive-slice-assign	arrays	rank-1 inclusive slice-assign	true	
+201-rank-2-row-replace-via-m-i-rhs	arrays	rank-2 row replace via m[i, :] = rhs	true	
+202-rank-2-column-replace-via-m-j-rhs	arrays	rank-2 column replace via m[:, j] = rhs	true	
+203-construct-field-access	structs	construct + field access	true	
+204-var-struct-field-assign	structs	var struct field assign	true	
+205-field-write-preserves-other-fields	structs	field write preserves other fields	true	
+206-nested-struct-field-write-through-chained-tfield	structs	nested struct field write through chained TField	true	
+207-refcounted-field-write-swaps-the-underlying-string	structs	refcounted field write swaps the underlying string	true	
+208-var-c-b-on-a-struct-copies-mutations-don-t-alias	structs	var c = b on a struct copies — mutations don't alias	true	
+209-nested-struct-copy-inner-mutation-in-copy-doesn-t-leak-to-or	structs	nested struct copy: inner mutation in copy doesn't leak to original	true	
+210-field-write-through-an-array-element-receiver-mutates-the-sl	structs	field write through an array-element receiver mutates the slot	false	
+211-sqrt-of-real	prelude	sqrt of real	true	
+212-assert-approx-on-complex-component-wise-distance	prelude	assert_approx on complex (component-wise distance)	false	
+213-assert-approx-element-wise-over-rank-1-real-array	prelude	assert_approx element-wise over rank-1 real array	false	
+214-assert-approx-element-wise-over-rank-1-complex-array	prelude	assert_approx element-wise over rank-1 complex array	false	
+215-assert-approx-element-wise-over-rank-1-integer-array-lifted	prelude	assert_approx element-wise over rank-1 integer array (lifted)	false	
+216-assert-approx-traps-when-an-array-element-exceeds-the-tolera	prelude	assert_approx traps when an array element exceeds the tolerance	false	
+217-assert-approx-traps-on-length-mismatch	prelude	assert_approx traps on length mismatch	false	
+218-assert-approx-traps-when-the-complex-distance-exceeds-the-to	prelude	assert_approx traps when the complex distance exceeds the tolerance	false	
+219-assert-approx-element-wise-over-rank-2-real-array	prelude	assert_approx element-wise over rank-2 real array	false	
+220-assert-approx-element-wise-over-rank-2-integer-array-lifted	prelude	assert_approx element-wise over rank-2 integer array (lifted)	false	
+221-assert-approx-element-wise-over-rank-2-complex-array	prelude	assert_approx element-wise over rank-2 complex array	false	
+222-assert-approx-traps-when-a-rank-2-element-exceeds-the-tolera	prelude	assert_approx traps when a rank-2 element exceeds the tolerance	false	
+223-assert-approx-traps-on-rank-2-row-count-mismatch	prelude	assert_approx traps on rank-2 row-count mismatch	false	
+224-assert-approx-traps-on-rank-2-column-count-mismatch	prelude	assert_approx traps on rank-2 column-count mismatch	false	
+225-sqrt-of-negative-real-returns-nan-spec-10-2	prelude	sqrt of negative real returns NaN (spec §10.2)	true	
+226-sqrt-of-negative-complex-returns-the-principal-imaginary-roo	prelude	sqrt of negative complex returns the principal imaginary root	true	
+227-abs	prelude	abs	true	
+228-exp-complex-exp-0-0i-1-0i-exactly	prelude	exp(complex) — exp(0 + 0i) = 1 + 0i exactly	true	
+229-sqrt-complex-sqrt-1-0i-0-i	prelude	sqrt(complex) — sqrt(-1 + 0i) = 0 + i	true	
+230-range	prelude	range	true	
+231-linspace	prelude	linspace	true	
+232-zeros-ones	prelude	zeros + ones	true	
+233-range-with-runtime-bounds	prelude	range with runtime bounds	true	
+234-range-with-runtime-bounds-empty-when-hi-lo	prelude	range with runtime bounds — empty when hi <= lo	true	
+235-zeros-with-runtime-length	prelude	zeros with runtime length	true	
+236-ones-with-runtime-length	prelude	ones with runtime length	true	
+237-linspace-with-runtime-length	prelude	linspace with runtime length	true	
+238-linspace-with-runtime-bounds-and-length	prelude	linspace with runtime bounds and length	true	
+239-length-of-dynamic-bound-range	prelude	length of dynamic-bound range	true	
+240-sum-of-dynamic-bound-range	prelude	sum of dynamic-bound range	true	
+241-scalar-broadcast-over-dynamic-bound-range	prelude	scalar broadcast over dynamic-bound range	true	
+242-map-over-dynamic-bound-range	prelude	map over dynamic-bound range	true	
+243-for-over-dynamic-bound-range-running-sum	prelude	for over dynamic-bound range — running sum	true	
+244-comparison-broadcast-over-dynamic-bound-range	prelude	comparison broadcast over dynamic-bound range	true	
+245-f-string-without-spec-behaves-like-s-string	string interpolation	f-string without spec behaves like s-string	true	
+246-f-string-width-left-align-zero-pad-on-integers	string interpolation	f-string width / left-align / zero-pad on integers	true	
+247-f-string-precision-on-reals	string interpolation	f-string precision on reals	true	
+248-f-string-hex-octal-binary	string interpolation	f-string hex / octal / binary	true	
+249-f-string-value-position-function-returns-formatted-string	string interpolation	f-string value-position (function returns formatted string)	true	
+250-f-string-literal-and-escape	string interpolation	f-string literal `%` and `$$` escape	true	
+251-assert-eq-passes-silently	prelude	assert_eq passes silently	false	
+252-assert-traps-passes-when-the-lambda-traps	prelude	assert_traps passes when the lambda traps	true	
+253-assert-traps-with-substring-match-passes	prelude	assert_traps with substring match passes	true	
+254-assert-traps-catches-a-runtime-trap-division-by-zero	prelude	assert_traps catches a runtime trap (division by zero)	true	
+255-sequential-vals-are-scoped-to-the-function-body	blocks + scoping	sequential vals are scoped to the function body	true	
+256-val-rhs-can-be-an-indented-block	blocks + scoping	val RHS can be an indented block	true	
+257-top-level-val-rhs-can-be-an-indented-block	blocks + scoping	top-level val RHS can be an indented block	true	
+258-inner-def-can-shadow-outer-val	blocks + scoping	inner def can shadow outer val	true	
+259-bind-block-level-names-from-a-tuple-literal	tuple destructuring	bind block-level names from a tuple literal	true	
+260-bind-from-an-existing-tuple-variable	tuple destructuring	bind from an existing tuple variable	true	
+261-handle-3-tuples-with-mixed-types	tuple destructuring	handle 3-tuples with mixed types	true	
+262-bind-names-at-the-top-level	tuple destructuring	bind names at the top level	true	
+263-wildcard-component-is-allowed	tuple destructuring	wildcard component is allowed	true	
+264-preserves-heterogeneous-element-types	tuple destructuring	preserves heterogeneous element types	true	
+265-bind-a-tuple-value-with-no-parens-at-all	paren-less tuple construction	bind a tuple value with no parens at all	true	
+266-bind-a-single-name-to-a-paren-less-tuple-rhs	paren-less tuple construction	bind a single name to a paren-less tuple RHS	true	
+267-bind-a-paren-less-3-tuple-at-the-top-level	paren-less tuple construction	bind a paren-less 3-tuple at the top level	true	
+268-bind-a-paren-less-heterogeneous-tuple	paren-less tuple construction	bind a paren-less heterogeneous tuple	true	
+269-return-a-paren-less-tuple-from-a-def-block-body	paren-less tuple construction	return a paren-less tuple from a def block body	true	
+270-return-a-paren-less-tuple-via-the-return-keyword	paren-less tuple construction	return a paren-less tuple via the `return` keyword	false	
+271-assign-a-paren-less-tuple-in-a-block-assignment-rhs	paren-less tuple construction	assign a paren-less tuple in a block (assignment RHS)	true	
+272-return-a-paren-less-tuple-as-the-last-item-of-an-indented-if	paren-less tuple construction	return a paren-less tuple as the last item of an indented if-branch block	true	
+273-embed-variable	string interpolation	embed variable	true	
+274-embed-multiple-variables-literal-text	string interpolation	embed multiple variables + literal text	true	
+275-evaluate-a-arithmetic-expression	string interpolation	evaluate a `${...}` arithmetic expression	true	
+276-evaluate-multiple-expressions-in-one-string	string interpolation	evaluate multiple `${...}` expressions in one string	true	
+277-evaluate-a-function-call-inside	string interpolation	evaluate a function call inside `${...}`	true	
+278-evaluate-an-if-expression-inside	string interpolation	evaluate an `if` expression inside `${...}`	true	
+279-embed-a-real-variable-in-s-interpolation	string interpolation	embed a real variable in s-interpolation	true	
+280-embed-a-whole-valued-real-formats-as-int-0	string interpolation	embed a whole-valued real (formats as `<int>.0`)	true	
+281-embed-a-real-in-scientific-range-java-style-e-exponent	string interpolation	embed a real in scientific range (Java-style E exponent)	true	
+282-embed-nan-inf-inf-as-s-interpolation-values	string interpolation	embed nan / inf / -inf as s-interpolation values	true	
+283-evaluate-a-reading-destructured-names	string interpolation	evaluate a `${...}` reading destructured names	true	
+284-real-value-via-s-interpolation-returned-from-a-function	string interpolation	real value via s-interpolation returned from a function	true	
+285-real-interpolation-handles-nan-inf-inf-via-the-value-positio	string interpolation	real interpolation handles nan / inf / -inf via the value-position path	true	
+286-callee-assignment-to-a-mut-param-mutates-the-caller-s-var	mut by-ref	callee assignment to a mut param mutates the caller's var	true	
+287-callee-can-both-read-and-write-the-aliased-cell	mut by-ref	callee can both read AND write the aliased cell	true	
+288-two-mut-params-alias-two-independent-vars	mut by-ref	two mut params alias two independent vars	true	
+289-mut-param-forwarded-into-another-mut-param-reaches-the-origi	mut by-ref	mut param forwarded into another mut param reaches the original var	true	
+290-read-mode-params-still-copy-caller-s-val-is-unchanged-after	mut by-ref	read-mode params still copy: caller's val is unchanged after the call	true	
+291-mut-param-with-same-name-as-caller-s-var-doesn-t-collide	mut by-ref	mut param with same name as caller's var doesn't collide	true	
+292-var-b-a-clones-when-a-is-reused-later	auto-clone (§8.3)	var b = a clones when a is reused later	true	
+293-var-b-a-does-not-clone-when-a-has-no-later-use	auto-clone (§8.3)	var b = a does not clone when a has no later use	true	
+294-mut-call-without-later-use-mutates-the-caller-s-var-no-clone	auto-clone (§8.3)	mut-call without later use mutates the caller's var (no clone)	true	
+295-mut-call-with-later-use-of-the-same-var-clones-mutation-is-i	auto-clone (§8.3)	mut-call with later use of the same var clones (mutation is invisible)	true	
+296-var-b-a-then-mut-call-on-b-a-and-b-are-independent-clones	auto-clone (§8.3)	var b = a then mut-call on b: a and b are independent clones	true	
+297-assign-b-a-clones-when-a-is-reused-later	auto-clone (§8.3)	assign b = a clones when a is reused later	true	
+298-rank-2-var-binding-clones-independently	auto-clone (§8.3)	rank-2 var binding clones independently	true	
+299-val-source-bound-to-var-does-not-need-cloning-val-is-immutab	auto-clone (§8.3)	val source bound to var does not need cloning (val is immutable)	false	
+300-scalar-var-is-never-cloned-only-arrays-are-unique-owned	auto-clone (§8.3)	scalar var is never cloned (only arrays are unique-owned)	true	
+301-chained-var-aliasing-with-intermediate-clone	auto-clone (§8.3)	chained var aliasing with intermediate clone	true	
+302-no-clone-needed-when-var-is-used-only-once-after-init	auto-clone (§8.3)	no clone needed when var is used only once after init	true	
+303-rank-2-element-mutation-through-clone-does-not-affect-origin	auto-clone (§8.3)	rank-2 element mutation through clone does not affect original	true	
+304-function-returning-var-array-doesn-t-break-clone-at-return	auto-clone (§8.3)	function returning var-array doesn't break (clone at return)	true	
+305-closure-capture-of-var-array-sees-mutations-through-the-capt	auto-clone (§8.3)	closure capture of var-array sees mutations through the captured cell	false	
+306-returned-closure-increments-its-captured-var-across-calls	closure escape (§4.11)	returned closure increments its captured var across calls	true	
+307-two-counters-returned-from-separate-calls-keep-independent-s	closure escape (§4.11)	two counters returned from separate calls keep independent state	true	
+308-returned-closure-reads-captured-var-after-parent-returned	closure escape (§4.11)	returned closure reads captured var after parent returned	true	
+309-allows-a-top-level-val-to-call-a-function-declared-later-in	top-level initialization	allows a top-level val to call a function declared later in source order	true	
+310-supports-mutual-recursion-between-top-level-functions	top-level initialization	supports mutual recursion between top-level functions	true	
+311-supports-top-level-val-that-depends-on-a-function	top-level initialization	supports top-level val that depends on a function	true	
+312-01-hello-hypotenuse-via-sqrt-and	docs/examples	01-hello: hypotenuse via sqrt and ^	true	
+313-02-arrays-element-wise-fusion-point-distance	docs/examples	02-arrays: element-wise fusion + Point distance	true	
+314-03-higher-order-map-captures-mean-fuses-into-sum	docs/examples	03-higher-order: map captures mean, fuses into sum	true	
+315-04-complex-complex-arithmetic-abs-re-im	docs/examples	04-complex: complex arithmetic + .abs / .re / .im	true	
+316-06-numerical-methods-newton-s-method-for-sqrt	docs/examples	06-numerical-methods: Newton's method for sqrt	true	
+317-06-numerical-methods-rk4-one-step-over-a-harmonic-oscillator	docs/examples	06-numerical-methods: RK4 one step over a harmonic oscillator (100 steps)	false	
+318-07-styles-three-idioms-fused-explicit-loop-slice-assignment	docs/examples	07-styles: three idioms — fused, explicit-loop, slice assignment	false	
+319-08-mandelbrot-per-row-slice-assignment-of-escape-time-vector	docs/examples	08-mandelbrot: per-row slice assignment of escape-time vector	false	
+320-09-sinusoids-three-term-wave-at-four-sample-points	docs/examples	09-sinusoids: three-term wave at four sample points	true	
+321-10-power-iteration-dominant-eigenvalue-eigenvector-via-and-d	docs/examples	10-power-iteration: dominant eigenvalue / eigenvector via @ and dot	false	
+322-12-fft-recursive-radix-2-fft-on-a-4-point-step-input	docs/examples	12-fft: recursive radix-2 FFT on a 4-point step input	false	
+323-declare-and-print-bare-variants	sum types (enums)	declare and print bare variants	true	
+324-construct-and-print-fielded-variants	sum types (enums)	construct and print fielded variants	true	
+325-use-the-enum-name-as-a-binding-s-type-annotation	sum types (enums)	use the enum name as a binding's type annotation	true	
+326-pass-an-enum-value-through-a-function-and-return-it	sum types (enums)	pass an enum value through a function and return it	true	
+327-match-dispatches-on-a-bare-variant	sum types (enums)	match dispatches on a bare variant	true	
+328-match-binds-variant-fields-into-the-arm-body	sum types (enums)	match binds variant fields into the arm body	true	
+329-match-wildcard-catches-the-remaining-variants	sum types (enums)	match wildcard catches the remaining variants	true	
+330-match-ignores-unused-fields-with	sum types (enums)	match ignores unused fields with `_`	true	
+331-match-arms-unify-to-a-single-result-type	sum types (enums)	match arms unify to a single result type	true	
+332-match-arm-uses-a-variant-field-of-type-string	sum types (enums)	match arm uses a variant field of type string	true	
+333-match-arm-uses-a-bool-field	sum types (enums)	match arm uses a bool field	true	
+334-optional-end-match-trailer-closes-the-block	sum types (enums)	optional `end match` trailer closes the block	true	
+335-interpolated-print-of-a-fielded-variant-in-s	sum types (enums)	interpolated print of a fielded variant in s"..."	true	
+336-on-a-scalar-var	compound assignment	+= on a scalar var	true	
+337-on-a-scalar-var	compound assignment	-= on a scalar var	true	
+338-on-a-scalar-var	compound assignment	*= on a scalar var	true	
+339-on-a-real-var	compound assignment	/= on a real var	true	
+340-on-an-integer-var	compound assignment	%= on an integer var	true	
+341-accumulator-inside-a-for-loop-fourier-sum-idiom	compound assignment	+= accumulator inside a for-loop (Fourier-sum idiom)	true	
+342-on-an-array-index-target	compound assignment	+= on an array index target	true	
+343-rhs-is-the-full-expression	compound assignment	+= RHS is the full expression	true	
+344-13-sum-types-newton-solver-describe-with-field-interpolation	docs/examples	13-sum-types: Newton-solver describe() with field interpolation	false	
+345-view-reads-the-source-s-elements-through-the-window	view-style slicing	view reads the source's elements through the window	false	
+346-view-length-reflects-the-window-not-the-source	view-style slicing	view length reflects the window, not the source	false	
+347-writes-through-a-view-update-the-source-array	view-style slicing	writes through a view update the source array	false	
+348-sum-map-dot-work-transparently-on-a-view	view-style slicing	sum / map / dot work transparently on a view	false	
+349-inclusive-range-form-a-view-lo-hi-includes-hi	view-style slicing	inclusive range form a.view(lo..=hi) includes hi	false	
+350-view-of-view-sees-the-original-elements-through-a-narrower-w	view-style slicing	view-of-view sees the original elements through a narrower window	false	
+351-negative-bounds-wrap-from-the-end	view-style slicing	negative bounds wrap from the end	false	
+352-an-out-of-bounds-view-traps	view-style slicing	an out-of-bounds view traps	false	
+353-writes-to-the-source-are-visible-through-a-previously-create	view-style slicing	writes to the source are visible through a previously-created view	false	
+354-row-range-view-reads-source-rows-through-the-window	rank-2 view-style slicing	row-range view reads source rows through the window	false	
+355-rows-cols-shape-reflect-the-view-s-window	rank-2 view-style slicing	rows/cols/shape reflect the view's window	false	
+356-writes-through-a-row-range-view-update-the-source-matrix	rank-2 view-style slicing	writes through a row-range view update the source matrix	false	
+357-sum-transpose-sum-axis-work-transparently-on-a-row-range-vie	rank-2 view-style slicing	sum / transpose / sum_axis work transparently on a row-range view	false	
+358-inclusive-range-form-m-view-lo-hi-includes-the-last-row	rank-2 view-style slicing	inclusive range form m.view(lo..=hi) includes the last row	false	
+359-view-of-view-collapses-to-the-underlying-buffer	rank-2 view-style slicing	view-of-view collapses to the underlying buffer	false	
+360-negative-bounds-wrap-from-the-bottom-row	rank-2 view-style slicing	negative bounds wrap from the bottom row	false	
+361-an-out-of-bounds-row-range-view-traps	rank-2 view-style slicing	an out-of-bounds row-range view traps	false	
+362-writes-to-the-source-matrix-are-visible-through-a-previously	rank-2 view-style slicing	writes to the source matrix are visible through a previously-created view	false	
+363-stride-2-borrows-every-other-element	rank-1 strided view-style slicing	stride 2 borrows every other element	false	
+364-strided-view-length-collapses-by-ceil-hi-lo-k	rank-1 strided view-style slicing	strided view length collapses by ceil((hi-lo)/k)	false	
+365-strided-view-supports-indexed-read	rank-1 strided view-style slicing	strided view supports indexed read	false	
+366-write-through-a-strided-view-updates-the-source	rank-1 strided view-style slicing	write through a strided view updates the source	false	
+367-sum-map-reduce-work-transparently-on-a-strided-view	rank-1 strided view-style slicing	sum / map / reduce work transparently on a strided view	false	
+368-view-of-view-multiplies-strides	rank-1 strided view-style slicing	view-of-view multiplies strides	false	
+369-stride-1-is-equivalent-to-a-contiguous-view	rank-1 strided view-style slicing	stride 1 is equivalent to a contiguous view	false	
+370-non-positive-stride-traps	rank-1 strided view-style slicing	non-positive stride traps	false	
+371-sub-rect-view-reads-source-elements-at-the-right-offsets	rank-2 sub-rectangle view-style slicing	sub-rect view reads source elements at the right offsets	false	
+372-sub-rect-shape-reflects-the-row-col-window	rank-2 sub-rectangle view-style slicing	sub-rect shape reflects the row+col window	false	
+373-writes-through-a-sub-rect-view-update-the-source-matrix	rank-2 sub-rectangle view-style slicing	writes through a sub-rect view update the source matrix	false	
+374-row-extraction-v-i-on-a-sub-rect-view-returns-the-right-elem	rank-2 sub-rectangle view-style slicing	row extraction (v[i]) on a sub-rect view returns the right elements	false	
+375-formatvalue-prints-sub-rect-view-in-the-expected-nested-form	rank-2 sub-rectangle view-style slicing	formatValue prints sub-rect view in the expected nested form	false	
+376-sum-on-a-sub-rect-view-accounts-for-row-stride	rank-2 sub-rectangle view-style slicing	sum on a sub-rect view accounts for row stride	false	
+377-view-of-view-composes-col-offsets	rank-2 sub-rectangle view-style slicing	view-of-view composes col offsets	false	
+378-transpose-of-a-sub-rect-view-produces-the-right-transposed-v	rank-2 sub-rectangle view-style slicing	transpose of a sub-rect view produces the right transposed values	false	
+379-out-of-bounds-col-range-traps	rank-2 sub-rectangle view-style slicing	out-of-bounds col range traps	false	
+380-const-calls-a-pure-prelude-function-returning-real	const fn calls	const calls a pure prelude function returning real	true	
+381-const-calls-a-user-defined-pure-function	const fn calls	const calls a user-defined pure function	true	
+382-const-calls-a-recursive-pure-function	const fn calls	const calls a recursive pure function	true	
+383-const-chains-a-prelude-call-into-arithmetic-with-another-con	const fn calls	const chains a prelude call into arithmetic with another const	true	
+384-user-pure-function-declared-after-the-const-still-works-decl	const fn calls	user pure function declared after the const still works (declared return type)	true	
+385-identity-t-returns-its-integer-argument-unchanged	user generics	identity[T] returns its integer argument unchanged	true	
+386-identity-t-returns-its-real-argument-unchanged	user generics	identity[T] returns its real argument unchanged	true	
+387-identity-t-returns-its-string-argument-unchanged	user generics	identity[T] returns its string argument unchanged	true	
+388-identity-t-called-with-multiple-concrete-types-in-one-progra	user generics	identity[T] called with multiple concrete types in one program	true	
+389-numeric-constrained-kindvar-admits-integer-and-real-used-in	user generics	numeric-constrained kindvar admits integer and real, used in arithmetic body	true	
+390-ord-constrained-kindvar-accepts-ordered-comparison-in-body	user generics	ord-constrained kindvar accepts ordered comparison in body	true	
+391-eq-constrained-kindvar-accepts-equality-in-body	user generics	eq-constrained kindvar accepts equality in body	true	
+392-eq-constrained-kindvar-over-complex-args	user generics	eq-constrained kindvar over complex args	true	
+393-concrete-overload-wins-over-generic-when-both-apply	user generics	concrete overload wins over generic when both apply	true	
+394-concrete-overload-with-promotion-wins-over-generic-when-both	user generics	concrete overload (with promotion) wins over generic when both apply	true	
+395-two-type-params-first-t-u-picks-first-arg	user generics	two type params: first[T, U] picks first arg	true	
+396-two-type-params-second-t-u-picks-second-arg	user generics	two type params: second[T, U] picks second arg	true	
+397-same-kind-var-across-two-params-binds-consistently	user generics	same kind var across two params binds consistently	true	
+398-generic-function-takes-a-lambda-and-applies-it	user generics	generic function takes a lambda and applies it	true	
+399-generic-calls-generic-with-type-param-threading	user generics	generic-calls-generic with type-param threading	true	
+400-numeric-kindvar-promotes-when-two-args-differ-integer-real	user generics	numeric kindvar promotes when two args differ (integer + real)	true	
+401-ord-constrained-generic-plus-concrete-bool-overload	user generics	ord-constrained generic plus concrete bool overload	true	
+402-single-param-box-t-construct-field-access-integer	user generic structs	single-param Box[T] construct + field access (integer)	true	
+403-single-param-box-t-specialized-for-string-in-the-same-progra	user generic structs	single-param Box[T] specialized for string in the same program	true	
+404-multi-param-pair-a-b-heterogeneous-specialization	user generic structs	multi-param Pair[A, B] heterogeneous specialization	true	
+405-nested-generic-pair-of-pairs	user generic structs	nested generic: Pair of Pairs	true	
+406-generic-struct-passed-to-a-generic-function	user generic structs	generic struct passed to a generic function	true	
+407-pair-specialized-for-integer-reused-across-construction-site	user generic structs	Pair specialized for integer reused across construction sites	true	
+408-ord-constrained-type-param-accepts-ordered-comparisons-via-f	user generic structs	ord-constrained type param accepts ordered comparisons via field	true	
+409-explicit-type-annotation-pair-integer-string	user generic structs	explicit type annotation Pair[integer, string]	true	
+410-field-write-through-a-specialized-generic-struct-var-binding	user generic structs	field write through a specialized generic struct (var binding)	true	
+411-opt-t-some-integer-match	user generic enums	Opt[T] Some(integer) match	true	
+412-opt-t-bound-to-bare-variant-via-annotation	user generic enums	Opt[T] bound to bare variant via annotation	true	
+413-opt-t-payload-binding-read-in-arm-body	user generic enums	Opt[T] payload binding read in arm body	true	
+414-opt-t-specialized-for-string-integer-in-the-same-program	user generic enums	Opt[T] specialized for string + integer in the same program	true	
+415-result-t-e-heterogeneous-match	user generic enums	Result[T, E] heterogeneous match	true	
+416-result-t-e-specialized-differently-across-sites	user generic enums	Result[T, E] specialized differently across sites	true	
+417-generic-enum-read-through-a-generic-function	user generic enums	generic enum read through a generic function	true	
+418-ord-constrained-enum-payload-comparison	user generic enums	Ord-constrained enum payload comparison	true	
+419-explicit-opt-integer-annotation-drives-spec	user generic enums	explicit Opt[integer] annotation drives spec	true	
+420-wildcard-arm-covers-the-rest	user generic enums	wildcard arm covers the rest	true	
+421-construct-index-read-back	[byte] buffer	construct, index, read back	false	
+422-hex-pretty-print	[byte] buffer	hex pretty-print	false	
+423-round-trip-via-to-integers-and-to-bytes	[byte] buffer	round-trip via to_integers and to_bytes	false	
+424-slicing-copies	[byte] buffer	slicing copies	false	
+425-structural-equality-on-length-and-bytes	[byte] buffer	structural equality on length and bytes	false	

@@ -1,0 +1,7 @@
+
+def main() =
+  val a: [complex] = [1.0 + 2i, 3.0 + 4i]
+  val b: [complex] = [1.0 + 2i, 0.0 + 0i]
+  print(a == b)
+  print(a != b)
+      

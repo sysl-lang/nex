@@ -1,0 +1,6 @@
+
+def main() =
+  val pair = (10, 20)
+  val x, y = pair
+  print(x - y)
+      

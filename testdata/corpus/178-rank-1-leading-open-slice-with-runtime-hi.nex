@@ -1,0 +1,6 @@
+
+def main() =
+  val a = [10, 20, 30, 40, 50]
+  val hi = 3
+  print(a[..hi])
+      

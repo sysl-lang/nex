@@ -1,0 +1,5 @@
+
+def main() =
+  val xs = [1, 2, 3, 4]
+  print(xs.map(x -> x * x).sum())
+      

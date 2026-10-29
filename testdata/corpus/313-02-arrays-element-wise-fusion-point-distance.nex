@@ -1,0 +1,21 @@
+
+struct Point
+  x: real
+  y: real
+end
+
+def distance(p1: Point, p2: Point) =
+  val dx = p1.x - p2.x
+  val dy = p1.y - p2.y
+  sqrt(dx^2 + dy^2)
+
+def main() =
+  val a = [1.0, 2.0, 3.0, 4.0, 5.0]
+  val b = [10.0, 20.0, 30.0, 40.0, 50.0]
+  val result = 2a + b - 1.0
+  print(result)
+
+  val origin = Point(0.0, 0.0)
+  val p = Point(3.0, 4.0)
+  print(distance(origin, p))
+      

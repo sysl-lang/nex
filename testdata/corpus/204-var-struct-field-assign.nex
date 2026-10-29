@@ -1,0 +1,11 @@
+
+struct Point
+  x: real
+  y: real
+end Point
+
+def main() =
+  var p = Point(1.0, 2.0)
+  p.x = 99.0
+  print(p.x)
+      

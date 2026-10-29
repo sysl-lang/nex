@@ -1,0 +1,6 @@
+
+def main() =
+  var n = 23
+  n %= 10
+  print(n)
+      

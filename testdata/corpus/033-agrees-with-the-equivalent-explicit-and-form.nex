@@ -1,0 +1,7 @@
+
+def main() =
+  for x in -2..=12 do
+    val chained  = 0 <= x < 10
+    val explicit = 0 <= x and x < 10
+    print(chained == explicit)
+      

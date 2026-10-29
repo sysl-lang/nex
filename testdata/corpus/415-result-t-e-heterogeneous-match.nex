@@ -1,0 +1,13 @@
+
+enum Result[T, E] =
+  Ok(value: T)
+  Err(error: E)
+end Result
+
+def main() =
+  val r: Result[integer, string] = Ok(7)
+  val v: integer = r match
+    Ok(n)  -> n
+    Err(_) -> -1
+  print(v)
+      

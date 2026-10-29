@@ -1,0 +1,8 @@
+
+def main() =
+  var k = 1
+  val f = x -> x + k
+  print(f(10))
+  k = 100
+  print(f(10))
+      

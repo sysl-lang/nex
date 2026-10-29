@@ -1,0 +1,5 @@
+
+const SQRT2 = sqrt(2.0)
+def main() =
+  print(SQRT2 * SQRT2)
+      

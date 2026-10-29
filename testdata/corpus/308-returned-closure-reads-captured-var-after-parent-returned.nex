@@ -1,0 +1,10 @@
+
+def make_reader(): () -> integer =
+  var x = 42
+  () -> x
+
+def main() =
+  val r = make_reader()
+  print(r())
+  print(r())
+      

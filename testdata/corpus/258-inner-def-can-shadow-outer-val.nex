@@ -1,0 +1,8 @@
+
+def f(x: integer) =
+  val x = x + 100
+  x
+
+def main() =
+  print(f(1))
+      

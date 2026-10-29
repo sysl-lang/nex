@@ -1,0 +1,7 @@
+
+val greeting =
+  val name = "world"
+  s"hello, $name"
+
+def main() = print(greeting)
+      

@@ -1,0 +1,9 @@
+
+def main() =
+  val z1 = 1.0 + 2i
+  val z2 = 3.0 - 1i
+  print(s"z1 + z2 = ${z1 + z2}")
+  print(s"z1 * z2 = ${z1 * z2}")
+  print(s"|z1| = ${z1.abs()}")
+  print(s"z1.re = ${z1.re}, z1.im = ${z1.im}")
+      

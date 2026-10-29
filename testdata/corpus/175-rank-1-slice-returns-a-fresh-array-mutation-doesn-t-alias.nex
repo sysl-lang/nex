@@ -1,0 +1,8 @@
+
+def main() =
+  var a = [10, 20, 30]
+  var b = a[0..2]
+  b[0] = 99
+  print(a)
+  print(b)
+      

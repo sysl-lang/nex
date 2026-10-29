@@ -1,0 +1,9 @@
+
+def neg(x: integer) = -x
+
+def apply2(f: integer -> integer, g: integer -> integer, x: integer) =
+  f(g(x))
+
+def main() =
+  print(apply2(neg, neg, 7))
+      

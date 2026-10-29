@@ -1,0 +1,11 @@
+
+enum Step =
+  Continue(n: integer)
+  Done
+
+def advance(s: Step): Step = s
+
+def main() =
+  print(advance(Continue(7)))
+  print(advance(Done))
+      

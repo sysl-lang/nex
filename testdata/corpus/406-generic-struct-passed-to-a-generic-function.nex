@@ -1,0 +1,11 @@
+
+struct Box[T]
+  value: T
+end Box
+
+def unbox[T](b: Box[T]): T = b.value
+
+def main() =
+  print(unbox(Box(7)))
+  print(unbox(Box("hi")))
+      

@@ -1,0 +1,8 @@
+
+def pick(flag: bool, a: [integer], b: [integer]): [integer] =
+  if flag then a else b
+
+def main() =
+  print(pick(true, [1, 2, 3], [4, 5, 6]))
+  print(pick(false, [1, 2, 3], [4, 5, 6]))
+      

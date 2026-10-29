@@ -1,0 +1,7 @@
+
+def main() =
+  val xs = [10, 20, 30, 40, 50]
+  print(xs[-1])
+  print(xs[-2])
+  print(xs[-5])
+      

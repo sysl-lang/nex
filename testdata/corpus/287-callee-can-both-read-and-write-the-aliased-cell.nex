@@ -1,0 +1,9 @@
+
+def double(x: mut integer) = x = x * 2
+
+def main() =
+  var n = 7
+  double(n)
+  double(n)
+  print(n)
+      

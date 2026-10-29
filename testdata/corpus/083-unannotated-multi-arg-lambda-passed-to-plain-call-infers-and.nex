@@ -1,0 +1,5 @@
+
+def apply2(f: ((integer, integer) -> integer), a: integer, b: integer) = f(a, b)
+def main() =
+  print(apply2((x, y) -> x + y, 4, 5))
+      

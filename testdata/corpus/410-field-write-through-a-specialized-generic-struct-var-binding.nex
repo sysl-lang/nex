@@ -1,0 +1,10 @@
+
+struct Box[T]
+  value: T
+end Box
+
+def main() =
+  var b = Box(1)
+  b.value = 99
+  print(b.value)
+      

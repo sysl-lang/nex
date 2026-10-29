@@ -1,0 +1,9 @@
+
+def main() =
+  var a = [1, 2, 3]
+  var b = [9, 9, 9]
+  b = a
+  b[0] = 0
+  print(a[0])
+  print(b[0])
+      

@@ -1,0 +1,5 @@
+
+def main() =
+  val x, y = (10, 20)
+  print(s"x+y = ${x + y}")
+      

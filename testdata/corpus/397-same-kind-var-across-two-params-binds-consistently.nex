@@ -1,0 +1,6 @@
+
+def pickMax[T: Ord](a: T, b: T): T = if a < b then b else a
+def main() =
+  print(pickMax(3, 7))
+  print(pickMax(2.5, 1.5))
+      

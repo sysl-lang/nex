@@ -1,0 +1,5 @@
+
+def apply(f: (integer -> integer), x: integer) = f(x)
+def main() =
+  print(apply(x -> x * 2, 3))
+      

@@ -1,0 +1,6 @@
+
+def main() =
+  val tiny = 1.0e-20
+  val big  = 1.0e20
+  print(s"tiny = $tiny, big = $big")
+      

@@ -1,0 +1,11 @@
+
+def is_even(n: integer): bool =
+  if n == 0 then true else is_odd(n - 1)
+
+def is_odd(n: integer): bool =
+  if n == 0 then false else is_even(n - 1)
+
+def main() =
+  print(is_even(4))
+  print(is_odd(7))
+      

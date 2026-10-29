@@ -1,0 +1,33 @@
+# nex
+
+A modern, AOT-compiled, array-first numerical programming language: Fortran's heritage — built-in
+complex numbers and matrices, IEEE 754 throughout, AOT performance — with modern syntax: Scala
+3-style indentation, expression-oriented, math-flavoured juxtaposition (`2pi`, `4a*c`,
+`3sin(2pi*t)`), and array expressions that compile to fused loops with no intermediate temporaries.
+
+```nex
+def normalize(v: [real]) =
+  val mag = sqrt(sum(v * v))
+  if mag == 0.0 then v
+  else v / mag
+```
+
+**This is the sysl implementation of nex.** The reference implementation is the Scala 3 one at
+[edadma/nex](https://github.com/edadma/nex), whose `docs/content/spec/` is the language
+specification; where this one and the reference disagree, the reference is right until the
+specification says otherwise. The port's plan, phase by phase, is [PORT-PLAN.md](PORT-PLAN.md).
+
+## Status
+
+The port has started: what exists is the command's skeleton and the oracle. `testdata/corpus/`
+holds the reference's program corpus — 425 programs, each beside the exact output it must print —
+and every milestone of the port is measured against it.
+
+```
+sysl build .
+sysl test .
+```
+
+## Licence
+
+ISC, as the reference implementation is — see [LICENSE](LICENSE).

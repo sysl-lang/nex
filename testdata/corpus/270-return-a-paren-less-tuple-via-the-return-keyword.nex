@@ -1,0 +1,10 @@
+
+def first_positive(xs: [real]) =
+  for x in xs do
+    if x > 0.0 then return x, true
+  end for
+  0.0, false
+def main() =
+  val a, b = first_positive([-1.0, 2.0, 3.0])
+  print(s"$a $b")
+      

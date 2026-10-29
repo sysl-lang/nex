@@ -1,0 +1,5 @@
+
+def main() =
+  val xs = [1, 2, 3]
+  print(filter(xs, x -> x > 0))
+      

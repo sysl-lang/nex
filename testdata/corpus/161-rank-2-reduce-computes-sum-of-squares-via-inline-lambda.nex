@@ -1,0 +1,5 @@
+
+def main() =
+  val m = [[1, 2], [3, 4]]
+  print(reduce(m, 0, (acc, x) -> acc + x * x))
+      

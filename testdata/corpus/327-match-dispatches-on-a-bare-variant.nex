@@ -1,0 +1,17 @@
+
+enum Color =
+  Red
+  Green
+  Blue
+
+def label(c: Color): string =
+  c match
+    Red   -> "stop"
+    Green -> "go"
+    Blue  -> "wait"
+
+def main() =
+  print(label(Red))
+  print(label(Green))
+  print(label(Blue))
+      

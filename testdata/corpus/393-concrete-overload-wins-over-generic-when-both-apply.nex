@@ -1,0 +1,7 @@
+
+def f(x: integer): integer = 100
+def f[T](x: T): integer = 200
+def main() =
+  print(f(1))
+  print(f("hi"))
+      

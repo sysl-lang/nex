@@ -1,0 +1,6 @@
+
+def second[T, U](a: T, b: U): U = b
+def main() =
+  print(second(1, "hi"))
+  print(second("yes", 99))
+      

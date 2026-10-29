@@ -1,0 +1,6 @@
+
+def main() =
+  val a = 3
+  val b = 4
+  print(s"max = ${if a < b then b else a}")
+      

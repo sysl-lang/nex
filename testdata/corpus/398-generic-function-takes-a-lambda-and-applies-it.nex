@@ -1,0 +1,6 @@
+
+def apply1[T, U](x: T, f: T -> U): U = f(x)
+def main() =
+  print(apply1(5, x -> x * 2))
+  print(apply1(3.0, x -> x + 0.5))
+      

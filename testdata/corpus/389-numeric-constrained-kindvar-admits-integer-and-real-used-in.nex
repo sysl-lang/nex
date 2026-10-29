@@ -1,0 +1,6 @@
+
+def twice[T: Numeric](x: T): T = x + x
+def main() =
+  print(twice(21))
+  print(twice(1.5))
+      

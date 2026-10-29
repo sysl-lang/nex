@@ -1,0 +1,31 @@
+
+enum Solver =
+  Converged(x: real)
+  Diverged
+  MaxIters(iters: integer, last: real)
+
+def newton(f: real -> real, fp: real -> real, x0: real, tol: real, max_iters: integer): Solver =
+  var x = x0
+  for i in 0..max_iters do
+    val fx = f(x)
+    if abs(fx) < tol then return Converged(x)
+    val d = fp(x)
+    if abs(d) < 1.0e-15 then return Diverged
+    x = x - fx / d
+  end for
+  MaxIters(max_iters, x)
+
+def f(x: real) : real = x^2 - 2.0
+def fp(x: real): real = 2.0 * x
+
+def describe(s: Solver): string =
+  s match
+    Converged(x)         -> s"converged at x=${x}"
+    Diverged             -> "diverged"
+    MaxIters(iters, x)   -> s"ran ${iters} iters, last x=${x}"
+
+def main() =
+  print(describe(newton(f, fp, 1.0,    1.0e-12, 50)))
+  print(describe(newton(f, fp, 0.0,    1.0e-12, 50)))
+  print(describe(newton(f, fp, 1.0e9,  1.0e-12, 3)))
+      

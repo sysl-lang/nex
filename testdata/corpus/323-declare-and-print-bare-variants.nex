@@ -1,0 +1,11 @@
+
+enum Color =
+  Red
+  Green
+  Blue
+
+def main() =
+  print(Red)
+  print(Green)
+  print(Blue)
+      

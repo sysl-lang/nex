@@ -1,0 +1,7 @@
+
+def main() =
+  val x = 42
+  print(f"|$x%5d|")
+  print(f"|$x%-5d|")
+  print(f"|$x%05d|")
+      

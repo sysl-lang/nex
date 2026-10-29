@@ -1,0 +1,10 @@
+
+def main() =
+  var a = [1, 2, 3]
+  var b = a
+  var c = b
+  c[0] = 999
+  print(a[0])
+  print(b[0])
+  print(c[0])
+      

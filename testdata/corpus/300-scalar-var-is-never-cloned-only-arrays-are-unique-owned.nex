@@ -1,0 +1,8 @@
+
+def main() =
+  var x = 42
+  var y = x
+  y = 99
+  print(x)
+  print(y)
+      

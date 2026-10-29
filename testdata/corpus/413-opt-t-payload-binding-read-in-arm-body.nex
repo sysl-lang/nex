@@ -1,0 +1,13 @@
+
+enum Opt[T] =
+  Some(value: T)
+  None
+end Opt
+
+def main() =
+  val x = Some(7)
+  val v: integer = x match
+    Some(n) -> n
+    None    -> 0
+  print(v)
+      

@@ -1,0 +1,16 @@
+
+enum Color =
+  Red
+  Green
+  Blue
+
+def isRed(c: Color): bool =
+  c match
+    Red -> true
+    _   -> false
+
+def main() =
+  print(isRed(Red))
+  print(isRed(Green))
+  print(isRed(Blue))
+      

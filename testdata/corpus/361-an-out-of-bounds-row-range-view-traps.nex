@@ -1,0 +1,6 @@
+
+def main() =
+  val m = [[1, 2], [3, 4], [5, 6]]
+  assert_traps(() -> m.view(0..10), "view")
+  print("caught")
+      

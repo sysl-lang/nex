@@ -1,0 +1,5 @@
+
+def main() =
+  val x = 1.5
+  print(s"x = $x")
+      

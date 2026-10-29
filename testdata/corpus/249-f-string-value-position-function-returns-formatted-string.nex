@@ -1,0 +1,6 @@
+
+def render(label: string, x: real): string = f"$label = $x%8.4f"
+def main() =
+  print(render("alpha", 3.14159))
+  print(render("gamma", 12345.678))
+      

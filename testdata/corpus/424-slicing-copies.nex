@@ -1,0 +1,14 @@
+
+def main() =
+  val b = bytes(5)
+  b[0] = 1
+  b[1] = 2
+  b[2] = 3
+  b[3] = 4
+  b[4] = 5
+  val s = b[1..4]
+  print(length(s))
+  print(s)
+  s[0] = 99
+  print(b[1])
+      

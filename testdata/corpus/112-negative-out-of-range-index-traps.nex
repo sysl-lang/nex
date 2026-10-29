@@ -1,0 +1,7 @@
+
+def main() =
+  val xs = [10, 20, 30]
+  assert_traps(() -> print(xs[-4]), "out of bounds")
+  assert_traps(() -> print(xs[3]),  "out of bounds")
+  print("ok")
+      

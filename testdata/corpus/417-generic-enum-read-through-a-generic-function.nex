@@ -1,0 +1,15 @@
+
+enum Opt[T] =
+  Some(value: T)
+  None
+end Opt
+
+def unwrap_or[T](o: Opt[T], d: T): T =
+  o match
+    Some(v) -> v
+    None    -> d
+
+def main() =
+  print(unwrap_or(Some(7), 0))
+  print(unwrap_or(Some("hi"), "miss"))
+      

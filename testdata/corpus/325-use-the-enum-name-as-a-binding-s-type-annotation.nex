@@ -1,0 +1,11 @@
+
+enum Solver =
+  Converged(x: real)
+  Diverged
+
+def main() =
+  val a: Solver = Converged(2.5)
+  val b: Solver = Diverged
+  print(a)
+  print(b)
+      

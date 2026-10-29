@@ -1,0 +1,5 @@
+
+def square(x: real) = x * x
+const NINE = square(3.0)
+def main() = print(NINE)
+      

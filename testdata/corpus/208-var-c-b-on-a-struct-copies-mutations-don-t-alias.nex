@@ -1,0 +1,15 @@
+
+struct Box
+  v: integer
+end Box
+
+def main() =
+  var b = Box(10)
+  var c = b
+  c.v = 99
+  print(b.v)
+  print(c.v)
+  b.v = 1
+  print(b.v)
+  print(c.v)
+      

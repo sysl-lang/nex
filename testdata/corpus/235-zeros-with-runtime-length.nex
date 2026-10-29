@@ -1,0 +1,4 @@
+def main() =
+  val n = 4
+  print(zeros(n))
+      

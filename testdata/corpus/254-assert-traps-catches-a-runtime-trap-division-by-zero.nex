@@ -1,0 +1,5 @@
+
+def main() =
+  assert_traps(() -> 1 / 0)
+  print("ok")
+      

@@ -1,0 +1,6 @@
+
+def add_arrays(a: [integer], b: [integer]): [integer] = a + b
+
+def main() =
+  print(add_arrays([1, 2, 3], [10, 20, 30]))
+      

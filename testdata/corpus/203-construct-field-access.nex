@@ -1,0 +1,11 @@
+
+struct Point
+  x: real
+  y: real
+end Point
+
+def main() =
+  val p = Point(3.0, 4.0)
+  print(p.x)
+  print(p.y)
+      

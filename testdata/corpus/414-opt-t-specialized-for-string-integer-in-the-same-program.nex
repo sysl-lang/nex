@@ -1,0 +1,18 @@
+
+enum Opt[T] =
+  Some(value: T)
+  None
+end Opt
+
+def main() =
+  val a = Some(1)
+  val b = Some("hi")
+  val sa: string = a match
+    Some(_) -> "int"
+    None    -> "none"
+  val sb: string = b match
+    Some(_) -> "str"
+    None    -> "none"
+  print(sa)
+  print(sb)
+      

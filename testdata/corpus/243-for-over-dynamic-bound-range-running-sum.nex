@@ -1,0 +1,7 @@
+def main() =
+  val n = 4
+  var s = 0
+  val xs = range(1, n + 1)
+  for x in xs do s = s + x
+  print(s)
+      

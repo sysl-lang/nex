@@ -1,0 +1,7 @@
+
+def first[T, U](a: T, b: U): T = a
+def main() =
+  print(first(1, "hi"))
+  print(first("yes", 99))
+  print(first(3.14, true))
+      

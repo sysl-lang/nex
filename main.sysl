@@ -1,0 +1,12 @@
+// The `nex` command. Only its usage line exists so far; the subcommands arrive with the phases they
+// drive, in the order PORT-PLAN.md gives.
+
+private val usage = "usage: nex <tokens | parse | elaborate | run | test | compile> <file.nex>"
+
+main(args: []string)
+    if args.len < 3
+        print(usage)
+        exit(2)
+
+    print(s"nex: '${args[1]}' is not implemented yet")
+    exit(1)

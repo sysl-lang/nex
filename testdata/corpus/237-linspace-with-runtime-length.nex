@@ -1,0 +1,4 @@
+def main() =
+  val n = 5
+  print(linspace(0.0, 1.0, n))
+      
