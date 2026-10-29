@@ -192,8 +192,8 @@ pub       trait     type      where     yield
 - `reduce` introduces the reduction clause of a `parallel for`
   ([chapter 10](/spec/10-parallelism/)). Everywhere else `reduce` is the prelude function of that
   name.
-- `unit` followed by a name at the start of a top-level declaration declares a unit of measure
-  (`unit ft = 12 in`, [chapter 13](/spec/13-units/)). Everywhere else `unit` is the type.
+- `unit` is a keyword that declares a unit of measure at the top level
+  (`unit ft = 12 in`, [chapter 13](/spec/13-units/)). It is not a type: the empty type is `void`.
 
 **Units of measure** are written in angle brackets directly after an operand, with no space: after
 a numeric literal, a name, a `]` or a `)` — `9.81<m/s^2>`, `real<mm>`, `x[i]<m>`, `(a + b)<m>`.
@@ -205,7 +205,7 @@ a call on the annotated operand, as in `to<mm>(x)`. Otherwise, or after a space,
 comparison: `1<x`, `0<x>1` and `lo<x<hi` compare, and `a<b>-c` is `a` in unit `b`, minus `c`.
 
 **Type names are not keywords.** `integer`, `real`, `complex`, `int8` … `int64`, `uint8` …
-`uint64`, `real16`, `real32`, `real64`, `bool`, `string` and `unit` are names the prelude defines
+`uint64`, `real16`, `real32`, `real64`, `bool`, `string` and `void` are names the prelude defines
 ([chapter 3](/spec/03-types/)), and `bfloat16` is reserved as a type name. Nor are `pi`, `e`, `inf`,
 `nan` and `i`: they are prelude constants and may be shadowed (§2.8).
 
@@ -301,7 +301,7 @@ s"cost: $$$price"
 `$name.field` inserts `name` followed by the text `.field`; write `${name.field}` to insert the
 field.
 
-**Unit**: `()`, the one value of type `unit`.
+**Unit**: `()`, the one value of type `void`.
 
 **Array literals** are bracketed lists, nested once per axis: `[1.0, 2.0, 3.0]`,
 `[[1, 2], [3, 4]]`. Their shape and storage order are in [chapter 4](/spec/04-arrays/).

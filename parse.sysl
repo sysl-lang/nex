@@ -221,14 +221,10 @@ struct Parser
     at_decl(self) -> bool
         val t = self.tok(0)
 
-        for word in ["@", "private", "val", "var", "const", "def", "extern", "struct", "enum", "module", "import"]
+        for word in ["@", "private", "val", "var", "const", "def", "extern", "struct", "enum", "module", "import", "unit"]
             if is_kw(t, word) then return true
 
-        self.at_unit_decl()
-
-    // Whether `unit` here opens a unit declaration: `unit` is a word only where a unit's name
-    // follows it, and stays the name of the empty tuple's type everywhere else.
-    at_unit_decl(self) -> bool = self.at_word("unit") && (is_ident(self.tok(1)) || is_kw(self.tok(1), "in"))
+        false
 
     decl(*self) -> Result[Decl, Diagnostic]
         val m = self.toks.mark()
@@ -301,9 +297,7 @@ struct Parser
 
         if self.accept("import") then return self.import_decl()
 
-        if self.at_unit_decl()
-            self.bump()
-            return self.unit_decl()
+        if self.accept("unit") then return self.unit_decl()
 
         self.fail("a declaration")
     end decl_kind
@@ -805,8 +799,11 @@ struct Parser
             self.expect("]")?
             return Ok(Type(self.toks.span_from(m), TypeKind.Array(elem, axes)))
 
+        if self.at("unit")
+            return Err(error(self.toks.here(), "`unit` declares a physical unit; the empty type is `void`"))
+
         val name = self.ident("a type")?
-        var t = Type(self.toks.span_from(m), Named(name))
+        var t =Type(self.toks.span_from(m), Named(name))
 
         if self.accept("[")
             var args: Buf[Type] = buf()

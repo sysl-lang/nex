@@ -48,7 +48,7 @@ nsjail on its own VM.
 | `real` | alias of `real64` | |
 | `complex` | alias of `complex[real64]` | |
 
-`bool`, `unit` and `string` are as in ref §3.1. The aliases are the same type, not a distinct one:
+`bool`, `void` and `string` are as in ref §3.1, `void` being the type the reference calls `unit`. The aliases are the same type, not a distinct one:
 `[real]` and `[real64]` are one type, and a diagnostic names a type the way the source spelled it.
 
 **The names are Fortran's `iso_fortran_env` kind names**, so a Fortran programmer reads
@@ -673,7 +673,7 @@ An `inout` parameter is an **exclusive borrow** of the caller's place, Swift's m
 reads and writes the caller's storage directly; the caller keeps the variable, nothing is moved, and
 the function does not return it. When the call returns, the caller sees every write. The mode
 applies to scalars, arrays and structs alike; a scalar `inout` is by reference, as the reference's
-`mut integer` was. A function type spells it the same way: `(inout [real], real) -> unit`.
+`mut integer` was. A function type spells it the same way: `(inout [real], real) -> void`.
 
 The call site writes no marker, as in Fortran: `scale(x, 2.0)` reads the same whether `v` is
 `inout` or not. A marker would add nothing the checker does not already enforce, since every misuse
@@ -974,7 +974,7 @@ believes without proof.
 | a `@c` struct, read mode or `inout` | `const S *` / `S *` to the struct, laid out as C lays it out |
 | a function type `(A, B) -> R` | a C function pointer (§10.2.1) |
 | `c_ptr` | `void *`, opaque, only as a callback's `@data` partner (§10.2.1) |
-| return: a scalar, a complex or `unit` | the value, or `void` |
+| return: a scalar, a complex or `void` | the value, or C `void` |
 
 **Complex scalars cross by value.** nex mirrors clang's ABI for `_Complex` on each target, so
 `double _Complex` arguments and results agree with C: on arm64 a complex is a homogeneous
@@ -1149,8 +1149,8 @@ default search path or a `-L dir` given on the command line.
 **Keywords** (ref §2.3) gain `inout`, `parallel`, `extern`, `enum`, and the loop and program
 controls `exit`, `cycle` and `stop` (§11.1). `mut` stays reserved and means nothing. `by` (the step
 of a range) and `reduce` (the `parallel for` clause) are contextual, so `reduce` remains a prelude
-name. `unit` is contextual too: followed by a name at the start of a top-level declaration it
-declares a unit of measure (§13.1), and everywhere else it is the type `unit`. The type names of
+name. `unit` is a keyword: it declares a unit of measure (§13.1) and is no type, so `def f(): unit`
+is an error that suggests `void`. The type names of
 §2.1 are prelude type names, not keywords.
 
 **Units**: a `<` written directly after a numeric literal, a name, a `]` or a `)`, with no space,
@@ -1257,9 +1257,8 @@ unit lbf = 4.4482216152605 N
 unit psi = lbf / in^2
 ```
 
-- **A `unit` declaration is a top-level declaration.** `unit` is a contextual word (§11): followed
-  by a name at the start of a top-level declaration it declares a unit, and everywhere else it is
-  the type `unit` of ref §3.1, which keeps its meaning.
+- **A `unit` declaration is a top-level declaration.** `unit` is a keyword (§11); the type
+  whose only value is `()` is `void`.
 - **A unit expression** is built from unit names and `1`: juxtaposition multiplies, `/` divides and
   `^n` raises to a constant power — an integer, optionally negative (`s^-1`), or a parenthesized
   rational (`m^(1/2)`). `^` binds tightest, juxtaposition next, `/` loosest and left-associative,
@@ -1458,7 +1457,7 @@ is in `K` until the affine units of §15 arrive.
 | Whole-array reduction order | — | §9.2.1 | blocked pairwise tree, the same with or without `parallel` |
 | FFI, BLAS, LAPACK | §6.11, §11.2 | §10 | `extern def`, `@link`, `@symbol`, `@strided`, `@pure`, `@c` structs, callbacks, complex by value; LAPACK value forms trap, `inout` forms return `info` |
 | Calling Fortran | — | §10.6 | `bind(c)` and plain gfortran procedures through `@fortran` |
-| Keywords | §2.3 | §11 | `inout`, `parallel`, `extern`, `enum`, `exit`, `cycle`, `stop`; contextual `unit` |
+| Keywords | §2.3 | §11 | `inout`, `parallel`, `extern`, `enum`, `exit`, `cycle`, `stop`, `unit` |
 | Chained comparisons | §4.6 (scalars) | §11 | one `Chain` node, never an `and` rewrite; on arrays the comparisons combine element-wise, every operand evaluated once, no per-element short-circuit |
 | `^` and unary minus | — | §11 | `^` binds tighter than unary minus (`-x^2` is `-(x^2)`) and is right-associative |
 | Loop control | — | §11.1 | `exit`, `cycle`, named loops, `stop n`, `by` in a `for` header |
@@ -1471,7 +1470,7 @@ is in `K` until the affine units of §15 arrive.
 | Units of measure | — | §13 | `unit` declarations (base, derived, scaled by an exact factor); `9.81<m/s^2>`, `real<m>`, `[real<Pa>; :, :]`; same-dimension scales convert to the left operand's unit, other dimensions are a compile error; `to<u>`, `strip`; erased before code generation |
 | Unit generics | §6.10 | §2.6, §13.5 | `U: Unit` parameters (`real<U^2>`) |
 | Prelude units | — | §13.9 | SI base, derived and scaled, imperial and US customary; `usgal` / `ukgal`, no `gal` |
-| `unit` | §3.1 | §11, §13.1 | still the type; also a contextual word that declares a unit at the top level |
+| The empty type | `unit` (§3.1) | §2.1, §11 | spelled `void`; `unit` is a keyword that declares a unit of measure (§13.1), and a type written `unit` is an error suggesting `void` |
 
 Unchanged, and restated only to fix their meaning beside the new rules: `i` and its shadowing
 (§12), silent auto-clone insertion (ref §8.3), scalar-only broadcasting (ref §4.5).

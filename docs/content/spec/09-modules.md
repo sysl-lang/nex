@@ -110,7 +110,7 @@ def main() =
 ```
 
 `main` is declared in one of two forms, `def main()` or `def main(args: [string])`, and returns
-`unit`; any other signature is a compile error. `args` holds the command-line arguments the user
+`void`; any other signature is a compile error. `args` holds the command-line arguments the user
 gave, without the program's name, and is 1-based like every array: `args[1]` is the first.
 
 ```nex
@@ -134,7 +134,7 @@ there is no interpreter, so what `nex run` runs is the native code itself.
 
 ## 9.6 Tests and `nex test`
 
-A function marked `@test` is a unit test. It takes no arguments and returns `unit`. It **passes** by
+A function marked `@test` is a unit test. It takes no arguments and returns `void`. It **passes** by
 returning and **fails** by trapping, and the prelude's assertions — `assert`, `assert_eq`,
 `assert_approx`, `assert_traps` — trap with a message saying what was expected:
 

@@ -62,8 +62,8 @@ enum Piece
 // stay free as names.
 private val reserved = ["and", "as", "const", "cycle", "def", "div", "do", "elif", "else", "end",
     "enum", "exit", "extern", "false", "for", "if", "import", "in", "inout", "match", "module", "mut",
-    "not", "or", "parallel", "private", "return", "stop", "struct", "then", "true", "val", "var",
-    "while"]
+    "not", "or", "parallel", "private", "return", "stop", "struct", "then", "true", "unit", "val",
+    "var", "while"]
 
 // The operators and delimiters, longest first so that the first match is the longest one. `//` and
 // `/*` open comments and are taken before this table is asked. `.*` is a token of its own so that the

@@ -96,7 +96,7 @@ Each nex parameter type has one C meaning:
 | a `@c` struct, `inout` | `S *` |
 | a function type `(A, B) -> R` | a C function pointer (§11.6) |
 | `c_ptr` | `void *`, opaque; only as the `@data` partner of a callback (§11.6) |
-| return: a scalar, a complex, or `unit` | the value, or `void` |
+| return: a scalar, a complex, or `void` | the value, or C `void` |
 
 Remember the aliases: `integer` is `int64`, `real` is `real64`, `complex` is `complex[real64]`. A
 C `int` is **`int32`**, not `integer` — the LP64 BLAS and LAPACK interfaces take `int32` sizes and

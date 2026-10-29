@@ -1,6 +1,6 @@
 ---
 title: Types
-summary: The sized numeric types, promotion and conversion, bool, string and unit, tuples, structs, sum types, function types, and array types.
+summary: The sized numeric types, promotion and conversion, bool, string and void, tuples, structs, sum types, function types, and array types.
 weight: 30
 ---
 
@@ -217,15 +217,15 @@ value at that real's own width: the `real32` nearest 0.3 prints as `0.3`, not as
 Shortest-form printing for `real32` and `real16` may change in detail.
 {{< /note >}}
 
-## 3.10 `bool`, `string` and `unit`
+## 3.10 `bool`, `string` and `void`
 
 | Type | Values |
 |---|---|
 | `bool` | `true` and `false` (Fortran's `logical`) |
 | `string` | immutable UTF-8 text |
-| `unit` | the single value `()`, the result of a function that returns nothing useful |
+| `void` | the single value `()`, the result of a function that returns nothing useful |
 
-Strings compare by content. A function with no declared result whose body ends in a statement returns `unit`; it plays the
+Strings compare by content. A function with no declared result whose body ends in a statement returns `void`; it plays the
 part of a Fortran `subroutine`.
 
 ## 3.11 Tuples
@@ -335,7 +335,7 @@ A parameter mode is part of the type. A function that modifies its first argumen
 def scale(v: inout [real], s: real) =
   v = v * s
 
-val f: (inout [real], real) -> unit = scale
+val f: (inout [real], real) -> void = scale
 ```
 
 A function with an `inout` parameter cannot stand where a function type without it is expected, nor

@@ -42,7 +42,7 @@ val regime =
 ```
 
 The value of an `if` is the value of the last expression in the branch taken. An `if` without an
-`else` has type `unit`, and so must its body: it is a statement, run for its effect.
+`else` has type `void`, and so must its body: it is a statement, run for its effect.
 
 ```nex
 if n > nmax
@@ -132,7 +132,7 @@ for k in 1..n
   y[k] = f(x[k])
 ```
 
-A `for` loop is an expression of type `unit`. Its loop variable is local to the loop: it is a new
+A `for` loop is an expression of type `void`. Its loop variable is local to the loop: it is a new
 binding for each iteration and does not exist after the loop ends. (In Fortran the `DO` variable
 survives the loop with a value one step past the last; nex has nothing to survive.)
 
@@ -246,7 +246,7 @@ while abs(f(x)) > tol and it < max_iter
   it += 1
 ```
 
-A `while` loop is an expression of type `unit`. It is Fortran's `DO WHILE (…)`.
+A `while` loop is an expression of type `void`. It is Fortran's `DO WHILE (…)`.
 
 ## 7.5 Leaving a loop early
 
@@ -302,7 +302,7 @@ ends at the first line indented no further than the header. Every body — of an
 visible after it ends.
 
 A block is itself an expression whose value is its last line's (a statement as the last line gives
-`unit`):
+`void`):
 
 ```nex
 val rms =

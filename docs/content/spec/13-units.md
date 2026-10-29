@@ -60,8 +60,8 @@ so a variable called `m`, `s` or `g` never clashes with a unit, and `in`, a keyw
 ordinary unit name inside the brackets. Spacing matters: `ms` is the millisecond, `m s` the
 metre-second.
 
-`unit` is also the name of the type whose only value is `()` ([Types](/spec/03-types/)); it
-declares a unit only at the start of a top-level declaration.
+`unit` is a keyword, so it is no variable's name and no type's: the type whose only value is `()`
+is `void` ([Types](/spec/03-types/)), and `def f(): unit` is an error that suggests it.
 
 ## 13.2 Spelling a unit
 

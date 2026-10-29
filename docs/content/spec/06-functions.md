@@ -126,7 +126,7 @@ def normalize(v: [real]) =
 ```
 
 There is no distinction between a function and a subroutine. A function with nothing to return
-returns `unit`, the type whose only value is `()`, and its call is a statement — what Fortran writes
+returns `void`, the type whose only value is `()`, and its call is a statement — what Fortran writes
 as a `subroutine` and `call`.
 
 **Return types** are inferred. One may be written after the parameter list, and must be for a
@@ -291,9 +291,9 @@ x ->
 A single parameter needs no parentheses; several do. A parameter's type is inferred from where the
 lambda is used, and must be written when nothing gives it.
 
-A **function type** is written with `->`: `real -> real`, `(real, real) -> real`, `() -> unit`. A
+A **function type** is written with `->`: `real -> real`, `(real, real) -> real`, `() -> void`. A
 parameter's mode is part of its type, written the same way as in a declaration:
-`(inout [real], real) -> unit`.
+`(inout [real], real) -> void`.
 
 ```nex
 def apply(f: real -> real, x: real) = f(x)

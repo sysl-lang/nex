@@ -191,10 +191,14 @@ unit_close_ends_a_line()
     assert_eq(lexed("val g = a >\n  b\n"), "K(val) ID(g) K(=) ID(a) K(>) ID(b) NL")
     assert_eq(lexed("val g = 1<m> > 2<m>\n"), "K(val) ID(g) K(=) N(1) U< ID(m) U> K(>) N(2) U< ID(m) U> NL")
 
-@test("`unit` is a name to the lexer: it declares only where the parser finds a unit's name after it")
-unit_is_not_reserved()
-    assert_eq(lexed("unit N = kg m / s^2"), "ID(unit) ID(N) K(=) ID(kg) ID(m) K(/) ID(s) K(^) N(2) NL")
-    assert_eq(lexed("unit in = 0.0254 m"), "ID(unit) K(in) K(=) N(0.0254) ID(m) NL")
+@test("`unit` is a reserved word")
+unit_is_reserved()
+    assert_eq(lexed("unit N = kg m / s^2"), "K(unit) ID(N) K(=) ID(kg) ID(m) K(/) ID(s) K(^) N(2) NL")
+    assert_eq(lexed("unit in = 0.0254 m"), "K(unit) K(in) K(=) N(0.0254) ID(m) NL")
+
+@test("`void` is a name to the lexer")
+void_is_a_name()
+    assert_eq(lexed("def f(): void = ()"), "K(def) ID(f) K(() K()) K(:) ID(void) K(=) K(() K()) NL")
 
 @test("a `<` glued to a number is a comparison unless unit syntax and a `>` follow on the line")
 number_less_than_stays_a_comparison()
