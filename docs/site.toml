@@ -1,0 +1,47 @@
+# nexlang.org — the documentation site for nex, built with juicer.
+#
+# Build:  cd docs && juicer build
+
+title       = "nex"
+author      = "Ed Maxedon"
+baseURL     = "https://nexlang.org/"
+description = "An array-first numerical language for scientists and engineers who write Fortran: Fortran's model with modern syntax and compiler-enforced safety, compiled ahead of time to native binaries, calling your existing Fortran, BLAS and LAPACK."
+
+repoURL = "https://github.com/sysl-lang/nex"
+
+theme = "juicerdocs"
+
+# Page <h1> comes from frontmatter title; markdown headings start at <h2>.
+headingShift = 0
+
+# Match URL space to on-disk layout so any static host serves files at the
+# URLs we publish.
+htmlDir = ""
+
+# `favicon` is the browser-tab icon (square). `[juicerdocs] icon` is the
+# wordmark-free variant the topbar shows next to the brand name; `logo` is the
+# larger logo the landing splash shows.
+favicon = "/nex-favicon.png"
+
+# Recompile theme CSS/JS on every build via sass/esbuild. Falls back to a
+# verbatim copy when those aren't on PATH.
+[assets]
+enabled     = true
+fingerprint = true
+
+[[assets.sass]]
+input  = "themes/juicerdocs/src/scss/juicerdocs.scss"
+output = "/juicerdocs.css"
+minify = true
+
+[[assets.esbuild]]
+input  = "themes/juicerdocs/static/juicerdocs.js"
+output = "/juicerdocs.js"
+minify = true
+
+[juicerdocs]
+version    = "v0.0.1"
+getStarted = true
+logo       = "/nex-logo.png"
+icon       = "/nex-icon.png"
+math       = true
