@@ -1,0 +1,135 @@
+@tests
+
+// The toolchain the compiler will drive, driven from sysl: each hand-written MLIR proof in
+// `experiments/mlir/` goes through `mlir-opt` with the pipeline in `pipeline.txt`, `mlir-translate`
+// and `clang` with the runtime, and the program it makes must print its corpus output byte for byte.
+// The same tests pin the library calls the driver is built from: a child's stdin from a path and from
+// a pipe this program wrote, a temporary directory, and a large text gathered in a `StrBuilder`.
+//
+// LLVM is found at `NEX_LLVM_HOME`, else Homebrew's; without `mlir-opt` there every test skips.
+
+import sysl.env.get_or
+import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
+import sysl.process.{Stdio, capture, pipe}
+import sysl.testing.skip
+import sysl.text.str_builder
+import sysl.time.monotonic
+
+private llvm_bin() -> string
+    val dir = s"${get_or("NEX_LLVM_HOME", "/opt/homebrew/opt/llvm")}/bin"
+
+    if !exists(s"$dir/mlir-opt") then skip(s"no mlir-opt in $dir")
+    dir
+
+// A tool run that must succeed, its stdout answered.
+private tool(program: string, args: []const string, stdin: Stdio = Inherit) -> string
+    val out = capture(program, args, stderr = true, stdin = stdin).unwrap()
+
+    assert(out.status.ok(), s"$program: ${out.status}\n${out.err.unwrap_or("")}")
+    out.text
+
+// Lower one proof to a native program in `work` and answer what it prints.
+private lower_and_run(bin: string, work: string, proof: string) -> string
+    val pipeline = read_text("experiments/mlir/pipeline.txt").unwrap().trim()
+    val lowered = s"$work/$proof.llvm.mlir"
+
+    tool(s"$bin/mlir-opt", [s"experiments/mlir/$proof.mlir", s"--pass-pipeline=$pipeline", "-o", lowered])
+
+    // `mlir-translate` reads the lowered module on its stdin and writes LLVM IR to its stdout.
+    write_text(s"$work/$proof.ll", tool(s"$bin/mlir-translate", ["--mlir-to-llvmir"],
+                                        stdin = Stdio.FromPath(lowered))).unwrap()
+    tool(s"$bin/clang", ["-Wno-override-module", "-O2", s"$work/$proof.ll",
+                         "experiments/mlir/runtime/nex_rt.c", "-o", s"$work/$proof"])
+    tool(s"$work/$proof", [])
+
+private check_proof(proof: string, oracle: string)
+    val bin = llvm_bin()
+    val work = make_temp_dir("nex-toolchain").unwrap()
+    val got = lower_and_run(bin, work, proof)
+
+    remove_dir_all(work).unwrap()
+    assert_eq(got, read_text(oracle).unwrap())
+
+@test("Newton's square root lowers through the pipeline and prints its corpus output")
+proof_newton()
+    check_proof("316-newton-sqrt", "testdata/corpus/316-06-numerical-methods-newton-s-method-for-sqrt.out")
+
+@test("three elementwise operators fuse into one loop and print the point distances of the corpus")
+proof_point_distance()
+    check_proof("313-point-distance", "testdata/corpus/313-02-arrays-element-wise-fusion-point-distance.out")
+
+@test("complex elementwise arithmetic emitted over re and im prints its corpus output")
+proof_complex()
+    check_proof("145-complex-elementwise", "testdata/corpus/145-elementwise-complex-via-componentwise-lowering.out")
+
+@test("the runtime spells reals as the reference interpreter does, at 22 boundary values")
+proof_real_spelling()
+    check_proof("real-spelling", "experiments/mlir/real-spelling.out")
+
+@test("the module named at a FromPath stdin is the one mlir-opt reads")
+stdin_from_path()
+    val bin = llvm_bin()
+    val work = make_temp_dir("nex-toolchain").unwrap()
+    val src = s"$work/a.mlir"
+
+    write_text(src, "func.func @from_path(%x: f64) -> f64 {\n  return %x : f64\n}\n").unwrap()
+
+    val text = tool(s"$bin/mlir-opt", ["-", "--canonicalize"], stdin = Stdio.FromPath(src))
+
+    remove_dir_all(work).unwrap()
+    assert(text.contains("func.func @from_path"), text)
+
+@test("a pipe this program writes and closes feeds mlir-opt through FromFile")
+stdin_from_pipe()
+    val bin = llvm_bin()
+    val (r, w) = pipe().unwrap()
+    var wr = w
+    var rd = r
+
+    wr.write("func.func @from_pipe() {\n  return\n}\n".bytes)
+    wr.close().unwrap()
+
+    val text = tool(s"$bin/mlir-opt", ["-"], stdin = Stdio.FromFile(rd))
+
+    rd.close().unwrap()
+    assert(text.contains("func.func @from_pipe"), text)
+
+@test("a missing input is mlir-opt's failure, reported through the status and stderr")
+mlir_opt_failure()
+    val bin = llvm_bin()
+    val out = capture(s"$bin/mlir-opt", ["no-such-file.mlir"], stderr = true).unwrap()
+
+    assert(!out.status.ok())
+    assert(out.err.unwrap_or("").contains("no-such-file.mlir"), out.err.unwrap_or(""))
+
+@test("a FromPath naming no file is refused before anything is started")
+stdin_from_missing_path()
+    assert(capture("/bin/cat", [], stdin = Stdio.FromPath("no-such-file.mlir")).is_err())
+
+@test("a 46 MB module gathered a line at a time in a StrBuilder is built and written in seconds")
+large_text()
+    val work = make_temp_dir("nex-toolchain").unwrap()
+    val start = monotonic()
+    var b = str_builder()
+
+    for i in 0..<1000000
+        b.push("    %v")
+        b.push_int(i)
+        b.push(" = arith.addf %a, %b : f64 // ")
+        b.push_real(1.5)
+        b.push("\n")
+
+    val text = b.finish()
+    val built = monotonic()
+
+    write_text(s"$work/big.mlir", text).unwrap()
+
+    val written = monotonic()
+    val back = read_text(s"$work/big.mlir").unwrap()
+
+    remove_dir_all(work).unwrap()
+    print(s"built ${text.len} bytes in ${(built - start).us / 1000} ms, wrote in ${(written - built).us / 1000} ms")
+    assert_eq(back.len, text.len)
+    assert(text.len > 45000000)
+    assert(text.ends_with("    %v999999 = arith.addf %a, %b : f64 // 1.5\n"))
+    assert((written - start).us < 10000000)

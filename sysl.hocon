@@ -2,7 +2,7 @@
 //
 //     sysl run . -- run program.nex
 //
-// The reference implementation is the Scala one at github.com/edadma/nex; PORT-PLAN.md says how this
+// The reference implementation is the Scala one at github.com/edadma/nex; PLAN.md says how this
 // one reaches it. `testdata/corpus/` holds the reference's program corpus, each program beside the
 // exact output it must print.
 
@@ -11,6 +11,9 @@ package {
   version = "0.0.1"
   sysl    = "0.7.9"
 }
+
+// The MLIR proofs' C runtime is built by clang in `tests_toolchain.sysl`, not by sysl.
+exclude = ["experiments"]
 
 // **`os`** to read source files and the corpus; **`heap`** for every tree the compiler builds.
 requires {
