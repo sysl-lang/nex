@@ -1186,7 +1186,7 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
 - **`print`** writes to standard output, **`eprint`** to standard error.
 - **No `intent(out)`.** A function returns its results; several are returned as a tuple and taken
   apart with `val (q, r) = f(…)`.
-- **`nex test`** runs every `@test def` in the project's test modules, prints one line per failure
+- **`nex test`** runs every `@test def` in the project, in any module, prints one line per failure
   and then a summary, and exits non-zero on any failure. `nex test <substring>` runs only the tests
   whose names contain it. A trap fails its own test; the others still run.
 
