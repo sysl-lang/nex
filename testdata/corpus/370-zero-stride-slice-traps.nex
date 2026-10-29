@@ -1,0 +1,4 @@
+def main() =
+  val a = [1, 2, 3, 4, 5]
+  assert_traps(() -> a[0..5 by 0], "stride")
+  print("caught")

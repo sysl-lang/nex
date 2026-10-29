@@ -1,0 +1,5 @@
+def main() =
+  val xs = [10, 20, 30, 40, 50]
+  print(xs[end])
+  print(xs[end - 1])
+  print(xs[end - 4])

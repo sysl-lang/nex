@@ -1,8 +1,0 @@
-
-def bump(x: mut integer) = x = x + 1
-
-def main() =
-  var n = 41
-  bump(n)
-  print(n)
-      

@@ -47,10 +47,12 @@ enum Piece
     // `${expr}`: the span is the text between the braces.
     ExprHole(at: Span, spec: string)
 
-// The words a name may not be.
-private val reserved = ["and", "as", "by", "const", "def", "div", "do", "elif", "else", "end", "enum",
-    "false", "for", "if", "import", "in", "match", "module", "mut", "not", "or", "private", "return",
-    "struct", "then", "true", "val", "var", "while"]
+// The words a name may not be. `mut` is reserved and means nothing; `by` and `reduce` are
+// contextual, read as words only where a stride or a `parallel for`'s reductions may stand, so they
+// stay free as names.
+private val reserved = ["and", "as", "const", "def", "div", "do", "elif", "else", "end", "enum",
+    "extern", "false", "for", "if", "import", "in", "inout", "match", "module", "mut", "not", "or",
+    "parallel", "private", "return", "struct", "then", "true", "val", "var", "while"]
 
 // The operators and delimiters, longest first so that the first match is the longest one. `//` and
 // `/*` open comments and are taken before this table is asked. `.*` is a token of its own so that the
@@ -187,19 +189,24 @@ private is_newline(t: Tok) -> bool = t match
 private last_keyword(out: *Buf[Spanned[Tok]]) -> string
     if out.len() == 0 then return ""
 
-    out.at(out.len() - 1).value match
-        Keyword(k) -> k
-        _ -> ""
+    keyword_of(out.at(out.len() - 1).value)
 
-// Whether the line ending under the cursor ends a statement, having consumed it either way.
+private keyword_of(t: Tok) -> string = t match
+    Keyword(k) -> k
+    _ -> ""
+
+// Whether the line ending under the cursor ends a statement, having consumed it either way. An
+// operator after a `:` is a `parallel for`'s reduction (`reduce total: +`), not a binary operator
+// waiting for its right operand, so it ends the line like any other operand.
 private ends_the_statement(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]]) -> bool
     val last = last_keyword(out)
     val trigger = lay.brackets > 0 && last == "->"
     val suspended = !lay.significant()
+    val reduction = out.len() > 1 && keyword_of(out.at(out.len() - 2).value) == ":"
 
     s.accept_newline()
 
-    if !suspended && contains(continuations, last) then return false
+    if !suspended && !reduction && contains(continuations, last) then return false
     if suspended && !trigger then return false
     if trigger then lay.opens_block()
 

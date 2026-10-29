@@ -1,7 +1,5 @@
-
 def main() =
   val a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-  val v1 = a.view(0..12, 2)
-  val v2 = v1.view(0..6, 2)
+  val v1 = a[0..12 by 2]
+  val v2 = v1[0..6 by 2]
   print(v2)
-      

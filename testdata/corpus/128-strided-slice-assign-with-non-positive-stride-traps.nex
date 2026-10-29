@@ -1,7 +1,0 @@
-
-def assignBadStride(v: mut [integer]) = v[0..5 by 0] = [1, 2, 3]
-def main() =
-  var v = [10, 20, 30, 40, 50]
-  assert_traps(() -> assignBadStride(v), "slice")
-  print("ok")
-      

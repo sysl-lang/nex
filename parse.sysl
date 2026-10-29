@@ -26,7 +26,7 @@ parse_expression(src: Source) -> Result[Expr, Diagnostic]
 
     p.standalone()
 
-private parser(src: Source, toks: Buf[Spanned[Tok]]) -> Parser = Parser(src, tokens_of(toks))
+private parser(src: Source, toks: Buf[Spanned[Tok]]) -> Parser = Parser(src, tokens_of(toks), false)
 
 private is_kw(t: Tok, text: string) -> bool = t match
     Keyword(k) -> k == text
@@ -85,6 +85,11 @@ struct Parser
     src: Source
     toks: Tokens[Tok]
 
+    // Whether the innermost `[` around the cursor opened an index list rather than an array
+    // literal, which is where `end` is an index (DESIGN §5.2). A parenthesis does not change it, so
+    // in `a[f(end)]` the `end` is `a`'s.
+    in_subscript: bool
+
     // -- the cursor -------------------------------------------------------------------------------
 
     // The token `n` ahead of the cursor; past the end, the end.
@@ -93,6 +98,16 @@ struct Parser
         None -> Eof
 
     at(self, text: string) -> bool = is_kw(self.tok(0), text)
+
+    // Whether the contextual word `word` (`by`, `reduce`) is at the cursor.
+    at_word(self, word: string) -> bool = self.tok(0) match
+        Ident(name) -> name == word
+        _ -> false
+
+    // Whether the cursor is on the first token of a line: what an end marker always is.
+    at_line_head(self) -> bool = self.toks.looked_back() match
+        Some(t) -> is_newline(t.value) || is_indent(t.value) || is_dedent(t.value)
+        None -> true
 
     accept(*self, text: string) -> bool
         if !self.at(text) then return false
@@ -187,7 +202,7 @@ struct Parser
     at_decl(self) -> bool
         val t = self.tok(0)
 
-        for word in ["@", "private", "val", "var", "const", "def", "struct", "enum", "module", "import"]
+        for word in ["@", "private", "val", "var", "const", "def", "extern", "struct", "enum", "module", "import"]
             if is_kw(t, word) then return true
 
         false
@@ -213,12 +228,7 @@ struct Parser
         if self.accept("(")
             if !self.at(")")
                 loop
-                    self.tok(0) match
-                        Str(v) -> args.push(AttrArg.Str(v))
-                        Ident(n) -> args.push(AttrArg.Name(n))
-                        _ -> return self.fail("a string or a name")
-
-                    self.bump()
+                    args.push(self.attribute_arg()?)
 
                     if !self.accept(",") then break
             end if
@@ -229,11 +239,37 @@ struct Parser
         Ok(Attribute(name, args))
     end attribute
 
+    // A string, a name, or `name = "string"`.
+    attribute_arg(*self) -> Result[AttrArg, Diagnostic]
+        val t = self.tok(0)
+
+        t match
+            Str(v) ->
+                self.bump()
+                return Ok(AttrArg.Str(v))
+            Ident(n) ->
+                self.bump()
+
+                if !self.accept("=") then return Ok(AttrArg.Name(n))
+
+                self.tok(0) match
+                    Str(v) ->
+                        self.bump()
+                        return Ok(AttrArg.Named(n, v))
+                    _ -> return self.fail("a string")
+            _ -> self.fail("a string or a name")
+    end attribute_arg
+
     decl_kind(*self) -> Result[DeclKind, Diagnostic]
         if self.accept("val") then return self.binding(Val)
         if self.accept("var") then return self.binding(Var)
         if self.accept("const") then return self.binding(Const)
         if self.accept("def") then return self.function()
+
+        if self.accept("extern")
+            self.expect("def")?
+            return self.extern_function()
+
         if self.accept("struct") then return self.structure()
         if self.accept("enum") then return self.enumeration()
 
@@ -259,18 +295,7 @@ struct Parser
     function(*self) -> Result[DeclKind, Diagnostic]
         val name = self.ident("a function name")?
         val type_params = self.type_params()?
-        var params: Buf[Param] = buf()
-
-        self.expect("(")?
-
-        if !self.at(")")
-            loop
-                params.push(self.param()?)
-
-                if !self.accept(",") then break
-
-        self.expect(")")?
-
+        val params = self.params()?
         val ret = if self.accept(":") then Some(self.type_expr()?) else None
         var body: Option[Expr] = None
 
@@ -281,16 +306,52 @@ struct Parser
         Ok(Fun(name, type_params, params, ret, body))
     end function
 
+    // The rest of an `extern def`: a C function's signature, which has no body to give.
+    extern_function(*self) -> Result[DeclKind, Diagnostic]
+        val name = self.ident("a function name")?
+        val params = self.params()?
+        val ret = if self.accept(":") then Some(self.type_expr()?) else None
+
+        if self.at("=")
+            return Err(error(self.toks.here(), "an `extern def` has no body: it declares a C function, which is defined in C"))
+
+        Ok(Extern(name, params, ret))
+    end extern_function
+
+    // A parenthesised parameter list.
+    params(*self) -> Result[Buf[Param], Diagnostic]
+        var out: Buf[Param] = buf()
+
+        self.expect("(")?
+
+        if !self.at(")")
+            loop
+                out.push(self.param()?)
+
+                if !self.accept(",") then break
+
+        self.expect(")")?
+        Ok(out)
+    end params
+
     param(*self) -> Result[Param, Diagnostic]
+        var attrs: Buf[Attribute] = buf()
+
+        while self.accept("@")
+            attrs.push(self.attribute()?)
+
         val name = self.ident("a parameter name")?
 
         self.expect(":")?
 
-        val mode = if self.accept("mut") then Mut else Read
+        if self.at("mut")
+            return Err(error(self.toks.here(), "`mut` is not a parameter mode: a parameter the callee writes is `inout`"))
+
+        val mode = if self.accept("inout") then Inout else Read
         val typ = self.type_expr()?
         val default = if self.accept("=") then Some(self.expr()?) else None
 
-        Ok(Param(name, typ, mode, default))
+        Ok(Param(attrs, name, typ, mode, default))
     end param
 
     // `[T, U: Numeric]` after a generic declaration's name, or nothing.
@@ -509,42 +570,72 @@ struct Parser
 
     // A type. `->` is right-associative, and a parenthesised list is the parameters of a function
     // type when an arrow follows it and a tuple type otherwise; one type in parentheses is itself.
+    // A parameter of a function type may say `inout`, so a list is read with modes and the modes are
+    // refused afterwards if no `->` makes it a function type's.
     type_expr(*self) -> Result[Type, Diagnostic]
         val m = self.toks.mark()
         var params: Buf[Type] = buf()
+        var modes: Buf[Mode] = buf()
         var single = true
+        var inout_at: Option[Span] = None
 
         if self.accept("(")
             single = false
 
             if !self.at(")")
                 loop
+                    if self.at("inout") && inout_at.is_none() then inout_at = Some(self.toks.here())
+
+                    modes.push(if self.accept("inout") then Inout else Read)
                     params.push(self.type_expr()?)
 
                     if !self.accept(",") then break
 
             self.expect(")")?
         else
+            if self.at("inout") then inout_at = Some(self.toks.here())
+
+            modes.push(if self.accept("inout") then Inout else Read)
             params.push(self.simple_type()?)
 
         if self.accept("->")
             val ret = self.type_expr()?
 
-            return Ok(Type(self.toks.span_from(m), Func(params, ret)))
+            return Ok(Type(self.toks.span_from(m), Func(params, modes, ret)))
+
+        inout_at match
+            Some(at) -> return Err(error(at, "`inout` is a parameter's mode: it belongs before a parameter's type or a function type's parameter"))
+            None -> ()
 
         if single || params.len() == 1 then return Ok(params[0])
 
         Ok(Type(self.toks.span_from(m), TypeKind.Tuple(params)))
     end type_expr
 
+    // `[T]`, `[T; axes]`, a name, or a name applied to type arguments.
     simple_type(*self) -> Result[Type, Diagnostic]
         val m = self.toks.mark()
 
         if self.accept("[")
             val elem = self.type_expr()?
 
+            *elem.kind match
+                Array(inner, axes) ->
+                    return Err(error(elem.span, s"an array element is a scalar; a matrix is `[${show_type(inner)}; ${colons(axes.len() + 1)}]`"))
+                _ -> ()
+
+            var axes: Buf[Axis] = buf()
+
+            if self.accept(";")
+                loop
+                    axes.push(self.axis()?)
+
+                    if !self.accept(",") then break
+            else
+                axes.push(AnyExtent)
+
             self.expect("]")?
-            return Ok(Type(self.toks.span_from(m), TypeKind.Array(elem)))
+            return Ok(Type(self.toks.span_from(m), TypeKind.Array(elem, axes)))
 
         val name = self.ident("a type")?
 
@@ -560,6 +651,25 @@ struct Parser
         self.expect("]")?
         Ok(Type(self.toks.span_from(m), Applied(name, args)))
     end simple_type
+
+    // One axis of an array type: `:`, a static extent, or a name (a const extent or a rank).
+    axis(*self) -> Result[Axis, Diagnostic]
+        val want = "an axis (`:`, an integer literal or a const name)"
+
+        if self.accept(":") then return Ok(AnyExtent)
+
+        self.tok(0) match
+            Num(text) ->
+                digits_value(text, 10) match
+                    Some(n) ->
+                        self.bump()
+                        Ok(FixedExtent(n))
+                    None -> self.fail(want)
+            Ident(name) ->
+                self.bump()
+                Ok(NamedExtent(name))
+            _ -> self.fail(want)
+    end axis
 
     // -- expressions ------------------------------------------------------------------------------
 
@@ -765,8 +875,11 @@ struct Parser
             Num(t) -> t
             _ -> return self.power()
 
+        // A contextual word after a number is the clause it opens (`0..10 by 2`, `0..n reduce s: +`),
+        // never something the number multiplies.
         self.tok(n + 1) match
-            Ident(_) -> ()
+            Ident(w) ->
+                if w == "by" || w == "reduce" then return self.power()
             t ->
                 if !is_kw(t, "(") then return self.power()
 
@@ -815,12 +928,16 @@ struct Parser
                 e = ex(self.toks.span_from(m), Call(e, args))
             elif self.accept("[")
                 var indices: Buf[Expr] = buf()
+                val outer = self.in_subscript
+
+                self.in_subscript = true
 
                 loop
                     indices.push(self.index_element()?)
 
                     if !self.accept(",") then break
 
+                self.in_subscript = outer
                 self.expect("]")?
                 e = ex(self.toks.span_from(m), Index(e, indices))
             elif self.accept(".")
@@ -877,8 +994,9 @@ struct Parser
         Ok(args)
     end arguments
 
-    // One position of an index list (§4.14): `:` for a whole axis, an index, or a range whose
-    // bounds may be left off and which may carry a `by` stride.
+    // One position of an index list (DESIGN §5.1): `:` for a whole axis, an index, or a range whose
+    // bounds may be left off and which may carry a `by` stride, negative to walk the window
+    // downward. `end` may stand in any of the expressions.
     index_element(*self) -> Result[Expr, Diagnostic]
         val m = self.toks.mark()
 
@@ -892,8 +1010,12 @@ struct Parser
 
         self.bump()
 
-        val hi = if self.at(",") || self.at("]") || self.at("by") then None else Some(self.additive()?)
-        val stride = if self.accept("by") then Some(self.additive()?) else None
+        val hi = if self.at(",") || self.at("]") || self.at_word("by") then None else Some(self.additive()?)
+        var stride: Option[Expr] = None
+
+        if self.at_word("by")
+            self.bump()
+            stride = Some(self.additive()?)
 
         if inclusive && hi.is_none()
             return Err(error(self.toks.previous(), "'..=' needs the bound it includes"))
@@ -936,7 +1058,13 @@ struct Parser
         end if
 
         if self.accept("[")
+            val outer = self.in_subscript
+
+            self.in_subscript = false
+
             val elems = self.arguments("]")?
+
+            self.in_subscript = outer
 
             for e in elems
                 *e.kind match
@@ -950,10 +1078,26 @@ struct Parser
         if self.accept("for") then return self.for_rest(m)
         if self.accept("while") then return self.while_rest(m)
 
+        if self.accept("parallel")
+            if self.accept("for") then return self.parallel_for_rest(m)
+
+            val body = self.expr()?
+
+            return Ok(ex(self.toks.span_from(m), Parallel(body)))
+
         if self.accept("return")
             val value = if self.at_expression() then Some(self.expr_tuple()?) else None
 
             return Ok(ex(self.toks.span_from(m), Return(value)))
+
+        // An `end` that starts a line is an end marker (DESIGN §5.2), out of place wherever it has
+        // reached an expression; one anywhere else is an index, which only a subscript has.
+        if self.at("end") && !self.at_line_head()
+            if !self.in_subscript
+                return Err(error(self.toks.here(), "`end` is only an index here inside `a[...]`"))
+
+            self.bump()
+            return Ok(ex(self.toks.span_from(m), End))
 
         self.fail("an expression")
     end primary
@@ -965,7 +1109,7 @@ struct Parser
         Str(_) -> true
         Interp(_, _) -> true
         Ident(_) -> true
-        Keyword(_) -> one_of(self.tok(0), ["(", "[", "-", "not", "true", "false", "if", "for", "while", "return"]).len > 0
+        Keyword(_) -> one_of(self.tok(0), ["(", "[", "-", "not", "true", "false", "if", "for", "while", "parallel", "return"]).len > 0
         _ -> false
 
     // `if cond then a [else b]`, with `then` optional before a block and `elif` for `else if`. The
@@ -1011,6 +1155,47 @@ struct Parser
         Ok(ex(span, For(pat, iterable, body)))
     end for_rest
 
+    // `parallel for i in r (, j in s)* [reduce v: op (, w: op)*]` and a loop body (DESIGN §9.1, §9.2).
+    parallel_for_rest(*self, m: usize) -> Result[Expr, Diagnostic]
+        var clauses: Buf[LoopClause] = buf()
+        var reductions: Buf[Reduction] = buf()
+
+        loop
+            val name = self.ident("a loop index")?
+
+            self.expect("in")?
+            clauses.push(LoopClause(name, self.expr()?))
+
+            if !self.accept(",") then break
+
+        if self.at_word("reduce")
+            self.bump()
+
+            loop
+                val name = self.ident("a reduction variable")?
+
+                self.expect(":")?
+
+                val op = self.tok(0) match
+                    Ident(w) -> if w == "min" || w == "max" then w else ""
+                    t -> one_of(t, ["+", "*", "and", "or"])
+
+                if op.len == 0
+                    return Err(error(self.toks.here(), "a reduction's operator is `+`, `*`, `min`, `max`, `and` or `or`"))
+
+                self.bump()
+                reductions.push(Reduction(name, op))
+
+                if !self.accept(",") then break
+        end if
+
+        val body = self.loop_body()?
+        val span = self.toks.span_from(m)
+
+        self.end_marker()
+        Ok(ex(span, ParallelFor(clauses, reductions, body)))
+    end parallel_for_rest
+
     while_rest(*self, m: usize) -> Result[Expr, Diagnostic]
         val cond = self.expr()?
         val body = self.loop_body()?
@@ -1040,6 +1225,15 @@ struct Parser
         Ok(parts)
     end interpolation
 end Parser
+
+// `:, :, :` for `n` axes: the dynamic shape of that rank.
+private colons(n: usize) -> string
+    var out = ":"
+
+    for _ in 1..<n
+        out = out + ", :"
+
+    out
 
 // Whether an expression names a place a value can be stored in.
 private is_place(e: Expr) -> bool = *e.kind match

@@ -25,6 +25,8 @@ enum AttrArg
     Str(value: string)
     // A bare name: a type parameter of the declaration, as in `@intrinsic("libm.sqrt", T)`.
     Name(name: string)
+    // `name = "value"`, as in `@link(framework = "Accelerate")`.
+    Named(name: string, value: string)
 
 struct Decl
     span: Span
@@ -38,12 +40,15 @@ enum BindKind
     Var
     Const
 
-// A parameter's mode: read-only unless the declaration says `mut`.
+// A parameter's mode: read-only unless the declaration says `inout`, which borrows the caller's
+// place for the call.
 enum Mode
     Read
-    Mut
+    Inout
 
+// `name: [inout] type [= default]`, after any attributes (`@strided x: [real]`).
 struct Param
+    attrs: Buf[Attribute]
     name: string
     typ: Type
     mode: Mode
@@ -74,6 +79,8 @@ enum DeclKind
     // `def name[T: C](params) [: ret] [= body]`. A `def` without a body is how an `@intrinsic` is
     // declared.
     Fun(name: string, type_params: Buf[TypeParam], params: Buf[Param], ret: Option[Type], body: Option[Expr])
+    // `extern def name(params) [: ret]`: a C function, declared and never defined here.
+    Extern(name: string, params: Buf[Param], ret: Option[Type])
     Struct(name: string, type_params: Buf[TypeParam], fields: Buf[Field])
     Enum(name: string, type_params: Buf[TypeParam], variants: Buf[Variant])
     // `module a.b`; under `@test` its declarations exist only in a test build.
@@ -99,16 +106,26 @@ struct Type
     span: Span
     kind: &TypeKind
 
+// One axis of an array type.
+enum Axis
+    // `:`: the extent is known at run time.
+    AnyExtent
+    // `3`: the extent is known at compile time.
+    FixedExtent(n: u64)
+    // `N`: a const extent, or a `Rank` parameter standing for every axis -- name resolution tells
+    // which, from the generic list.
+    NamedExtent(name: string)
+
 enum TypeKind
     Named(name: string)
     // `Pair[integer, string]`.
     Applied(name: string, args: Buf[Type])
-    // `[T]`.
-    Array(elem: Type)
+    // `[T; axes]`; `[T]` is `[T; :]`.
+    Array(elem: Type, axes: Buf[Axis])
     // `(T1, T2)`; `()` is the empty tuple.
     Tuple(elems: Buf[Type])
-    // `(P1, P2) -> R`, or `P -> R` with one parameter.
-    Func(params: Buf[Type], ret: Type)
+    // `(P1, inout P2) -> R`, or `P -> R` with one parameter; a mode per parameter.
+    Func(params: Buf[Type], modes: Buf[Mode], ret: Type)
 
 // A piece of an interpolated literal: literal text, or a value with the printf specifier written
 // after it in an `f"..."` literal (`""` where there is none). `$name` is the value of `name`.
@@ -123,6 +140,16 @@ struct LambdaParam
 struct MatchCase
     pat: Pattern
     body: Expr
+
+// `i in 0..n` in a `parallel for` header.
+struct LoopClause
+    name: string
+    range: Expr
+
+// `total: +` after `reduce`: the outer `var` and the operator that combines into it.
+struct Reduction
+    name: string
+    op: string
 
 enum BlockItem
     Item(decl: Decl)
@@ -162,6 +189,8 @@ enum ExprKind
     Index(target: Expr, indices: Buf[Expr])
     // `:` in an index list: the whole of that axis.
     AxisAll
+    // `end` inside an index list: the last index of the axis it indexes.
+    End
     Field(receiver: Expr, name: string)
     // `t.0`.
     TupleField(receiver: Expr, index: usize)
@@ -171,6 +200,10 @@ enum ExprKind
     If(cond: Expr, then_branch: Expr, else_branch: Option[Expr])
     For(pat: Pattern, iterable: Expr, body: Expr)
     While(cond: Expr, body: Expr)
+    // `parallel for i in r, j in s reduce v: op do body`.
+    ParallelFor(clauses: Buf[LoopClause], reductions: Buf[Reduction], body: Expr)
+    // `parallel e`: a map, a reduction or a whole-array expression computed in parallel.
+    Parallel(body: Expr)
     Return(value: Option[Expr])
     Match(scrutinee: Expr, cases: Buf[MatchCase])
     // `target = value`, or a compound `+=`, `-=`, `*=`, `/=`, `%=`.

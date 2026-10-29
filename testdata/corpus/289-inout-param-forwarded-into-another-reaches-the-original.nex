@@ -1,0 +1,7 @@
+def inner(x: inout integer) = x = x + 100
+def outer(y: inout integer) = inner(y)
+
+def main() =
+  var n = 5
+  outer(n)
+  print(n)

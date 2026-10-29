@@ -112,9 +112,41 @@ private show_attr(a: Attribute) -> string
     for arg in a.args
         args.push(arg match
             Str(v) -> quoted(v)
-            Name(n) -> n)
+            Name(n) -> n
+            Named(n, v) -> n + " = " + quoted(v))
 
     "@" + a.name + "(" + join(args.view(), ", ") + ")"
+
+private attrs_prefix(attrs: Buf[Attribute]) -> string
+    var head = ""
+
+    for a in attrs
+        head = head + show_attr(a) + " "
+
+    head
+
+// `(x real)`, `(v inout [real])`, `(@strided x [real])`, `(n integer 1)` with a default.
+private show_params(params: Buf[Param]) -> string
+    var ps: Buf[string] = buf()
+
+    for p in params
+        var text = attrs_prefix(p.attrs) + p.name + " "
+
+        if p.mode == Inout then text = text + "inout "
+
+        text = text + show_type(p.typ)
+
+        p.default match
+            Some(e) -> text = text + " " + show_expr(e)
+            None -> ()
+
+        ps.push("(" + text + ")")
+
+    "(" + join(ps.view(), " ") + ")"
+
+private show_ret(ret: Option[Type]) -> string = ret match
+    Some(t) -> show_type(t)
+    None -> "_"
 
 private generic(name: string, tps: Buf[TypeParam]) -> string
     if tps.len() == 0 then return name
@@ -132,10 +164,7 @@ private show_field(f: Field) -> string = "(" + f.name + " " + show_type(f.typ) +
 
 show_decl(d: Decl) -> string
     var items: Buf[string] = buf()
-    var head = ""
-
-    for a in d.attrs
-        head = head + show_attr(a) + " "
+    var head = attrs_prefix(d.attrs)
 
     if d.private_ then head = head + "private "
 
@@ -159,27 +188,14 @@ show_decl(d: Decl) -> string
         Fun(name, tps, params, ret, body) ->
             head = head + "def"
             items.push(generic(name, tps))
-
-            var ps: Buf[string] = buf()
-
-            for p in params
-                var text = p.name + " "
-
-                if p.mode == Mut then text = text + "mut "
-
-                text = text + show_type(p.typ)
-
-                p.default match
-                    Some(e) -> text = text + " " + show_expr(e)
-                    None -> ()
-
-                ps.push("(" + text + ")")
-
-            items.push("(" + join(ps.view(), " ") + ")")
-            items.push(ret match
-                Some(t) -> show_type(t)
-                None -> "_")
+            items.push(show_params(params))
+            items.push(show_ret(ret))
             items.push(opt_expr(body))
+        Extern(name, params, ret) ->
+            head = head + "extern def"
+            items.push(name)
+            items.push(show_params(params))
+            items.push(show_ret(ret))
         Struct(name, tps, fields) ->
             head = head + "struct"
             items.push(generic(name, tps))
@@ -240,10 +256,27 @@ show_pattern(p: Pattern) -> string = *p.kind match
 show_type(t: Type) -> string = *t.kind match
     Named(n) -> n
     Applied(n, args) -> n + "[" + types(args) + "]"
-    Array(elem) -> "[" + show_type(elem) + "]"
+    Array(elem, axes) ->
+        // `[T; :]` is the type `[T]` names, and prints the short way.
+        var out: Buf[string] = buf()
+
+        for a in axes
+            out.push(a match
+                AnyExtent -> ":"
+                FixedExtent(n) -> n.to_string()
+                NamedExtent(n) -> n)
+
+        if out.len() == 1 && out[0] == ":" then return "[" + show_type(elem) + "]"
+
+        "[" + show_type(elem) + "; " + join(out.view(), ", ") + "]"
     Tuple(elems) -> "(" + types(elems) + ")"
-    Func(params, ret) ->
-        val ps = if params.len() == 1 then show_type(params[0]) else "(" + types(params) + ")"
+    Func(params, modes, ret) ->
+        var out: Buf[string] = buf()
+
+        for i in 0..<params.len()
+            out.push((if modes[i] == Inout then "inout " else "") + show_type(params[i]))
+
+        val ps = if params.len() == 1 then out[0] else "(" + join(out.view(), ", ") + ")"
 
         "(" + ps + " -> " + show_type(ret) + ")"
 
@@ -266,6 +299,7 @@ show_expr(e: Expr) -> string
         UnitLit -> return "()"
         Name(n) -> return n
         AxisAll -> return ":"
+        End -> return "end"
         Interp(parts, format) ->
             for p in parts
                 items.push(p match
@@ -362,6 +396,23 @@ show_expr(e: Expr) -> string
             items.push(show_expr(c))
             items.push(show_expr(body))
             return form("while", items)
+        ParallelFor(clauses, reductions, body) ->
+            for c in clauses
+                items.push("(" + c.name + " " + show_expr(c.range) + ")")
+
+            if reductions.len() > 0
+                var rs: Buf[string] = buf()
+
+                for r in reductions
+                    rs.push("(" + r.name + " " + r.op + ")")
+
+                items.push("(reduce " + join(rs.view(), " ") + ")")
+
+            items.push(show_expr(body))
+            return form("parallel-for", items)
+        Parallel(x) ->
+            items.push(show_expr(x))
+            return form("parallel", items)
         Return(v) ->
             v match
                 Some(x) -> items.push(show_expr(x))

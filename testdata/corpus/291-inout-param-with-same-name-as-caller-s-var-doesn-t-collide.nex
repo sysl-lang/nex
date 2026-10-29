@@ -1,0 +1,8 @@
+def bump(n: inout integer) = n = n + 1
+
+def main() =
+  var n = 0
+  bump(n)
+  bump(n)
+  bump(n)
+  print(n)

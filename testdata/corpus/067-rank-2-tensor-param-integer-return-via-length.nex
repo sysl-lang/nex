@@ -1,6 +1,4 @@
-
-def rows_count(m: [[integer]]): integer = length(m)
+def rows_count(m: [integer; :, :]): integer = length(m)
 
 def main() =
   print(rows_count([[1, 2, 3], [4, 5, 6]]))
-      

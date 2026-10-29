@@ -1,0 +1,8 @@
+def zero_first(xs: inout [integer]) = xs[0] = 0
+
+def main() =
+  var a = [10, 20, 30]
+  var b = a
+  zero_first(b)
+  print(a[0])
+  print(b[0])

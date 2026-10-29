@@ -1,5 +1,3 @@
-
 def main() =
   val a = [10, 20, 30, 40, 50]
-  print(length(a.view(1..4)))
-      
+  print(length(a[1..4]))
