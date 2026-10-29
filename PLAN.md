@@ -207,8 +207,10 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    files of "The corpus under DESIGN.md" committed; `index.tsv`'s `v2` column reads 367 `same` +
    2 untouched-trap `same` (369), 52 `syntax`, 4 `meaning`; `grep -lw mut`, `grep -l '\.view('`
    and the negative-index grep return only 112 and 116.
-1. **M1 — the parser** (branch `m1-parser`). *Exit*: all 425 corpus programs parse; `nex parse`
-   prints the tree; the reference's lexer and parser cases ported; parser cases for array types
+1. **M1 — the parser.** The reference's syntax is on dev (`fa31517`, lexer, parser, corpus and
+   literate tests); what remains is DESIGN.md's syntax, as its own item after M0. *Exit*: all 425
+   corpus programs, as migrated, parse; `nex parse` prints the tree; the reference's lexer and
+   parser cases ported; parser cases for array types
    with axes and static extents, rank-3 literals, every subscript form with `end` (including `end`
    on a continuation line inside brackets, and `end for` after a line ending in `]`), `inout`,
    `parallel for … reduce`, `parallel` expressions and `extern def` with its attributes.
