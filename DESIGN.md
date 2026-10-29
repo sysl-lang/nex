@@ -1153,15 +1153,17 @@ name. `unit` is contextual too: followed by a name at the start of a top-level d
 declares a unit of measure (§13.1), and everywhere else it is the type `unit`. The type names of
 §2.1 are prelude type names, not keywords.
 
-**Units**: a `<` written directly after a numeric literal, a name or a `]`, with no space, opens a
-unit of measure only if the text after it, up to a `>` on the same line, is valid unit syntax
-(`9.81<m/s^2>`, `real32<m/s>`, §13.2); otherwise it is the comparison, so `1<x` and
-`0<x and x>1` compare. Inside the brackets, names are unit names in their own namespace, so `in`
-is a unit there. A `<` after anything else, or after a space, is the comparison.
+**Units**: a `<` written directly after a numeric literal, a name, a `]` or a `)`, with no space,
+opens a unit of measure only if the text after it, up to a `>` on the same line, is valid unit
+syntax (`9.81<m/s^2>`, `real32<m/s>`, §13.2) **and** the annotation ends the operand: what follows
+the `>` cannot begin an operand (§13.2 lists what may). Otherwise it is the comparison, so `1<x`,
+`0<x and x>1`, `0<x>1` and `lo<x<hi` compare. Inside the brackets, names are unit names in their own
+namespace, so `in` is a unit there. A `<` after anything else, or after a space, is the comparison.
 
 **Operator precedence**: `^` binds tighter than unary minus, so `-x^2` is `-(x^2)` as in Fortran and
 mathematics, and `^` is right-associative (`2^3^2` is `2^(3^2)`). `^` is the only power operator;
-there is no `**`.
+there is no `**`. A unit annotation `<u>` is a postfix at the level of a call and a subscript, so it
+binds tighter than `^`, unary minus and juxtaposition: `-3.0<m>^2` is `-((3.0<m>)^2)`.
 
 **Ranges**: `..` is the inclusive range operator and `..<` the half-open one (§5.1); there is no
 `..=`. Both serve slices and `for` headers alike: `for k in 1..n` runs `n` times. There is no `range()` function: `lo..hi` and `lo..<hi` are the only
@@ -1273,9 +1275,33 @@ unit psi = lbf / in^2
 | an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
 | dimensionless | `<1>`: `real<1>` is `real` |
 
-- **`<` opens a unit only directly after a numeric literal, a name or a `]`, with no space, and
-  only when unit syntax up to a `>` on the same line follows.** `x<y`, `1<x` and `2 < x` are
-  comparisons; `2<x>` is the literal 2 with unit `x`.
+- **`<` opens a unit only directly after a numeric literal, a name, a `]` or a `)`, with no space,
+  only when unit syntax up to a `>` on the same line follows, and only when the annotation ends
+  the operand**: the token after the `>` cannot begin an operand. It must be a binary operator (a
+  `-` counts as one), `)`, `]`, `}`, `,`, `=`, `then`, `do`, `else`, a comment or the end of the
+  line; a `(` against the `>` is a call on the annotated operand (`to<mm>(x)`). `x<y`, `1<x` and
+  `2 < x` are comparisons; `2<x>` is the literal 2 with unit `x`.
+- **`<unit>` is a postfix operator on any operand**, at the level of a call `(…)` and a subscript
+  `[…]`: tighter than `^`, unary minus, juxtaposition and every binary operator, and chained left to
+  right with the other postfixes (`x[i]<m>`, `f(x)<m>`, `to<mm>(x)`).
+
+  | Written | Read as |
+  |---|---|
+  | `9.81<m/s^2> * t` | a unit, then `*` |
+  | `f(2.0<in>)` | a unit |
+  | `0<x>1` | comparisons: `1` begins an operand |
+  | `lo<x<hi` | comparisons |
+  | `a<b>-c` | `a` in unit `b`, minus `c` |
+  | `2 * 3.0<m>` | `2 * (3.0<m>)` |
+  | `3.0<m>^2` | `(3.0<m>)^2` |
+  | `-3.0<m>` | `-(3.0<m>)` |
+  | `2pi<rad>` | `2 * (pi<rad>)` |
+  | `(a + b)<m>`, `strip(y)<m>` | a unit on the parenthesised operand, on the call |
+  | `if x<m> then …` | a unit: `then` cannot begin an operand |
+
+- **The checker accepts an annotation only on a dimensionless operand**: it attaches a unit to a
+  number. An operand that already carries a unit is a compile error pointing to `to<u>(x)`, which
+  is how a value changes unit (§13.3).
 - **Plain `real` is dimensionless**, and so is an unannotated literal: `1.0` is `real<1>`.
 - **Units attach to real and complex types only** (**PROPOSED**); integers count things. An integer
   literal with a unit is a real literal of that value: `12<in>` is `12.0<in>`.

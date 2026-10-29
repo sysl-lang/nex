@@ -73,9 +73,38 @@ declares a unit only at the start of a top-level declaration.
 | an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
 | dimensionless | `<1>`: `real<1>` is `real` |
 
-The `<` follows the literal or the type name directly, with no space, and the text after it up to a
-`>` on the same line must be valid unit syntax. Otherwise, or after a space, `<` is the comparison:
-`x<y`, `1<x` and `2 < x` compare, while `2<x>` is the literal 2 with unit `x`.
+The `<` follows the end of an operand directly, with no space — a literal, a name, a `]` or a `)`
+— and two more things must hold for it to open a unit:
+
+- the text after it up to a `>` on the same line is valid unit syntax, and
+- **the annotation ends the operand**: what follows the `>` cannot begin an operand. It is a binary
+  operator (a `-` counts as one), `)`, `]`, `}`, `,`, `=`, `then`, `do`, `else`, a comment or the end
+  of the line. A `(` against the `>` is a call on the annotated operand, as in `to<mm>(x)`.
+
+Otherwise, or after a space, `<` is the comparison: `x<y`, `1<x` and `2 < x` compare, while `2<x>`
+is the literal 2 with unit `x`.
+
+**`<unit>` is a postfix operator on any operand**, at the level of a call `(…)` and a subscript
+`[…]`. It binds tighter than `^`, unary minus, juxtaposition and every binary operator, and chains
+left to right with the other postfixes: `x[i]<m>`, `f(x)<m>`, `to<mm>(x)`.
+
+| Written | Read as |
+|---|---|
+| `9.81<m/s^2> * t` | a unit, then `*` |
+| `f(2.0<in>)` | a unit |
+| `0<x>1` | comparisons: `1` begins an operand |
+| `lo<x<hi` | comparisons |
+| `a<b>-c` | `a` in unit `b`, minus `c` |
+| `2 * 3.0<m>` | `2 * (3.0<m>)` |
+| `3.0<m>^2` | `(3.0<m>)^2` |
+| `-3.0<m>` | `-(3.0<m>)` |
+| `2pi<rad>` | `2 * (pi<rad>)` |
+| `(a + b)<m>`, `strip(y)<m>` | a unit on the parenthesised operand, on the call |
+| `if x<m> then …` | a unit: `then` cannot begin an operand |
+
+An annotation attaches a unit to a **dimensionless** operand. One written on an operand that
+already carries a unit is a compile error, which points to `to<u>(x)`: that is how a value changes
+unit.
 
 Plain `real` is dimensionless, and so is a literal written without a unit. A unit can be attached to
 a real or complex type of any width; integers count things and carry no unit, and an integer

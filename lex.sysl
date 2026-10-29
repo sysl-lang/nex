@@ -8,12 +8,12 @@
 // - **A newline inside brackets is whitespace**, except after a `->` that ends its line: that
 //   opens a block-form lambda body, whose lines count until the bracket that holds it closes, or
 //   until a `,` at the body's own level hands the next argument back to the bracket.
-// - **A `<` written against a number or a name opens a unit annotation**, `9.81<m/s^2>`,
-//   `real<m>`, `to<mm>(x)`: against a number always, and against a name (or the `]` of
-//   `complex[real32]<V>`) when a `>` closes it on
-//   the same line around nothing but unit syntax (names other than reserved words, `in` aside;
-//   digits, blanks, `/`, `^`, `-`, `.` and parentheses). Anywhere else, and with a blank before it,
-//   `<` is the comparison, so `a < b`, `n<3` and `a[i]<b` compare.
+// - **A `<` written against the end of an operand opens a unit annotation** — against a number, a
+//   name, a `]` or a `)`: `9.81<m/s^2>`, `real<m>`, `to<mm>(x)`, `x[i]<m>`, `(a + b)<m>` — when a
+//   `>` closes it on the same line around nothing but unit syntax (names other than reserved words,
+//   `in` aside; digits, blanks, `/`, `^`, `-`, `.` and parentheses), and what follows that `>` cannot
+//   begin an operand (`ends_annotation`). Anywhere else, and with a blank before it, `<` is the
+//   comparison, so `a < b`, `n<3`, `a[i]<b`, `0<x>1` and `lo<x<hi` compare.
 // - **A line ending in a binary operator, `and` or `or` continues on the next line**, outside
 //   brackets.
 // - **A `Newline` comes before an `Indent` and after each `Dedent`**, and the input ends with a
@@ -73,6 +73,9 @@ private val reserved = ["and", "as", "const", "cycle", "def", "div", "do", "elif
 private val operators = ["..=", "..<", "..", "->", ".*", "**", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
     "%=", "(", ")", "[", "]", "{", "}", "+", "-", "*", "/", "%", "^", "@", "<", ">", "=", ".", ",",
     ";", ":"]
+
+// The words that may follow a unit annotation's `>`: none of them begins an operand.
+private val annotation_enders = ["then", "do", "else", "and", "or", "div", "as", "by"]
 
 // The tokens that leave a line unfinished when they end it.
 private val continuations = ["+", "-", "*", "/", "%", "^", "==", "!=", "<", ">", "<=", ">=", "and",
@@ -296,26 +299,17 @@ private scan_punct(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]], m: usize)
     if s.peek() == Some(u8('<')) && s.peek_at(1) != Some(u8('=')) && out.len() > 0
         val prev = out.at(out.len() - 1)
         val glued = prev.span.end == m
-        val after = s.rest()[1..<s.rest().len]
+        val ends_operand = prev.value match
+            Num(_) -> true
+            Ident(_) -> true
+            // `x[i]<m>`, `complex[real32]<V>`, `(a + b)<m>`, `f(x)<m>`.
+            Keyword(k) -> k == "]" || k == ")"
+            _ -> false
 
-        prev.value match
-            Num(_) ->
-                if glued && closes_on_line(after, true)
-                    s.bump()
-                    out.push(Spanned(UnitOpen, s.span_from(m)))
-                    return Ok(())
-            Ident(_) ->
-                if glued && closes_on_line(after, true)
-                    s.bump()
-                    out.push(Spanned(UnitOpen, s.span_from(m)))
-                    return Ok(())
-            Keyword(k) ->
-                // `complex[real32]<V>`: an applied type name.
-                if k == "]" && glued && closes_on_line(after, true)
-                    s.bump()
-                    out.push(Spanned(UnitOpen, s.span_from(m)))
-                    return Ok(())
-            _ -> ()
+        if glued && ends_operand && opens_unit(s.rest()[1..<s.rest().len])
+            s.bump()
+            out.push(Spanned(UnitOpen, s.span_from(m)))
+            return Ok(())
     end if
 
     for op in operators
@@ -356,21 +350,25 @@ private unit_open(out: *Buf[Spanned[Tok]]) -> bool
     false
 end unit_open
 
-// Whether a `>` closes a unit annotation in `text` before the line ends. With `shaped`, only unit
+// Whether the text after a glued `<` makes it a unit annotation: a `>` closes it on the same line
+// around nothing but unit syntax, and what follows that `>` cannot begin an operand, so the
+// annotation ends the operand it is written on. `0<x>1` and `a<b>c` therefore compare.
+private opens_unit(text: []const u8) -> bool
+    closes_on_line(text) match
+        Some(close) -> ends_annotation(text[close + 1..<text.len])
+        None -> false
+
+// The offset of the `>` that closes a unit annotation in `text` before the line ends. Only unit
 // syntax may stand before it: a name that is a reserved word other than `in`, or any other
 // punctuation, says the `<` was a comparison.
-private closes_on_line(text: []const u8, shaped: bool) -> bool
+private closes_on_line(text: []const u8) -> Option[usize]
     var i: usize = 0
 
     while i < text.len
         val c = text[i]
 
-        if c == u8('>') then return true
-        if c == u8('\n') || c == u8('\r') then return false
-
-        if !shaped
-            i += 1
-            continue
+        if c == u8('>') then return Some(i)
+        if c == u8('\n') || c == u8('\r') then return None
 
         if is_name_start(c)
             val start = i
@@ -380,19 +378,51 @@ private closes_on_line(text: []const u8, shaped: bool) -> bool
 
             val word = from_utf8_unchecked(text[start..<i])
 
-            if is_reserved(word) && word != "in" then return false
+            if is_reserved(word) && word != "in" then return None
 
             continue
 
         if !(c.is_digit() || c == u8(' ') || c == u8('\t') || c == u8('/') || c == u8('^') ||
             c == u8('-') || c == u8('.') || c == u8('(') || c == u8(')'))
-            return false
+            return None
 
         i += 1
     end while
 
-    false
+    None
 end closes_on_line
+
+// Whether `text`, which follows a unit annotation's `>`, cannot begin an operand: it is the end of
+// the line, a comment, a binary operator (a `-` counts as one, so `a<b>-c` subtracts), a closing
+// bracket, `,`, `=`, `:`, `;`, or one of the words `then`, `do`, `else`, `and`, `or`, `div`, `as`,
+// `by`. A `(` against the `>` is a call on the annotated operand, as in `to<mm>(x)`.
+private ends_annotation(text: []const u8) -> bool
+    if text.len > 0 && text[0] == u8('(') then return true
+
+    var i: usize = 0
+
+    while i < text.len && (text[i] == u8(' ') || text[i] == u8('\t'))
+        i += 1
+
+    if i == text.len then return true
+
+    val c = text[i]
+
+    if is_name_start(c)
+        val start = i
+
+        while i < text.len && is_name_cont(text[i])
+            i += 1
+
+        return contains(annotation_enders, from_utf8_unchecked(text[start..<i]))
+
+    if c == u8('.') then return i + 1 < text.len && text[i + 1] == u8('.')
+    if c == u8('!') then return i + 1 < text.len && text[i + 1] == u8('=')
+
+    c == u8('\n') || c == u8('\r') || c == u8('+') || c == u8('-') || c == u8('*') || c == u8('/') ||
+        c == u8('%') || c == u8('^') || c == u8('=') || c == u8('<') || c == u8('>') || c == u8('@') ||
+        c == u8(')') || c == u8(']') || c == u8('}') || c == u8(',') || c == u8(':') || c == u8(';')
+end ends_annotation
 
 private drain(out: *Buf[Spanned[Tok]], closed: usize, at: Span)
     if closed == 0 then return

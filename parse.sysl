@@ -2,7 +2,8 @@
 //
 // Each function reads one construct of spec chapters 4 to 9 and is named for it. Precedence is the
 // table of §4.3, loosest first: `,` (a tuple), `->` (a lambda), `or`, `and`, comparison, `..`,
-// `+ -`, `* / div % @`, juxtaposition, unary `-` and `not`, `^`, then calls, indexing and `.`.
+// `+ -`, `* / div % @`, juxtaposition, unary `-` and `not`, `^`, then calls, indexing, `.` and a
+// unit annotation `<unit>`, all postfix and chained left to right.
 // A postfix `match` may follow any expression short of a tuple. A loop label, `name:`, is told
 // from a name by the `for` or `while` two tokens on.
 //
@@ -1108,7 +1109,7 @@ struct Parser
 
         Ok(ex(self.toks.span_from(m), BinOp("^", base, exponent)))
 
-    // A primary expression and the calls, indexing and field accesses after it.
+    // A primary expression and the calls, indexing, field accesses and unit annotations after it.
     postfix(*self) -> Result[Expr, Diagnostic]
         val m = self.toks.mark()
         var e = self.primary()?
@@ -1151,6 +1152,11 @@ struct Parser
                             e = ex(self.toks.span_from(m), MethodCall(e, name, args))
                         else
                             e = ex(self.toks.span_from(m), Field(e, name))
+            elif is_unit_open(self.tok(0))
+                // `e<unit>`, where the lexer found a unit annotation ending the operand.
+                val u = self.annotation()?
+
+                e = ex(self.toks.span_from(m), Measured(e, u))
             else
                 break
         end loop
@@ -1223,9 +1229,7 @@ struct Parser
             Num(text) ->
                 self.bump()
 
-                val lit = number(self.toks.span_from(m), text, false)?
-
-                return self.measured(m, lit)
+                return number(self.toks.span_from(m), text, false)
             Str(v) ->
                 self.bump()
                 return Ok(ex(self.toks.span_from(m), StrLit(v)))
@@ -1247,7 +1251,7 @@ struct Parser
                 end if
 
                 self.bump()
-                return self.measured(m, ex(self.toks.span_from(m), ExprKind.Name(name)))
+                return Ok(ex(self.toks.span_from(m), ExprKind.Name(name)))
             _ -> ()
 
         if self.accept("true") then return Ok(ex(self.toks.span_from(m), BoolLit(true)))
@@ -1314,14 +1318,6 @@ struct Parser
 
         self.fail("an expression")
     end primary
-
-    // `e`, or `e<unit>` where the lexer found a unit annotation written against it.
-    measured(*self, m: usize, e: Expr) -> Result[Expr, Diagnostic]
-        if !is_unit_open(self.tok(0)) then return Ok(e)
-
-        val u = self.annotation()?
-
-        Ok(ex(self.toks.span_from(m), Measured(e, u)))
 
     // Whether an expression can begin at the cursor, which is what decides whether a `return` has
     // a value.

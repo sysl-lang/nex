@@ -195,10 +195,14 @@ pub       trait     type      where     yield
 - `unit` followed by a name at the start of a top-level declaration declares a unit of measure
   (`unit ft = 12 in`, [chapter 13](/spec/13-units/)). Everywhere else `unit` is the type.
 
-**Units of measure** are written in angle brackets directly after a numeric literal or a type
-name, with no space: `9.81<m/s^2>`, `real<mm>`. Inside the brackets, names are unit names, so `in`
-is the inch there. A `<` is a unit bracket only when unit syntax and a `>` follow on the same line;
-otherwise, or after a space, it is the comparison (`1<x` compares).
+**Units of measure** are written in angle brackets directly after an operand, with no space: after
+a numeric literal, a name, a `]` or a `)` — `9.81<m/s^2>`, `real<mm>`, `x[i]<m>`, `(a + b)<m>`.
+Inside the brackets, names are unit names, so `in` is the inch there. **A unit annotation must end
+its operand**: a glued `<` is a unit bracket only when unit syntax and a `>` follow on the same line
+*and* what follows that `>` cannot begin an operand — a binary operator (a `-` counts as one), `)`,
+`]`, `}`, `,`, `=`, `then`, `do`, `else`, a comment or the end of the line. A `(` against the `>` is
+a call on the annotated operand, as in `to<mm>(x)`. Otherwise, or after a space, `<` is the
+comparison: `1<x`, `0<x>1` and `lo<x<hi` compare, and `a<b>-c` is `a` in unit `b`, minus `c`.
 
 **Type names are not keywords.** `integer`, `real`, `complex`, `int8` … `int64`, `uint8` …
 `uint64`, `real16`, `real32`, `real64`, `bool`, `string` and `unit` are names the prelude defines
@@ -309,7 +313,7 @@ Operators, from the most tightly binding to the least:
 | Level | Operators | Associativity | Meaning |
 |---|---|---|---|
 | 1 | `.` | left | field access |
-| 2 | `f(…)`, `a[…]` | left | call, subscript |
+| 2 | `f(…)`, `a[…]`, `x<unit>` | left | call, subscript, unit annotation |
 | 3 | `^` | right | power (Fortran's `**`) |
 | 4 | unary `-`, `not` | right | negation |
 | 5 | juxtaposition | left | `2x`, `2pi`, `2(x + 1)` |
