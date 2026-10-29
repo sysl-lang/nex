@@ -18,9 +18,9 @@ private rows() -> Buf[string]
 
     out
 
-@test("the corpus index lists all 431 programs")
+@test("the corpus index lists all 433 programs")
 corpus_count()
-    assert_eq(rows().len(), 431)
+    assert_eq(rows().len(), 433)
 
 @test("every program in the index has a source and an expected output")
 corpus_files()

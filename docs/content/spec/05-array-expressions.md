@@ -43,6 +43,15 @@ val big = a > 1.5                   // [false, true, true]
 val mid = (a > 1.5) and (a < 2.5)   // [false, true, false]
 ```
 
+A chained comparison on arrays is element-wise as well: each comparison gives a `bool` array and the
+results are combined with an element-wise `and`. Every operand is evaluated once, whole, before the
+comparisons; there is no short-circuit per element, as there is on scalars
+([Lexical structure](/spec/02-lexical/)).
+
+```nex
+val inside = 1.5 < a < 2.5          // [false, true, false]
+```
+
 `and` and `or` short-circuit only on scalar `bool`s; on arrays both sides are computed.
 
 The prelude's math functions are **elemental**: applied to an array they apply to every element, and

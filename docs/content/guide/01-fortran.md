@@ -123,6 +123,7 @@ Inside a subscript, `end` means the last index of that axis. nex also has a half
 | `mod(a, b)` | `a % b` |
 | `a / b` on two integers | `a div b` (`a / b` on two integers gives a `real`) |
 | `a /= b`, `.and.`, `.or.`, `.not.` | `a != b`, `and`, `or`, `not` |
+| `lo <= x .and. x <= hi` | `lo <= x <= hi` (a chained comparison; `x` evaluated once) |
 
 `@` is matrix multiplication on ranks 1 and 2 and calls BLAS when the product is large enough to
 pay for it ([Array expressions](/spec/05-array-expressions/)). Note that `@` on two complex

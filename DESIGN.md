@@ -1165,6 +1165,18 @@ mathematics, and `^` is right-associative (`2^3^2` is `2^(3^2)`). `^` is the onl
 there is no `**`. A unit annotation `<u>` is a postfix at the level of a call and a subscript, so it
 binds tighter than `^`, unary minus and juxtaposition: `-3.0<m>^2` is `-((3.0<m>)^2)`.
 
+**Chained comparisons**: two or more of `==`, `!=`, `<`, `<=`, `>`, `>=` in a row, mixed freely, are
+one chained comparison, as in ref §4.6: `0 < x < 1`, `lo <= x < hi`, `a == b == c`. The parser
+builds one node for the whole run (`Chain(operands, ops)`; a single comparison stays a `BinOp`) and
+never rewrites it into `and`, which would write the middle operand twice. Parentheses end a chain:
+`(a < b) < c` compares a `bool` with `c`. Each operand is evaluated **at most once, left to right**.
+- **On scalars** the chain stops at the first false comparison and the operands after it are not
+  evaluated: `0 < f() < g()` calls `g` only when `0 < f()` holds.
+- **On arrays** (any operand an array, §7.1) each comparison is element-wise and the results are
+  combined with an element-wise `and`, so `0.0 < a <= 1.0` is a `[bool]` of `a`'s shape. Every
+  operand is evaluated exactly once, whole, before the comparisons; there is no per-element
+  short-circuit. Shapes and broadcasting follow §7.1 pairwise.
+
 **Ranges**: `..` is the inclusive range operator and `..<` the half-open one (§5.1); there is no
 `..=`. Both serve slices and `for` headers alike: `for k in 1..n` runs `n` times. There is no `range()` function: `lo..hi` and `lo..<hi` are the only
 range spellings, and each is an integer array wherever an expression may stand (`sum(0..<n)`). A
@@ -1445,6 +1457,7 @@ is in `K` until the affine units of §15 arrive.
 | FFI, BLAS, LAPACK | §6.11, §11.2 | §10 | `extern def`, `@link`, `@symbol`, `@strided`, `@pure`, `@c` structs, callbacks, complex by value; LAPACK value forms trap, `inout` forms return `info` |
 | Calling Fortran | — | §10.6 | `bind(c)` and plain gfortran procedures through `@fortran` |
 | Keywords | §2.3 | §11 | `inout`, `parallel`, `extern`, `enum`, `exit`, `cycle`, `stop`; contextual `unit` |
+| Chained comparisons | §4.6 (scalars) | §11 | one `Chain` node, never an `and` rewrite; on arrays the comparisons combine element-wise, every operand evaluated once, no per-element short-circuit |
 | `^` and unary minus | — | §11 | `^` binds tighter than unary minus (`-x^2` is `-(x^2)`) and is right-associative |
 | Loop control | — | §11.1 | `exit`, `cycle`, named loops, `stop n`, `by` in a `for` header |
 | Program entry | — | §11.2 | `main()` or `main(args: [string])`, 1-based `args`; declarations only at the top level; `eprint` |

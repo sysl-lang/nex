@@ -1,0 +1,11 @@
+def mid(): integer =
+  print("mid")
+  5
+
+def last(): integer =
+  print("last")
+  10
+
+def main() =
+  print(7 < mid() < last())
+  print(1 < mid() < last())

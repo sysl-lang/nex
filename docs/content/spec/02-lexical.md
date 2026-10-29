@@ -326,7 +326,12 @@ Operators, from the most tightly binding to the least:
 | 12 | `->` | right | function literal, function type |
 | 13 | `,` | right | tuple |
 
-Comparisons chain: `0 <= k < n` means `0 <= k and k < n`, with `k` evaluated once.
+Comparisons chain: two or more of `==`, `!=`, `<`, `<=`, `>`, `>=` in a row, mixed freely, are one
+chained comparison. `0 <= k < n` is true when `0 <= k` and `k < n` both are, with `k` evaluated
+once. The operands are evaluated left to right, each at most once, and on scalars the chain stops at
+the first false comparison: in `0 < f() < g()`, `g` is not called when `0 < f()` is false. On arrays
+the comparisons combine element by element ([Array expressions](/spec/05-array-expressions/)).
+Parentheses end a chain: `(a < b) < c` compares the `bool` `a < b` with `c`.
 
 `^` binds tighter than unary minus, so `-x^2` is `-(x^2)`, as in mathematics and as Fortran's
 `-x**2` is; write `(-x)^2` for the square of the negation. `^` is right-associative: `2^3^2` is

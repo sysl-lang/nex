@@ -430,3 +430,5 @@ file	category	name	mlir	pending	v3
 429-to-converts-between-scaled-units	units of measure	to converts between scaled units	false		new
 430-a-function-generic-over-a-unit	units of measure	a function generic over a unit	false		new
 431-strip-drops-the-unit	units of measure	strip drops the unit	false		new
+432-a-chained-comparison-evaluates-its-middle-once	chained comparisons	a chained comparison evaluates its middle once	false		new
+433-a-chained-comparison-stops-at-the-first-false	chained comparisons	a chained comparison stops at the first false	false		new
