@@ -1,0 +1,17 @@
+// Literate nex (spec §2.9): a `.lnex` file is Markdown whose indented blocks are the program. Prose
+// is blanked rather than removed, so every line of the program is on the line of the document it was
+// written on.
+//
+// The tangling is `sh.sysl.parsing`'s `tangle_literate`, which keeps the same rules as sysl's own
+// `.lsysl` files. Two of them differ from §2.9: it refuses a tab in a code line's indentation where
+// §2.9 counts a leading tab as one level, and it ends every line with `\n` where the reference keeps
+// `\r\n`. The tests that pin §2.9's wording on both are written and waiting.
+
+import sh.sysl.parsing.{Diagnostic, Source, tangle_literate}
+
+// Whether a file is literate is said by its name, since nothing inside the text could say it.
+is_literate(name: string) -> bool = name.ends_with(".lnex")
+
+// The program text of a source file: the file itself, or the program a literate one holds.
+program_text(doc: Source) -> Result[Source, Diagnostic] =
+    if is_literate(doc.name) then tangle_literate(doc) else Ok(doc)

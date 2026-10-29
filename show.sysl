@@ -1,0 +1,390 @@
+// The printed forms of what the lexer and the parser produce: what `nex tokens` and `nex parse`
+// print, and what the tests compare against.
+//
+// **A tree prints as an S-expression**, one form per node with its operator first: `(+ 1 (* 2 x))`,
+// `(call f a b)`, `(def square ((x real)) real (* x x))`. A name, a number and a string print as
+// themselves; a part left out prints as `_`. Types print in nex's own syntax, since they are short
+// and have no precedence to show.
+
+import sysl.buf.{Buf, buf}
+import sysl.fmt.shortest
+import sysl.text.{from_utf8_unchecked, join}
+import sh.sysl.parsing.{Source, Spanned, write_quoted}
+
+// -- tokens -----------------------------------------------------------------------------------------
+
+// One token in a compact form: `K(def)` for a keyword or an operator, `ID(x)`, `N(42)`, `S(text)`,
+// and `NL`, `INDENT`, `DEDENT` for the layout. An interpolated literal prints as its body after `s:`
+// or `f:`.
+show_token(src: Source, t: Tok) -> string = t match
+    Num(text) -> s"N(${text})"
+    Str(value) -> s"S(${escaped(value)})"
+    Interp(pieces, format) -> s"S(${escaped(interp_body(src, pieces, format))})"
+    Ident(name) -> s"ID(${name})"
+    Keyword(text) -> s"K(${text})"
+    Newline -> "NL"
+    Indent -> "INDENT"
+    Dedent -> "DEDENT"
+    Eof -> "EOF"
+
+// The tokens of a file, without the end marker.
+token_names(src: Source, toks: Buf[Spanned[Tok]]) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for t in toks
+        t.value match
+            Eof -> ()
+            v -> out.push(show_token(src, v))
+
+    out
+
+show_tokens(src: Source, toks: Buf[Spanned[Tok]]) -> string = join(token_names(src, toks).view(), "\n") + "\n"
+
+private interp_body(src: Source, pieces: Buf[Piece], format: bool) -> string
+    var out = if format then "f:" else "s:"
+
+    for p in pieces
+        val piece = p match
+            Chunk(text) -> text
+            NameHole(at, spec) -> "$" + from_utf8_unchecked(src.text(at)) + spec
+            ExprHole(at, spec) -> "${" + from_utf8_unchecked(src.text(at)) + "}" + spec
+
+        out = out + piece
+
+    out
+
+// Control characters and the backslash written as escapes, so a token stays on one line.
+private escaped(text: string) -> string
+    var b: Buf[u8] = buf()
+
+    for c in text.bytes
+        if c == u8('\n') then
+            b.extend("\\n".bytes)
+        elif c == u8('\t') then
+            b.extend("\\t".bytes)
+        elif c == u8('\r') then
+            b.extend("\\r".bytes)
+        elif c == u8('\\') then
+            b.extend("\\\\".bytes)
+        else
+            b.push(c)
+
+    from_utf8_unchecked(b.view()).copy()
+
+// -- the tree ---------------------------------------------------------------------------------------
+
+private quoted(text: string) -> string = write_quoted(text, u8('"'))
+
+// `(head item item ...)`.
+private form(head: string, items: Buf[string]) -> string =
+    if items.len() == 0 then "(" + head + ")" else "(" + head + " " + join(items.view(), " ") + ")"
+
+private exprs_into(out: *Buf[string], es: Buf[Expr])
+    for e in es
+        out.push(show_expr(e))
+
+private opt_expr(e: Option[Expr]) -> string = e match
+    Some(x) -> show_expr(x)
+    None -> "_"
+
+// A real always with a point or an exponent, so it never reads as an integer.
+private show_real(x: real) -> string
+    val text = shortest(x)
+
+    for c in text.bytes
+        if c == u8('.') || c == u8('e') || c == u8('n') then return text
+
+    text + ".0"
+
+show_program(p: Program) -> string
+    var out: Buf[string] = buf()
+
+    for d in p.decls
+        out.push(show_decl(d))
+
+    join(out.view(), "\n")
+
+private show_attr(a: Attribute) -> string
+    if a.args.len() == 0 then return "@" + a.name
+
+    var args: Buf[string] = buf()
+
+    for arg in a.args
+        args.push(arg match
+            Str(v) -> quoted(v)
+            Name(n) -> n)
+
+    "@" + a.name + "(" + join(args.view(), ", ") + ")"
+
+private generic(name: string, tps: Buf[TypeParam]) -> string
+    if tps.len() == 0 then return name
+
+    var out: Buf[string] = buf()
+
+    for tp in tps
+        out.push(tp.constraint match
+            Some(c) -> tp.name + ": " + c
+            None -> tp.name)
+
+    name + "[" + join(out.view(), ", ") + "]"
+
+private show_field(f: Field) -> string = "(" + f.name + " " + show_type(f.typ) + ")"
+
+show_decl(d: Decl) -> string
+    var items: Buf[string] = buf()
+    var head = ""
+
+    for a in d.attrs
+        head = head + show_attr(a) + " "
+
+    if d.private_ then head = head + "private "
+
+    *d.kind match
+        Bind(kind, pat, typ, init) ->
+            val word = kind match
+                Val -> "val"
+                Var -> "var"
+                Const -> "const"
+
+            head = head + word
+            items.push(show_pattern(pat))
+
+            typ match
+                Some(t) ->
+                    items.push(":")
+                    items.push(show_type(t))
+                None -> ()
+
+            items.push(show_expr(init))
+        Fun(name, tps, params, ret, body) ->
+            head = head + "def"
+            items.push(generic(name, tps))
+
+            var ps: Buf[string] = buf()
+
+            for p in params
+                var text = p.name + " "
+
+                if p.mode == Mut then text = text + "mut "
+
+                text = text + show_type(p.typ)
+
+                p.default match
+                    Some(e) -> text = text + " " + show_expr(e)
+                    None -> ()
+
+                ps.push("(" + text + ")")
+
+            items.push("(" + join(ps.view(), " ") + ")")
+            items.push(ret match
+                Some(t) -> show_type(t)
+                None -> "_")
+            items.push(opt_expr(body))
+        Struct(name, tps, fields) ->
+            head = head + "struct"
+            items.push(generic(name, tps))
+
+            for f in fields
+                items.push(show_field(f))
+        Enum(name, tps, variants) ->
+            head = head + "enum"
+            items.push(generic(name, tps))
+
+            for v in variants
+                if v.fields.len() == 0
+                    items.push(v.name)
+                else
+                    var fs: Buf[string] = buf()
+
+                    fs.push(v.name)
+
+                    for f in v.fields
+                        fs.push(show_field(f))
+
+                    items.push("(" + join(fs.view(), " ") + ")")
+        Module(path) ->
+            head = head + "module"
+            items.push(join(path.view(), "."))
+        Import(path, selectors, wildcard) ->
+            head = head + "import"
+            items.push(join(path.view(), "."))
+
+            if wildcard then items.push("*")
+
+            for sel in selectors
+                items.push(sel.alias match
+                    Some(a) -> "(" + sel.name + " as " + a + ")"
+                    None -> sel.name)
+
+    form(head, items)
+end show_decl
+
+show_pattern(p: Pattern) -> string = *p.kind match
+    Name(n) -> n
+    Wildcard -> "_"
+    Tuple(elems) ->
+        var out: Buf[string] = buf()
+
+        for e in elems
+            out.push(show_pattern(e))
+
+        form("tuple", out)
+    Variant(name, args) ->
+        var out: Buf[string] = buf()
+
+        for a in args
+            out.push(show_pattern(a))
+
+        form(name, out)
+
+show_type(t: Type) -> string = *t.kind match
+    Named(n) -> n
+    Applied(n, args) -> n + "[" + types(args) + "]"
+    Array(elem) -> "[" + show_type(elem) + "]"
+    Tuple(elems) -> "(" + types(elems) + ")"
+    Func(params, ret) ->
+        val ps = if params.len() == 1 then show_type(params[0]) else "(" + types(params) + ")"
+
+        "(" + ps + " -> " + show_type(ret) + ")"
+
+private types(ts: Buf[Type]) -> string
+    var out: Buf[string] = buf()
+
+    for t in ts
+        out.push(show_type(t))
+
+    join(out.view(), ", ")
+
+show_expr(e: Expr) -> string
+    var items: Buf[string] = buf()
+
+    *e.kind match
+        IntLit(v) -> return v.to_string()
+        RealLit(v) -> return show_real(v)
+        BoolLit(v) -> return v.to_string()
+        StrLit(v) -> return quoted(v)
+        UnitLit -> return "()"
+        Name(n) -> return n
+        AxisAll -> return ":"
+        Interp(parts, format) ->
+            for p in parts
+                items.push(p match
+                    Text(text) -> quoted(text)
+                    Value(x, spec) -> if spec.len == 0 then show_expr(x) else "(spec " + show_expr(x) + " " + quoted(spec) + ")")
+
+            return form(if format then "f" else "s", items)
+        BinOp(op, l, r) ->
+            items.push(show_expr(l))
+            items.push(show_expr(r))
+            return form(op, items)
+        Chain(operands, ops) ->
+            for i in 0..<operands.len()
+                if i > 0 then items.push(ops[i - 1])
+
+                items.push(show_expr(operands[i]))
+
+            return form("chain", items)
+        Unary(op, x) ->
+            items.push(show_expr(x))
+            return form(op, items)
+        Juxtapose(c, b) ->
+            items.push(show_expr(c))
+            items.push(show_expr(b))
+            return form("juxt", items)
+        Range(lo, hi, inclusive, stride) ->
+            items.push(opt_expr(lo))
+            items.push(opt_expr(hi))
+
+            stride match
+                Some(k) ->
+                    items.push("by")
+                    items.push(show_expr(k))
+                None -> ()
+
+            return form(if inclusive then "..=" else "..", items)
+        Array(elems) ->
+            exprs_into(&items, elems)
+            return form("array", items)
+        Tuple(elems) ->
+            exprs_into(&items, elems)
+            return form("tuple", items)
+        Call(callee, args) ->
+            items.push(show_expr(callee))
+            exprs_into(&items, args)
+            return form("call", items)
+        NamedArg(n, v) ->
+            items.push(n)
+            items.push(show_expr(v))
+            return form("named", items)
+        Index(target, indices) ->
+            items.push(show_expr(target))
+            exprs_into(&items, indices)
+            return form("index", items)
+        Field(r, n) ->
+            items.push(show_expr(r))
+            items.push(n)
+            return form(".", items)
+        TupleField(r, i) ->
+            items.push(show_expr(r))
+            items.push(i.to_string())
+            return form(".", items)
+        MethodCall(r, n, args) ->
+            items.push(show_expr(r))
+            items.push(n)
+            exprs_into(&items, args)
+            return form("method", items)
+        Lambda(params, body) ->
+            var ps: Buf[string] = buf()
+
+            for p in params
+                ps.push(p.typ match
+                    Some(t) -> "(" + p.name + " " + show_type(t) + ")"
+                    None -> p.name)
+
+            items.push("(" + join(ps.view(), " ") + ")")
+            items.push(show_expr(body))
+            return form("fn", items)
+        If(c, t, el) ->
+            items.push(show_expr(c))
+            items.push(show_expr(t))
+
+            el match
+                Some(x) -> items.push(show_expr(x))
+                None -> ()
+
+            return form("if", items)
+        For(p, it, body) ->
+            items.push(show_pattern(p))
+            items.push(show_expr(it))
+            items.push(show_expr(body))
+            return form("for", items)
+        While(c, body) ->
+            items.push(show_expr(c))
+            items.push(show_expr(body))
+            return form("while", items)
+        Return(v) ->
+            v match
+                Some(x) -> items.push(show_expr(x))
+                None -> ()
+
+            return form("return", items)
+        Match(scrutinee, cases) ->
+            items.push(show_expr(scrutinee))
+
+            for c in cases
+                items.push("(" + show_pattern(c.pat) + " " + show_expr(c.body) + ")")
+
+            return form("match", items)
+        Assign(op, t, v) ->
+            items.push(show_expr(t))
+            items.push(show_expr(v))
+            return form(op, items)
+        Block(its, result) ->
+            for it in its
+                items.push(it match
+                    Item(d) -> show_decl(d)
+                    Stmt(x) -> show_expr(x))
+
+            items.push(show_expr(result))
+            return form("block", items)
+end show_expr

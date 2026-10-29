@@ -12,6 +12,12 @@ package {
   sysl    = "0.7.9"
 }
 
+// The lexer and parser are written on `sh.sysl.parsing`: its scanner, its layout pass for the
+// off-side rule, its interpolated-literal reader and its diagnostics.
+dependencies {
+  parsing { git = "github.com/sysl-lang/parsing", version = "0.13.2" }
+}
+
 // **`os`** to read source files and the corpus; **`heap`** for every tree the compiler builds.
 requires {
   os   = true

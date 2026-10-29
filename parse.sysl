@@ -1,0 +1,1096 @@
+// The nex parser: tokens to the tree in `ast.sysl`, by recursive descent.
+//
+// Each function reads one construct of spec chapters 4 to 9 and is named for it. Precedence is the
+// table of §4.3, loosest first: `,` (a tuple), `->` (a lambda), `or`, `and`, comparison, `..`,
+// `+ -`, `* / div % @`, juxtaposition, `^`, unary `-` and `not`, then calls, indexing and `.`.
+// A postfix `match` may follow any expression short of a tuple.
+//
+// **Two places look ahead before they commit**, and both are where the language puts the deciding
+// token after the part that is ambiguous: a parenthesised lambda head (`(x, y) -> ...` against the
+// tuple `(x, y)`) is told by the `->` after it, and a statement is an assignment when an assignment
+// operator follows what it began with. The rest decides on the token in front of it.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.{from_utf8_unchecked, parse_real}
+import sh.sysl.parsing.{Diagnostic, Source, Span, Spanned, Tokens, error, tokens_of}
+
+// A whole file: its declarations.
+parse_program(src: Source) -> Result[Program, Diagnostic]
+    var p = parser(src, lex(src)?)
+
+    p.program()
+
+// One expression standing alone, as a `${...}` hole holds and as tests write them.
+parse_expression(src: Source) -> Result[Expr, Diagnostic]
+    var p = parser(src, lex(src)?)
+
+    p.standalone()
+
+private parser(src: Source, toks: Buf[Spanned[Tok]]) -> Parser = Parser(src, tokens_of(toks))
+
+private is_kw(t: Tok, text: string) -> bool = t match
+    Keyword(k) -> k == text
+    _ -> false
+
+private is_newline(t: Tok) -> bool = t match
+    Newline -> true
+    _ -> false
+
+private is_indent(t: Tok) -> bool = t match
+    Indent -> true
+    _ -> false
+
+private is_dedent(t: Tok) -> bool = t match
+    Dedent -> true
+    _ -> false
+
+private is_ident(t: Tok) -> bool = t match
+    Ident(_) -> true
+    _ -> false
+
+private is_eof(t: Tok) -> bool = t match
+    Eof -> true
+    _ -> false
+
+// How a token is named in a complaint about finding it.
+private described(t: Tok) -> string = t match
+    Num(text) -> s"'${text}'"
+    Str(_) -> "a string"
+    Interp(_, _) -> "an interpolated string"
+    Ident(name) -> s"'${name}'"
+    Keyword(text) -> s"'${text}'"
+    Newline -> "the end of the line"
+    Indent -> "an indented block"
+    Dedent -> "the end of the block"
+    Eof -> "the end of the input"
+
+private ex(span: Span, kind: ExprKind) -> Expr = Expr(span, kind)
+
+// The words that may close a block after `end`, beside the construct's own name.
+private val end_words = ["if", "for", "while", "do", "def", "struct", "enum", "module", "match"]
+
+private val compare_ops = ["==", "!=", "<", "<=", ">", ">="]
+
+private val mul_ops = ["*", "/", "div", "%", "@"]
+
+private val assign_ops = ["=", "+=", "-=", "*=", "/=", "%="]
+
+private one_of(t: Tok, set: []const string) -> string
+    for op in set
+        if is_kw(t, op) then return op
+
+    ""
+
+struct Parser
+    src: Source
+    toks: Tokens[Tok]
+
+    // -- the cursor -------------------------------------------------------------------------------
+
+    // The token `n` ahead of the cursor; past the end, the end.
+    tok(self, n: usize) -> Tok = self.toks.peek_at(n) match
+        Some(t) -> t.value
+        None -> Eof
+
+    at(self, text: string) -> bool = is_kw(self.tok(0), text)
+
+    accept(*self, text: string) -> bool
+        if !self.at(text) then return false
+
+        self.toks.advance()
+        true
+
+    bump(*self)
+        self.toks.advance()
+
+    fail[T](self, want: string) -> Result[T, Diagnostic] =
+        Err(error(self.toks.here(), s"expected ${want}, found ${described(self.tok(0))}"))
+
+    expect(*self, text: string) -> Result[unit, Diagnostic]
+        if self.accept(text) then return Ok(())
+
+        self.fail(s"'${text}'")
+
+    ident(*self, what: string) -> Result[string, Diagnostic]
+        self.tok(0) match
+            Ident(name) ->
+                self.bump()
+                Ok(name)
+            _ -> self.fail(what)
+
+    // Whether a run of newlines and then `text` is ahead.
+    at_after_newlines(self, text: string) -> bool
+        var n: usize = 0
+
+        while is_newline(self.tok(n))
+            n += 1
+
+        is_kw(self.tok(n), text)
+
+    skip_newlines(*self)
+        while is_newline(self.tok(0))
+            self.bump()
+
+    // Newlines and `;`, which separate statements interchangeably.
+    skip_separators(*self) -> bool
+        var any = false
+
+        while is_newline(self.tok(0)) || self.at(";")
+            self.bump()
+            any = true
+
+        any
+
+    // Whether a block opens here: the newline ending a header, then an indent.
+    at_block(self) -> bool = is_newline(self.tok(0)) && is_indent(self.tok(1))
+
+    // `end`, optionally naming what it closes, after the newline that follows a block's dedent. It
+    // closes nothing the layout has not already closed; which name it gives is not checked.
+    end_marker(*self)
+        if !self.at_after_newlines("end") then return
+
+        self.skip_newlines()
+        self.bump()
+
+        self.tok(0) match
+            Ident(_) -> self.bump()
+            t ->
+                if one_of(t, end_words).len > 0 then self.bump()
+    end end_marker
+
+    // -- declarations -----------------------------------------------------------------------------
+
+    program(*self) -> Result[Program, Diagnostic]
+        var decls: Buf[Decl] = buf()
+
+        self.skip_separators()
+
+        while !is_eof(self.tok(0))
+            decls.push(self.decl()?)
+
+            if is_eof(self.tok(0)) then break
+            if !self.skip_separators() then return self.fail("the end of the declaration")
+
+        Ok(Program(decls))
+    end program
+
+    standalone(*self) -> Result[Expr, Diagnostic]
+        val e = self.expr_tuple()?
+
+        self.skip_newlines()
+
+        if !is_eof(self.tok(0)) then return self.fail("the end of the expression")
+
+        Ok(e)
+
+    // Whether a declaration starts here.
+    at_decl(self) -> bool
+        val t = self.tok(0)
+
+        for word in ["@", "private", "val", "var", "const", "def", "struct", "enum", "module", "import"]
+            if is_kw(t, word) then return true
+
+        false
+
+    decl(*self) -> Result[Decl, Diagnostic]
+        val m = self.toks.mark()
+        var attrs: Buf[Attribute] = buf()
+
+        while self.accept("@")
+            attrs.push(self.attribute()?)
+            self.skip_newlines()
+
+        val private_ = self.accept("private")
+        val kind = self.decl_kind()?
+
+        Ok(Decl(self.toks.span_from(m), attrs, private_, kind))
+    end decl
+
+    attribute(*self) -> Result[Attribute, Diagnostic]
+        val name = self.ident("an attribute name")?
+        var args: Buf[AttrArg] = buf()
+
+        if self.accept("(")
+            if !self.at(")")
+                loop
+                    self.tok(0) match
+                        Str(v) -> args.push(AttrArg.Str(v))
+                        Ident(n) -> args.push(AttrArg.Name(n))
+                        _ -> return self.fail("a string or a name")
+
+                    self.bump()
+
+                    if !self.accept(",") then break
+            end if
+
+            self.expect(")")?
+        end if
+
+        Ok(Attribute(name, args))
+    end attribute
+
+    decl_kind(*self) -> Result[DeclKind, Diagnostic]
+        if self.accept("val") then return self.binding(Val)
+        if self.accept("var") then return self.binding(Var)
+        if self.accept("const") then return self.binding(Const)
+        if self.accept("def") then return self.function()
+        if self.accept("struct") then return self.structure()
+        if self.accept("enum") then return self.enumeration()
+
+        if self.accept("module")
+            return Ok(Module(self.dotted()?))
+
+        if self.accept("import") then return self.import_decl()
+
+        self.fail("a declaration")
+    end decl_kind
+
+    binding(*self, kind: BindKind) -> Result[DeclKind, Diagnostic]
+        val pat = self.pattern_list()?
+        val typ = if self.accept(":") then Some(self.type_expr()?) else None
+
+        self.expect("=")?
+
+        val init = if self.at_block() then self.block()? else self.expr_tuple()?
+
+        Ok(Bind(kind, pat, typ, init))
+    end binding
+
+    function(*self) -> Result[DeclKind, Diagnostic]
+        val name = self.ident("a function name")?
+        val type_params = self.type_params()?
+        var params: Buf[Param] = buf()
+
+        self.expect("(")?
+
+        if !self.at(")")
+            loop
+                params.push(self.param()?)
+
+                if !self.accept(",") then break
+
+        self.expect(")")?
+
+        val ret = if self.accept(":") then Some(self.type_expr()?) else None
+        var body: Option[Expr] = None
+
+        if self.accept("=")
+            body = Some(if self.at_block() then self.block()? else self.statement(true)?)
+            self.end_marker()
+
+        Ok(Fun(name, type_params, params, ret, body))
+    end function
+
+    param(*self) -> Result[Param, Diagnostic]
+        val name = self.ident("a parameter name")?
+
+        self.expect(":")?
+
+        val mode = if self.accept("mut") then Mut else Read
+        val typ = self.type_expr()?
+        val default = if self.accept("=") then Some(self.expr()?) else None
+
+        Ok(Param(name, typ, mode, default))
+    end param
+
+    // `[T, U: Numeric]` after a generic declaration's name, or nothing.
+    type_params(*self) -> Result[Buf[TypeParam], Diagnostic]
+        var out: Buf[TypeParam] = buf()
+
+        if !self.accept("[") then return Ok(out)
+
+        loop
+            val name = self.ident("a type parameter")?
+            val constraint = if self.accept(":") then Some(self.ident("a constraint")?) else None
+
+            out.push(TypeParam(name, constraint))
+
+            if !self.accept(",") then break
+
+        self.expect("]")?
+        Ok(out)
+    end type_params
+
+    field(*self) -> Result[Field, Diagnostic]
+        val name = self.ident("a field name")?
+
+        self.expect(":")?
+        Ok(Field(name, self.type_expr()?))
+
+    // The lines of an indented block, each read by `item`, with the newline before the block and
+    // the dedent after it taken.
+    lines[T](*self, what: string, item: (*Parser) -> Result[T, Diagnostic]) -> Result[Buf[T], Diagnostic]
+        var out: Buf[T] = buf()
+
+        if !self.at_block() then return self.fail(what)
+
+        self.bump()
+        self.bump()
+
+        loop
+            out.push(item(self)?)
+            self.skip_separators()
+
+            if is_dedent(self.tok(0)) then break
+
+        self.bump()
+        Ok(out)
+    end lines
+
+    structure(*self) -> Result[DeclKind, Diagnostic]
+        val name = self.ident("a struct name")?
+        val type_params = self.type_params()?
+        val fields = self.lines("the struct's fields on indented lines", (p) -> p.field())?
+
+        self.end_marker()
+        Ok(Struct(name, type_params, fields))
+    end structure
+
+    enumeration(*self) -> Result[DeclKind, Diagnostic]
+        val name = self.ident("an enum name")?
+        val type_params = self.type_params()?
+
+        self.expect("=")?
+
+        val variants = self.lines("the enum's variants on indented lines", (p) -> p.variant())?
+
+        self.end_marker()
+        Ok(Enum(name, type_params, variants))
+    end enumeration
+
+    variant(*self) -> Result[Variant, Diagnostic]
+        val name = self.ident("a variant name")?
+        var fields: Buf[Field] = buf()
+
+        if self.accept("(")
+            loop
+                fields.push(self.field()?)
+
+                if !self.accept(",") then break
+
+            self.expect(")")?
+        end if
+
+        Ok(Variant(name, fields))
+    end variant
+
+    dotted(*self) -> Result[Buf[string], Diagnostic]
+        var path: Buf[string] = buf()
+
+        path.push(self.ident("a module name")?)
+
+        while self.at(".") && is_ident(self.tok(1))
+            self.bump()
+            path.push(self.ident("a module name")?)
+
+        Ok(path)
+    end dotted
+
+    import_decl(*self) -> Result[DeclKind, Diagnostic]
+        val path = self.dotted()?
+        var selectors: Buf[Selector] = buf()
+
+        if self.accept(".*") then return Ok(Import(path, selectors, true))
+
+        if self.accept(".")
+            self.expect("{")?
+
+            if !self.at("}")
+                loop
+                    val name = self.ident("a name to import")?
+                    val alias = if self.accept("as") then Some(self.ident("a name to import it as")?) else None
+
+                    selectors.push(Selector(name, alias))
+
+                    if !self.accept(",") then break
+            end if
+
+            self.expect("}")?
+        end if
+
+        Ok(Import(path, selectors, false))
+    end import_decl
+
+    // -- blocks and statements --------------------------------------------------------------------
+
+    // An indented block. Its value is its last line's: a block of one expression is that expression,
+    // and a block ending in a declaration is `()`.
+    block(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val items = self.lines("an indented block", (p) -> p.block_item())?
+        val span = self.toks.span_from(m)
+        var head: Buf[BlockItem] = buf()
+
+        for i in 0..<items.len() - 1
+            head.push(items[i])
+
+        items[items.len() - 1] match
+            Stmt(e) ->
+                if items.len() == 1 then return Ok(e)
+
+                Ok(ex(span, Block(head, e)))
+            Item(_) ->
+                head.push(items[items.len() - 1])
+                Ok(ex(span, Block(head, ex(span, UnitLit))))
+    end block
+
+    block_item(*self) -> Result[BlockItem, Diagnostic] =
+        if self.at_decl() then Ok(Item(self.decl()?)) else Ok(Stmt(self.statement(true)?))
+
+    // An expression, or an assignment to one. A tuple is read where `tuple` says one may stand: on a
+    // line of its own, but not as an inline branch, where the comma belongs to what is around it.
+    statement(*self, tuple: bool) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val target = if tuple then self.expr_tuple()? else self.expr()?
+        val op = one_of(self.tok(0), assign_ops)
+
+        if op.len == 0 then return Ok(target)
+
+        if !is_place(target)
+            return Err(error(target.span, "only a name, a field or an indexed element can be assigned to"))
+
+        self.bump()
+
+        val value = if tuple then self.expr_tuple()? else self.expr()?
+
+        Ok(ex(self.toks.span_from(m), Assign(op, target, value)))
+    end statement
+
+    // A branch of an `if`, a loop body after `do`, a `match` arm: an indented block, or an inline
+    // statement.
+    branch(*self) -> Result[Expr, Diagnostic] =
+        if self.at_block() then self.block() else self.statement(false)
+
+    // -- patterns and types -----------------------------------------------------------------------
+
+    // The names a `val` or a `for` binds: `x`, `_`, `a, b`, or `(a, b)` -- the parenthesised form is
+    // the one a type annotation needs.
+    pattern_list(*self) -> Result[Pattern, Diagnostic]
+        val m = self.toks.mark()
+        val parens = self.accept("(")
+        var elems: Buf[Pattern] = buf()
+
+        loop
+            elems.push(self.name_pattern()?)
+
+            if !self.accept(",") then break
+
+        if parens then self.expect(")")?
+
+        if elems.len() == 1 then return Ok(elems[0])
+
+        Ok(Pattern(self.toks.span_from(m), PatternKind.Tuple(elems)))
+    end pattern_list
+
+    name_pattern(*self) -> Result[Pattern, Diagnostic]
+        val at = self.toks.here()
+        val name = self.ident("a name to bind")?
+
+        Ok(Pattern(at, if name == "_" then Wildcard else PatternKind.Name(name)))
+
+    // A `match` arm's pattern: a name, `_`, or a variant with patterns for its fields.
+    case_pattern(*self) -> Result[Pattern, Diagnostic]
+        val m = self.toks.mark()
+        val name = self.ident("a pattern")?
+
+        if !self.accept("(")
+            return Ok(Pattern(self.toks.span_from(m), if name == "_" then Wildcard else PatternKind.Name(name)))
+
+        var args: Buf[Pattern] = buf()
+
+        loop
+            args.push(self.case_pattern()?)
+
+            if !self.accept(",") then break
+
+        self.expect(")")?
+        Ok(Pattern(self.toks.span_from(m), PatternKind.Variant(name, args)))
+    end case_pattern
+
+    // A type. `->` is right-associative, and a parenthesised list is the parameters of a function
+    // type when an arrow follows it and a tuple type otherwise; one type in parentheses is itself.
+    type_expr(*self) -> Result[Type, Diagnostic]
+        val m = self.toks.mark()
+        var params: Buf[Type] = buf()
+        var single = true
+
+        if self.accept("(")
+            single = false
+
+            if !self.at(")")
+                loop
+                    params.push(self.type_expr()?)
+
+                    if !self.accept(",") then break
+
+            self.expect(")")?
+        else
+            params.push(self.simple_type()?)
+
+        if self.accept("->")
+            val ret = self.type_expr()?
+
+            return Ok(Type(self.toks.span_from(m), Func(params, ret)))
+
+        if single || params.len() == 1 then return Ok(params[0])
+
+        Ok(Type(self.toks.span_from(m), TypeKind.Tuple(params)))
+    end type_expr
+
+    simple_type(*self) -> Result[Type, Diagnostic]
+        val m = self.toks.mark()
+
+        if self.accept("[")
+            val elem = self.type_expr()?
+
+            self.expect("]")?
+            return Ok(Type(self.toks.span_from(m), TypeKind.Array(elem)))
+
+        val name = self.ident("a type")?
+
+        if !self.accept("[") then return Ok(Type(self.toks.span_from(m), Named(name)))
+
+        var args: Buf[Type] = buf()
+
+        loop
+            args.push(self.type_expr()?)
+
+            if !self.accept(",") then break
+
+        self.expect("]")?
+        Ok(Type(self.toks.span_from(m), Applied(name, args)))
+    end simple_type
+
+    // -- expressions ------------------------------------------------------------------------------
+
+    // `a, b, c`: the loosest level, a tuple where there is more than one.
+    expr_tuple(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val first = self.expr()?
+
+        if !self.at(",") then return Ok(first)
+
+        var elems: Buf[Expr] = buf()
+
+        elems.push(first)
+
+        while self.accept(",")
+            elems.push(self.expr()?)
+
+        Ok(ex(self.toks.span_from(m), ExprKind.Tuple(elems)))
+    end expr_tuple
+
+    // An expression short of a tuple, and the `match` that may follow it.
+    expr(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val e = self.arrow()?
+
+        if !self.accept("match") then return Ok(e)
+
+        val cases = self.lines("the match's arms on indented lines", (p) -> p.match_case())?
+        val span = self.toks.span_from(m)
+
+        self.end_marker()
+        Ok(ex(span, Match(e, cases)))
+    end expr
+
+    match_case(*self) -> Result[MatchCase, Diagnostic]
+        val pat = self.case_pattern()?
+
+        self.expect("->")?
+        Ok(MatchCase(pat, self.branch()?))
+
+    // A lambda, or what is below one. A lambda's head is a name or a parenthesised list of names
+    // that may carry types; it is one only when the `->` follows, so a parenthesised head is read on
+    // trial and given back when it is not.
+    arrow(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+
+        self.lambda_head() match
+            Some(params) ->
+                val body = if self.at_block() then self.block()? else self.arrow()?
+
+                return Ok(ex(self.toks.span_from(m), Lambda(params, body)))
+            None -> self.toks.reset(m)
+
+        self.or_expr()
+    end arrow
+
+    lambda_head(*self) -> Option[Buf[LambdaParam]]
+        var params: Buf[LambdaParam] = buf()
+
+        self.tok(0) match
+            Ident(name) ->
+                if !is_kw(self.tok(1), "->") then return None
+
+                self.bump()
+                self.bump()
+                params.push(LambdaParam(name, None))
+                return Some(params)
+            _ -> ()
+
+        if !self.accept("(") then return None
+
+        if !self.at(")")
+            loop
+                val name = self.tok(0) match
+                    Ident(n) -> n
+                    _ -> return None
+
+                self.bump()
+
+                var typ: Option[Type] = None
+
+                if self.accept(":")
+                    typ = self.type_expr() match
+                        Ok(t) -> Some(t)
+                        Err(_) -> return None
+
+                params.push(LambdaParam(name, typ))
+
+                if !self.accept(",") then break
+        end if
+
+        if !self.accept(")") || !self.accept("->") then return None
+
+        Some(params)
+    end lambda_head
+
+    or_expr(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        var e = self.and_expr()?
+
+        while self.accept("or")
+            val rhs = self.and_expr()?
+
+            e = ex(self.toks.span_from(m), BinOp("or", e, rhs))
+
+        Ok(e)
+
+    and_expr(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        var e = self.comparison()?
+
+        while self.accept("and")
+            val rhs = self.comparison()?
+
+            e = ex(self.toks.span_from(m), BinOp("and", e, rhs))
+
+        Ok(e)
+
+    // One comparison is a `BinOp`; two or more in a row are a chain (§4.6).
+    comparison(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        var operands: Buf[Expr] = buf()
+        var ops: Buf[string] = buf()
+
+        operands.push(self.range()?)
+
+        loop
+            val op = one_of(self.tok(0), compare_ops)
+
+            if op.len == 0 then break
+
+            self.bump()
+            ops.push(op)
+            operands.push(self.range()?)
+
+        if ops.len() == 0 then return Ok(operands[0])
+
+        val span = self.toks.span_from(m)
+
+        if ops.len() == 1 then return Ok(ex(span, BinOp(ops[0], operands[0], operands[1])))
+
+        Ok(ex(span, Chain(operands, ops)))
+    end comparison
+
+    range(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val lo = self.additive()?
+        val inclusive = self.at("..=")
+
+        if !inclusive && !self.at("..") then return Ok(lo)
+
+        self.bump()
+
+        val hi = self.additive()?
+
+        Ok(ex(self.toks.span_from(m), Range(Some(lo), Some(hi), inclusive, None)))
+    end range
+
+    additive(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        var e = self.multiplicative()?
+
+        loop
+            val op = one_of(self.tok(0), ["+", "-"])
+
+            if op.len == 0 then break
+
+            self.bump()
+
+            val rhs = self.multiplicative()?
+
+            e = ex(self.toks.span_from(m), BinOp(op, e, rhs))
+
+        Ok(e)
+    end additive
+
+    multiplicative(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        var e = self.juxtaposition()?
+
+        loop
+            val op = one_of(self.tok(0), mul_ops)
+
+            if op.len == 0 then break
+
+            self.bump()
+
+            val rhs = self.juxtaposition()?
+
+            e = ex(self.toks.span_from(m), BinOp(op, e, rhs))
+
+        Ok(e)
+    end multiplicative
+
+    // A numeric literal written against a name or a parenthesised expression multiplies it (§4.4):
+    // `2x`, `2pi`, `2(x + 1)`, `-4i`. What it multiplies may carry a power, so `2x^3` is `2 * x^3`.
+    juxtaposition(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val negative = self.at("-")
+        val n: usize = if negative then 1 else 0
+
+        val text = self.tok(n) match
+            Num(t) -> t
+            _ -> return self.power()
+
+        self.tok(n + 1) match
+            Ident(_) -> ()
+            t ->
+                if !is_kw(t, "(") then return self.power()
+
+        if negative then self.bump()
+        self.bump()
+
+        val coeff = number(self.toks.span_from(m), text, negative)?
+        val base = self.postfix()?
+        val body = if self.accept("^") then ex(self.toks.span_from(m), BinOp("^", base, self.power()?)) else base
+
+        Ok(ex(self.toks.span_from(m), Juxtapose(coeff, body)))
+    end juxtaposition
+
+    // `^` is right-associative and binds looser than a unary operator: `-2^2` is `(-2)^2`.
+    power(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val base = self.unary()?
+
+        if !self.accept("^") then return Ok(base)
+
+        val exponent = self.power()?
+
+        Ok(ex(self.toks.span_from(m), BinOp("^", base, exponent)))
+
+    unary(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+
+        for op in ["-", "not"]
+            if self.accept(op)
+                val operand = self.unary()?
+
+                return Ok(ex(self.toks.span_from(m), Unary(op, operand)))
+
+        self.postfix()
+    end unary
+
+    // A primary expression and the calls, indexing and field accesses after it.
+    postfix(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        var e = self.primary()?
+
+        loop
+            if self.accept("(")
+                val args = self.arguments(")")?
+
+                e = ex(self.toks.span_from(m), Call(e, args))
+            elif self.accept("[")
+                var indices: Buf[Expr] = buf()
+
+                loop
+                    indices.push(self.index_element()?)
+
+                    if !self.accept(",") then break
+
+                self.expect("]")?
+                e = ex(self.toks.span_from(m), Index(e, indices))
+            elif self.accept(".")
+                self.tok(0) match
+                    Num(text) ->
+                        self.bump()
+
+                        val index = digits_value(text, 10) match
+                            Some(v) -> usize(v)
+                            None -> return Err(error(self.toks.previous(), "a tuple field is a whole number"))
+
+                        e = ex(self.toks.span_from(m), TupleField(e, index))
+                    _ ->
+                        val name = self.ident("a field or method name")?
+
+                        if self.accept("(")
+                            val args = self.arguments(")")?
+
+                            e = ex(self.toks.span_from(m), MethodCall(e, name, args))
+                        else
+                            e = ex(self.toks.span_from(m), Field(e, name))
+            else
+                break
+        end loop
+
+        Ok(e)
+    end postfix
+
+    // A call's arguments up to `close`, each positional or `name = value`; a trailing comma is
+    // allowed.
+    arguments(*self, close: string) -> Result[Buf[Expr], Diagnostic]
+        var args: Buf[Expr] = buf()
+
+        while !self.at(close)
+            val m = self.toks.mark()
+
+            val named = self.tok(0) match
+                Ident(n) -> if is_kw(self.tok(1), "=") then n else ""
+                _ -> ""
+
+            if named.len > 0
+                self.bump()
+                self.bump()
+
+                val value = self.expr()?
+
+                args.push(ex(self.toks.span_from(m), NamedArg(named, value)))
+            else
+                args.push(self.expr()?)
+
+            if !self.accept(",") then break
+
+        self.expect(close)?
+        Ok(args)
+    end arguments
+
+    // One position of an index list (§4.14): `:` for a whole axis, an index, or a range whose
+    // bounds may be left off and which may carry a `by` stride.
+    index_element(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+
+        if self.accept(":") then return Ok(ex(self.toks.span_from(m), AxisAll))
+
+        val lo = if self.at("..") || self.at("..=") then None else Some(self.additive()?)
+        val inclusive = self.at("..=")
+
+        if !inclusive && !self.at("..")
+            return Ok(lo.unwrap())
+
+        self.bump()
+
+        val hi = if self.at(",") || self.at("]") || self.at("by") then None else Some(self.additive()?)
+        val stride = if self.accept("by") then Some(self.additive()?) else None
+
+        if inclusive && hi.is_none()
+            return Err(error(self.toks.previous(), "'..=' needs the bound it includes"))
+
+        Ok(ex(self.toks.span_from(m), Range(lo, hi, inclusive, stride)))
+    end index_element
+
+    primary(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val t = self.tok(0)
+
+        t match
+            Num(text) ->
+                self.bump()
+                return number(self.toks.span_from(m), text, false)
+            Str(v) ->
+                self.bump()
+                return Ok(ex(self.toks.span_from(m), StrLit(v)))
+            Interp(pieces, format) ->
+                self.bump()
+
+                val parts = self.interpolation(pieces)?
+
+                return Ok(ex(self.toks.span_from(m), Interp(parts, format)))
+            Ident(name) ->
+                self.bump()
+                return Ok(ex(self.toks.span_from(m), ExprKind.Name(name)))
+            _ -> ()
+
+        if self.accept("true") then return Ok(ex(self.toks.span_from(m), BoolLit(true)))
+        if self.accept("false") then return Ok(ex(self.toks.span_from(m), BoolLit(false)))
+
+        if self.accept("(")
+            if self.accept(")") then return Ok(ex(self.toks.span_from(m), UnitLit))
+
+            val inner = self.expr_tuple()?
+
+            self.expect(")")?
+            return Ok(inner)
+        end if
+
+        if self.accept("[")
+            val elems = self.arguments("]")?
+
+            for e in elems
+                *e.kind match
+                    NamedArg(_, _) -> return Err(error(e.span, "an array element cannot be named"))
+                    _ -> ()
+
+            return Ok(ex(self.toks.span_from(m), ExprKind.Array(elems)))
+        end if
+
+        if self.accept("if") then return self.if_rest(m)
+        if self.accept("for") then return self.for_rest(m)
+        if self.accept("while") then return self.while_rest(m)
+
+        if self.accept("return")
+            val value = if self.at_expression() then Some(self.expr_tuple()?) else None
+
+            return Ok(ex(self.toks.span_from(m), Return(value)))
+
+        self.fail("an expression")
+    end primary
+
+    // Whether an expression can begin at the cursor, which is what decides whether a `return` has
+    // a value.
+    at_expression(self) -> bool = self.tok(0) match
+        Num(_) -> true
+        Str(_) -> true
+        Interp(_, _) -> true
+        Ident(_) -> true
+        Keyword(_) -> one_of(self.tok(0), ["(", "[", "-", "not", "true", "false", "if", "for", "while", "return"]).len > 0
+        _ -> false
+
+    // `if cond then a [else b]`, with `then` optional before a block and `elif` for `else if`. The
+    // `else` may be on the line after an inline branch or after the block.
+    if_rest(*self, m: usize) -> Result[Expr, Diagnostic]
+        val cond = self.expr()?
+        val yes = if self.accept("then") then self.branch()? else self.block_or("'then' or an indented block")?
+        var no: Option[Expr] = None
+
+        if self.at_after_newlines("else") || self.at_after_newlines("elif")
+            self.skip_newlines()
+
+            if self.accept("elif")
+                no = Some(self.if_rest(self.toks.mark() - 1)?)
+            else
+                self.bump()
+                no = Some(self.branch()?)
+        end if
+
+        val span = self.toks.span_from(m)
+
+        self.end_marker()
+        Ok(ex(span, If(cond, yes, no)))
+    end if_rest
+
+    block_or(*self, want: string) -> Result[Expr, Diagnostic] =
+        if self.at_block() then self.block() else self.fail(want)
+
+    // A loop body: `do` and a branch, or an indented block.
+    loop_body(*self) -> Result[Expr, Diagnostic] =
+        if self.accept("do") then self.branch() else self.block_or("'do' or an indented block")
+
+    for_rest(*self, m: usize) -> Result[Expr, Diagnostic]
+        val pat = self.pattern_list()?
+
+        self.expect("in")?
+
+        val iterable = self.expr()?
+        val body = self.loop_body()?
+        val span = self.toks.span_from(m)
+
+        self.end_marker()
+        Ok(ex(span, For(pat, iterable, body)))
+    end for_rest
+
+    while_rest(*self, m: usize) -> Result[Expr, Diagnostic]
+        val cond = self.expr()?
+        val body = self.loop_body()?
+        val span = self.toks.span_from(m)
+
+        self.end_marker()
+        Ok(ex(span, While(cond, body)))
+    end while_rest
+
+    // The pieces of an interpolated literal as parts of the tree: each `${...}` hole is read here, in
+    // place, so a mistake inside one is reported where it was written.
+    interpolation(*self, pieces: Buf[Piece]) -> Result[Buf[Part], Diagnostic]
+        var parts: Buf[Part] = buf()
+
+        for piece in pieces
+            piece match
+                Chunk(text) -> parts.push(Text(text))
+                NameHole(at, spec) ->
+                    val name = from_utf8_unchecked(self.src.text(at)).copy()
+
+                    parts.push(Value(ex(at, ExprKind.Name(name)), spec))
+                ExprHole(at, spec) ->
+                    var sub = parser(self.src, lex_within(self.src, at.start, at.end)?)
+
+                    parts.push(Value(sub.standalone()?, spec))
+
+        Ok(parts)
+    end interpolation
+end Parser
+
+// Whether an expression names a place a value can be stored in.
+private is_place(e: Expr) -> bool = *e.kind match
+    Name(_) -> true
+    Field(_, _) -> true
+    TupleField(_, _) -> true
+    Index(_, _) -> true
+    _ -> false
+
+// The value of the digits of `text` in `base`, or `None` where it does not fit 64 bits.
+private digits_value(text: string, base: u64) -> Option[u64]
+    var v: u64 = 0
+
+    for c in text.bytes
+        val d = u64(c.digit_value(int(base)).unwrap())
+
+        if v > (0xFFFF_FFFF_FFFF_FFFFu64 - d) / base then return None
+
+        v = v * base + d
+
+    Some(v)
+end digits_value
+
+// A numeric literal's value: an integer in any of the four bases, or a real where it has a point or
+// an exponent. A hexadecimal, binary or octal literal may use all 64 bits; a decimal one must fit an
+// `integer`.
+private number(span: Span, text: string, negative: bool) -> Result[Expr, Diagnostic]
+    val prefixes = [("0x", 16u64), ("0b", 2u64), ("0o", 8u64)]
+
+    for (prefix, base) in prefixes
+        if text.starts_with(prefix)
+            val v = digits_value(text[2..<text.len], base) match
+                Some(v) -> i64(v)
+                None -> return Err(error(span, "this literal does not fit in 64 bits"))
+
+            return Ok(ex(span, IntLit(if negative then -v else v)))
+
+    for c in text.bytes
+        if c == u8('.') || c == u8('e') || c == u8('E')
+            val v = parse_real(text) match
+                Ok(v) -> v
+                Err(_) -> return Err(error(span, "malformed real literal"))
+
+            return Ok(ex(span, RealLit(if negative then -v else v)))
+
+    digits_value(text, 10) match
+        Some(v) ->
+            if v > 0x7FFF_FFFF_FFFF_FFFFu64 then return Err(error(span, "this integer does not fit in an integer"))
+
+            val n = i64(v)
+
+            Ok(ex(span, IntLit(if negative then -n else n)))
+        None -> Err(error(span, "this integer does not fit in an integer"))
+end number

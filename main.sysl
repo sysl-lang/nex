@@ -1,5 +1,8 @@
-// The `nex` command. Only its usage line exists so far; the subcommands arrive with the phases they
-// drive, in the order PORT-PLAN.md gives.
+// The `nex` command. The subcommands arrive with the phases they drive, in the order PORT-PLAN.md
+// gives: `tokens` prints what the lexer reads, `parse` the tree the parser builds.
+
+import sysl.fs.read_bytes
+import sh.sysl.parsing.{Source, source}
 
 private val usage = "usage: nex <tokens | parse | elaborate | run | test | compile> <file.nex>"
 
@@ -8,5 +11,33 @@ main(args: []string)
         print(usage)
         exit(2)
 
-    print(s"nex: '${args[1]}' is not implemented yet")
+    val command = args[1]
+    val file = args[2]
+
+    if command != "tokens" && command != "parse"
+        print(s"nex: '${command}' is not implemented yet")
+        exit(1)
+
+    val bytes = read_bytes(file) match
+        Ok(b) -> b
+        Err(e) -> fail(s"nex: cannot read ${file}: ${e}")
+
+    val doc = source(file, bytes)
+    val src = program_text(doc) match
+        Ok(s) -> s
+        Err(d) -> fail(d.render(doc))
+
+    if command == "tokens"
+        lex(src) match
+            Ok(toks) -> prints(show_tokens(src, toks))
+            Err(d) -> fail(d.render(src))
+    else
+        parse_program(src) match
+            Ok(p) -> print(show_program(p))
+            Err(d) -> fail(d.render(src))
+end main
+
+private fail(text: string) -> never
+    eprints(text)
+    eprints("\n")
     exit(1)
