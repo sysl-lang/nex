@@ -3,8 +3,9 @@
 nex is written here from scratch in sysl. The Scala 3 implementation at
 [edadma/nex](https://github.com/edadma/nex) (local clone `~/dev/nex`) is a reference for behaviour,
 and its `docs/content/spec/` is the specification **as amended by `DESIGN.md`**: rank-N arrays with
-static shapes, slices as views, sized precision, `end`-relative indexing with no negative wrap,
-`inout` borrows, parallel loops and reductions, and C/BLAS/LAPACK through `extern`. No part of the
+static shapes, 1-based indexing and inclusive `..` ranges as in Fortran, the `iso_fortran_env` type
+names, slices as views, `end`-relative indexing with no negative wrap, `inout` borrows,
+reproducible parallel loops and reductions, and C/BLAS/LAPACK/Fortran through `extern`. No part of the
 reference's structure is carried over. The backend is MLIR from the first program compiled, and
 there is no interpreter: `nex run` compiles and runs.
 
@@ -35,19 +36,40 @@ Counted with `grep` over `testdata/corpus/*.nex`:
 | `mut` parameters (§8) | `-w mut` | 10: 127, 128, 286–289, 291, 294–296 | 8 | 2: **295**, **296** |
 | `a.view(…)` (§6) | `\.view(` | 35: 345–379 | 33 (29 read-only, 4 writing through the view) | 2: **353**, **362** |
 
-The sets overlap in 351 and 360 (a view with a negative bound), so **58 distinct programs** are
-touched: 2 stay byte-for-byte as the reference wrote them, **52 are rewritten with their `.out`
-unchanged**, and **4 get a new `.out`**. The other **367 programs are untouched**, and their `.out`
-files remain the reference's. No corpus program uses `inout`, `parallel` or `extern` as a name, binds
-`end`, or puts a literal after a loop index named `i` (`2i` inside `for i`), so no other program
-changes reading.
+The sets overlap in 351 and 360 (a view with a negative bound), so 58 distinct programs are touched
+by these four changes; 2 of them (112, 116) keep their text.
+
+**On top of these, the whole corpus is rewritten to v3 syntax**: 1-based indexing, inclusive `..`
+(`..<` for half-open), and the `iso_fortran_env` type names. Counted with `grep` over
+`testdata/corpus/*.nex`, **162 programs** index an array or write a range (`[A-Za-z0-9_)]\[` or
+`\.\.`), and the 5 byte-buffer programs (421–425, `bytes(n)`) become `[uint8]` programs; no corpus
+program spells a sized type name (`integerN`, `complexN`). Each is
+rewritten so it computes **the same thing**: an index `a[k]` becomes `a[k + 1]` (or the loop that
+produced `k` shifts its range), the reference's half-open `lo..hi` over indices becomes
+`lo+1..hi`, its inclusive `..=` becomes `..`, and a byte buffer becomes `[uint8]`. A range that
+is not an index range (`for k in 0..3` counting, printing `k`) is restated to keep its values
+(`for k in 0..2`). A program whose output
+**prints an index or a loop counter** (a `print(i)`, an "at index" message, an `argmax`, an
+out-of-bounds trap message naming the index) gets a new `.out` with the 1-based value, written from
+DESIGN.md. The exact `syntax` / `meaning` split is counted by the migration commit itself, which
+records it in `index.tsv`; the programs that touch neither an index, a range nor a sized type
+(about 260) stay byte-for-byte the reference's. No corpus program uses `inout`, `parallel`,
+`extern`, `origin` or `rebase` as a name, binds `end`, or puts a literal after a loop index named
+`i` (`2i` inside `for i`), so no other program changes reading.
 
 **How each is migrated** — one commit, before M1, in `testdata/corpus/` itself (git keeps the
-reference's text), with a new `index.tsv` column `v2` = `same`, `syntax` or `meaning`:
+reference's text), with a new `index.tsv` column `v3` = `same`, `syntax` or `meaning`:
 
 - **`[[T]]`** → `[T; :, :]` (067's `[[integer]]`, 321's `[[real]]`).
+- **1-based, inclusive ranges** → every index shifted by one and every range restated: the
+  reference's `for k in 0..n` (half-open) is `for k in 1..n`, `a[0]` is `a[1]`, `a[i..j]` (half-open)
+  is `a[i+1..j]`, `a[i..=j]` is `a[i+1..j+1]`.
+- **Byte buffers** → `[uint8]` (DESIGN §2.1, §3.1): `val b = bytes(4)` → `val b: [uint8] =
+  zeros(4)`, and the byte prelude (`to_bytes`, `read_bytes`, `write_bytes`) takes and gives
+  `[uint8]`. A program that prints a whole buffer (422's hex dump) is `meaning` if `[uint8]` prints
+  differently from the reference's byte buffer, and its `.out` is rewritten from DESIGN.md.
 - **Negative indices** → `end`-relative: `a[-1]` → `a[end]`, `a[-3..-1]` → `a[end-2..end]`,
-  `a[..-1]` → `a[..end]`, `a[..=-1]` → `a[..=end]`, `m[:, -1]` → `m[:, end]`,
+  `a[..-1]` (half-open) → `a[..end-1]`, `a[..=-1]` → `a[..end]`, `m[:, -1]` → `m[:, end]`,
   `m[-2..length(m), …]` → `m[end-1.., …]`, `a.view(-3..)` → `a[end-2..]`. Each program prints what it
   printed before. 112 and 116 stay as written: they test that an out-of-range index traps, and a
   negative index now always does.
@@ -58,10 +80,12 @@ reference's text), with a new `index.tsv` column `v2` = `same`, `syntax` or `mea
   nothing is moved or cloned. **296** now prints `10` then `0` (was `10`, `10`): `var b = a` is
   still a clone because `a` is used again, and `zero_first(b)` now zeroes `b` itself.
 - **`a.view(…)`** → a slice: `a.view(r)` → `a[r]`, `a.view(r, k)` → `a[r by k]`, `m.view(r)` →
-  `m[r, :]` (axis 1 left whole), `m.view(r, c)` → `m[r, c]`; a view of a view becomes a slice of a
+  `m[r, :]` (the second axis left whole), `m.view(r, c)` → `m[r, c]`, each range then restated
+  1-based and inclusive; a view of a view becomes a slice of a
   slice. The 29 read-only programs print what they did. The 4 that write through a named view —
   **347, 356, 366, 373** — write the source's window instead, `v[0] = 99` with `val v = a.view(1..4)`
-  becoming `a[1..4][0] = 99` (DESIGN §5.3), and print what they did. **353** now prints `30` (was
+  becoming `a[2..4][1] = 99` (DESIGN §5.3; the same elements, 1-based and inclusive), and print what
+  they did. **353** now prints `30` (was
   `99`) and **362** prints `5` (was `99`): a view keeps the value it was taken with (DESIGN §6.2 rule
   4).
 
@@ -92,8 +116,9 @@ source ──parse──▶ AST ──elaborate──▶ typed IR ──emit─�
    every array expression left as a whole-array operation rather than a loop. Every type in it is
    concrete. `nex elaborate` prints it.
 3. **MLIR emission**: the typed IR to MLIR text, assembled in a `StrBuilder`. Scalars and control
-   flow are `arith`, `math`, `scf` and `func`; an array of shape `(d0, …, dk)` is a
-   `tensor<dk×…×d0×T>` (axes reversed, so the default layout is column-major); an array expression
+   flow are `arith`, `math`, `scf` and `func`; an array of shape `(d1, …, dk)` is a
+   `tensor<dk×…×d1×T>` (axes reversed, so the default layout is column-major, and each 1-based nex
+   index is lowered by subtracting 1, which folds into loop bounds); an array expression
    is a `linalg.generic` per operator, and fusing them is MLIR's job, not ours; a slice is a
    `tensor.extract_slice`; complex numbers are the `complex` dialect with multiplication and
    division written out (below). Every function but `main` is `private`.
@@ -115,8 +140,9 @@ source ──parse──▶ AST ──elaborate──▶ typed IR ──emit─�
 5. **The runtime** (`runtime/nex_rt.c`), linked into every program: printing every value as the
    reference spells it — reals as Java's `Double.toString` (`1.0E20`, `4.9E-324`), complex numbers,
    arrays read through `llvm.emit_c_interface` memref descriptors honouring their strides — plus the
-   string, handle and trap machinery below. `libomp` is linked when a program has a `parallel`
-   construct, and a BLAS when it calls one.
+   string, handle and trap machinery below. `libomp` is linked when, and only when, a program has a
+   `parallel` construct (no flag), and a BLAS when it calls one; a program calling Fortran links
+   `libgfortran`.
 
 `tests_toolchain.sysl` holds the pipeline to account: hand-written proofs in `experiments/mlir/` go
 through it from sysl and must print their expected output, and the library calls the driver is
@@ -182,7 +208,7 @@ before `convert-func-to-llvm`, `convert-openmp-to-llvm`; the program links `libo
   `omp.declare_reduction` for the reduction) and run on several threads (`parallel.mlir`). An element
   write inside one must be a `linalg.fill` of a one-element slice: `tensor.from_elements` costs an
   allocation and a `memrefCopy` per iteration.
-- **BLAS takes a view as it is.** A column-major matrix or a view with unit stride along axis 0 is a
+- **BLAS takes a view as it is.** A column-major matrix or a view with unit stride along its first axis is a
   pointer (`extract_aligned_pointer_as_index` plus the metadata offset) and a leading dimension (the
   memref's axis-0 stride), handed to `cblas_dgemm` with no copy (`blas.mlir`, Accelerate).
 - **There are no pointer element types.** `memref<4x!llvm.ptr>` is an invalid memref element type,
@@ -203,15 +229,21 @@ Each is one bounded item ending in a green `sysl test .` on its branch, with the
 its categories passing. Corpus counts are from `index.tsv`'s category column (they sum to 425, all
 of the corpus as migrated above); `v2` counts are the programs the milestone adds to `testdata/v2/`.
 
-0. **M0 — the corpus migration** (branch `corpus-v2`). *Exit*: the 52 rewrites and 4 new `.out`
-   files of "The corpus under DESIGN.md" committed; `index.tsv`'s `v2` column reads 367 `same` +
-   2 untouched-trap `same` (369), 52 `syntax`, 4 `meaning`; `grep -lw mut`, `grep -l '\.view('`
-   and the negative-index grep return only 112 and 116.
+0. **M0 — the corpus migration to v3 syntax** (branch `corpus-v3`). The whole corpus is rewritten
+   to DESIGN.md's syntax: **1-based indexing, inclusive `..` (`..<` half-open), the
+   `iso_fortran_env` type names and `[uint8]` for bytes**, plus the four rewrites of "The corpus
+   under DESIGN.md". *Exit*: every program of that section committed; `index.tsv`'s `v3` column
+   accounts for all 425 as `same`, `syntax` or `meaning`, every `meaning` program's new `.out`
+   quoting the DESIGN rule that changed it (at least 295, 296, 353, 362, and each program that
+   prints an index); `grep -lw mut`, `grep -l '\.view('`, `grep -l '\.\.='`, `grep -lw bytes` and
+   the negative-index grep return only 112 and 116; and a reviewer's pass over the 162 index/range
+   programs finds no 0-based index left.
 1. **M1 — the parser.** The reference's syntax is on dev (`fa31517`, lexer, parser, corpus and
    literate tests); what remains is DESIGN.md's syntax, as its own item after M0. *Exit*: all 425
    corpus programs, as migrated, parse; `nex parse` prints the tree; the reference's lexer and
    parser cases ported; parser cases for array types
-   with axes and static extents, rank-3 literals, every subscript form with `end` (including `end`
+   with axes and static extents, `complex[real32]`, rank-3 literals, `..` and `..<` with and
+   without bounds and `by`, every subscript form with `end` (including `end`
    on a continuation line inside brackets, and `end for` after a line ending in `]`), `inout`,
    `parallel for … reduce`, `parallel` expressions and `extern def` with its attributes.
 2. **M2 — the typed IR.** Elaboration, inference over the precision lattice, generics and `Rank`
@@ -219,7 +251,10 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    the parallel-safety check and the module-`var` effect summary both use. *Exit*: all 425
    elaborate; the reference's elaborator stage 1–3 cases ported (positive ones by the printed IR,
    negative ones by their diagnostic); a negative case for each rule of DESIGN §8.3 and §9.4 and for
-   each narrowing that §2.2 refuses.
+   each narrowing that §2.2 refuses (same-width signed/unsigned mixing, a promoted `[real64]` stored
+   into a `[real32]`); §8.3 rule 1's disjoint borrows accepted in each listed form (constant
+   windows, a split at one `e`, distinct constant indices) and rejected otherwise with the
+   split-form suggestion.
 3. **M3 — scalars and the pipeline: 151.** Emission for scalars of every width, control flow,
    functions, strings and printing; the driver and the runtime's printing per width and trapping
    division and overflow at every width; `inout` scalars. `precision.mlir` joins the toolchain tests.
@@ -227,7 +262,8 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    comparison (7), control flow (27), blocks + scoping (4), top-level initialization (3), compound
    assignment (8), functions (43), string interpolation (19), const fn calls (5), `inout` by-ref (6)
    — 151 pass; and `v2` **precision** programs (every type of DESIGN §2.1 printed, each promotion
-   rule, each conversion's trap, literal adoption, `real32` printing) pass.
+   rule, each conversion's trap, unsigned overflow and underflow traps, literal adoption, a `real64`
+   scalar promoting a `real32` array, `real32` printing) pass.
 4. **M4 — aggregates and closures: 38 more, 189.** Structs, tuples, enums, escaping closures, the
    handle tables. *Exit*: structs (8), tuple destructuring (6), paren-less tuple construction (8),
    sum types (13), closure escape (3) pass.
@@ -248,36 +284,78 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    pass; `v2` view programs (rule 4, a returned view, a view stored in a struct, a strided rank-3
    plane) pass; and **passing a slice to a function allocates nothing**: the bufferized IR of each
    view program in the four categories has no `memref.alloc` or `memref.copy` the program's own
-   arrays do not account for. Also DESIGN §5.4 and §6.4: `v2` programs for negative strides (every
-   row of §5.4's example, a reversed column, reversed slice assignment, `reverse(a, k)`) and for
-   `origin` (a symmetric kernel, a ghost-cell grid, `end` on an offset view, an out-of-range index
-   trapping, an offset view arriving 0-based in a callee) pass with no copy; the negative-stride
-   `memref` question of §5.4 is settled by a probe in `experiments/mlir/`.
+   arrays do not account for. `v2` **base and range** programs, all in 1-based inclusive syntax:
+   `a[1]` and `a[end]` read the ends, `a[0]` and `a[n+1]` trap `out of bounds`, `a[2..5]` has four
+   elements and `a[2..<5]` three, `a[1..0]` and `a[n+1..n]` are empty without trapping, `m[2..3, :]`
+   and `m[:, ..<end]` agree with their element-by-element loops `for i in 2..3`. Also DESIGN §5.4
+   and §6.4: `v2` programs for negative strides (every row of §5.4's example, `a[end..1 by -1]`, a
+   reversed column `m[:, end..1 by -1]`, reversed slice assignment, `reverse(a, k)`) and for
+   `origin` (a symmetric kernel `for k in -r..r`, a ghost-cell grid, `end` on an offset view, an
+   out-of-range index trapping, `rebase(w)` passed to a callee and arriving 1-based) pass with no
+   copy; passing, returning, storing or capturing an `origin` view are four negative cases whose
+   diagnostic names `origin`; the negative-stride `memref` question of §5.4 is settled by a probe in
+   `experiments/mlir/`.
 8. **M8 — the prelude and catchable traps: 50 more, 425.** The array and matrix prelude at every
    rank, `assert_approx`, `assert_traps` over `setjmp`/`longjmp`. *Exit*: prelude (38) and
    docs/examples (12) pass: **the whole corpus, 425 of 425**; `examples/fft` compiles and runs.
 9. **M9 — parallel.** `parallel for` with `shared_outs`, `reduce` clauses as `scf.parallel` +
    `scf.reduce`, `parallel map` and parallel element-wise expressions, the OpenMP pipeline, the trap
    relay out of a parallel region. `parallel.mlir` joins the toolchain tests (skipped without
-   `libomp`). *Exit*: `v2` **parallel** programs pass under both the sequential and the OpenMP
-   pipeline with identical output (integer reductions, and real ones whose order cannot matter); each
-   rejected body of DESIGN §9.4 is a negative elaborator case; a trapping iteration is caught by
-   `assert_traps`; a reduction over every operator of §9.2 runs (the OpenMP lowering of `min`, `max`,
-   `and`, `or` and complex `+` is proved here or reported); and on this machine at
+   `libomp`). **Reductions are reproducible** (DESIGN §9.2.1): fixed 4096-iteration blocks, each
+   reduced sequentially, partials combined in a fixed pairwise tree that nex emits itself, and the
+   sequential whole-array reductions (`sum`, `product`, `dot`, `norm`, axis forms) lowered through
+   the same tree. The operators are `+ * min max and or`, the location reductions `minloc` /
+   `maxloc`, and user-defined `(T, T) -> T` functions. The OpenMP pipeline is chosen by the presence
+   of a `parallel` construct, with no flag, and a program without one links no OpenMP runtime.
+   `print` and stderr in a parallel body are atomic per call. *Exit*: `v2` **parallel** programs
+   print **identical bits** sequentially and under `OMP_NUM_THREADS` = 1, 2, 4 and 7, real
+   reductions included; `sum(x)` and `parallel sum(x)` agree bit for bit on n = 10⁶; a pairwise
+   `sum` beats a naive loop's error on an ill-conditioned series; `minloc`/`maxloc` return the lowest
+   index on ties at every thread count; a Kahan `reduce s: kahan_add` runs; every rejected body of
+   DESIGN §9.4 (file I/O, input, a non-`@pure` extern, a shared write) is a negative elaborator case,
+   and `print` in a body is accepted; a trapping iteration is caught by `assert_traps`; a program
+   with no `parallel` has no `omp` symbol in its binary; a reduction over every operator of §9.2 runs
+   (the OpenMP lowering of each is proved here or reported); and on this machine at
    `OMP_NUM_THREADS=4` the perf oracle's axpy, dot and point-distance kernels written with `parallel`
    run at least 2.5× faster than their sequential builds.
-10. **M10 — FFI, BLAS and LAPACK.** `extern def`, `@link`, `@symbol`, `@strided`, `@pure`; arrays and
-    views crossing per DESIGN §10.3 (with the copies it requires); `@` dispatching to `gemm`, `gemv`
-    and `dot` by threshold and by shape; the LAPACK prelude. `blas.mlir` joins the toolchain tests
-    (skipped without a BLAS). *Exit*: `v2` **FFI** programs pass — a libm function, `cblas_ddot` on a
-    strided view with `incx = 2`, `dgemm` on a sub-block view with its leading dimension, an `inout`
-    LAPACK `dgesv` solve, `transpose(A) @ B` dispatched with the `T` flag and no transposed copy;
-    `A @ B` above the threshold emits a call and below it a `linalg.matmul`, checked in the emitted
-    MLIR; and the BLAS gemm kernel below meets its bar.
+10. **M10 — FFI, Fortran interop, BLAS and LAPACK.** `extern def`, `@link`, `@symbol`, `@strided`,
+    `@pure`; arrays and views crossing per DESIGN §10.3 (with the copies it requires); **complex
+    scalars by value** mirroring clang's ABI per target (arm64 HFA in two FP registers, x86-64 SysV
+    SSE); **`@c` structs by reference**; **C callbacks** (a nex `def` as a function pointer, a
+    capturing closure through `void *user_data`, by-reference callback arguments for a Fortran
+    extern); **calling Fortran** (DESIGN §10.6) — `bind(c)` procedures and plain gfortran objects
+    through `@fortran`: `name_` mangling, every argument by reference, hidden trailing string
+    lengths, column-major arrays crossing with no copy. This is the product case against Julia, and
+    it is first-class here, not a later extra. `@` dispatches to `gemm`, `gemv` and `dot` by
+    threshold and by shape; the LAPACK prelude's first set (`solve lstsq inv det lu chol qr eig eigh
+    svd`), whose value forms trap with a message naming the routine and cause and whose `inout`
+    forms return `info`. `blas.mlir` joins the toolchain tests (skipped without a BLAS). *Exit*: `v2`
+    **FFI** programs pass — a libm function, `cblas_ddot` on a strided view with `incx = 2`, `dgemm`
+    on a sub-block view with its leading dimension, an `inout` LAPACK `dgesv` solve,
+    `transpose(A) @ B` dispatched with the `T` flag and no transposed copy, `cexp` called and
+    returning a `complex[real64]` by value, a struct read and written through a `@c` pointer, a C
+    quadrature routine integrating a nex `def` and a capturing closure through `user_data`; `v2`
+    **Fortran** programs pass against a gfortran-compiled fixture library — a `bind(c)` function, a
+    plain `subroutine` taking scalars, arrays and an `info` by reference, one taking a
+    `character(*)` argument, and a Fortran routine calling a nex callback; each LAPACK value form's
+    failure traps with its message (`solve` on a singular matrix, `chol` on an indefinite one) and
+    its `inout` form returns the same `info`; `eig` of a rotation matrix returns complex
+    eigenvalues; `A @ B` above the threshold emits a call and below it a `linalg.matmul`, checked in
+    the emitted MLIR; and the BLAS gemm kernel below meets its bar.
 11. **M11 — modules and `nex test`.** The module loader, the source prelude found by
     `--prelude-path` / `NEX_HOME`, `@test` discovery. *Exit*: the reference's module loader,
     sysroot, prelude integration and test runner cases ported.
 12. **M12 — performance.** *Exit*: the perf oracle below, met on every kernel.
+
+**Later** (DESIGN §14), each its own item once M12 is done, none dropped:
+
+- **Structs by value across the FFI** — `@c` structs passed and returned by value, with clang's
+  per-target aggregate classification. Kept on the list at the user's request.
+- **`bfloat16`** — the name is reserved; MLIR's `bf16` makes it cheap.
+- **`real128`** and `complex[real128]`.
+- **Batched BLAS** — a vendor batched `gemm` behind an explicit routine, if the
+  `parallel for k … C[:, :, k] = A[:, :, k] @ B[:, :, k]` idiom measures slower.
+- **Banded and tridiagonal LAPACK solvers**, generalized eigenproblems, `rcond` / `cond`.
 
 **The playground** (its own item, any time after M3). A page in `docs/` with an editor; **Run**
 sends the source to a small service that compiles it with the ordinary pipeline and **runs the

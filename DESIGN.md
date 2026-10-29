@@ -15,12 +15,20 @@ experiment under `experiments/mlir/` that ran it through the toolchain (LLVM 23.
 
 ## 1. Summary of the core
 
-nex is an array-first numerical language: whole-array expressions that fuse, column-major storage,
-value semantics enforced by `val`/`var` and a uniqueness rule, and a syntax in the Scala 3 / sysl
-family. Scalars come in sized widths (§2). Arrays have any rank and an optional static shape (§3).
-A slice is a read-only view (§6). A function mutates a caller's array through an `inout` exclusive
-borrow (§8). Loops and reductions can be parallel, and the checker proves them race-free (§9). C,
-BLAS and LAPACK are reachable through `extern` declarations, and `@` uses BLAS when that pays (§10).
+nex is an array-first numerical language for the scientists and engineers who write Fortran:
+**Fortran's model, modern syntax, compiler-enforced safety, ahead-of-time native binaries.** It
+keeps what a Fortran programmer relies on — column-major storage, 1-based arrays, inclusive ranges
+(`a[2..5]` is `a(2:5)`), the `iso_fortran_env` type names, whole-array expressions that fuse — and
+adds value semantics enforced by `val`/`var` and a uniqueness rule, in a syntax of the Scala 3 /
+sysl family. Scalars come in sized widths (§2). Arrays have any rank and an optional static shape
+(§3). A slice is a read-only view (§6). A function mutates a caller's array through an `inout`
+exclusive borrow (§8). Loops and reductions can be parallel, the checker proves them race-free, and
+their results are the same for every thread count (§9). C, BLAS, LAPACK and existing Fortran are
+reachable through `extern` declarations, and `@` uses BLAS when that pays (§10).
+
+nex is compiled, always: there is no interpreter, and `nex run` compiles the program to a native
+binary and runs it. The playground does the same on a server, running the native binary inside
+nsjail on its own VM.
 
 ---
 
@@ -30,44 +38,59 @@ BLAS and LAPACK are reachable through `extern` declarations, and `@` uses BLAS w
 
 | Type | Meaning | MLIR |
 |---|---|---|
-| `integer8`, `integer16`, `integer32`, `integer64` | signed two's-complement integers | `i8` … `i64` |
+| `int8`, `int16`, `int32`, `int64` | signed two's-complement integers | `i8` … `i64` |
+| `uint8`, `uint16`, `uint32`, `uint64` | unsigned integers | `i8` … `i64` (unsigned operations) |
 | `real16`, `real32`, `real64` | IEEE 754 binary16, binary32, binary64 | `f16`, `f32`, `f64` |
-| `complex16`, `complex32`, `complex64` | a pair of `real16` / `real32` / `real64` (re, im) | `complex<f16>` … `complex<f64>` |
-| `integer` | alias of `integer64` | |
+| `complex[real16]`, `complex[real32]`, `complex[real64]` | a pair of that real type (re, im) | `complex<f16>` … `complex<f64>` |
+| `integer` | alias of `int64` | |
 | `real` | alias of `real64` | |
-| `complex` | alias of `complex64` | |
+| `complex` | alias of `complex[real64]` | |
 
 `bool`, `unit` and `string` are as in ref §3.1. The aliases are the same type, not a distinct one:
 `[real]` and `[real64]` are one type, and a diagnostic names a type the way the source spelled it.
 
+**The names are Fortran's `iso_fortran_env` kind names**, so a Fortran programmer reads
+`real64`, `int32` and `complex[real64]` (Fortran's `complex(real64)`) without a glossary. The
+number counts **bits**. A complex type names the kind of its **part**, as Fortran does: `complex[real32]`
+is two `real32`s, matches LAPACK's `c` routines, and promotes from `real32` without changing the
+number.
+
+**The defaults are 64-bit.** `integer` is `int64`, `real` is `real64` and `complex` is
+`complex[real64]`. This deliberately fixes Fortran's single-precision default `real`, which has cost
+generations of programs their accuracy through a forgotten `d0` or `kind=`; a program that wants
+single precision says `real32`.
+
+**There is no `byte` type.** Raw bytes are `[uint8]`, an ordinary array with every array operation.
+
 **Why this set.**
 
 - **Integers 8, 16, 32, 64.** They are the widths C, BLAS/LAPACK (LP64 uses 32, ILP64 uses 64) and
-  every file format exchange, so an `extern` declaration (§10) can spell any C integer parameter. A
-  128-bit integer has no hardware arithmetic, no C ABI that BLAS uses and no numerical workload
-  that needs it.
-- **Signed only.** nex integer arithmetic traps on overflow (ref §4.4), and an unsigned type would
-  bring wrap-or-trap questions at zero for no numerical gain; unsigned storage is what `[byte]`
-  (ref §3.3.1) is for. Whether unsigned widths are wanted is an open question (§14).
+  every file format exchange, so an `extern` declaration (§10) can spell any C or Fortran integer
+  parameter. A 128-bit integer has no hardware arithmetic, no C ABI that BLAS uses and no numerical
+  workload that needs it.
+- **Unsigned widths exist, and trap like signed ones.** Unsigned arithmetic traps on overflow and
+  on going below zero (`uint8(0) - 1` traps), exactly as signed arithmetic traps on overflow
+  (ref §4.4). Mixing a signed and an unsigned operand of the same width is a compile error that
+  asks for an explicit conversion (§2.2), because neither type holds the other's range.
 - **Reals 16, 32, 64.** binary64 is the default and Fortran's `double precision`; binary32 is what
   single-precision BLAS, GPUs and memory-bound kernels use; binary16 is the storage width of
   half-precision data. `real16` is a storage-and-arithmetic type, and its transcendental functions
-  compute in `real32` and round (**PROPOSED**); `sqrt` is native (`precision.mlir`).
-- **Complex at each real width, named by the width of its parts.** `complex32` is two `real32`s, so
-  promotion `real32 → complex32` keeps the number and `complex32` matches LAPACK's `c` routines. This
-  is Fortran's `complex(kind=4)` convention and the opposite of NumPy's `complex64` (named by total
-  size) (**PROPOSED** naming).
+  compute in `real32` and round (**PROPOSED**); `sqrt` is native (`precision.mlir`). `real128` comes
+  later (§14).
+- **No `bfloat16`.** The name is reserved; MLIR's `bf16` makes it cheap to add when a workload asks.
 
 ### 2.2 Promotion lattice
 
 ```
-integer8 → integer16 → integer32 → integer64
-   │            │           │           │        (any integerN → any realM or complexM)
-   ▼            ▼           ▼           ▼
-real16   →   real32   →   real64
-   │            │           │
-   ▼            ▼           ▼
-complex16 →  complex32 →  complex64
+uint8 ──→ uint16 ──→ uint32 ──→ uint64
+   ╲          ╲          ╲                       (uintN → int(2N): every value fits)
+int8  ──→  int16  ──→  int32  ──→  int64
+   │          │          │          │            (any integer → any real or complex)
+   ▼          ▼          ▼          ▼
+real16    →    real32    →    real64
+   │             │              │
+   ▼             ▼              ▼
+complex[real16] → complex[real32] → complex[real64]
 ```
 
 An arrow is an **implicit widening**. A widening happens in exactly the places ref §3.2 promotes: an
@@ -79,11 +102,15 @@ follow arrows is **narrowing** and needs a conversion function (§2.4).
 operands of types `A` and `B`:
 
 1. Same type: that type.
-2. Both in the same family (integer, real or complex): the wider of the two.
-3. An integer with a real or a complex: **the real or complex operand's type**. `n * x` with
-   `n: integer64` and `x: real32` is `real32`, as in Fortran: a loop index never widens a
+2. Both in the same family (signed integer, unsigned integer, real or complex): the wider of the two.
+3. A signed and an unsigned integer: the signed type when it is strictly wider (`uint8 + int16` is
+   `int16`); otherwise a **compile error** naming both types and asking for a conversion
+   (`int32(u) + n`).
+4. An integer with a real or a complex: **the real or complex operand's type**. `n * x` with
+   `n: int64` and `x: real32` is `real32`, as in Fortran: a loop index never widens a
    single-precision kernel.
-4. A real with a complex: the complex type of the wider width. `real64 + complex32` is `complex64`.
+5. A real with a complex: the complex type of the wider width. `real64 + complex[real32]` is
+   `complex[real64]`.
 
 `/` follows ref §4.4: two integers give `real64`; an integer with a real `realN` gives `realN`.
 `div` and `%` need two integers and give the wider. `^` with an integer exponent keeps the base's
@@ -91,8 +118,15 @@ type.
 
 **Arrays never convert implicitly as a whole.** `[real32]` does not pass where `[real64]` is
 expected; `real64(a)` converts it (§2.4) and the allocation is visible. Element-wise operations mix
-widths per element under rules 1–4, so `a32 + b64` is a `[real64]` computed in one fused loop with
+widths per element under rules 1–5, so `a32 + b64` is a `[real64]` computed in one fused loop with
 no converted copy of `a32`.
+
+**A typed scalar promotes an array, as in Fortran and Julia.** `x * a` with `x: real64` and
+`a: [real32]` is a `[real64]`: the result is computed at the wider width, element by element. A
+*literal* is not a typed scalar: it adapts to the array (§2.3), so `2.0 * a` stays `[real32]`.
+Storing a promoted result back into the narrower array is a **compile error**, not a silent
+rounding: `a = x * a` with `a: [real32]` is refused, and `a = real32(x) * a` or
+`a = real32(x * a)` says which rounding is meant.
 
 ### 2.3 Literals and prelude constants
 
@@ -101,40 +135,43 @@ such as `1.0f32` would read as juxtaposition (`1.0 * f32`, ref §4.4).
 
 - **With an expected type** (an annotated binding, a parameter, a typed element or field): the
   literal is that type. An integer literal outside the target's range is a compile error
-  (`val b: integer8 = 300`). A real literal is rounded to the nearest value of the target width;
+  (`val b: int8 = 300`, `val u: uint8 = -1`). A real literal is rounded to the nearest value of the target width;
   one that rounds to infinity is a compile error (`val h: real16 = 70000.0`). An integer literal
   may initialize a real or complex (`val x: real32 = 1`), as ref §3.2 allows.
 - **As an operand of a binary operator whose other operand has a type:** an integer literal adopts
   that type if it is an integer, real or complex type; a real literal adopts it if it is a real or
   complex type, and otherwise (`n + 0.5` with `n` an integer) is `real64`. So `x32 * 2.0` is
-  `real32`, and `x8 + 1` is `integer8` (and traps when `x8` is 127).
-- **With no context:** an integer literal is `integer64`, a real literal `real64` (ref §2.4).
+  `real32`, `x8 + 1` is `int8` (and traps when `x8` is 127), and `u + 1` with `u: uint32` is
+  `uint32`. The same holds when the other operand is an array: `2.0 * a32` is `[real32]`.
+- **With no context:** an integer literal is `int64`, a real literal `real64` (ref §2.4).
 
 **The prelude constants `pi`, `e`, `inf`, `nan` and `i` are typed like literals** (**PROPOSED**):
-each adopts the width its context asks for (`pi` is `real32` beside a `real32`, `i` is `complex32`
+each adopts the width its context asks for (`pi` is `real32` beside a `real32`, `i` is `complex[real32]`
 beside a `real32`), and with no context `pi`, `e`, `inf`, `nan` are `real64` and `i` is
-`complex64`. Without this, `2pi * x32` would silently widen a `real32` kernel to `real64`.
+`complex[real64]`. Without this, `2pi * x32` would silently widen a `real32` kernel to `real64`.
 
 ### 2.4 Conversions
 
 Every numeric type name is also its conversion function, on a scalar and element-wise on an array:
-`real32(x)`, `integer16(n)`, `complex32(z)`, `complex32(re, im)`, `real64(a)`.
+`real32(x)`, `int16(n)`, `uint8(k)`, `complex[real32](z)`, `complex[real32](re, im)`,
+`real64(a)`.
 
 | From → to | Behaviour |
 |---|---|
-| integer → narrower integer | exact, or **traps** when the value is out of range |
+| integer → narrower integer, signed ↔ unsigned | exact, or **traps** when the value is out of range (`uint32(-1)` traps) |
 | real → integer | truncates toward zero; **traps** on NaN, infinity or out of range |
 | real → narrower real | rounds to nearest-even; overflow gives ±∞ (IEEE, no trap) |
 | complex → narrower complex | each part as real → real |
 | complex → real or integer | not a conversion: take `.re` (or `abs`, `arg`) first |
 | any widening | the implicit widening of §2.2, also callable explicitly |
 
-`to_real`, `to_integer` and `to_complex` (ref §10.7) remain and mean `real64`, `integer64` and
-`complex64`.
+`to_real`, `to_integer` and `to_complex` (ref §10.7) remain and mean `real64`, `int64` and
+`complex[real64]`.
 
 ### 2.5 Arithmetic, traps and printing
 
-- Integer arithmetic traps on overflow **at every width** (ref §4.4). The emitted form is
+- Integer arithmetic traps on overflow **at every width, signed and unsigned** (ref §4.4); an
+  unsigned result below zero is an overflow. The emitted form is
   `llvm.intr.sadd.with.overflow` and its siblings, then a branch to the trap (`precision.mlir` runs
   `127 + 1` and `100 + 27` at `i8`).
 - Real arithmetic is IEEE at its own width: `real32` operations are `f32` operations, never computed
@@ -152,10 +189,10 @@ The closed constraint set of ref §6.10 widens to the sized types:
 |---|---|
 | `Any` | every type |
 | `Numeric` | every integer, real and complex type |
-| `Integral` (**PROPOSED** name) | `integer8` … `integer64` |
+| `Integral` (**PROPOSED** name) | `int8` … `int64`, `uint8` … `uint64` |
 | `Real` | every integer and real type |
 | `Float` | `real16`, `real32`, `real64` |
-| `Complex` | `complex16`, `complex32`, `complex64` |
+| `Complex` | `complex[real16]`, `complex[real32]`, `complex[real64]` |
 | `Ord` | every integer and real type |
 | `Eq` | every numeric type, `bool`, `string` |
 | `Rank` | not a type: a rank (§3.4) |
@@ -197,18 +234,24 @@ anything else: without a `;` there is no shape to read. **`[[T]]` is not a type.
 element is a scalar, so `[[real]]` is rejected with *"an array element is a scalar; a matrix is
 `[real; :, :]`"*.
 
-**Element types**: every numeric type of §2, and `bool`. `[byte]` stays the separate storage type of
-ref §3.3.1, rank 1 only.
+**Element types**: every numeric type of §2, and `bool`. Bytes are `[uint8]`, an ordinary array;
+there is no separate byte storage type.
 
-### 3.2 Storage
+### 3.2 Storage and indexing base
 
-Storage is column-major for every rank: axis 0 varies fastest. A dense array of shape
-`(d0, d1, …, dk)` stores element `[i0, i1, …, ik]` at `i0 + d0·(i1 + d1·(i2 + …))`.
+**Arrays are 1-based**, as in Fortran: the first element of every axis is index 1 and the last is
+its extent. Axes are numbered from 1 too (`extent(a, 1)` is the first axis, Fortran's
+`size(a, dim=1)`).
 
-**Lowering.** A nex array of shape `(d0, …, dk)` is an MLIR `tensor<dk × … × d0 × T>`: the axes are
+Storage is column-major for every rank: the first axis varies fastest. A dense array of shape
+`(d1, d2, …, dk)` stores element `[i1, i2, …, ik]` at zero-based offset
+`(i1−1) + d1·((i2−1) + d2·((i3−1) + …))`.
+
+**Lowering.** A nex array of shape `(d1, …, dk)` is an MLIR `tensor<dk × … × d1 × T>`: the axes are
 reversed, so MLIR's identity (row-major) layout is nex's column-major one, and nex index `[i, j, k]`
-is tensor index `[k, j, i]`. A dynamic axis is `?`, a static one its number. This keeps every
-`linalg` op, fusion and bufferization on default layouts (`views.mlir`, rank 2 and rank 3).
+is tensor index `[k−1, j−1, i−1]`. The front end subtracts the base once per index; MLIR folds it
+into the loop bounds, so a 1-based loop costs nothing over a 0-based one. A dynamic axis is `?`,
+a static one its number. This keeps every `linalg` op, fusion and bufferization on default layouts (`views.mlir`, rank 2 and rank 3).
 
 ### 3.3 Static shapes
 
@@ -218,8 +261,8 @@ is tensor index `[k, j, i]`. A dynamic axis is `?`, a static one its number. Thi
 - A static shape converts implicitly to the dynamic shape of the same rank (`[real; 3, 3]` passes
   where `[real; :, :]` is wanted).
 - A dynamic shape converts implicitly to a static one at a binding, argument or return, with a
-  run-time check that **traps** `shape mismatch` (**PROPOSED**; the alternative, an explicit
-  conversion, is an open question in §14).
+  run-time check that **traps** `shape mismatch`. Only a dynamic side can trap: two static shapes
+  that differ are always the compile error of the first rule.
 - **A literal is dynamically shaped** unless its binding is annotated: `val a = [1.0, 2.0]` is
   `[real; :]`, so `var a = [1.0, 2.0]` may later be assigned a longer array (ref §5.2)
   (**PROPOSED**).
@@ -244,8 +287,8 @@ extent const); name resolution does, from the generic list. Inside the body, `ra
 constant `R`. Rank-generic code works through whole-array operations, `map`, the reductions,
 `extent`, `size` and `flatten`; it cannot write an index list, whose length would be `R`.
 
-Static extents as generic parameters (`def trace[N: Extent](m: [real; N, N])`) are not part of this
-design; see §14.
+Static extents as generic parameters (`def trace[N: Extent](m: [real; N, N])`) are not part of the
+language; a generic function takes dynamic axes and the caller's static shape converts to them.
 
 ---
 
@@ -253,17 +296,17 @@ design; see §14.
 
 ### 4.1 Literals
 
-A rank-R literal is brackets nested R deep. The outermost list runs along axis 0, the next along
-axis 1, and so on: the element at nesting path `i, j, k` is `a[i, j, k]`. Rank 2 is ref §4.13's
-row-by-row form unchanged.
+A rank-R literal is brackets nested R deep. The outermost list runs along axis 1, the next along
+axis 2, and so on: the element at nesting position `i, j, k` (counting from 1) is `a[i, j, k]`.
+Rank 2 is ref §4.13's row-by-row form unchanged.
 
 ```nex
 val m = [[1.0, 2.0, 3.0],
-         [4.0, 5.0, 6.0]]                      // [real; :, :], shape (2, 3), m[1, 0] == 4.0
+         [4.0, 5.0, 6.0]]                      // [real; :, :], shape (2, 3), m[2, 1] == 4.0
 
 val t = [[[1, 2], [3, 4]],
          [[5, 6], [7, 8]]]                     // [integer; :, :, :], shape (2, 2, 2)
-                                               // t[1, 0, 1] == 6
+                                               // t[2, 1, 2] == 6
 ```
 
 Every list at one depth must have the same length. A literal whose nesting is visibly jagged is a
@@ -291,17 +334,17 @@ type lands"): `val z: [real32; :, :] = zeros((4, 4))`.
 | Function | Result |
 |---|---|
 | `rank(a)` | the rank, a compile-time constant |
-| `extent(a, k)` | the extent of axis `k` (traps if `k` is not an axis) |
+| `extent(a, k)` | the extent of axis `k`, `1 ≤ k ≤ rank(a)` (traps if `k` is not an axis) |
 | `extents(a)` | `[integer; R]`, every extent (**PROPOSED**; usable in rank-generic code) |
 | `size(a)` | the number of elements, the product of the extents |
-| `length(a)` | `extent(a, 0)`; for rank 2 the row count, as in the reference |
+| `length(a)` | `extent(a, 1)`; for rank 2 the row count, as in the reference |
 | `shape(a)` | for rank ≥ 2 the R-tuple of extents (ref §10.4's `(rows, cols)` at rank 2); for rank 1 the length |
 | `rows(m)`, `cols(m)` | rank 2 only |
-| `reshape(a, (d0, …, dk))` | rank k+1 from any array of the same size, column-major (ref's `reshape(a, m, n)` stays) |
+| `reshape(a, (d1, …, dk))` | rank k from any array of the same size, column-major (ref's `reshape(a, m, n)` stays) |
 | `flatten(a)` | rank 1, column-major order, from any rank |
 | `transpose(m)` | rank 2 only |
-| `permute(a, (p0, …, pk))` | axes reordered: result axis `n` is source axis `p_n` (**PROPOSED**) |
-| `sum_axis(a, k)` | sum over axis `k`: rank R−1 (ref's rank-2 form is `k` = 0 or 1) |
+| `permute(a, (p1, …, pk))` | axes reordered: result axis `n` is source axis `p_n` (**PROPOSED**) |
+| `sum_axis(a, k)` | sum over axis `k`: rank R−1 (at rank 2, `k` is 1 or 2) |
 
 `transpose`, `permute`, `reshape` of a dense array and `flatten` of a dense array return views (§6):
 no data moves (**PROPOSED** as a performance guarantee; the result is a value either way, so which it
@@ -316,45 +359,52 @@ is cannot be observed; the lowering is *(unverified)*).
 
 ### 5.1 Index lists
 
-`a[s0, s1, …]` takes one subscript per axis. Each subscript is one of:
+`a[s1, s2, …]` takes one subscript per axis. Each subscript is one of:
 
 | Subscript | Axis in the result |
 |---|---|
 | an integer expression | removed (the axis collapses) |
 | `:` | kept, whole |
-| `lo..hi`, `lo..=hi`, `lo..`, `..hi`, `..=hi`, `..` | kept, the window |
+| `lo..hi`, `lo..`, `..hi`, `..` | kept, the window `lo` to `hi` **inclusive** (Fortran's `lo:hi`) |
+| `lo..<hi`, `..<hi` | kept, the half-open window `lo` to `hi − 1` |
 | any of the range forms followed by `by k` | kept, every k-th element of the window |
+
+**`..` is inclusive because that is what a Fortran programmer reads**: `a[2..5]` is four elements,
+`a(2:5)`. `..<` is the half-open form for the code that wants it, chiefly splitting at a point
+(`a[..<k]`, `a[k..]`). An omitted `lo` is 1 and an omitted `hi` is the axis's extent (`end`).
 
 - Fewer subscripts than the rank leaves the trailing axes whole: on rank 3, `t[i]` is
   `t[i, :, :]` and `t[i, j]` is `t[i, j, :]` (ref §4.14's `m[i]` row form, generalized). More
   subscripts than the rank is a compile error.
 - The result's rank is the number of kept axes. With every axis collapsed the result is the element
   itself, a scalar; otherwise it is a view (§6).
-- **`by k` is legal on every axis** of every rank (`m[0..4 by 2, 1..]`, `t[:, :, 0..10 by 3]`), on
+- **`by k` is legal on every axis** of every rank (`m[1..5 by 2, 2..]`, `t[:, :, 1..10 by 3]`), on
   read and as an assignment target. `k` may be **negative**, which walks the window downward (§5.4);
   a stride of `0` traps.
-- Indexing is 0-based. **Every index and bound is checked**: an index `i` on an axis of extent `n`
-  must satisfy `0 ≤ i < n`, a window `lo..hi` must satisfy `0 ≤ lo ≤ hi ≤ n`, and anything else
-  **traps** `out of bounds`. **There is no negative-index wrap**: `a[-1]` traps like `a[n]`.
+- Indexing is 1-based (§3.2). **Every index and bound is checked**: an index `i` on an axis of
+  extent `n` must satisfy `1 ≤ i ≤ n`, and a window `lo..hi` must satisfy `1 ≤ lo` and `hi ≤ n`
+  unless it is empty. A window with `hi = lo − 1` is empty and legal (`a[1..0]`, `a[n+1..n]`), as in
+  Fortran; anything else **traps** `out of bounds`. **There is no negative-index wrap**: `a[0]` and
+  `a[-1]` trap like `a[n + 1]`.
 
 ### 5.2 `end`: the last index of the axis
 
 Inside a subscript, `end` is the last valid index of the axis that subscript indexes,
-`extent(a, k) - 1`. It may appear anywhere in an index or a slice bound, in any expression:
+`extent(a, k)`. It may appear anywhere in an index or a slice bound, in any expression:
 
 ```nex
 a[end]               // the last element
 a[end - 1]           // the one before it
 a[end-2..]           // the last three
-a[..end]             // all but the last
-a[..=end]            // all of it
+a[..end-1]           // all but the last (also a[..<end])
+a[1..end]            // all of it
 m[:, end]            // the last column
-m[end, 0]            // the first element of the last row
+m[end, 1]            // the first element of the last row
 t[:, :, end]         // the last plane of a rank-3 array
-a[(end + 1) div 2]   // the middle-or-later element
+a[(end + 1) div 2]   // the middle element (the earlier of two when the length is even)
 ```
 
-- On an empty axis `end` is `-1`, so `a[end]` traps and `a[0..=end]` is empty: no special case.
+- On an empty axis `end` is `0`, so `a[end]` traps and `a[1..end]` is empty: no special case.
 - `end` binds to the **innermost** enclosing subscript list: in `a[b[end]]` it is `b`'s last index,
   and in `a[f(end)]` it is `a`'s (**PROPOSED** for the nested cases).
 - With a partial index list (§5.1), `end` in position `k` is axis `k`'s.
@@ -372,7 +422,7 @@ whether that line is inside an open `[`. So:
   checks the innermost bracket is a subscript list, not an array literal; otherwise the parse error
   above.
 
-A continuation line inside a subscript that starts with `end` (`a[0,` newline `end]`) is at depth > 0
+A continuation line inside a subscript that starts with `end` (`a[1,` newline `end]`) is at depth > 0
 and is therefore the index. No legal program changes reading under this rule, because no end marker
 can sit inside brackets.
 
@@ -383,20 +433,20 @@ also an assignment target (ref §4.15), for every rank, with `by` on any axis:
 
 ```nex
 var m = zeros((4, 4)) * 1.0
-m[:, 0] = [1.0, 2.0, 3.0, 4.0]          // a column
+m[:, 1] = [1.0, 2.0, 3.0, 4.0]          // the first column
 m[end, :] = fill(4, 9.0)                // the last row
-m[0..4 by 2, 1..3] = [[1.0, 2.0],
-                      [3.0, 4.0]]       // rows 0 and 2, columns 1 and 2
-t[:, :, 1] = plane                      // a plane of a rank-3 array
-m[1..3, 1..3] += 1.0                    // compound, element-wise, in place (PROPOSED: compound slice targets)
-a[1..4][0] = 99                         // a slice of a place is a place: writes a[1] (PROPOSED)
+m[1..3 by 2, 2..3] = [[1.0, 2.0],
+                      [3.0, 4.0]]       // rows 1 and 3, columns 2 and 3
+t[:, :, 2] = plane                      // a plane of a rank-3 array
+m[2..3, 2..3] += 1.0                    // compound, element-wise, in place (PROPOSED: compound slice targets)
+a[2..4][1] = 99                         // a slice of a place is a place: writes a[2] (PROPOSED)
 ```
 
 The right-hand side must have the slice's shape (statically when both are static, else a trap), or
 be a scalar, which fills the window (broadcast, as ref §4.5 broadcasts scalars). The write is in
 place: no copy of the target is made, and the binding keeps its identity. The right-hand side is
 evaluated as a value before the first element is written, so an overlapping self-assignment
-(`a[1..] = a[..end]`) shifts correctly; the compiler copies the source when the windows can overlap
+(`a[2..] = a[..end-1]`) shifts correctly; the compiler copies the source when the windows can overlap
 *(unverified: one-shot-bufferize is expected to insert that copy)*.
 
 ---
@@ -404,23 +454,23 @@ evaluated as a value before the first element is written, so an overlapping self
 ### 5.4 Negative strides
 
 With a negative `by k`, a range's bounds are read **in the direction of travel**: the first bound is
-where the walk starts, the second where it stops, and a range stays half-open (`..`) or closed
-(`..=`) exactly as it is going forward.
+where the walk starts, the second where it stops, and a range stays inclusive (`..`) or half-open
+(`..<`) exactly as it is going forward. This is Fortran's `a(hi:lo:-1)`.
 
 ```nex
-val a = [0, 1, 2, 3, 4, 5, 6]
-a[5..2 by -1]          // [5, 4, 3]       — half-open: stops before 2
-a[5..=2 by -1]         // [5, 4, 3, 2]
-a[.. by -1]            // [6, 5, 4, 3, 2, 1, 0] — open bounds fill from the stride's direction
-a[end..=0 by -1]       // the same, spelled out
-a[.. by -2]            // [6, 4, 2, 0]
-m[:, end..=0 by -1]    // the columns of m in reverse order
+val a = [10, 20, 30, 40, 50, 60, 70]
+a[5..2 by -1]          // [50, 40, 30, 20] — inclusive: a[5], a[4], a[3], a[2]
+a[5..<2 by -1]         // [50, 40, 30]     — half-open: stops before a[2]
+a[.. by -1]            // [70, 60, 50, 40, 30, 20, 10] — open bounds fill from the stride's direction
+a[end..1 by -1]        // the same, spelled out
+a[.. by -2]            // [70, 50, 30, 10]
+m[:, end..1 by -1]     // the columns of m in reverse order
 ```
 
-- An open start is the last index of the axis (`end`); an open stop runs past index `0`. Since no
-  index is negative (§5.1), a closed `..=0` is the only spelled way to name index `0` as the stop.
+- An open start is the last index of the axis (`end`); an open stop is index `1`.
 - Bounds are checked as going forward: the start must be a valid index of a non-empty window, the
-  stop must lie in `0..=n`, and a window whose start is below its stop is empty.
+  stop must lie in `1..n` (or be `0` / `n + 1` for an empty window), and a window whose start is
+  below its stop is empty (`a[1..2 by -1]` is empty, as Fortran's `a(1:2:-1)`).
 - A reversed slice is a view like any other (§6): **nothing is copied**. It is valid as an
   assignment target (`a[.. by -1] = b` writes `b` into `a` back to front).
 - The prelude's `reverse(a)` is `a[.. by -1]`, and `reverse(a, k)` reverses axis `k` only.
@@ -448,7 +498,7 @@ an owned array is never observable, only its cost: **a view is a value**, fixed 
    `val`. Writing *the source's* window is slice assignment on the source (§5.3), never through a
    named view.
 2. **Copies when mutated.** A view bound to a `var` becomes an owned array: `var w = a[1..4]`
-   copies the window, and `w[0] = 1` then changes only `w`. The copy is made by the auto-clone pass
+   copies the window, and `w[1] = 1` then changes only `w`. The copy is made by the auto-clone pass
    (ref §8.3) and is silent, like every other clone. (A slice *expression* of a `var` passed to an
    `inout` parameter is not a view but a place, written in place: §8.2.)
 3. **Copies when it escapes.** A view that would outlive the expression or block that took it, by
@@ -484,27 +534,30 @@ which the pipeline gains (PLAN.md).
 
 ### 6.4 Offset views: `origin`
 
-Arrays are 0-based, always; there are no declared lower bounds. Where a computation reads better
-with other bounds — a symmetric domain (`-n..=n` for FFT frequencies, a convolution kernel), a grid
+Arrays are 1-based, always; there are no declared lower bounds. Where a computation reads better
+with other bounds — a symmetric domain (`-n..n` for FFT frequencies, a convolution kernel), a grid
 with ghost cells — `origin` takes an **offset view**:
 
 ```nex
-val w = origin(kernel, -r)          // w[-r] .. w[r] are kernel[0] .. kernel[2r]
-val g = origin(grid, -1, -1)        // one origin per axis: g[-1, -1] is grid[0, 0]
-for k in -r..=r do
+val w = origin(kernel, -r)          // w[-r] .. w[r] are kernel[1] .. kernel[2r + 1]
+val g = origin(grid, 0, 0)          // one origin per axis: g[0, 0] is grid[1, 1]
+for k in -r..r do
   acc += w[k] * x[i - k]
 ```
 
-- `origin(a, o0, o1, …)` takes one first-index per axis (fewer leaves the rest at `0`). Indexing,
+- `origin(a, o1, o2, …)` takes one first-index per axis (fewer leaves the rest at `1`). Indexing,
   slicing and `end` on the view are relative to it: on `w`, `end` is `r`, and an index outside
-  `-r..=r` traps.
+  `-r..r` traps.
 - It is a view (§6.2): read-only, no allocation, no copy — the offset is folded into the view's base
   address, so an access costs exactly what an access to `kernel` costs.
-- **PROPOSED: the origin belongs to the binding, not to the array.** When an offset view is passed
-  to a function, returned, or stored, it arrives **0-based**: a function parameter's first index is
-  always `0`, so no function ever has to ask what its array's bounds are. (Fortran resets an
-  assumed-shape dummy to `1` the same way; here the rule is stated rather than discovered.) A
-  function that wants the offset takes it as an ordinary argument and calls `origin` itself.
+- **An offset view is local.** It lives only in the function that took it. Passing it as an
+  argument, returning it, storing it in a struct, tuple or enum payload, binding it at module level,
+  or capturing it in an escaping closure is a **compile error that names `origin`**: *"an `origin`
+  view cannot leave this function; `rebase(w)` makes an ordinary 1-based array"*. So every function
+  parameter starts at 1 and no function ever asks what its array's bounds are.
+- `rebase(w)` is an ordinary 1-based copy of an offset view's elements (`rebase(w)[1]` is `w[-r]`),
+  and is what crosses a function boundary. A function that wants the offset takes it as an ordinary
+  argument and calls `origin` itself.
 
 ---
 
@@ -528,8 +581,16 @@ Element-wise expressions fuse to one loop nest per expression for every rank (`v
 | `[T; :] @ [T; :, :]` | `k @ (k, n)` | `n` |
 | `[T; :] @ [T; :]` | `k @ k` | `T` (the dot product, no conjugation) |
 
-An operand of rank 3 or more is a compile error (**PROPOSED**; batching over leading axes is an open
-question, §14). The inner extent is checked at compile time when both are static and traps
+An operand of rank 3 or more is a **compile error**, as Fortran's `matmul` takes ranks 1 and 2 only.
+A batch of products is an explicit loop over the trailing axis, which the checker proves race-free
+(§9):
+
+```nex
+parallel for k in 1..n do
+  C[:, :, k] = A[:, :, k] @ B[:, :, k]
+```
+
+The inner extent is checked at compile time when both are static and traps
 otherwise. Static extents carry into the result's type: `[real; 3, 4] @ [real; 4, :]` is
 `[real; 3, :]`. Mixed element types promote per §2.2.
 
@@ -549,7 +610,7 @@ A parameter is **read mode** (the default, ref §6.4: the callee reads it and ma
 
 ```nex
 def scale(v: inout [real], s: real) =
-  v = v * s                        // or element by element: for k in 0..length(v) do v[k] *= s
+  v = v * s                        // or element by element: for k in 1..length(v) do v[k] *= s
 
 def swap(a: inout integer, b: inout integer) =
   val t = a
@@ -569,13 +630,15 @@ the function does not return it. When the call returns, the caller sees every wr
 applies to scalars, arrays and structs alike; a scalar `inout` is by reference, as the reference's
 `mut integer` was. A function type spells it the same way: `(inout [real], real) -> unit`.
 
-The call site writes no marker (**PROPOSED**; Swift writes `&x`, see §14).
+The call site writes no marker, as in Fortran: `scale(x, 2.0)` reads the same whether `v` is
+`inout` or not. A marker would add nothing the checker does not already enforce, since every misuse
+of an `inout` argument (§8.2, §8.3) is a compile error at the call.
 
 ### 8.2 What may be passed
 
 The argument to an `inout` parameter is a **place** rooted in something mutable: a `var` binding,
 an `inout` parameter, a field of one (`p.pos`), an element (`a[i]`), or a slice (`m[:, j]`,
-`a[0..n by 2]`), which borrows exactly that window and writes it in place. Passing a `val`, a
+`a[1..n by 2]`), which borrows exactly that window and writes it in place. Passing a `val`, a
 literal, a function result or any other temporary is a compile error: *"an inout argument must be a
 `var`"*. (No auto-clone fires here: a clone's writes could not reach anything.)
 
@@ -584,14 +647,23 @@ literal, a function result or any other temporary is a compile error: *"an inout
 For the duration of the call, the callee has the only access to the borrowed place. At every call
 the checker rejects:
 
-1. **The same root in two `inout` arguments**: `swap(a, a)`, `swap(a[0], a[1])`,
-   `f(m[:, 0], m[:, 1])`. The exception is two **different fields** of a local struct `var`
-   (`swap(p.x, p.y)`), which never overlap. Whether provably disjoint windows of one array may be
-   borrowed together is an open question (§14); this design rejects them.
+1. **The same root in two `inout` arguments, unless the two places are syntactically disjoint**:
+   `swap(a, a)`, `swap(a[i], a[j])` and `f(a[1..k], a[j..n])` are rejected. Two places of one root
+   are accepted together only when the checker can see from the source alone that they cannot
+   overlap:
+   - two **different fields** of a local struct `var` (`swap(p.x, p.y)`);
+   - on one axis, **non-overlapping constant windows or indices**: `f(a[1..4], a[5..8])`,
+     `swap(a[1], a[2])`, `f(m[:, 1], m[:, 2])`;
+   - on one axis, **a split at one expression `e`**, the same expression on both sides:
+     `f(a[1..e], a[e+1..n])`, `f(a[..<e], a[e..])`, `f(m[:, ..e], m[:, e+1..])`.
+
+   Every other pair of places on one root is a compile error, and the message suggests the split
+   form: *"`a[1..k]` and `a[j..n]` may overlap; borrow `a[1..e]` and `a[e+1..]` at one split point
+   `e`"*. No run-time disjointness check is made.
 2. **An `inout` argument plus any other argument that reads the same root while the call runs**:
    `f(a, a)` with the first parameter `inout`, or `f(a, a[1..3])`, since a read-mode array argument
    is borrowed, not copied (ref §8.4). An argument that is fully evaluated to a scalar before the call
-   starts does not conflict: `scale(a, a[0])` and `resize(a, length(a))` are legal. Arguments are
+   starts does not conflict: `scale(a, a[1])` and `resize(a, length(a))` are legal. Arguments are
    evaluated left to right, and the exclusive access begins after the last one.
 3. **Access by another route inside the callee.** Passing a module-level `var` as `inout` to a
    function that reads or writes that `var` by name, directly or through anything it calls, is
@@ -623,12 +695,12 @@ pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer a
 ### 9.1 `parallel for`
 
 ```nex
-parallel for i in 0..n do y[i] = a * x[i] + y[i]
+parallel for i in 1..n do y[i] = a * x[i] + y[i]
 
-parallel for j in 0..cols(m)
+parallel for j in 1..cols(m)
   m[:, j] = m[:, j] / norm(m[:, j])        // each iteration owns column j
 
-parallel for i in 0..rows(c), j in 0..cols(c)          // a 2-D iteration space (PROPOSED)
+parallel for i in 1..rows(c), j in 1..cols(c)          // a 2-D iteration space (PROPOSED)
   c[i, j] = dot(a[i, :], b[:, j])
 ```
 
@@ -643,22 +715,71 @@ A reduction is declared in the header with its operator, after the ranges:
 ```nex
 var total = 0.0
 var peak = 0.0
-parallel for i in 0..n reduce total: +, peak: max
+parallel for i in 1..n reduce total: +, peak: max
   total += x[i] * y[i]
   peak = max(peak, abs(x[i]))
 print(total, peak)
 ```
 
-The operators are `+`, `*`, `min`, `max`, `and`, `or`. The reduction variable is an outer `var` of
-a type the operator applies to. Each iteration contributes through exactly one of `v op= e`,
-`v = v op e`, `v = op(v, e)` (for `min`, `max`), `v = v and e`, `v = v or e`, where `e` does not
-mention `v`; `v` is not read anywhere else in the body. The `var`'s value before the loop is the
-starting value, and after the loop it holds the combination of the start and every contribution.
-`reduce` is a contextual word here, not a keyword: the prelude function `reduce` keeps its name.
+**The operators** are the built-in `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc`, and any
+**user-defined function** of type `(T, T) -> T`. The reduction variable is an outer `var` of a type
+the operator applies to. Each iteration contributes through exactly one of `v op= e`, `v = v op e`,
+`v = op(v, e)` (for `min`, `max` and a user function), `v = v and e`, `v = v or e`, or the location
+forms below, where `e` does not mention `v`; `v` is not read anywhere else in the body. The `var`'s
+value before the loop is the starting value, and after the loop it holds the combination of the
+start and every contribution. `reduce` is a contextual word here, not a keyword: the prelude
+function `reduce` keeps its name.
 
-**A parallel floating-point reduction does not promise the sequential order.** `+` over reals is
-combined in an order that depends on the thread count, so the last bits may differ between runs
-with different thread counts (but not between runs with the same count and schedule); see §14.
+- **A user-defined operator** is named in the header and called in the contribution:
+
+  ```nex
+  def kahan_add(a: (real, real), b: (real, real)): (real, real) = …
+
+  var s = (0.0, 0.0)
+  parallel for i in 1..n reduce s: kahan_add
+    s = kahan_add(s, (x[i], 0.0))
+  ```
+
+  The variable's value before the loop is taken as the operator's **identity**: every block of
+  §9.2.1 starts from it, so it must satisfy `f(id, x) == x` (here `(0.0, 0.0)`, a zero sum with
+  zero compensation). The function is called inside the
+  parallel body and obeys every rule of §9.4. The compiler assumes it is associative; it cannot
+  check that, and the fixed combination order of §9.2.1 makes the result reproducible whether or
+  not it is.
+- **`minloc` and `maxloc`** reduce a (value, index) pair, as Fortran's `MINLOC`/`MAXLOC` and
+  OpenMP's `MINLOC`/`MAXLOC` reductions do. The variable holds both, and the contribution names the
+  candidate and its index:
+
+  ```nex
+  var worst = (0.0, 0)
+  parallel for i in 1..n reduce worst: maxloc
+    worst = maxloc(worst, abs(r[i]), i)
+  val (largest, where) = worst
+  ```
+
+  Ties go to the lowest index, as in Fortran, whatever the thread count.
+
+#### 9.2.1 Reproducible reductions
+
+**A reduction's result does not depend on the thread count.** The index range is cut into
+fixed-size blocks (4096 iterations; the size is a compile-time constant, not a tuning knob), each
+block is reduced sequentially from the operator's identity (`0` for `+`, `1` for `*`, `+inf` for
+`min`, …; for a user operator, the variable's starting value), the block partials are combined in
+a **fixed pairwise tree** over the block numbers, and the tree's result is combined once with the
+variable's starting value. Threads only decide who computes
+which block, never the order of combination, so `OMP_NUM_THREADS=1` and `OMP_NUM_THREADS=64` give
+identical bits.
+
+**The sequential whole-array reductions use the same tree.** `sum(x)`, `product`, `dot`, `norm`
+and their axis forms block and combine exactly as `parallel sum(x)` does, so adding or removing
+`parallel` never changes a result's bits.
+
+**The order is not left to right.** A floating-point `sum` therefore differs in its last bits from
+a naive Fortran `DO` loop that accumulates one element at a time. Pairwise summation is also more
+accurate: its rounding error grows as O(log n) rather than O(n). A loop written element by element
+without `reduce` (`for i in 1..n do s += x[i]`) is an ordinary sequential loop and accumulates in
+source order, as written. Integer reductions are exact, so their order is unobservable except that
+an overflow traps.
 
 ### 9.3 Parallel map and reduction expressions
 
@@ -671,10 +792,16 @@ val r = parallel 2a + b                          // a whole-array expression (PR
 ```
 
 The forms are `map`, the reductions `sum`, `product`, `min`, `max`, `dot`, and any whole-array
-element-wise expression. The general `reduce(a, init, f)` has no parallel form, because `f`'s
-associativity cannot be checked; a custom combination is a `parallel for … reduce` over one of the
-six operators. A whole-array expression without `parallel` is sequential (**PROPOSED**: it is always
-safe to run in parallel, so whether the compiler may do so unasked is an open question, §14).
+element-wise expression. The general `reduce(a, init, f)` has no parallel form; a custom
+combination is a `parallel for … reduce s: f` with a user operator (§9.2), where the identity and
+the contribution are spelled out.
+
+**There is no implicit parallelism.** A whole-array expression or reduction without `parallel` runs
+on one thread, even though it would always be safe to run in parallel. The reason is MPI: the
+typical scientific code runs one MPI rank per core, and a compiler that threaded each rank unasked
+would oversubscribe every core. Threads are only ever started by a `parallel` the programmer wrote.
+The one exception is outside nex's control: an `@` dispatched to BLAS (§10.4) may thread inside the
+library, under that library's own controls (`OPENBLAS_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`).
 
 ### 9.4 What the checker proves
 
@@ -693,8 +820,13 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
    value semantics means no other code can change it meanwhile.
 3. **No effects through calls.** A function called in the body may receive `inout` only places that
    rule 1 allows the body to write (`normalize(m[:, j])`), and may not itself write a module-level
-   `var` (the transitive summary of §8.3). I/O (`print`, `write_bytes`, …) and `extern` functions not
-   marked `@pure` (§10) are rejected in a parallel body (**PROPOSED**: stdout is shared state).
+   `var` (the transitive summary of §8.3). `extern` functions not marked `@pure` (§10) are rejected
+   in a parallel body.
+   **I/O:** `print` and writing to stderr are allowed, and each call is **atomic** — its whole line
+   is written under a lock, so lines never interleave mid-line — but the **order of lines across
+   iterations is unspecified**. This is the one deliberately non-reproducible thing in a parallel
+   loop. Every other I/O (`read_bytes`, `write_bytes`, opening or writing a file, reading input) is a
+   compile error in a parallel body.
 4. **The reductions are well formed** (§9.2).
 
 A body the checker cannot prove is a compile error naming the offending write or read, never a
@@ -723,9 +855,20 @@ ran an iteration: 0 sequentially, 3 under `OMP_NUM_THREADS=4`. An element write 
 an allocation and a `memrefCopy` call per iteration (both run).
 
 The OpenMP lowering of a reduction over an operator the conversion does not pattern-match
-(complex `+`, `min`/`max` on integers, `and`/`or`) is *(unverified)*; only real `+` was run. Which
-pipeline a program gets, and how the thread count is chosen, is §14. The runtime honours
-`OMP_NUM_THREADS` (**PROPOSED**).
+(complex `+`, `min`/`max` on integers, `and`/`or`, `minloc`/`maxloc`, a user operator) is
+*(unverified)*; only real `+` was run. The fixed block-and-tree order of §9.2.1 is emitted by nex
+around the per-block loop, not left to `omp.declare_reduction`, whose combination order follows the
+thread count.
+
+**Which pipeline a program gets is decided by the program, not by a flag.** A program that contains
+a `parallel` construct anywhere is lowered through OpenMP and links the OpenMP runtime; a program
+with none is lowered sequentially and links no OpenMP runtime at all. There is no `-fopenmp`
+equivalent to forget.
+
+**The thread count comes from `OMP_NUM_THREADS` only**, the variable every HPC batch script already
+sets; nex adds no variable of its own. `OMP_PROC_BIND` and `OMP_PLACES` are honoured as the OpenMP
+runtime reads them. `OMP_NUM_THREADS=1` runs the program sequentially and, by §9.2.1, produces
+identical bits.
 
 ---
 
@@ -738,13 +881,13 @@ pipeline a program gets, and how the thread count is chosen, is §14. The runtim
 extern def cbrt(x: real): real
 
 @link(framework = "Accelerate")                    // macOS; @link("openblas") elsewhere
-extern def cblas_ddot(n: integer32, x: [real], incx: integer32,
-                      y: [real], incy: integer32): real
+extern def cblas_ddot(n: int32, x: [real], incx: int32,
+                      y: [real], incy: int32): real
 
 @symbol("dgesv_")
-extern def lapack_dgesv(n: integer32, nrhs: integer32, a: inout [real; :, :], lda: integer32,
-                        ipiv: inout [integer32], b: inout [real; :, :], ldb: integer32,
-                        info: inout integer32)
+extern def lapack_dgesv(n: int32, nrhs: int32, a: inout [real; :, :], lda: int32,
+                        ipiv: inout [int32], b: inout [real; :, :], ldb: int32,
+                        info: inout int32)
 ```
 
 `extern def` is a bodyless declaration of a C function, the second sanctioned bodyless form beside
@@ -757,57 +900,82 @@ believes without proof.
 
 | nex parameter | C sees |
 |---|---|
-| `integer8` … `integer64` | `int8_t` … `int64_t` |
+| `int8` … `int64` | `int8_t` … `int64_t` |
+| `uint8` … `uint64` | `uint8_t` … `uint64_t` |
 | `real32`, `real64`, `real16` | `float`, `double`, `_Float16` |
+| `complex[real32]`, `complex[real64]` | `float _Complex`, `double _Complex`, **by value** |
 | `bool` | `bool` (`_Bool`) |
 | `inout` scalar | a pointer to it (`int32_t *info`) |
 | `string` | `const char *`, a NUL-terminated copy valid for the call |
 | `[T; …]` read mode | `const T *` to the first element of the window |
 | `[T; …]` `inout` | `T *` to the first element; C's writes land in the caller's array |
-| return: a scalar or `unit` | the value, or `void` |
+| a `@c` struct, read mode or `inout` | `const S *` / `S *` to the struct, laid out as C lays it out |
+| a function type `(A, B) -> R` | a C function pointer (§10.2.1) |
+| return: a scalar, a complex or `unit` | the value, or `void` |
 
-A complex scalar does not cross by value (the C ABI for `double _Complex` differs by target)
-(**PROPOSED**); complex **arrays** cross as pointers, whose interleaved (re, im) layout is C99's and
-BLAS's *(unverified for complex)*. No array is returned from C, and structs and callbacks do not
-cross (§14). A read-mode array argument is a promise that C does not write it; the compiler cannot
-check that, and a C function that breaks it breaks value semantics.
+**Complex scalars cross by value.** nex mirrors clang's ABI for `_Complex` on each target, so
+`double _Complex` arguments and results agree with C: on arm64 a complex is a homogeneous
+floating-point aggregate in two consecutive FP registers; on x86-64 System V it is two SSE values
+(a `complex[real64]` in two SSE registers, a `complex[real32]` packed in one). Complex **arrays**
+cross as pointers, whose interleaved (re, im) layout is C99's and BLAS's *(unverified for complex)*.
+
+**`@c` structs cross by reference.** A struct declared `@c` has C's field order, alignment and
+padding, and passes as a pointer (`const S *` in read mode, `S *` as `inout`). A struct **by value**
+does not cross yet (§14).
+
+No array is returned from C. A read-mode array argument is a promise that C does not write it; the
+compiler cannot check that, and a C function that breaks it breaks value semantics.
+
+#### 10.2.1 Callbacks
+
+A nex `def` passes where C wants a function pointer: an `extern` parameter of a function type
+(`f: (real) -> real`) receives a C-callable trampoline for the named function. The callback's
+parameters follow the extern's convention — by value for a C extern, by reference when the extern
+is declared Fortran (§10.6). A callback must not capture: a **non-capturing** `def` or lambda passes
+directly. A **capturing** closure passes only where the C library offers a `void *user_data`
+parameter beside the function pointer (as QUADPACK wrappers, GSL and most C ODE solvers do); nex
+then passes the closure's environment through `user_data` and the trampoline unpacks it. A capturing
+closure to an extern with no such parameter is a compile error. A trap inside a callback unwinds
+to the nex frame that made the extern call *(unverified)*.
 
 ### 10.3 Strides and the leading dimension
 
 C receives a pointer and nothing else, so what the pointer means must be agreed:
 
-- **Rank 1.** By default the parameter needs unit stride: a strided view (`x[0..n by 2]`) is copied
+- **Rank 1.** By default the parameter needs unit stride: a strided view (`x[1..n by 2]`) is copied
   to a dense array before the call (and, for `inout`, copied back after). A parameter marked
   `@strided` passes any view as is, and the program passes the stride itself, as BLAS's `incx`.
-- **Rank 2.** By default the parameter needs unit stride along axis 0 (each column contiguous) and
+- **Rank 2.** By default the parameter needs unit stride along the first axis (each column contiguous) and
   any stride between columns: that column stride is the **leading dimension**. A view such as
   `m[1..3, :]` or `m[2..6, 1..4]` crosses with no copy, its pointer offset to its first element and
-  its leading dimension the source's. A view strided along axis 0 (`m[0..8 by 2, :]`) is copied
-  first.
+  its leading dimension the source's. A view strided along the first axis (`m[1..8 by 2, :]`) is
+  copied first.
 - **Rank ≥ 3.** The parameter needs a dense column-major array; anything else is copied first.
 
 The prelude gives the numbers C needs: `stride(a, k)`, the element stride of axis `k`, and
-`ld(m) = stride(m, 1)` for rank 2 (**PROPOSED** names). Every copy here is silent, like an
+`ld(m) = stride(m, 2)` for rank 2 (**PROPOSED** names). Every copy here is silent, like an
 auto-clone.
 
 **Lowering.** The pointer is `memref.extract_aligned_pointer_as_index` plus the offset from
-`memref.extract_strided_metadata`; the leading dimension is the stride of the memref's axis 0, which
-is nex's axis 1 (§3.2). `blas.mlir` calls `cblas_dgemm` from Accelerate on a whole matrix and on the
-view `Big[1..3, :]` (offset 1, leading dimension 4) and gets the same product both times, no copy.
+`memref.extract_strided_metadata`; the leading dimension is the stride of the memref's first
+dimension, which is nex's second axis (§3.2). `blas.mlir` calls `cblas_dgemm` from Accelerate on a
+whole matrix and on the view `Big[2..3, :]` (offset 1, leading dimension 4) and gets the same
+product both times, no copy.
 
 ### 10.4 `@` dispatches to BLAS
 
 `A @ B` is a BLAS call instead of a `linalg` op when all of these hold:
 
-1. The element type is `real32`, `real64`, `complex32` or `complex64` (`s`, `d`, `c`, `z`). Integer,
+1. The element type is `real32`, `real64`, `complex[real32]` or `complex[real64]` (`s`, `d`, `c`,
+   `z`). Integer,
    `bool` and `real16` products never dispatch.
 2. **Either** the product is large: `m·k·n ≥ 64³` for matrix-matrix, `m·k ≥ 128²` for
    matrix-vector and vector-matrix, `k ≥ 4096` for a dot (**PROPOSED** thresholds, to be set by the
    perf oracle); **or** the shape is one the fused path cannot do without materializing an operand:
    an operand that is `transpose(X)`, `conj(transpose(X))` (BLAS's `T` and `C` flags), or a rank-2
-   view whose unit stride is along axis 1 rather than axis 0 (a transposed layout).
+   view whose unit stride is along the second axis rather than the first (a transposed layout).
 3. A BLAS library is linked: Accelerate on macOS (the run in `blas.mlir`), OpenBLAS elsewhere
-   *(unverified)*, through the LP64 (`integer32`) interface.
+   *(unverified)*, through the LP64 (`int32`) interface.
 
 The routine follows the shape: `gemm`, `gemv` (`T` flag for vector-matrix), `dot` (`dotu` for
 complex: nex's `@` does not conjugate). With static extents the decision is made at compile time;
@@ -821,12 +989,73 @@ order. Every corpus matrix is far below the threshold. A build flag disables dis
 
 ### 10.5 LAPACK
 
-The prelude reaches LAPACK for the dense linear-algebra kernels, each taking and returning values,
-copying its inputs because LAPACK overwrites them (**PROPOSED** set and names): `solve(A, b)`,
-`lstsq(A, b)`, `inv(A)`, `det(A)`, `chol(A)`, `qr(A)`, `eig(A)`, `eigh(A)`, `svd(A)`. Each has an
-`inout` form that factors in place without the copy (`lu_inplace(A, ipiv)`). A LAPACK `info` that
-reports failure (a singular matrix, no convergence) traps. Column-major storage means no transposes,
-and the leading-dimension rules are §10.3's.
+The prelude reaches LAPACK for the dense linear-algebra kernels. **The first set** is:
+
+| Function | LAPACK | Result |
+|---|---|---|
+| `solve(A, b)` | `?gesv` | `x` with `A @ x == b` (`b` a vector or a matrix of right-hand sides) |
+| `lstsq(A, b)` | `?gelsd` | the least-squares `x` |
+| `inv(A)` | `?getrf` + `?getri` | the inverse |
+| `det(A)` | `?getrf` | the determinant |
+| `lu(A)` | `?getrf` | `(L, U, p)`, the pivoted factors |
+| `chol(A)` | `?potrf` | the Cholesky factor of a symmetric/Hermitian positive-definite `A` |
+| `qr(A)` | `?geqrf` + `?orgqr` | `(Q, R)` |
+| `eig(A)` | `?geev` | eigenvalues (and vectors) of a general matrix, **always complex** |
+| `eigh(A)` | `?syevd` / `?heevd` | eigenvalues (real) and vectors of a symmetric/Hermitian matrix |
+| `svd(A)` | `?gesdd` | `(U, s, Vt)` |
+
+**Later** (§14): banded and tridiagonal solvers, generalized eigenproblems, `rcond` / `cond`.
+
+**The value forms** take and return values, copying their inputs because LAPACK overwrites them,
+and **trap** when LAPACK's `info` reports failure, with a message naming the routine and the cause
+in the user's terms: *"solve: matrix is singular (U[3,3] = 0)"*, *"chol: matrix is not positive
+definite (leading minor 4)"*, *"svd: did not converge"*. The indices in a message are 1-based, as
+LAPACK's `info` already is.
+
+**The `inout` forms** factor in place without the copy — `lu_inplace(A, ipiv)`,
+`chol_inplace(A)`, `qr_inplace(A, tau)`, … — and do **not** trap: they return LAPACK's `info` as an
+`integer`, for the code that wants to handle a singular matrix itself.
+
+Column-major storage means no transposes, and the leading-dimension rules are §10.3's.
+
+### 10.6 Calling Fortran
+
+**nex calls existing Fortran directly**, and this is first-class, not an afterthought: the product
+case against Julia is *Fortran's model, modern syntax, compiler-enforced safety, ahead-of-time native
+binaries* — and a scientist's existing Fortran library is part of Fortran's model. Two kinds of
+Fortran procedure are reachable:
+
+- **`bind(c)` procedures** (Fortran 2003 interoperability) are C functions to nex and are declared
+  as in §10.1, with `@symbol` giving the `bind(c, name=…)` name.
+- **Plain gfortran objects** — a `.o`, `.a` or `.so` compiled from ordinary Fortran 77/90 — are
+  declared `@fortran` (**PROPOSED** spelling):
+
+  ```nex
+  @fortran @link("mylib")
+  extern def dgtsv(n: int32, nrhs: int32, dl: inout [real], d: inout [real], du: inout [real],
+                   b: inout [real; :, :], ldb: int32, info: inout int32)
+
+  @fortran
+  extern def read_mesh(filename: string, nodes: inout [real; :, :], n: inout int32)
+  ```
+
+  `@fortran` applies gfortran's conventions so the declaration reads like the Fortran interface:
+  1. **Name mangling**: the symbol is the lowercase name with a trailing underscore (`dgtsv_`);
+     `@symbol` overrides it (a module procedure's `__mod_MOD_name`).
+  2. **Every argument by reference**, as Fortran passes it: a read-mode scalar passes the address of
+     a temporary copy, an `inout` scalar the address of the caller's place.
+  3. **Hidden string lengths**: each `string` argument passes its pointer in place and its length
+     as an extra trailing argument (`size_t` in gfortran 8 and later), in order after all the
+     declared arguments. Fortran strings are not NUL-terminated and nex adds no terminator.
+  4. **Arrays** pass as for C (§10.2, §10.3): column-major is native, so a dense array or a
+     leading-dimension view crosses with no copy, and Fortran's 1-based indexing matches nex's.
+  5. **Complex** is by reference like every other argument; a Fortran `COMPLEX` function result
+     follows gfortran's convention for the target *(unverified)*.
+
+What does not cross: Fortran assumed-shape (`a(:)`) dummies of a non-`bind(c)` procedure, which
+need gfortran's array descriptor; derived types; `optional` arguments. Each is reached through a
+`bind(c)` wrapper written in Fortran. LAPACK and BLAS (§10.4, §10.5) are themselves Fortran and are
+called through these rules.
 
 ---
 
@@ -835,6 +1064,9 @@ and the leading-dimension rules are §10.3's.
 **Keywords** (ref §2.3) gain `inout`, `parallel` and `extern`. `mut` stays reserved and means
 nothing. `by` (slices) and `reduce` (the `parallel for` clause) are contextual, so `reduce` remains a
 prelude name. The type names of §2.1 are prelude type names, not keywords.
+
+**Ranges**: `..` is the inclusive range operator and `..<` the half-open one (§5.1); there is no
+`..=`. Both serve slices and `for` headers alike: `for k in 1..n` runs `n` times.
 
 **`end`** is both the block terminator of ref §2.7 and the index expression of §5.2, told apart by
 bracket depth and line position as §5.2 specifies.
@@ -851,8 +1083,8 @@ numerical code is not worth a reserved word.
 
 ```nex
 val z = 3 + 2i            // 3.0+2.0i: i is the imaginary unit
-for i in 0..3
-  print(2i)               // 0, 2, 4: i is the loop index, so 2i is 2 * i, an integer
+for i in 1..3
+  print(2i)               // 2, 4, 6: i is the loop index, so 2i is 2 * i, an integer
 print(2i)                 // 0.0+2.0i: the loop's i is out of scope again
 ```
 
@@ -865,8 +1097,12 @@ Inside a scope that binds `i`, write the unit some other way (`complex(0.0, 1.0)
 
 | Subject | Reference | Here | Change |
 |---|---|---|---|
-| Sized numeric types and their aliases | §3.1, §11.2 | §2.1 | `integer8…64`, `real16…64`, `complex16…64`; `integer`, `real`, `complex` become aliases |
-| Promotion | §3.2, §4.4 | §2.2 | a lattice across widths; integer meets real gives the real's width |
+| Sized numeric types and their aliases | §3.1, §11.2 | §2.1 | `iso_fortran_env` names: `int8…64`, `uint8…64`, `real16…64`, `complex[real16…64]`; `integer`, `real`, `complex` become aliases of the 64-bit kinds |
+| Unsigned integers | — | §2.1, §2.2 | `uint8…64`, trapping; same-width signed/unsigned mixing needs a conversion |
+| `byte` and `[byte]` | §3.3.1 | §3.1 | gone: bytes are `[uint8]`, an ordinary array (`read_bytes`/`write_bytes` take and give `[uint8]`) |
+| Promotion | §3.2, §4.4 | §2.2 | a lattice across widths; integer meets real gives the real's width; a typed scalar promotes an array |
+| Index base | §4.14 (0-based) | §3.2, §5.1 | **1-based**, as Fortran; axis numbers (`extent(a, k)`, `sum_axis`) are 1-based too |
+| Range syntax | §4.14 (`..` half-open, `..=` inclusive) | §5.1 | `a..b` is **inclusive** (Fortran `a:b`); `a..<b` is half-open; `..=` is gone |
 | Literal typing | §2.4 | §2.3 | literals and `pi`/`e`/`inf`/`nan`/`i` take their context's width |
 | Conversions | §10.7 | §2.4 | a conversion function per type name |
 | Generic constraints | §6.10 | §2.6 | widened to sized types; `Integral`, `Rank` added |
@@ -878,14 +1114,16 @@ Inside a scope that binds `i`, write the unit some other way (`complex(0.0, 1.0)
 | End-relative indexing | — | §5.2 | `end` in subscripts |
 | Strided slices on every axis; strided assignment | §4.14, §4.15 | §5.1, §5.3 | `by` on any axis, read and write |
 | Negative strides | §4.14 (deferred) | §5.4 | `by -k` reverses; `reverse(a)`; a view, no copy |
-| Offset views | — | §6.4 | `origin(a, o0, …)`: a view with other first indices; arrays stay 0-based |
+| Offset views | — | §6.4 | `origin(a, o1, …)`: a local-only view with other first indices; `rebase` copies to 1-based; arrays stay 1-based |
 | Slices | §4.14 ("freshly owned") | §6 | a slice is a read-only view |
 | `a.view(…)` | §10.5 (view-style slicing) | §6 | gone; a slice is the view, and writing goes through slice assignment or `inout` |
 | Writes to a source visible through an earlier view | §10.5 | §6.2 rule 4 | a view keeps the value it was taken with |
-| `@` | §4.5 | §7.2 | ranks 1 and 2, static extents, BLAS dispatch |
-| Parameter modes | §6.4, §3.9, §8.1–§8.4 | §8 | `inout` exclusive borrow replaces move-in `mut` |
-| Parallel loops and reductions | §11.2 | §9 | `parallel for … reduce`, `parallel map`/reductions |
-| FFI, BLAS, LAPACK | §6.11, §11.2 | §10 | `extern def`, `@link`, `@symbol`, `@strided`, `@pure` |
+| `@` | §4.5 | §7.2 | ranks 1 and 2 only, static extents, BLAS dispatch |
+| Parameter modes | §6.4, §3.9, §8.1–§8.4 | §8 | `inout` exclusive borrow replaces move-in `mut`; syntactically disjoint windows may be borrowed together |
+| Parallel loops and reductions | §11.2 | §9 | `parallel for … reduce` with built-in, `minloc`/`maxloc` and user operators; reproducible across thread counts; `parallel map`/reductions; no implicit parallelism |
+| Whole-array reduction order | — | §9.2.1 | blocked pairwise tree, the same with or without `parallel` |
+| FFI, BLAS, LAPACK | §6.11, §11.2 | §10 | `extern def`, `@link`, `@symbol`, `@strided`, `@pure`, `@c` structs, callbacks, complex by value; LAPACK value forms trap, `inout` forms return `info` |
+| Calling Fortran | — | §10.6 | `bind(c)` and plain gfortran procedures through `@fortran` |
 | Keywords | §2.3 | §11 | `inout`, `parallel`, `extern` |
 
 Unchanged, and restated only to fix their meaning beside the new rules: `i` and its shadowing
@@ -893,35 +1131,20 @@ Unchanged, and restated only to fix their meaning beside the new rules: `i` and 
 
 ---
 
-## 14. Open questions
+## 14. Later
 
-These are the user's to answer. The document above takes the stated default until then.
+Decided directions that are not in the first language. Each is kept here so it is not lost, and
+each has an item in PLAN.md's later list.
 
-1. **Unsigned integers.** Should `uinteger8…64` exist (for bit manipulation, image data, FFI to
-   unsigned C parameters), and should `[byte]` then become `[uinteger8]`? Default: no unsigned
-   types; `[byte]` stays.
-2. **`bfloat16`.** Wanted beside `real16` (ML data)? Default: no.
-3. **A real64 scalar meeting a real32 array.** §2.2 promotes `a32 * x64` to a `[real64]` (NumPy's
-   current rule). Should an array's width win over a non-literal scalar's instead? Default: promote.
-4. **Dynamic to static shape.** Implicit with a run-time check (default), or only through an
-   explicit conversion?
-5. **Static extents as generic parameters** (`def trace[N: Extent](m: [real; N, N])`). Wanted?
-   Default: not in the language.
-6. **Batched `@`** over leading axes for rank ≥ 3 (NumPy's `matmul`). Default: a compile error.
-7. **A call-site marker for `inout`** (`scale(&x, 2.0)` or `scale(inout x, 2.0)`), as Swift
-   requires. Default: no marker.
-8. **Disjoint borrows of one array.** Should `f(a[0..k], a[k..])` with both parameters `inout` be
-   allowed when the checker can prove the windows disjoint (divide and conquer)? Default: rejected.
-9. **Reproducible parallel reductions.** Should a floating-point reduction give the same bits for
-   every thread count (a fixed reduction tree, at some cost)? Default: same bits only for the same
-   thread count.
-10. **Implicit parallelism.** May the compiler run whole-array expressions in parallel without a
-    `parallel` prefix, above a size threshold? Default: only when asked.
-11. **Which pipeline by default, and the thread count.** Is OpenMP lowering on for every build, or
-    behind a flag (`nex build --parallel`), and is `NEX_THREADS` wanted beside `OMP_NUM_THREADS`?
-    Default: on whenever a program has a `parallel` construct.
-12. **I/O in a parallel body.** Rejected (default), or allowed with unspecified interleaving?
-13. **User-defined reduction operators** for `parallel for … reduce`. Default: the six built-in ones.
-14. **FFI breadth.** Complex scalars by value, structs, and C callbacks (for an ODE solver or a
-    quadrature routine taking an integrand). Default: none of the three.
-15. **The first LAPACK set** (§10.5), and whether failure traps or returns a result value.
+- **Structs by value across the FFI.** `@c` structs cross by reference today (§10.2); passing and
+  returning them by value needs the per-target aggregate classification clang does (arm64 HFA and
+  indirect rules, x86-64 SysV eightbyte classes), and is deferred until a library asks for it.
+- **`real128`** (and `complex[real128]`), the `iso_fortran_env` quad kind.
+- **`bfloat16`.** The name is reserved (§2.1).
+- **Batched BLAS** behind an explicit batched routine, should the `parallel for` idiom of §7.2
+  prove slower than a vendor's batched `gemm`.
+- **More LAPACK** (§10.5): banded and tridiagonal solvers, generalized eigenproblems,
+  `rcond` / `cond`.
+
+Not in the language, and not planned: implicit parallelism (§9.3), static extents as generic
+parameters (§3.4), batched `@` on rank ≥ 3 (§7.2), a call-site marker for `inout` (§8.1).
