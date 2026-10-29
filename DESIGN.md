@@ -27,8 +27,9 @@ their results are the same for every thread count (§9). C, BLAS, LAPACK and exi
 reachable through `extern` declarations, and `@` uses BLAS when that pays (§10). A real can carry a
 unit of measure (`9.81<m/s^2>`, `real<mm>`), checked at compile time and free at run time (§13).
 
-nex is compiled, always: there is no interpreter, and `nex run` compiles the program to a native
-binary and runs it. The playground does the same on a server, running the native binary inside
+nex is compiled: `nex run` compiles the program to a native binary and runs it, and the compiler
+is the source of truth for what a program means. An interpreter sharing the compiler's front end
+and runtime is a later, measured option (PLAN.md), checked against the compiler test by test. The playground does the same on a server, running the native binary inside
 nsjail on its own VM.
 
 ---
