@@ -15,12 +15,12 @@ file	category	name	mlir	pending	v3
 014-unary-minus	scalar arithmetic	unary minus	true		same
 015-complex-from-i	scalar arithmetic	complex from `i`	true		same
 016-complex-multiply	scalar arithmetic	complex multiply	true		same
-017-unary-minus-binds-tighter-than-power	scalar arithmetic	unary minus binds tighter than power	true		same
+017-power-binds-tighter-than-unary-minus	scalar arithmetic	power binds tighter than unary minus	true		meaning
 018-integer-equality	comparison + logical	integer ==	true		same
 019-integer-inequality	comparison + logical	integer !=	true		same
 020-integer-less-than	comparison + logical	integer <	true		same
-021-and-short-circuits	comparison + logical	and short-circuits	true		same
-022-or-short-circuits	comparison + logical	or short-circuits	true		same
+021-and-short-circuits	comparison + logical	and short-circuits	true		meaning
+022-or-short-circuits	comparison + logical	or short-circuits	true		meaning
 023-not	comparison + logical	not	true		same
 024-string-compares-by-content	comparison + logical	string == compares by content	true		same
 025-string-is-the-negation-of	comparison + logical	string != is the negation of ==	true		same
@@ -41,9 +41,9 @@ file	category	name	mlir	pending	v3
 040-if-expression-yields-a-real-typed-value	control flow	if expression yields a real-typed value	true		same
 041-if-expression-yields-a-bool	control flow	if expression yields a bool	true		same
 042-nested-if-expression	control flow	nested if expression	true		same
-043-while-loop	control flow	while loop	true		same
-044-for-over-array	control flow	for over array	true		same
-045-for-over-val-bound-array	control flow	for over val-bound array	true		same
+043-while-loop	control flow	while loop	true		syntax
+044-for-over-array	control flow	for over array	true		syntax
+045-for-over-val-bound-array	control flow	for over val-bound array	true		syntax
 046-for-over-array-produced-by-range	control flow	for over array produced by a half-open range	true		syntax
 047-for-over-range	control flow	for over range	true		syntax
 048-for-over-inclusive-range	control flow	for over inclusive range	true		syntax
@@ -58,7 +58,7 @@ file	category	name	mlir	pending	v3
 057-string-arg-call-refines-a-bound-then-called-lambda-using-for	control flow	string-arg call refines a bound-then-called lambda using `+` for concat	true		same
 058-for-with-tuple-destructuring-on-enumerate-xs	control flow	for with tuple destructuring on enumerate(xs)	false		meaning
 059-early-return	control flow	early return	true		same
-060-array-of-lambdas-each-closure-fits-in-16-byte-slots	control flow	array of lambdas — each closure fits in 16-byte slots	true		same
+060-array-of-lambdas-each-closure-fits-in-16-byte-slots	control flow	array of lambdas — each closure fits in 16-byte slots	true		syntax
 061-rank-2-single-index-returns-the-row-as-a-rank-1-array	control flow	rank-2 single-index returns the row as a rank-1 array	true		syntax
 062-rank-2-two-integer-index-returns-a-scalar-element	control flow	rank-2 two-integer index returns a scalar element	true		syntax
 063-rank-2-indexing-through-a-computed-integer-expression	control flow	rank-2 indexing through a computed integer expression	true		syntax
@@ -128,10 +128,10 @@ file	category	name	mlir	pending	v3
 127-strided-slice-assign-length-mismatch-traps	arrays	strided slice-assign length mismatch traps	false		syntax
 128-strided-slice-assign-with-zero-stride-traps	arrays	strided slice-assign with zero stride traps	false		syntax
 129-sum	arrays	sum	true		same
-130-min-over-an-integer-array	arrays	min over an integer array	true		same
-131-max-over-an-integer-array	arrays	max over an integer array	true		same
-132-min-over-a-real-array	arrays	min over a real array	true		same
-133-max-over-a-real-array	arrays	max over a real array	true		same
+130-minval-over-an-integer-array	arrays	minval over an integer array	true		syntax
+131-maxval-over-an-integer-array	arrays	maxval over an integer array	true		syntax
+132-minval-over-a-real-array	arrays	minval over a real array	true		syntax
+133-maxval-over-a-real-array	arrays	maxval over a real array	true		syntax
 134-min-max-binary-scalar-form-still-works	arrays	min/max binary scalar form still works	true		same
 135-element-wise-add	arrays	element-wise add	true		same
 136-broadcast-scalar-array	arrays	broadcast scalar * array	true		same
@@ -164,8 +164,8 @@ file	category	name	mlir	pending	v3
 163-flatten-on-a-rank-1-array-is-a-copy	arrays	flatten on a rank-1 array is a copy	true		same
 164-reshape-interprets-input-column-major-spec-10-4	arrays	reshape interprets input column-major (spec §10.4)	true		same
 165-flatten-reshape-round-trip-preserves-shape-spec-10-4	arrays	flatten + reshape round-trip preserves shape (spec §10.4)	true		same
-166-sum-axis-m-1-collapses-rows-producing-the-column-totals	arrays	sum_axis(m, 1) collapses rows producing the column totals	true		syntax
-167-sum-axis-m-2-collapses-columns-producing-the-row-totals	arrays	sum_axis(m, 2) collapses columns producing the row totals	true		syntax
+166-sum-dim-m-1-collapses-rows-producing-the-column-totals	arrays	sum(m, dim = 1) collapses rows producing the column totals	true		syntax
+167-sum-dim-m-2-collapses-columns-producing-the-row-totals	arrays	sum(m, dim = 2) collapses columns producing the row totals	true		syntax
 168-product-of-an-integer-array	arrays	product of an integer array	true		same
 169-product-of-a-real-array	arrays	product of a real array	true		same
 170-diag-arr-builds-a-square-matrix-with-arr-on-the-diagonal	arrays	diag(arr) builds a square matrix with arr on the diagonal	true		same
@@ -252,7 +252,7 @@ file	category	name	mlir	pending	v3
 251-assert-eq-passes-silently	prelude	assert_eq passes silently	false		same
 252-assert-traps-passes-when-the-lambda-traps	prelude	assert_traps passes when the lambda traps	true		same
 253-assert-traps-with-substring-match-passes	prelude	assert_traps with substring match passes	true		same
-254-assert-traps-catches-a-runtime-trap-division-by-zero	prelude	assert_traps catches a runtime trap (division by zero)	true		same
+254-assert-traps-catches-a-runtime-trap-division-by-zero	prelude	assert_traps catches a runtime trap (division by zero)	true		meaning
 255-sequential-vals-are-scoped-to-the-function-body	blocks + scoping	sequential vals are scoped to the function body	true		same
 256-val-rhs-can-be-an-indented-block	blocks + scoping	val RHS can be an indented block	true		same
 257-top-level-val-rhs-can-be-an-indented-block	blocks + scoping	top-level val RHS can be an indented block	true		same
@@ -268,7 +268,7 @@ file	category	name	mlir	pending	v3
 267-bind-a-paren-less-3-tuple-at-the-top-level	paren-less tuple construction	bind a paren-less 3-tuple at the top level	true		same
 268-bind-a-paren-less-heterogeneous-tuple	paren-less tuple construction	bind a paren-less heterogeneous tuple	true		same
 269-return-a-paren-less-tuple-from-a-def-block-body	paren-less tuple construction	return a paren-less tuple from a def block body	true		same
-270-return-a-paren-less-tuple-via-the-return-keyword	paren-less tuple construction	return a paren-less tuple via the `return` keyword	false		same
+270-return-a-paren-less-tuple-via-the-return-keyword	paren-less tuple construction	return a paren-less tuple via the `return` keyword	false		syntax
 271-assign-a-paren-less-tuple-in-a-block-assignment-rhs	paren-less tuple construction	assign a paren-less tuple in a block (assignment RHS)	true		same
 272-return-a-paren-less-tuple-as-the-last-item-of-an-indented-if	paren-less tuple construction	return a paren-less tuple as the last item of an indented if-branch block	true		same
 273-embed-variable	string interpolation	embed variable	true		same
@@ -314,7 +314,7 @@ file	category	name	mlir	pending	v3
 313-02-arrays-element-wise-fusion-point-distance	docs/examples	02-arrays: element-wise fusion + Point distance	true		same
 314-03-higher-order-map-captures-mean-fuses-into-sum	docs/examples	03-higher-order: map captures mean, fuses into sum	true		same
 315-04-complex-complex-arithmetic-abs-re-im	docs/examples	04-complex: complex arithmetic + .abs / .re / .im	true		same
-316-06-numerical-methods-newton-s-method-for-sqrt	docs/examples	06-numerical-methods: Newton's method for sqrt	true		same
+316-06-numerical-methods-newton-s-method-for-sqrt	docs/examples	06-numerical-methods: Newton's method for sqrt	true		syntax
 317-06-numerical-methods-rk4-one-step-over-a-harmonic-oscillator	docs/examples	06-numerical-methods: RK4 one step over a harmonic oscillator (100 steps)	false		syntax
 318-07-styles-three-idioms-fused-explicit-loop-slice-assignment	docs/examples	07-styles: three idioms — fused, explicit-loop, slice assignment	false		syntax
 319-08-mandelbrot-per-row-slice-assignment-of-escape-time-vector	docs/examples	08-mandelbrot: per-row slice assignment of escape-time vector	false		syntax
@@ -355,7 +355,7 @@ file	category	name	mlir	pending	v3
 354-row-range-view-reads-source-rows-through-the-window	rank-2 view-style slicing	row-range view reads source rows through the window	false		syntax
 355-rows-cols-shape-reflect-the-view-s-window	rank-2 view-style slicing	rows/cols/shape reflect the view's window	false		syntax
 356-writing-into-a-row-range-slice-of-a-place-updates-the-source	rank-2 view-style slicing	writing into a row-range slice of a place updates the source matrix	false		syntax
-357-sum-transpose-sum-axis-work-transparently-on-a-row-range-vie	rank-2 view-style slicing	sum / transpose / sum_axis work transparently on a row-range view	false		syntax
+357-sum-transpose-sum-dim-work-transparently-on-a-row-range-vie	rank-2 view-style slicing	sum / transpose / sum(v, dim = k) work transparently on a row-range view	false		syntax
 358-inclusive-range-form-m-view-lo-hi-includes-the-last-row	rank-2 view-style slicing	inclusive range form m.view(lo..=hi) includes the last row	false		syntax
 359-view-of-view-collapses-to-the-underlying-buffer	rank-2 view-style slicing	view-of-view collapses to the underlying buffer	false		syntax
 360-end-relative-row-bounds	rank-2 view-style slicing	end-relative row bounds	false		syntax

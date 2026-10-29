@@ -45,14 +45,23 @@ keywords_and_names()
 
 @test("every keyword of the language is one")
 every_keyword()
-    val words = "and as const def div do else end extern false for if import in inout match module mut not or parallel private return struct then true val var while"
+    val words = "and as const cycle def div do elif else end enum exit extern false for if import in inout match module mut not or parallel private return stop struct then true val var while"
     val out = lexed(words)
 
-    assert_eq(out, "K(and) K(as) K(const) K(def) K(div) K(do) K(else) K(end) K(extern) K(false) K(for) K(if) K(import) K(in) K(inout) K(match) K(module) K(mut) K(not) K(or) K(parallel) K(private) K(return) K(struct) K(then) K(true) K(val) K(var) K(while) NL")
+    assert_eq(out, "K(and) K(as) K(const) K(cycle) K(def) K(div) K(do) K(elif) K(else) K(end) K(enum) K(exit) K(extern) K(false) K(for) K(if) K(import) K(in) K(inout) K(match) K(module) K(mut) K(not) K(or) K(parallel) K(private) K(return) K(stop) K(struct) K(then) K(true) K(val) K(var) K(while) NL")
 
-@test("by, reduce and the type names are names, not keywords")
+@test("by, reduce, break, continue and the type names are names, not keywords")
 contextual_words()
     assert_eq(lexed("by reduce int8 uint8 real16 real64 complex"), "ID(by) ID(reduce) ID(int8) ID(uint8) ID(real16) ID(real64) ID(complex) NL")
+    assert_eq(lexed("break continue exits cycles stopper"), "ID(break) ID(continue) ID(exits) ID(cycles) ID(stopper) NL")
+
+@test("`**` is refused by name, and `^` is a power")
+no_double_star()
+    assert_eq(lexed("x^2"), "ID(x) K(^) N(2) NL")
+    assert_eq(lexed("val y = x**2\n"), "error: there is no `**`: a power is written `x^n` @1:10")
+    assert_eq(lexed("val y = x ** 2\n"), "error: there is no `**`: a power is written `x^n` @1:11")
+    assert_eq(lexed("val y = x * *p\n"), "K(val) ID(y) K(=) ID(x) K(*) K(*) ID(p) NL")
+    assert_eq(lexed("/** doc */ x"), "ID(x) NL")
 
 @test("operators are read longest first")
 operators()

@@ -1,5 +1,5 @@
 
 def main() =
-  for x in 0..<4 do
+  for x in 0..<4
     print(x + 100)
       

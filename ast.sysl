@@ -46,10 +46,12 @@ enum Mode
     Read
     Inout
 
-// `name: [inout] type [= default]`, after any attributes (`@strided x: [real]`).
+// `name: [inout] type [= default]`, after any attributes (`@strided x: [real]`). `type_attrs` are
+// the attributes written in the type's position, after the colon (`data: @data(f) c_ptr`).
 struct Param
     attrs: Buf[Attribute]
     name: string
+    type_attrs: Buf[Attribute]
     typ: Type
     mode: Mode
     default: Option[Expr]
@@ -193,19 +195,27 @@ enum ExprKind
     // `end` inside an index list: the last index of the axis it indexes.
     End
     Field(receiver: Expr, name: string)
-    // `t.0`.
+    // `t.1`: a tuple's fields count from 1. The index is kept as written; `t.0` is the elaborator's
+    // to refuse.
     TupleField(receiver: Expr, index: usize)
     // `x.f(args)`: a field holding a function, or `f(x, args)` -- the elaborator decides.
     MethodCall(receiver: Expr, name: string, args: Buf[Expr])
     Lambda(params: Buf[LambdaParam], body: Expr)
     If(cond: Expr, then_branch: Expr, else_branch: Option[Expr])
-    For(pat: Pattern, iterable: Expr, body: Expr)
-    While(cond: Expr, body: Expr)
+    // `[label:] for pat in iterable body`; the label is what an `exit` or `cycle` names.
+    For(label: Option[string], pat: Pattern, iterable: Expr, body: Expr)
+    While(label: Option[string], cond: Expr, body: Expr)
     // `parallel for i in r, j in s reduce v: op do body`.
     ParallelFor(clauses: Buf[LoopClause], reductions: Buf[Reduction], body: Expr)
     // `parallel e`: a map, a reduction or a whole-array expression computed in parallel.
     Parallel(body: Expr)
     Return(value: Option[Expr])
+    // `exit [label]`: leave the innermost loop, or the one labelled.
+    Exit(label: Option[string])
+    // `cycle [label]`: go on to the next iteration of the innermost loop, or of the one labelled.
+    Cycle(label: Option[string])
+    // `stop [code]`: end the program, with `code` as its exit status.
+    Stop(code: Option[Expr])
     Match(scrutinee: Expr, cases: Buf[MatchCase])
     // `target = value`, or a compound `+=`, `-=`, `*=`, `/=`, `%=`.
     Assign(op: string, target: Expr, value: Expr)

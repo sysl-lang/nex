@@ -15,7 +15,7 @@ def main() =
   val h = 0.01
   val steps = 100
 
-  for k in 1..steps do
+  for k in 1..steps
     y = rk4_step(harmonic, t, y, h)
     t = t + h
   end for

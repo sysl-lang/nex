@@ -3,5 +3,5 @@ def main() =
   val v = m[2..3, :]
   print(sum(v))
   print(transpose(v))
-  print(sum_axis(v, 1))
-  print(sum_axis(v, 2))
+  print(sum(v, dim = 1))
+  print(sum(v, dim = 2))

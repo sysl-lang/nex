@@ -5,13 +5,13 @@ def fft(x: [complex]): [complex] =
   val half = n div 2
   var even = fill(half, 0.0 + 0i)
   var odd  = fill(half, 0.0 + 0i)
-  for k in 1..half do
+  for k in 1..half
     even[k] = x[2 * k - 1]
     odd[k]  = x[2 * k]
   val ef = fft(even)
   val of = fft(odd)
   var t = fill(half, 0.0 + 0i)
-  for k in 1..half do
+  for k in 1..half
     val angle = -2.0 * pi * to_real(k - 1) / to_real(n)
     t[k] = (cos(angle) + sin(angle) * i) * of[k]
   var y = fill(n, 0.0 + 0i)
@@ -22,6 +22,6 @@ def fft(x: [complex]): [complex] =
 def main() =
   val x: [complex] = [1.0, 1.0, 0.0, 0.0]
   val y = fft(x)
-  for k in 1..length(y) do
+  for k in 1..length(y)
     print(y[k])
       

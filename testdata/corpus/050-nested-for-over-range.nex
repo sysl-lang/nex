@@ -1,6 +1,6 @@
 
 def main() =
-  for i in 0..1 do
-    for j in 0..1 do
+  for i in 0..1
+    for j in 0..1
       print(i * 10 + j)
       

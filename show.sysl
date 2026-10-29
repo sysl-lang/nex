@@ -83,6 +83,12 @@ private exprs_into(out: *Buf[string], es: Buf[Expr])
     for e in es
         out.push(show_expr(e))
 
+// A loop's label as it was written, `name:`; nothing where the loop has none.
+private label_into(out: *Buf[string], label: Option[string])
+    label match
+        Some(n) -> out.push(n + ":")
+        None -> ()
+
 private opt_expr(e: Option[Expr]) -> string = e match
     Some(x) -> show_expr(x)
     None -> "_"
@@ -125,7 +131,8 @@ private attrs_prefix(attrs: Buf[Attribute]) -> string
 
     head
 
-// `(x real)`, `(v inout [real])`, `(@strided x [real])`, `(n integer 1)` with a default.
+// `(x real)`, `(v inout [real])`, `(@strided x [real])`, `(data @data(f) c_ptr)`, `(n integer 1)`
+// with a default.
 private show_params(params: Buf[Param]) -> string
     var ps: Buf[string] = buf()
 
@@ -134,7 +141,7 @@ private show_params(params: Buf[Param]) -> string
 
         if p.mode == Inout then text = text + "inout "
 
-        text = text + show_type(p.typ)
+        text = text + attrs_prefix(p.type_attrs) + show_type(p.typ)
 
         p.default match
             Some(e) -> text = text + " " + show_expr(e)
@@ -387,15 +394,35 @@ show_expr(e: Expr) -> string
                 None -> ()
 
             return form("if", items)
-        For(p, it, body) ->
+        For(label, p, it, body) ->
+            label_into(&items, label)
             items.push(show_pattern(p))
             items.push(show_expr(it))
             items.push(show_expr(body))
             return form("for", items)
-        While(c, body) ->
+        While(label, c, body) ->
+            label_into(&items, label)
             items.push(show_expr(c))
             items.push(show_expr(body))
             return form("while", items)
+        Exit(label) ->
+            label match
+                Some(n) -> items.push(n)
+                None -> ()
+
+            return form("exit", items)
+        Cycle(label) ->
+            label match
+                Some(n) -> items.push(n)
+                None -> ()
+
+            return form("cycle", items)
+        Stop(code) ->
+            code match
+                Some(x) -> items.push(show_expr(x))
+                None -> ()
+
+            return form("stop", items)
         ParallelFor(clauses, reductions, body) ->
             for c in clauses
                 items.push("(" + c.name + " " + show_expr(c.range) + ")")

@@ -50,15 +50,17 @@ enum Piece
 // The words a name may not be. `mut` is reserved and means nothing; `by` and `reduce` are
 // contextual, read as words only where a stride or a `parallel for`'s reductions may stand, so they
 // stay free as names.
-private val reserved = ["and", "as", "const", "def", "div", "do", "elif", "else", "end", "enum",
-    "extern", "false", "for", "if", "import", "in", "inout", "match", "module", "mut", "not", "or",
-    "parallel", "private", "return", "struct", "then", "true", "val", "var", "while"]
+private val reserved = ["and", "as", "const", "cycle", "def", "div", "do", "elif", "else", "end",
+    "enum", "exit", "extern", "false", "for", "if", "import", "in", "inout", "match", "module", "mut",
+    "not", "or", "parallel", "private", "return", "stop", "struct", "then", "true", "val", "var",
+    "while"]
 
 // The operators and delimiters, longest first so that the first match is the longest one. `//` and
 // `/*` open comments and are taken before this table is asked. `.*` is a token of its own so that the
-// `*` of `import m.*` at the end of a line is not read as an operator continuing it. `..=` is in the
-// table only so that it is refused by name rather than read as `..` and `=`.
-private val operators = ["..=", "..<", "..", "->", ".*", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
+// `*` of `import m.*` at the end of a line is not read as an operator continuing it. `..=` and `**`
+// are in the table only so that they are refused by name rather than read as `..` and `=`, or as two
+// `*`.
+private val operators = ["..=", "..<", "..", "->", ".*", "**", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
     "%=", "(", ")", "[", "]", "{", "}", "+", "-", "*", "/", "%", "^", "@", "<", ">", "=", ".", ",",
     ";", ":"]
 
@@ -281,6 +283,7 @@ private scan_punct(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]], m: usize)
             val at = s.span_from(m)
 
             if op == "..=" then return Err(error(at, "there is no `..=`: `a..b` already includes `b`, and `a..<b` stops before it"))
+            if op == "**" then return Err(error(at, "there is no `**`: a power is written `x^n`"))
 
             if op == "(" || op == "[" || op == "{"
                 lay.open_bracket()

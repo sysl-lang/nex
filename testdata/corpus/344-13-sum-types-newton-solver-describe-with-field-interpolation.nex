@@ -6,7 +6,7 @@ enum Solver =
 
 def newton(f: real -> real, fp: real -> real, x0: real, tol: real, max_iters: integer): Solver =
   var x = x0
-  for i in 1..max_iters do
+  for i in 1..max_iters
     val fx = f(x)
     if abs(fx) < tol then return Converged(x)
     val d = fp(x)
