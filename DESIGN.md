@@ -1162,7 +1162,9 @@ namespace, so `in` is a unit there. A `<` after anything else, or after a space,
 
 **Operator precedence**: `^` binds tighter than unary minus, so `-x^2` is `-(x^2)` as in Fortran and
 mathematics, and `^` is right-associative (`2^3^2` is `2^(3^2)`). `^` is the only power operator;
-there is no `**`. A unit annotation `<u>` is a postfix at the level of a call and a subscript, so it
+there is no `**`. Logical `not` is not a tight unary: it binds below the comparisons and above `and`
+(Fortran's `.not.`, Python's `not`), so `not a < b < c` is `not (a < b < c)` over the whole chain and
+`not a and b` is `(not a) and b`; unary minus is unchanged (`-a < b` is `(-a) < b`). A unit annotation `<u>` is a postfix at the level of a call and a subscript, so it
 binds tighter than `^`, unary minus and juxtaposition: `-3.0<m>^2` is `-((3.0<m>)^2)`.
 
 **Chained comparisons**: two or more of `==`, `!=`, `<`, `<=`, `>`, `>=` in a row, mixed freely, are

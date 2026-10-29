@@ -1,8 +1,8 @@
 // The nex parser: tokens to the tree in `ast.sysl`, by recursive descent.
 //
 // Each function reads one construct of spec chapters 4 to 9 and is named for it. Precedence is the
-// table of §4.3, loosest first: `,` (a tuple), `->` (a lambda), `or`, `and`, comparison, `..`,
-// `+ -`, `* / div % @`, juxtaposition, unary `-` and `not`, `^`, then calls, indexing, `.` and a
+// table of §4.3, loosest first: `,` (a tuple), `->` (a lambda), `or`, `and`, `not`, comparison, `..`,
+// `+ -`, `* / div % @`, juxtaposition, unary `-`, `^`, then calls, indexing, `.` and a
 // unit annotation `<unit>`, all postfix and chained left to right.
 // A postfix `match` may follow any expression short of a tuple. A loop label, `name:`, is told
 // from a name by the `for` or `while` two tokens on.
@@ -965,14 +965,25 @@ struct Parser
 
     and_expr(*self) -> Result[Expr, Diagnostic]
         val m = self.toks.mark()
-        var e = self.comparison()?
+        var e = self.not_expr()?
 
         while self.accept("and")
-            val rhs = self.comparison()?
+            val rhs = self.not_expr()?
 
             e = ex(self.toks.span_from(m), BinOp("and", e, rhs))
 
         Ok(e)
+
+    // `not` binds below the comparisons and above `and`: `not a < b < c` is `not (a < b < c)`, a
+    // whole chain, and `not a and b` is `(not a) and b`. It nests: `not not a`.
+    not_expr(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+
+        if !self.accept("not") then return self.comparison()
+
+        val operand = self.not_expr()?
+
+        Ok(ex(self.toks.span_from(m), Unary("not", operand)))
 
     // One comparison is a `BinOp`; two or more in a row are a chain (§4.6).
     comparison(*self) -> Result[Expr, Diagnostic]
@@ -1084,15 +1095,14 @@ struct Parser
         Ok(ex(self.toks.span_from(m), Juxtapose(coeff, body)))
     end juxtaposition
 
-    // A unary `-` or `not` applies to a whole power: `-x^2` is `-(x^2)` and `-2^2` is `-4`.
+    // A unary `-` applies to a whole power: `-x^2` is `-(x^2)` and `-2^2` is `-4`.
     unary(*self) -> Result[Expr, Diagnostic]
         val m = self.toks.mark()
 
-        for op in ["-", "not"]
-            if self.accept(op)
-                val operand = self.unary()?
+        if self.accept("-")
+            val operand = self.unary()?
 
-                return Ok(ex(self.toks.span_from(m), Unary(op, operand)))
+            return Ok(ex(self.toks.span_from(m), Unary("-", operand)))
 
         self.power()
     end unary

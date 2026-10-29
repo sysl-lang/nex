@@ -315,16 +315,17 @@ Operators, from the most tightly binding to the least:
 | 1 | `.` | left | field access |
 | 2 | `f(…)`, `a[…]`, `x<unit>` | left | call, subscript, unit annotation |
 | 3 | `^` | right | power (Fortran's `**`) |
-| 4 | unary `-`, `not` | right | negation |
+| 4 | unary `-` | right | negation |
 | 5 | juxtaposition | left | `2x`, `2pi`, `2(x + 1)` |
 | 6 | `*`, `/`, `div`, `%`, `@` | left | product, quotient, integer quotient, remainder, matrix product |
 | 7 | `+`, `-` | left | sum, difference |
 | 8 | `..`, `..<` | left | ranges |
 | 9 | `==`, `!=`, `<`, `<=`, `>`, `>=` | chained | comparison |
-| 10 | `and` | left | logical and |
-| 11 | `or` | left | logical or |
-| 12 | `->` | right | function literal, function type |
-| 13 | `,` | right | tuple |
+| 10 | `not` | right | logical not |
+| 11 | `and` | left | logical and |
+| 12 | `or` | left | logical or |
+| 13 | `->` | right | function literal, function type |
+| 14 | `,` | right | tuple |
 
 Comparisons chain: two or more of `==`, `!=`, `<`, `<=`, `>`, `>=` in a row, mixed freely, are one
 chained comparison. `0 <= k < n` is true when `0 <= k` and `k < n` both are, with `k` evaluated
@@ -332,6 +333,10 @@ once. The operands are evaluated left to right, each at most once, and on scalar
 the first false comparison: in `0 < f() < g()`, `g` is not called when `0 < f()` is false. On arrays
 the comparisons combine element by element ([Array expressions](/spec/05-array-expressions/)).
 Parentheses end a chain: `(a < b) < c` compares the `bool` `a < b` with `c`.
+
+`not` binds below the comparisons and above `and`, as Fortran's `.not.` and Python's `not` do:
+`not a < b` is `not (a < b)`, `not a < b < c` negates the whole chain, and `not a and b` is
+`(not a) and b`. It may be repeated, `not not a`. Unary minus is unaffected: `-a < b` is `(-a) < b`.
 
 `^` binds tighter than unary minus, so `-x^2` is `-(x^2)`, as in mathematics and as Fortran's
 `-x**2` is; write `(-x)^2` for the square of the negation. `^` is right-associative: `2^3^2` is
