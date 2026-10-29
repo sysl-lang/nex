@@ -1,7 +1,7 @@
 def main() =
   val a = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
   print(a[..10 by 2])
-  print(a[2.. by 2])
+  print(a[3.. by 2])
   print(a[.. by 5])
   print(a[end-4.. by 2])
-  print(a[..end by 3])
+  print(a[..end-1 by 3])

@@ -1,10 +1,10 @@
 
 def make_arr(n: integer) =
   var a = [0, 0, 0]
-  a[0] = n
+  a[1] = n
   a
 
 def main() =
   val xs = make_arr(42)
-  print(xs[0])
+  print(xs[1])
       

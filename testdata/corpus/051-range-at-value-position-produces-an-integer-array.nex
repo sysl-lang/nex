@@ -1,5 +1,5 @@
 
 def main() =
-  val r = 0..5
+  val r = 0..4
   print(r)
       

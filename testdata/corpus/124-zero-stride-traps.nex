@@ -1,5 +1,5 @@
 def main() =
   val a = [10, 20, 30]
-  assert_traps(() -> print(a[0..3 by 0]), "stride")
-  assert_traps(() -> print(a[.. by 0]), "stride")
+  assert_traps(() -> print(a[1..3 by 0]), "slice")
+  assert_traps(() -> print(a[.. by 0]), "slice")
   print("ok")

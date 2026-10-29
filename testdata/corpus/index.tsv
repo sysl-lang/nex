@@ -1,4 +1,4 @@
-file	category	name	mlir	pending	v2
+file	category	name	mlir	pending	v3
 001-evaluate-integer-literal	top-level bindings + print	evaluate integer literal	true		same
 002-evaluate-real-literal	top-level bindings + print	evaluate real literal	true		same
 003-evaluate-bool-literal	top-level bindings + print	evaluate bool literal	true		same
@@ -31,7 +31,7 @@ file	category	name	mlir	pending	v2
 030-3-way-chain-returns-true-when-in-range	chained comparison	3-way `<` chain returns true when in range	true		same
 031-3-way-chain-returns-false-when-out-of-range	chained comparison	3-way `<` chain returns false when out of range	true		same
 032-mixed-operators-0-x-10-100	chained comparison	mixed operators: `0 <= x < 10 <= 100`	true		same
-033-agrees-with-the-equivalent-explicit-and-form	chained comparison	agrees with the equivalent explicit `and` form	true		same
+033-agrees-with-the-equivalent-explicit-and-form	chained comparison	agrees with the equivalent explicit `and` form	true		syntax
 034-inner-operand-is-evaluated-exactly-once-side-effecting-call	chained comparison	inner operand is evaluated exactly once (side-effecting call)	false		same
 035-4-way-chain-with-all-distinct-comparison-operators	chained comparison	4-way chain with all distinct comparison operators	true		same
 036-short-circuit-side-effecting-inner-operand-skipped-when-earl	chained comparison	short-circuit: side-effecting inner operand skipped when earlier cmp fails	false		same
@@ -45,23 +45,23 @@ file	category	name	mlir	pending	v2
 044-for-over-array	control flow	for over array	true		same
 045-for-over-val-bound-array	control flow	for over val-bound array	true		same
 046-for-over-array-produced-by-range	control flow	for over array produced by range()	true		same
-047-for-over-range	control flow	for over range	true		same
-048-for-over-inclusive-range	control flow	for over inclusive range	true		same
-049-for-over-range-computes-a-running-sum	control flow	for over range computes a running sum	true		same
-050-nested-for-over-range	control flow	nested for over range	true		same
-051-range-at-value-position-produces-an-integer-array	control flow	range at value position produces an integer array	true		same
-052-inclusive-range-at-value-position	control flow	inclusive range at value position	true		same
-053-empty-range-at-value-position	control flow	empty range at value position	true		same
+047-for-over-range	control flow	for over range	true		syntax
+048-for-over-inclusive-range	control flow	for over inclusive range	true		syntax
+049-for-over-range-computes-a-running-sum	control flow	for over range computes a running sum	true		syntax
+050-nested-for-over-range	control flow	nested for over range	true		syntax
+051-range-at-value-position-produces-an-integer-array	control flow	range at value position produces an integer array	true		syntax
+052-inclusive-range-at-value-position	control flow	inclusive range at value position	true		syntax
+053-empty-range-at-value-position	control flow	empty range at value position	true		syntax
 054-direct-call-refines-a-bound-then-called-integer-lambda	control flow	direct call refines a bound-then-called integer lambda	true		same
 055-direct-call-refines-a-bound-then-called-real-lambda	control flow	direct call refines a bound-then-called real lambda	true		same
 056-second-direct-call-after-refinement-still-works	control flow	second direct call after refinement still works	true		same
 057-string-arg-call-refines-a-bound-then-called-lambda-using-for	control flow	string-arg call refines a bound-then-called lambda using `+` for concat	true		same
-058-for-with-tuple-destructuring-on-enumerate-xs	control flow	for with tuple destructuring on enumerate(xs)	false		same
+058-for-with-tuple-destructuring-on-enumerate-xs	control flow	for with tuple destructuring on enumerate(xs)	false		meaning
 059-early-return	control flow	early return	true		same
 060-array-of-lambdas-each-closure-fits-in-16-byte-slots	control flow	array of lambdas — each closure fits in 16-byte slots	true		same
-061-rank-2-single-index-returns-the-row-as-a-rank-1-array	control flow	rank-2 single-index returns the row as a rank-1 array	true		same
-062-rank-2-two-integer-index-returns-a-scalar-element	control flow	rank-2 two-integer index returns a scalar element	true		same
-063-rank-2-indexing-through-a-computed-integer-expression	control flow	rank-2 indexing through a computed integer expression	true		same
+061-rank-2-single-index-returns-the-row-as-a-rank-1-array	control flow	rank-2 single-index returns the row as a rank-1 array	true		syntax
+062-rank-2-two-integer-index-returns-a-scalar-element	control flow	rank-2 two-integer index returns a scalar element	true		syntax
+063-rank-2-indexing-through-a-computed-integer-expression	control flow	rank-2 indexing through a computed integer expression	true		syntax
 064-plain-function	functions	plain function	true		same
 065-tensor-typed-param-scalar-return	functions	tensor-typed param + scalar return	true		same
 066-rank-1-tensor-param-with-prelude-reductions	functions	rank-1 tensor param with prelude reductions	true		same
@@ -102,29 +102,29 @@ file	category	name	mlir	pending	v2
 101-prelude-hof-method-call-sugar-xs-map-x-runs	functions	prelude HOF method-call sugar `xs.map(x -> ...)` runs	true		same
 102-bound-then-called-lambda-with-no-declared-type-runs-after-de	functions	bound-then-called lambda with no declared type runs after deferred resolve	true		same
 103-bound-then-called-lambda-runs-through-prelude-hof	functions	bound-then-called lambda runs through prelude HOF	true		same
-104-top-level-def-passed-as-a-function-value-argument	functions	top-level def passed as a function-value argument	false		same
+104-top-level-def-passed-as-a-function-value-argument	functions	top-level def passed as a function-value argument	false		syntax
 105-same-top-level-def-passed-twice-in-one-expression	functions	same top-level def passed twice in one expression	true		same
 106-top-level-def-bound-to-a-val-then-called-via-the-binding	functions	top-level def bound to a val, then called via the binding	true		same
 107-literal-length	arrays	literal + length	true		same
-108-index-access	arrays	index access	true		same
+108-index-access	arrays	index access	true		syntax
 109-end-is-the-last-index-rank-1	arrays	end is the last index (rank 1)	true		syntax
 110-end-on-rank-2-element-and-row	arrays	end on rank-2 element and row	true		syntax
 111-end-in-element-assign-target	arrays	end in an element-assign target	true		syntax
-112-negative-out-of-range-index-traps	arrays	negative out-of-range index traps	false		same
+112-negative-out-of-range-index-traps	arrays	negative out-of-range index traps	false		syntax
 113-end-relative-bounds-on-rank-1-slice	arrays	end-relative bounds on a rank-1 slice	true		syntax
 114-end-relative-bounds-on-rank-2-slice-axes	arrays	end-relative bounds on rank-2 slice axes	true		syntax
 115-end-relative-bounds-in-slice-assign-target	arrays	end-relative bounds in a slice-assign target	true		syntax
 116-over-negative-slice-bound-traps	arrays	over-negative slice bound traps	false		same
-117-open-ended-slice-bounds-a-lo-a-hi-a	arrays	open-ended slice bounds (`a[lo..]`, `a[..hi]`, `a[..]`)	true		same
+117-open-ended-slice-bounds-a-lo-a-hi-a	arrays	open-ended slice bounds (`a[lo..]`, `a[..hi]`, `a[..]`)	true		syntax
 118-open-ended-slice-bounds-combine-with-end	arrays	open-ended slice bounds combine with end	true		syntax
-119-open-ended-axis-bounds-on-rank-2-slices	arrays	open-ended axis bounds on rank-2 slices	true		same
+119-open-ended-axis-bounds-on-rank-2-slices	arrays	open-ended axis bounds on rank-2 slices	true		syntax
 120-open-ended-slice-assign-target-v-2-rhs	arrays	open-ended slice-assign target (`v[-2..] = rhs`)	true		syntax
-121-strided-slice-with-closed-bounds-a-lo-hi-by-k	arrays	strided slice with closed bounds (`a[lo..hi by k]`)	true		same
+121-strided-slice-with-closed-bounds-a-lo-hi-by-k	arrays	strided slice with closed bounds (`a[lo..hi by k]`)	true		syntax
 122-strided-slice-combined-with-open-bounds-and-end	arrays	strided slice combined with open bounds and end	true		syntax
-123-strided-slice-edge-cases-empty-window-stride-span	arrays	strided slice edge cases (empty window, stride > span)	true		same
+123-strided-slice-edge-cases-empty-window-stride-span	arrays	strided slice edge cases (empty window, stride > span)	true		syntax
 124-zero-stride-traps	arrays	zero stride traps	false		syntax
-125-strided-slice-assign-target-a-lo-hi-by-k-rhs	arrays	strided slice-assign target (`a[lo..hi by k] = rhs`)	true		same
-126-strided-slice-assign-combines-with-open-bounds-and-inclusive	arrays	strided slice-assign combines with open bounds and inclusive	true		same
+125-strided-slice-assign-target-a-lo-hi-by-k-rhs	arrays	strided slice-assign target (`a[lo..hi by k] = rhs`)	true		syntax
+126-strided-slice-assign-combines-with-open-bounds-and-inclusive	arrays	strided slice-assign combines with open bounds and inclusive	true		syntax
 127-strided-slice-assign-length-mismatch-traps	arrays	strided slice-assign length mismatch traps	false		syntax
 128-strided-slice-assign-with-zero-stride-traps	arrays	strided slice-assign with zero stride traps	false		syntax
 129-sum	arrays	sum	true		same
@@ -164,43 +164,43 @@ file	category	name	mlir	pending	v2
 163-flatten-on-a-rank-1-array-is-a-copy	arrays	flatten on a rank-1 array is a copy	true		same
 164-reshape-interprets-input-column-major-spec-10-4	arrays	reshape interprets input column-major (spec §10.4)	true		same
 165-flatten-reshape-round-trip-preserves-shape-spec-10-4	arrays	flatten + reshape round-trip preserves shape (spec §10.4)	true		same
-166-sum-axis-m-0-collapses-rows-producing-the-column-totals	arrays	sum_axis(m, 0) collapses rows producing the column totals	true		same
-167-sum-axis-m-1-collapses-columns-producing-the-row-totals	arrays	sum_axis(m, 1) collapses columns producing the row totals	true		same
+166-sum-axis-m-1-collapses-rows-producing-the-column-totals	arrays	sum_axis(m, 1) collapses rows producing the column totals	true		syntax
+167-sum-axis-m-2-collapses-columns-producing-the-row-totals	arrays	sum_axis(m, 2) collapses columns producing the row totals	true		syntax
 168-product-of-an-integer-array	arrays	product of an integer array	true		same
 169-product-of-a-real-array	arrays	product of a real array	true		same
 170-diag-arr-builds-a-square-matrix-with-arr-on-the-diagonal	arrays	diag(arr) builds a square matrix with arr on the diagonal	true		same
 171-identity-n-is-the-n-n-integer-identity-matrix	arrays	identity(n) is the n×n integer identity matrix	true		same
-172-rank-1-slice-with-half-open-range-spec-4-14	arrays	rank-1 slice with half-open range (spec §4.14)	true		same
-173-rank-1-slice-with-closed-range	arrays	rank-1 slice with closed range	true		same
-174-rank-1-slice-with-empty-range	arrays	rank-1 slice with empty range	true		same
-175-rank-1-slice-returns-a-fresh-array-mutation-doesn-t-alias	arrays	rank-1 slice returns a fresh array (mutation doesn't alias)	true		same
-176-slicing-computed-bounds-works-spec-4-14-range-expression	arrays	slicing computed bounds works (spec §4.14: range expression)	true		same
-177-rank-1-slice-with-runtime-inclusive-bound	arrays	rank-1 slice with runtime inclusive bound	true		same
+172-rank-1-slice-with-half-open-range-spec-4-14	arrays	rank-1 slice with half-open range (spec §4.14)	true		syntax
+173-rank-1-slice-with-closed-range	arrays	rank-1 slice with closed range	true		syntax
+174-rank-1-slice-with-empty-range	arrays	rank-1 slice with empty range	true		syntax
+175-rank-1-slice-returns-a-fresh-array-mutation-doesn-t-alias	arrays	rank-1 slice returns a fresh array (mutation doesn't alias)	true		syntax
+176-slicing-computed-bounds-works-spec-4-14-range-expression	arrays	slicing computed bounds works (spec §4.14: range expression)	true		syntax
+177-rank-1-slice-with-runtime-inclusive-bound	arrays	rank-1 slice with runtime inclusive bound	true		syntax
 178-rank-1-leading-open-slice-with-runtime-hi	arrays	rank-1 leading-open slice with runtime hi	true		same
-179-rank-1-trailing-open-slice-with-runtime-lo	arrays	rank-1 trailing-open slice with runtime lo	true		same
+179-rank-1-trailing-open-slice-with-runtime-lo	arrays	rank-1 trailing-open slice with runtime lo	true		syntax
 180-rank-1-fully-open-slice-copies-the-array	arrays	rank-1 fully-open slice copies the array	true		same
-181-rank-1-slice-with-runtime-stride	arrays	rank-1 slice with runtime stride	true		same
-182-rank-1-slice-with-runtime-lo-hi-stride	arrays	rank-1 slice with runtime lo + hi + stride	true		same
-183-rank-1-slice-on-a-dynamic-bound-range	arrays	rank-1 slice on a dynamic-bound range	true		same
-184-length-of-dynamic-slice	arrays	length of dynamic slice	true		same
-185-rank-2-slice-column-with-spec-4-14	arrays	rank-2 slice column with `:` (spec §4.14)	true		same
-186-rank-2-slice-row-with-single-integer-index	arrays	rank-2 slice row with single integer index	true		same
-187-rank-2-slice-with-row-range-and-full-column-axis	arrays	rank-2 slice with row range and full column axis	true		same
-188-rank-2-sub-matrix-slice-both-axes-ranges	arrays	rank-2 sub-matrix slice (both axes ranges)	true		same
-189-rank-2-full-copy-with-m	arrays	rank-2 full copy with `m[:, :]`	true		same
-190-rank-2-slice-with-closed-range-axis	arrays	rank-2 slice with closed-range axis	true		same
-191-rank-2-slice-with-runtime-row-range	arrays	rank-2 slice with runtime row range	true		same
-192-rank-2-slice-with-runtime-column-range	arrays	rank-2 slice with runtime column range	true		same
-193-rank-2-slice-with-runtime-ranges-on-both-axes	arrays	rank-2 slice with runtime ranges on both axes	true		same
-194-rank-2-slice-with-runtime-row-index-drops-a-dimension	arrays	rank-2 slice with runtime row index drops a dimension	true		same
-195-rank-2-slice-with-runtime-column-index-drops-a-dimension	arrays	rank-2 slice with runtime column index drops a dimension	true		same
+181-rank-1-slice-with-runtime-stride	arrays	rank-1 slice with runtime stride	true		syntax
+182-rank-1-slice-with-runtime-lo-hi-stride	arrays	rank-1 slice with runtime lo + hi + stride	true		syntax
+183-rank-1-slice-on-a-dynamic-bound-range	arrays	rank-1 slice on a dynamic-bound range	true		syntax
+184-length-of-dynamic-slice	arrays	length of dynamic slice	true		syntax
+185-rank-2-slice-column-with-spec-4-14	arrays	rank-2 slice column with `:` (spec §4.14)	true		syntax
+186-rank-2-slice-row-with-single-integer-index	arrays	rank-2 slice row with single integer index	true		syntax
+187-rank-2-slice-with-row-range-and-full-column-axis	arrays	rank-2 slice with row range and full column axis	true		syntax
+188-rank-2-sub-matrix-slice-both-axes-ranges	arrays	rank-2 sub-matrix slice (both axes ranges)	true		syntax
+189-rank-2-full-copy-with-m	arrays	rank-2 full copy with `m[:, :]`	true		syntax
+190-rank-2-slice-with-closed-range-axis	arrays	rank-2 slice with closed-range axis	true		syntax
+191-rank-2-slice-with-runtime-row-range	arrays	rank-2 slice with runtime row range	true		syntax
+192-rank-2-slice-with-runtime-column-range	arrays	rank-2 slice with runtime column range	true		syntax
+193-rank-2-slice-with-runtime-ranges-on-both-axes	arrays	rank-2 slice with runtime ranges on both axes	true		syntax
+194-rank-2-slice-with-runtime-row-index-drops-a-dimension	arrays	rank-2 slice with runtime row index drops a dimension	true		syntax
+195-rank-2-slice-with-runtime-column-index-drops-a-dimension	arrays	rank-2 slice with runtime column index drops a dimension	true		syntax
 196-rank-2-leading-open-row-slice-with-runtime-hi	arrays	rank-2 leading-open row slice with runtime hi	true		same
-197-rank-2-trailing-open-column-slice-with-runtime-lo	arrays	rank-2 trailing-open column slice with runtime lo	true		same
-198-var-array-index-assign	arrays	var array index assign	true		same
-199-rank-1-slice-assign-overwrites-underlying-buffer	arrays	rank-1 slice-assign overwrites underlying buffer	true		same
-200-rank-1-inclusive-slice-assign	arrays	rank-1 inclusive slice-assign	true		same
-201-rank-2-row-replace-via-m-i-rhs	arrays	rank-2 row replace via m[i, :] = rhs	true		same
-202-rank-2-column-replace-via-m-j-rhs	arrays	rank-2 column replace via m[:, j] = rhs	true		same
+197-rank-2-trailing-open-column-slice-with-runtime-lo	arrays	rank-2 trailing-open column slice with runtime lo	true		syntax
+198-var-array-index-assign	arrays	var array index assign	true		syntax
+199-rank-1-slice-assign-overwrites-underlying-buffer	arrays	rank-1 slice-assign overwrites underlying buffer	true		syntax
+200-rank-1-inclusive-slice-assign	arrays	rank-1 inclusive slice-assign	true		syntax
+201-rank-2-row-replace-via-m-i-rhs	arrays	rank-2 row replace via m[i, :] = rhs	true		syntax
+202-rank-2-column-replace-via-m-j-rhs	arrays	rank-2 column replace via m[:, j] = rhs	true		syntax
 203-construct-field-access	structs	construct + field access	true		same
 204-var-struct-field-assign	structs	var struct field assign	true		same
 205-field-write-preserves-other-fields	structs	field write preserves other fields	true		same
@@ -208,7 +208,7 @@ file	category	name	mlir	pending	v2
 207-refcounted-field-write-swaps-the-underlying-string	structs	refcounted field write swaps the underlying string	true		same
 208-var-c-b-on-a-struct-copies-mutations-don-t-alias	structs	var c = b on a struct copies — mutations don't alias	true		same
 209-nested-struct-copy-inner-mutation-in-copy-doesn-t-leak-to-or	structs	nested struct copy: inner mutation in copy doesn't leak to original	true		same
-210-field-write-through-an-array-element-receiver-mutates-the-sl	structs	field write through an array-element receiver mutates the slot	false		same
+210-field-write-through-an-array-element-receiver-mutates-the-sl	structs	field write through an array-element receiver mutates the slot	false		syntax
 211-sqrt-of-real	prelude	sqrt of real	true		same
 212-assert-approx-on-complex-component-wise-distance	prelude	assert_approx on complex (component-wise distance)	false		same
 213-assert-approx-element-wise-over-rank-1-real-array	prelude	assert_approx element-wise over rank-1 real array	false		same
@@ -290,20 +290,20 @@ file	category	name	mlir	pending	v2
 289-inout-param-forwarded-into-another-reaches-the-original	inout by-ref	inout param forwarded into another inout param reaches the original var	true		syntax
 290-read-mode-params-still-copy-caller-s-val-is-unchanged-after	inout by-ref	read-mode params still copy: caller's val is unchanged after the call	true		same
 291-inout-param-with-same-name-as-caller-s-var-doesn-t-collide	inout by-ref	inout param with same name as caller's var doesn't collide	true		syntax
-292-var-b-a-clones-when-a-is-reused-later	auto-clone (§8.3)	var b = a clones when a is reused later	true		same
-293-var-b-a-does-not-clone-when-a-has-no-later-use	auto-clone (§8.3)	var b = a does not clone when a has no later use	true		same
+292-var-b-a-clones-when-a-is-reused-later	auto-clone (§8.3)	var b = a clones when a is reused later	true		syntax
+293-var-b-a-does-not-clone-when-a-has-no-later-use	auto-clone (§8.3)	var b = a does not clone when a has no later use	true		syntax
 294-inout-call-mutates-the-caller-s-var-no-clone	auto-clone (§8.3)	inout call mutates the caller's var (no clone)	true		syntax
 295-inout-call-with-later-use-still-mutates-the-caller-s-var	auto-clone (§8.3)	inout call with a later use of the same var still mutates it (nothing is cloned)	true		meaning
 296-var-b-a-then-inout-call-on-b-mutates-b-only	auto-clone (§8.3)	var b = a, then an inout call on b mutates b only	true		meaning
-297-assign-b-a-clones-when-a-is-reused-later	auto-clone (§8.3)	assign b = a clones when a is reused later	true		same
-298-rank-2-var-binding-clones-independently	auto-clone (§8.3)	rank-2 var binding clones independently	true		same
-299-val-source-bound-to-var-does-not-need-cloning-val-is-immutab	auto-clone (§8.3)	val source bound to var does not need cloning (val is immutable)	false		same
+297-assign-b-a-clones-when-a-is-reused-later	auto-clone (§8.3)	assign b = a clones when a is reused later	true		syntax
+298-rank-2-var-binding-clones-independently	auto-clone (§8.3)	rank-2 var binding clones independently	true		syntax
+299-val-source-bound-to-var-does-not-need-cloning-val-is-immutab	auto-clone (§8.3)	val source bound to var does not need cloning (val is immutable)	false		syntax
 300-scalar-var-is-never-cloned-only-arrays-are-unique-owned	auto-clone (§8.3)	scalar var is never cloned (only arrays are unique-owned)	true		same
-301-chained-var-aliasing-with-intermediate-clone	auto-clone (§8.3)	chained var aliasing with intermediate clone	true		same
-302-no-clone-needed-when-var-is-used-only-once-after-init	auto-clone (§8.3)	no clone needed when var is used only once after init	true		same
-303-rank-2-element-mutation-through-clone-does-not-affect-origin	auto-clone (§8.3)	rank-2 element mutation through clone does not affect original	true		same
-304-function-returning-var-array-doesn-t-break-clone-at-return	auto-clone (§8.3)	function returning var-array doesn't break (clone at return)	true		same
-305-closure-capture-of-var-array-sees-mutations-through-the-capt	auto-clone (§8.3)	closure capture of var-array sees mutations through the captured cell	false		same
+301-chained-var-aliasing-with-intermediate-clone	auto-clone (§8.3)	chained var aliasing with intermediate clone	true		syntax
+302-no-clone-needed-when-var-is-used-only-once-after-init	auto-clone (§8.3)	no clone needed when var is used only once after init	true		syntax
+303-rank-2-element-mutation-through-clone-does-not-affect-origin	auto-clone (§8.3)	rank-2 element mutation through clone does not affect original	true		syntax
+304-function-returning-var-array-doesn-t-break-clone-at-return	auto-clone (§8.3)	function returning var-array doesn't break (clone at return)	true		syntax
+305-closure-capture-of-var-array-sees-mutations-through-the-capt	auto-clone (§8.3)	closure capture of var-array sees mutations through the captured cell	false		syntax
 306-returned-closure-increments-its-captured-var-across-calls	closure escape (§4.11)	returned closure increments its captured var across calls	true		same
 307-two-counters-returned-from-separate-calls-keep-independent-s	closure escape (§4.11)	two counters returned from separate calls keep independent state	true		same
 308-returned-closure-reads-captured-var-after-parent-returned	closure escape (§4.11)	returned closure reads captured var after parent returned	true		same
@@ -315,12 +315,12 @@ file	category	name	mlir	pending	v2
 314-03-higher-order-map-captures-mean-fuses-into-sum	docs/examples	03-higher-order: map captures mean, fuses into sum	true		same
 315-04-complex-complex-arithmetic-abs-re-im	docs/examples	04-complex: complex arithmetic + .abs / .re / .im	true		same
 316-06-numerical-methods-newton-s-method-for-sqrt	docs/examples	06-numerical-methods: Newton's method for sqrt	true		same
-317-06-numerical-methods-rk4-one-step-over-a-harmonic-oscillator	docs/examples	06-numerical-methods: RK4 one step over a harmonic oscillator (100 steps)	false		same
-318-07-styles-three-idioms-fused-explicit-loop-slice-assignment	docs/examples	07-styles: three idioms — fused, explicit-loop, slice assignment	false		same
-319-08-mandelbrot-per-row-slice-assignment-of-escape-time-vector	docs/examples	08-mandelbrot: per-row slice assignment of escape-time vector	false		same
+317-06-numerical-methods-rk4-one-step-over-a-harmonic-oscillator	docs/examples	06-numerical-methods: RK4 one step over a harmonic oscillator (100 steps)	false		syntax
+318-07-styles-three-idioms-fused-explicit-loop-slice-assignment	docs/examples	07-styles: three idioms — fused, explicit-loop, slice assignment	false		syntax
+319-08-mandelbrot-per-row-slice-assignment-of-escape-time-vector	docs/examples	08-mandelbrot: per-row slice assignment of escape-time vector	false		syntax
 320-09-sinusoids-three-term-wave-at-four-sample-points	docs/examples	09-sinusoids: three-term wave at four sample points	true		same
 321-10-power-iteration-dominant-eigenvalue-and-eigenvector	docs/examples	10-power-iteration: dominant eigenvalue / eigenvector via @ and dot	false		syntax
-322-12-fft-recursive-radix-2-fft-on-a-4-point-step-input	docs/examples	12-fft: recursive radix-2 FFT on a 4-point step input	false		same
+322-12-fft-recursive-radix-2-fft-on-a-4-point-step-input	docs/examples	12-fft: recursive radix-2 FFT on a 4-point step input	false		syntax
 323-declare-and-print-bare-variants	sum types (enums)	declare and print bare variants	true		same
 324-construct-and-print-fielded-variants	sum types (enums)	construct and print fielded variants	true		same
 325-use-the-enum-name-as-a-binding-s-type-annotation	sum types (enums)	use the enum name as a binding's type annotation	true		same
@@ -339,10 +339,10 @@ file	category	name	mlir	pending	v2
 338-on-a-scalar-var	compound assignment	*= on a scalar var	true		same
 339-on-a-real-var	compound assignment	/= on a real var	true		same
 340-on-an-integer-var	compound assignment	%= on an integer var	true		same
-341-accumulator-inside-a-for-loop-fourier-sum-idiom	compound assignment	+= accumulator inside a for-loop (Fourier-sum idiom)	true		same
-342-on-an-array-index-target	compound assignment	+= on an array index target	true		same
+341-accumulator-inside-a-for-loop-fourier-sum-idiom	compound assignment	+= accumulator inside a for-loop (Fourier-sum idiom)	true		syntax
+342-on-an-array-index-target	compound assignment	+= on an array index target	true		syntax
 343-rhs-is-the-full-expression	compound assignment	+= RHS is the full expression	true		same
-344-13-sum-types-newton-solver-describe-with-field-interpolation	docs/examples	13-sum-types: Newton-solver describe() with field interpolation	false		same
+344-13-sum-types-newton-solver-describe-with-field-interpolation	docs/examples	13-sum-types: Newton-solver describe() with field interpolation	false		syntax
 345-view-reads-the-source-s-elements-through-the-window	view-style slicing	view reads the source's elements through the window	false		syntax
 346-view-length-reflects-the-window-not-the-source	view-style slicing	view length reflects the window, not the source	false		syntax
 347-writing-into-a-slice-of-a-place-updates-the-source-array	view-style slicing	writing into a slice of a place updates the source array	false		syntax
@@ -419,8 +419,8 @@ file	category	name	mlir	pending	v2
 418-ord-constrained-enum-payload-comparison	user generic enums	Ord-constrained enum payload comparison	true		same
 419-explicit-opt-integer-annotation-drives-spec	user generic enums	explicit Opt[integer] annotation drives spec	true		same
 420-wildcard-arm-covers-the-rest	user generic enums	wildcard arm covers the rest	true		same
-421-construct-index-read-back	[byte] buffer	construct, index, read back	false		same
-422-hex-pretty-print	[byte] buffer	hex pretty-print	false		same
-423-round-trip-via-to-integers-and-to-bytes	[byte] buffer	round-trip via to_integers and to_bytes	false		same
-424-slicing-copies	[byte] buffer	slicing copies	false		same
-425-structural-equality-on-length-and-bytes	[byte] buffer	structural equality on length and bytes	false		same
+421-construct-index-read-back	[byte] buffer	construct, index, read back	false		syntax
+422-a-uint8-array-prints-as-integers	[byte] buffer	a [uint8] array prints as integers	false		meaning
+423-round-trip-via-to-integers-and-to-bytes	[byte] buffer	round-trip via to_integers and to_bytes	false		syntax
+424-slicing-copies	[byte] buffer	slicing copies	false		meaning
+425-structural-equality-on-length-and-bytes	[byte] buffer	structural equality on length and bytes	false		syntax

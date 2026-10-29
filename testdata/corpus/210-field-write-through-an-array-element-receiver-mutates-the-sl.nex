@@ -5,7 +5,7 @@ end P
 
 def main() =
   var ps = [P(1), P(2), P(3)]
-  ps[0].x = 99
-  print(ps[0].x)
+  ps[1].x = 99
   print(ps[1].x)
+  print(ps[2].x)
       

@@ -1,7 +1,7 @@
 
 def main() =
   var s = 0
-  for i in 1..=5 do
+  for i in 1..5 do
     s = s + i
   print(s)
       

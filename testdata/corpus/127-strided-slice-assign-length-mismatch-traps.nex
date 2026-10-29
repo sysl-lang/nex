@@ -1,4 +1,4 @@
-def assign5by2(v: inout [integer]) = v[0..5 by 2] = [1, 2]
+def assign5by2(v: inout [integer]) = v[1..5 by 2] = [1, 2]
 
 def main() =
   var v = [10, 20, 30, 40, 50]

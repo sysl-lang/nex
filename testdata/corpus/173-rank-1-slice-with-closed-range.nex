@@ -1,6 +1,6 @@
 
 def main() =
   val a = [10, 20, 30, 40, 50]
-  print(a[0..=4])
-  print(a[1..=2])
+  print(a[1..5])
+  print(a[2..3])
       

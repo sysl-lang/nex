@@ -1,7 +1,7 @@
 
 def main() =
   var a = [1, 2, 3]
-  val f = () -> a[0]
-  a[0] = 999
+  val f = () -> a[1]
+  a[1] = 999
   print(f())
       

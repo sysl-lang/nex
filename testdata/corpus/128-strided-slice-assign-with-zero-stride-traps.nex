@@ -1,6 +1,6 @@
-def assign_bad_stride(v: inout [integer]) = v[0..5 by 0] = [1, 2, 3]
+def assign_bad_stride(v: inout [integer]) = v[1..5 by 0] = [1, 2, 3]
 
 def main() =
   var v = [10, 20, 30, 40, 50]
-  assert_traps(() -> assign_bad_stride(v), "stride")
+  assert_traps(() -> assign_bad_stride(v), "slice")
   print("ok")

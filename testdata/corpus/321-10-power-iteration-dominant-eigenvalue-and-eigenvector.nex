@@ -2,7 +2,7 @@ def power_iteration(A: [real; :, :], iters: integer) =
   val n = rows(A)
   var v = fill(n, 1.0)
   var lambda = 0.0
-  for k in 0..iters do
+  for k in 1..iters do
     val Av = A @ v
     val norm = sqrt(dot(Av, Av))
     v = Av / norm

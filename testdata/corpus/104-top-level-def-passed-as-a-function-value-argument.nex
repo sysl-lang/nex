@@ -1,5 +1,5 @@
 
-def harmonic(t: real, y: [real]) = [y[1], -y[0]]
+def harmonic(t: real, y: [real]) = [y[2], -y[1]]
 
 def call_with(f: (real, [real]) -> [real], t: real, y: [real]) =
   f(t, y)

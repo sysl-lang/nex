@@ -1,13 +1,12 @@
 
 def main() =
-  val b = bytes(4)
-  b[0] = 255
-  b[1] = 0
-  b[2] = 128
-  b[3] = 1
+  var b: [uint8] = zeros(4)
+  b[1] = 255
+  b[2] = 0
+  b[3] = 128
+  b[4] = 1
   print(length(b))
-  print(b[0])
   print(b[1])
   print(b[2])
   print(b[3])
-      
+  print(b[4])

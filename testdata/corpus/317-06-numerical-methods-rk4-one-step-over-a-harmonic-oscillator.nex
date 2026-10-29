@@ -7,7 +7,7 @@ def rk4_step(f: (real, [real]) -> [real], t: real, y: [real], h: real) =
   y + h/6 * (k1 + 2k2 + 2k3 + k4)
 
 def harmonic(t: real, y: [real]) =
-  [y[1], -y[0]]
+  [y[2], -y[1]]
 
 def main() =
   var y = [1.0, 0.0]
@@ -15,10 +15,10 @@ def main() =
   val h = 0.01
   val steps = 100
 
-  for k in 0..steps do
+  for k in 1..steps do
     y = rk4_step(harmonic, t, y, h)
     t = t + h
   end for
 
-  print(s"position=${y[0]}, velocity=${y[1]}")
+  print(s"position=${y[1]}, velocity=${y[2]}")
       

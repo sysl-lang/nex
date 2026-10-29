@@ -1,8 +1,8 @@
 
 def main() =
   val m = [[10, 20, 30], [40, 50, 60]]
-  print(m[0, 0])
-  print(m[0, 2])
   print(m[1, 1])
-  print(m[1, 2])
+  print(m[1, 3])
+  print(m[2, 2])
+  print(m[2, 3])
       

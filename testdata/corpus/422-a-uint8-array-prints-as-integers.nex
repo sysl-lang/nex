@@ -1,0 +1,7 @@
+
+def main() =
+  var b: [uint8] = zeros(3)
+  b[1] = 18
+  b[2] = 255
+  b[3] = 0
+  print(b)

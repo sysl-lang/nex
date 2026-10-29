@@ -2,7 +2,7 @@
 def main() =
   var a = [5, 10, 15]
   var b = a
-  print(b[0])
   print(b[1])
   print(b[2])
+  print(b[3])
       

@@ -1,16 +1,15 @@
 
 def main() =
-  val a = bytes(2)
-  a[0] = 9
-  a[1] = 10
-  val b = bytes(2)
-  b[0] = 9
-  b[1] = 10
-  val c = bytes(2)
-  c[0] = 9
-  c[1] = 11
-  val d = bytes(3)
+  var a: [uint8] = zeros(2)
+  a[1] = 9
+  a[2] = 10
+  var b: [uint8] = zeros(2)
+  b[1] = 9
+  b[2] = 10
+  var c: [uint8] = zeros(2)
+  c[1] = 9
+  c[2] = 11
+  val d: [uint8] = zeros(3)
   print(a == b)
   print(a == c)
   print(a == d)
-      

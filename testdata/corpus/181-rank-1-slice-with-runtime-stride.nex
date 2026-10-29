@@ -2,5 +2,5 @@
 def main() =
   val a = [10, 20, 30, 40, 50, 60]
   val k = 2
-  print(a[0..6 by k])
+  print(a[1..6 by k])
       

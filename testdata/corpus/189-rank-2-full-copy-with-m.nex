@@ -2,7 +2,7 @@
 def main() =
   val m = [[1, 2], [3, 4]]
   var copy = m[:, :]
-  copy[0, 0] = 99
+  copy[1, 1] = 99
   print(m)
   print(copy)
       

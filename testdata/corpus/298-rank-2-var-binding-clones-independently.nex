@@ -2,7 +2,7 @@
 def main() =
   var m = [[1, 2], [3, 4]]
   var n = m
-  n[0, 0] = 99
-  print(m[0, 0])
-  print(n[0, 0])
+  n[1, 1] = 99
+  print(m[1, 1])
+  print(n[1, 1])
       
