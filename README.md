@@ -12,10 +12,11 @@ def normalize(v: [real]) =
   else v / mag
 ```
 
-**This is the sysl implementation of nex.** The reference implementation is the Scala 3 one at
-[edadma/nex](https://github.com/edadma/nex), whose `docs/content/spec/` is the language
-specification; where this one and the reference disagree, the reference is right until the
-specification says otherwise. The port's plan, phase by phase, is [PORT-PLAN.md](PORT-PLAN.md).
+**This is the sysl implementation of nex**, written from scratch with an MLIR backend. The reference
+implementation is the Scala 3 one at [edadma/nex](https://github.com/edadma/nex), whose
+`docs/content/spec/` is the language specification; where this one and the reference disagree, the
+reference is right until the specification says otherwise. The architecture and milestones are in
+[PLAN.md](PLAN.md).
 
 ## Status
 
@@ -27,6 +28,9 @@ and every milestone of the port is measured against it.
 sysl build .
 sysl test .
 ```
+
+Compiling needs LLVM's `mlir-opt`, `mlir-translate` and `clang`, found at `NEX_LLVM_HOME` or else
+Homebrew's `opt/llvm`; without them the toolchain tests skip.
 
 ## Licence
 

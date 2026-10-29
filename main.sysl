@@ -1,4 +1,4 @@
-// The `nex` command. The subcommands arrive with the phases they drive, in the order PORT-PLAN.md
+// The `nex` command. The subcommands arrive with the phases they drive, in the order PLAN.md
 // gives: `tokens` prints what the lexer reads, `parse` the tree the parser builds.
 
 import sysl.fs.read_bytes
