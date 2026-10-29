@@ -264,38 +264,40 @@ end program jacobi
 const n = 100
 const tol = 1.0e-10
 
-val h = 1.0 / (n + 1)
-val f = fill(n, 1.0)
-var u = fill(n + 2, 0.0)              // u[1] and u[end] are the boundary values
-var diff = inf
-var iter = 0
+def main() =
+  val h = 1.0 / (n + 1)
+  val f = fill(n, 1.0)
+  var u = fill(n + 2, 0.0)            // u[1] and u[end] are the boundary values
+  var diff = inf
+  var iter = 0
 
-while diff >= tol and iter < 100000
-  val unew = 0.5 * (u[1..end-2] + u[3..end] + h * h * f)
-  diff = max(map(unew - u[2..end-1], t -> abs(t)))
-  u[2..end-1] = unew
-  iter += 1
+  while diff >= tol and iter < 100000
+    val unew = 0.5 * (u[1..end-2] + u[3..end] + h * h * f)
+    diff = max(map(unew - u[2..end-1], t -> abs(t)))
+    u[2..end-1] = unew
+    iter += 1
 
-print(s"iterations: $iter  u(mid) = ${u[(n + 3) div 2]}")
+  print(s"iterations: $iter  u(mid) = ${u[(n + 3) div 2]}")
 ```
 
-The nex version has no declarations to keep in step with the code, no `_real64` suffixes, and no
+A program starts at `def main()`, like Fortran's `program` unit. The nex version has no declarations to keep in step with the code, no `_real64` suffixes, and no
 `implicit none` because there is no implicit typing. `1.0 / (n + 1)` is a `real` because `/` on
 an integer always gives a real. The Fortran array runs `0:n+1`; nex arrays start at 1, so the
 interior is `u[2..end-1]` and the middle point `u((n+1)/2)` is `u[(n + 3) div 2]`.
 
 The update is a loop you can run in parallel. To keep Fortran's `0:n+1` indexing in the loop
-body, take an `origin` view, which renumbers an array without copying it:
+body, take an `origin` view, which renumbers an array without copying it. The loop in `main`
+becomes:
 
 ```nex
-var unew = fill(n, 0.0)
+  var unew = fill(n, 0.0)
 
-while diff >= tol and iter < 100000
-  val g = origin(u, 0)                // g[0] .. g[n+1] are u[1] .. u[n+2]
-  parallel for k in 1..n do unew[k] = 0.5 * (g[k - 1] + g[k + 1] + h * h * f[k])
-  diff = max(map(unew - u[2..end-1], t -> abs(t)))
-  u[2..end-1] = unew
-  iter += 1
+  while diff >= tol and iter < 100000
+    val g = origin(u, 0)              // g[0] .. g[n+1] are u[1] .. u[n+2]
+    parallel for k in 1..n do unew[k] = 0.5 * (g[k - 1] + g[k + 1] + h * h * f[k])
+    diff = max(map(unew - u[2..end-1], t -> abs(t)))
+    u[2..end-1] = unew
+    iter += 1
 ```
 
 Each iteration writes only `unew[k]` and only reads `u`, which the loop does not write, so the

@@ -14,6 +14,9 @@ theme = "juicerdocs"
 # Page <h1> comes from frontmatter title; markdown headings start at <h2>.
 headingShift = 0
 
+# Keep the chapter numbers in URLs (`/spec/04-arrays/`), the form every cross-link uses.
+stripPrefix = false
+
 # Match URL space to on-disk layout so any static host serves files at the
 # URLs we publish.
 htmlDir = ""

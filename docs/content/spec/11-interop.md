@@ -622,4 +622,4 @@ These are decided directions that the first language does not include:
 - **Generalized eigenproblems** (`A x = λ B x`).
 - **`rcond` / `cond`**, condition-number estimates.
 
-The full list is in the [Later](/spec/later/) appendix.
+The full list is in the [Later](/spec/appendix-later/) appendix.
