@@ -660,11 +660,16 @@ struct Parser
 
         self.tok(0) match
             Num(text) ->
-                digits_value(text, 10) match
-                    Some(n) ->
+                val lit = number(self.toks.here(), text, false)?
+
+                *lit.kind match
+                    IntLit(n) ->
+                        // A hexadecimal literal with the top bit set reads as a negative integer.
+                        if n < 0 then return self.fail(want)
+
                         self.bump()
-                        Ok(FixedExtent(n))
-                    None -> self.fail(want)
+                        Ok(FixedExtent(u64(n)))
+                    _ -> self.fail(want)
             Ident(name) ->
                 self.bump()
                 Ok(NamedExtent(name))
@@ -817,9 +822,9 @@ struct Parser
     range(*self) -> Result[Expr, Diagnostic]
         val m = self.toks.mark()
         val lo = self.additive()?
-        val inclusive = self.at("..=")
+        val inclusive = self.at("..")
 
-        if !inclusive && !self.at("..") then return Ok(lo)
+        if !inclusive && !self.at("..<") then return Ok(lo)
 
         self.bump()
 
@@ -1002,10 +1007,10 @@ struct Parser
 
         if self.accept(":") then return Ok(ex(self.toks.span_from(m), AxisAll))
 
-        val lo = if self.at("..") || self.at("..=") then None else Some(self.additive()?)
-        val inclusive = self.at("..=")
+        val lo = if self.at("..") || self.at("..<") then None else Some(self.additive()?)
+        val inclusive = self.at("..")
 
-        if !inclusive && !self.at("..")
+        if !inclusive && !self.at("..<")
             return Ok(lo.unwrap())
 
         self.bump()
@@ -1013,12 +1018,12 @@ struct Parser
         val hi = if self.at(",") || self.at("]") || self.at_word("by") then None else Some(self.additive()?)
         var stride: Option[Expr] = None
 
+        if !inclusive && hi.is_none()
+            return Err(error(self.toks.previous(), "`..<` needs the bound it stops before: `a[k..]` runs to the end"))
+
         if self.at_word("by")
             self.bump()
             stride = Some(self.additive()?)
-
-        if inclusive && hi.is_none()
-            return Err(error(self.toks.previous(), "'..=' needs the bound it includes"))
 
         Ok(ex(self.toks.span_from(m), Range(lo, hi, inclusive, stride)))
     end index_element
@@ -1176,12 +1181,14 @@ struct Parser
 
                 self.expect(":")?
 
+                // `min`, `max`, `minloc`, `maxloc` and a user function are names; which name is an
+                // operator is the elaborator's question.
                 val op = self.tok(0) match
-                    Ident(w) -> if w == "min" || w == "max" then w else ""
+                    Ident(w) -> w
                     t -> one_of(t, ["+", "*", "and", "or"])
 
                 if op.len == 0
-                    return Err(error(self.toks.here(), "a reduction's operator is `+`, `*`, `min`, `max`, `and` or `or`"))
+                    return Err(error(self.toks.here(), "a reduction's operator is `+`, `*`, `and`, `or`, `min`, `max`, `minloc`, `maxloc` or a function's name"))
 
                 self.bump()
                 reductions.push(Reduction(name, op))
@@ -1243,12 +1250,15 @@ private is_place(e: Expr) -> bool = *e.kind match
     Index(_, _) -> true
     _ -> false
 
-// The value of the digits of `text` in `base`, or `None` where it does not fit 64 bits.
+// The value of the digits of `text` in `base`, or `None` where one of them is not a digit of that
+// base or the value does not fit 64 bits.
 private digits_value(text: string, base: u64) -> Option[u64]
     var v: u64 = 0
 
     for c in text.bytes
-        val d = u64(c.digit_value(int(base)).unwrap())
+        val d = c.digit_value(int(base)) match
+            Some(k) -> u64(k)
+            None -> return None
 
         if v > (0xFFFF_FFFF_FFFF_FFFFu64 - d) / base then return None
 

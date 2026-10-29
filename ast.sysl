@@ -177,8 +177,9 @@ enum ExprKind
     Unary(op: string, operand: Expr)
     // `2x`, `2pi`, `2(x + 1)`: a numeric coefficient written against what it multiplies.
     Juxtapose(coeff: Expr, body: Expr)
-    // `lo..hi`, `lo..=hi`. Inside an index list either bound may be left off and a stride given:
-    // `a[..n]`, `a[k..]`, `a[..]`, `a[0..n by 2]`.
+    // `lo..hi`, which includes `hi`, or `lo..<hi`, which stops before it (`inclusive` false). Inside
+    // an index list either bound of `..` may be left off, `lo` of `..<`, and a stride given:
+    // `a[..n]`, `a[k..]`, `a[..]`, `a[..<k]`, `a[1..n by 2]`, `a[.. by -1]`.
     Range(lo: Option[Expr], hi: Option[Expr], inclusive: bool, stride: Option[Expr])
     // `[a, b, c]`; a matrix is an array of rows.
     Array(elems: Buf[Expr])

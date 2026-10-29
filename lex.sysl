@@ -56,8 +56,9 @@ private val reserved = ["and", "as", "const", "def", "div", "do", "elif", "else"
 
 // The operators and delimiters, longest first so that the first match is the longest one. `//` and
 // `/*` open comments and are taken before this table is asked. `.*` is a token of its own so that the
-// `*` of `import m.*` at the end of a line is not read as an operator continuing it.
-private val operators = ["..=", "..", "->", ".*", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
+// `*` of `import m.*` at the end of a line is not read as an operator continuing it. `..=` is in the
+// table only so that it is refused by name rather than read as `..` and `=`.
+private val operators = ["..=", "..<", "..", "->", ".*", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
     "%=", "(", ")", "[", "]", "{", "}", "+", "-", "*", "/", "%", "^", "@", "<", ">", "=", ".", ",",
     ";", ":"]
 
@@ -278,6 +279,8 @@ private scan_punct(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]], m: usize)
     for op in operators
         if s.accept_seq(op.bytes)
             val at = s.span_from(m)
+
+            if op == "..=" then return Err(error(at, "there is no `..=`: `a..b` already includes `b`, and `a..<b` stops before it"))
 
             if op == "(" || op == "[" || op == "{"
                 lay.open_bracket()

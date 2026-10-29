@@ -45,15 +45,21 @@ keywords_and_names()
 
 @test("every keyword of the language is one")
 every_keyword()
-    val words = "and as const def div do else end false for if import in match module mut not or private return struct then true val var while"
+    val words = "and as const def div do else end extern false for if import in inout match module mut not or parallel private return struct then true val var while"
     val out = lexed(words)
 
-    assert_eq(out, "K(and) K(as) K(const) K(def) K(div) K(do) K(else) K(end) K(false) K(for) K(if) K(import) K(in) K(match) K(module) K(mut) K(not) K(or) K(private) K(return) K(struct) K(then) K(true) K(val) K(var) K(while) NL")
+    assert_eq(out, "K(and) K(as) K(const) K(def) K(div) K(do) K(else) K(end) K(extern) K(false) K(for) K(if) K(import) K(in) K(inout) K(match) K(module) K(mut) K(not) K(or) K(parallel) K(private) K(return) K(struct) K(then) K(true) K(val) K(var) K(while) NL")
+
+@test("by, reduce and the type names are names, not keywords")
+contextual_words()
+    assert_eq(lexed("by reduce int8 uint8 real16 real64 complex"), "ID(by) ID(reduce) ID(int8) ID(uint8) ID(real16) ID(real64) ID(complex) NL")
 
 @test("operators are read longest first")
 operators()
     assert_eq(lexed("a == b != c <= d >= e"), "ID(a) K(==) ID(b) K(!=) ID(c) K(<=) ID(d) K(>=) ID(e) NL")
-    assert_eq(lexed("0..=10 0..10"), "N(0) K(..=) N(10) N(0) K(..) N(10) NL")
+    assert_eq(lexed("0..<10 0..10"), "N(0) K(..<) N(10) N(0) K(..) N(10) NL")
+    assert_eq(lexed("a[..<k] a[k..]"), "ID(a) K([) K(..<) ID(k) K(]) ID(a) K([) ID(k) K(..) K(]) NL")
+    assert_eq(lexed("1..n by -1"), "N(1) K(..) ID(n) ID(by) K(-) N(1) NL")
     assert_eq(lexed("a div b"), "ID(a) K(div) ID(b) NL")
     assert_eq(lexed("(){}[],;:"), "K(() K()) K({) K(}) K([) K(]) K(,) K(;) K(:) NL")
     assert_eq(lexed("A @ B"), "ID(A) K(@) ID(B) NL")
@@ -129,6 +135,12 @@ unterminated_string()
 @test("a character that starts no token is refused")
 illegal_character()
     assert_eq(lexed("val x = 1 $ 2\n"), "error: illegal character @1:11")
+
+@test("`..=` is refused by name, wherever it is written")
+no_inclusive_equals_range()
+    assert_eq(lexed("for k in 0..=10 do f(k)\n"), "error: there is no `..=`: `a..b` already includes `b`, and `a..<b` stops before it @1:11")
+    assert_eq(lexed("a[..=3]\n"), "error: there is no `..=`: `a..b` already includes `b`, and `a..<b` stops before it @1:3")
+    assert_eq(lexed("a[1..= 3]\n"), "error: there is no `..=`: `a..b` already includes `b`, and `a..<b` stops before it @1:4")
 
 @test("a line that lines up with no open block is refused")
 ragged_dedent()

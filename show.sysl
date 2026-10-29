@@ -335,7 +335,7 @@ show_expr(e: Expr) -> string
                     items.push(show_expr(k))
                 None -> ()
 
-            return form(if inclusive then "..=" else "..", items)
+            return form(if inclusive then ".." else "..<", items)
         Array(elems) ->
             exprs_into(&items, elems)
             return form("array", items)
