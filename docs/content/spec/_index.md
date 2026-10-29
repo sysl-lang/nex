@@ -18,6 +18,7 @@ The nex language reference. Each chapter covers one area of the language.
 10. [Parallelism](/spec/10-parallelism/)
 11. [Interoperability: C, BLAS, LAPACK, Fortran](/spec/11-interop/)
 12. [Prelude](/spec/12-prelude/)
-13. [Appendix: Later](/spec/appendix-later/)
+13. [Units of measure](/spec/13-units/)
+14. [Appendix: Later](/spec/appendix-later/)
 
 Rules marked as proposed in a chapter are not settled and may change.

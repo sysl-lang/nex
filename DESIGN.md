@@ -4,7 +4,7 @@ This is the language this implementation compiles. The reference specification
 (`~/dev/nex/docs/content/spec/`, cited here as *ref §n*) still defines everything this document does
 not touch: lexical structure, tuples, structs, sum types, `match`, closures, modules, interpolation,
 the scalar prelude. Where a section here covers a subject, it replaces the reference's text on that
-subject. The table in §13 lists every such place.
+subject. The table in §14 lists every such place.
 
 **Two markings run through it.** **PROPOSED** marks a rule this document had to invent to make a
 decided feature complete; it stands until the user says otherwise. A claim about MLIR names the
@@ -24,7 +24,8 @@ sysl family. Scalars come in sized widths (§2). Arrays have any rank and an opt
 (§3). A slice is a read-only view (§6). A function mutates a caller's array through an `inout`
 exclusive borrow (§8). Loops and reductions can be parallel, the checker proves them race-free, and
 their results are the same for every thread count (§9). C, BLAS, LAPACK and existing Fortran are
-reachable through `extern` declarations, and `@` uses BLAS when that pays (§10).
+reachable through `extern` declarations, and `@` uses BLAS when that pays (§10). A real can carry a
+unit of measure (`9.81<m/s^2>`, `real<mm>`), checked at compile time and free at run time (§13).
 
 nex is compiled, always: there is no interpreter, and `nex run` compiles the program to a native
 binary and runs it. The playground does the same on a server, running the native binary inside
@@ -76,7 +77,7 @@ single precision says `real32`.
   single-precision BLAS, GPUs and memory-bound kernels use; binary16 is the storage width of
   half-precision data. `real16` is a storage-and-arithmetic type, and its transcendental functions
   compute in `real32` and round (**PROPOSED**); `sqrt` is native (`precision.mlir`). `real128` comes
-  later (§14).
+  later (§15).
 - **No `bfloat16`.** The name is reserved; MLIR's `bf16` makes it cheap to add when a workload asks.
 
 ### 2.2 Promotion lattice
@@ -200,6 +201,7 @@ The closed constraint set of ref §6.10 widens to the sized types:
 | `Ord` | every integer and real type |
 | `Eq` | every numeric type, `bool`, `string` |
 | `Rank` | not a type: a rank (§3.4) |
+| `Unit` | not a type: a unit of measure (§13.5) |
 
 Unifying one type parameter against several numeric actuals widens along §2.2, as ref §6.10 widens
 through the old tower.
@@ -981,7 +983,7 @@ cross as pointers, whose interleaved (re, im) layout is C99's and BLAS's *(unver
 
 **`@c` structs cross by reference.** A struct declared `@c` has C's field order, alignment and
 padding, and passes as a pointer (`const S *` in read mode, `S *` as `inout`). A struct **by value**
-does not cross yet (§14).
+does not cross yet (§15).
 
 No array is returned from C. A read-mode array argument is a promise that C does not write it; the
 compiler cannot check that, and a C function that breaks it breaks value semantics.
@@ -1082,7 +1084,7 @@ The prelude reaches LAPACK for the dense linear-algebra kernels. **The first set
 
 Pivot indices (`ipiv`) are `[int32]`, LAPACK's integer.
 
-**Later** (§14): banded and tridiagonal solvers, generalized eigenproblems, `rcond` / `cond`.
+**Later** (§15): banded and tridiagonal solvers, generalized eigenproblems, `rcond` / `cond`.
 
 **The value forms** take and return values, copying their inputs because LAPACK overwrites them,
 and **trap** when LAPACK's `info` reports failure, with a message naming the routine and the cause
@@ -1146,7 +1148,14 @@ default search path or a `-L dir` given on the command line.
 **Keywords** (ref §2.3) gain `inout`, `parallel`, `extern`, `enum`, and the loop and program
 controls `exit`, `cycle` and `stop` (§11.1). `mut` stays reserved and means nothing. `by` (the step
 of a range) and `reduce` (the `parallel for` clause) are contextual, so `reduce` remains a prelude
-name. The type names of §2.1 are prelude type names, not keywords.
+name. `unit` is contextual too: followed by a name at the start of a top-level declaration it
+declares a unit of measure (§13.1), and everywhere else it is the type `unit`. The type names of
+§2.1 are prelude type names, not keywords.
+
+**Units**: a `<` written directly after a numeric literal or a type name, with no space, opens a
+unit of measure that the matching `>` closes (`9.81<m/s^2>`, `real32<m/s>`, §13.2). Inside the
+brackets, names are unit names in their own namespace, so `in` is a unit there. A `<` after
+anything else, or after a space, is the comparison.
 
 **Operator precedence**: `^` binds tighter than unary minus, so `-x^2` is `-(x^2)` as in Fortran and
 mathematics, and `^` is right-associative (`2^3^2` is `2^(3^2)`). `^` is the only power operator;
@@ -1212,7 +1221,169 @@ Inside a scope that binds `i`, write the unit some other way (`complex(0.0, 1.0)
 
 ---
 
-## 13. Where this differs from the reference specification
+## 13. Units of measure
+
+A real or complex value may carry a **unit of measure**, which the type checker follows through
+every expression and erases before code generation. A program that adds a length to a force, or
+stores a pressure where a length belongs, does not compile. The notation is F#'s: a unit is written
+in angle brackets after a literal or a type name.
+
+### 13.1 Declaring units
+
+```nex
+unit m                          // a base unit: a dimension of its own
+unit N = kg m / s^2             // a derived unit
+unit in = 0.0254 m              // a scaled unit: an exact factor times a unit
+unit ft = 12 in
+unit lbf = 4.4482216152605 N
+unit psi = lbf / in^2
+```
+
+- **A `unit` declaration is a top-level declaration.** `unit` is a contextual word (§11): followed
+  by a name at the start of a top-level declaration it declares a unit, and everywhere else it is
+  the type `unit` of ref §3.1, which keeps its meaning.
+- **A unit expression** is built from unit names and `1`: juxtaposition multiplies, `/` divides and
+  `^n` raises to a constant power — an integer, optionally negative (`s^-1`), or a parenthesized
+  rational (`m^(1/2)`). `^` binds tightest, juxtaposition next, `/` loosest and left-associative,
+  and parentheses group: `kg m / s^2` is (kg·m)/s², and `J / kg K` is J/(kg·K).
+- **A derived unit** (`N = kg m / s^2`) is another name for its expression. **A scaled unit**
+  (`in = 0.0254 m`) is a positive numeric literal times a unit expression. The factor is **exact**:
+  a decimal literal is read as the rational it spells, and factors compose exactly, so `ft` is
+  exactly 0.3048 m and `psi` exactly 6894.757293168361… Pa as a rational. A definition may not
+  refer to itself, directly or through another unit.
+- **Two units are the same unit** when they reduce to the same exponents of the same base units and
+  the same factor. `N` and `kg m / s^2` are one unit, `Hz` and `1/s` are one, and so are `J` and
+  `N m` (as in SI, torque and energy are not told apart). `mm` and `m` have the same **dimension**
+  and different factors: two units, convertible (§13.3).
+- **Unit names live in their own namespace** and appear only inside `<…>` and in `unit`
+  declarations, so a variable named `m`, `s` or `g` does not clash with the unit, and the keyword
+  `in` is an ordinary unit name there (`2.0<in>`). A module's own `unit` declaration of a prelude
+  unit's name shadows it in that module, as any prelude name may be shadowed. `ms` is the
+  millisecond; the metre-second is `m s`.
+
+### 13.2 Spelling a unit
+
+| Form | Example |
+|---|---|
+| a literal | `9.81<m/s^2>`, `2.0<in>`, `1.0e5<Pa>` |
+| a real type | `real<m>`, `real32<m/s>`, `real16<Pa>` |
+| a complex type | `complex<V>`, `complex[real32]<ohm>` |
+| an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
+| dimensionless | `<1>`: `real<1>` is `real` |
+
+- **`<` opens a unit only directly after a numeric literal or a type name, with no space.** `x<y`
+  with `x` a binding is a comparison, and so is `2 < x`; `2<x>` is the literal 2 with unit `x`.
+- **Plain `real` is dimensionless**, and so is an unannotated literal: `1.0` is `real<1>`.
+- **Units attach to real and complex types only** (**PROPOSED**); integers count things. An integer
+  literal with a unit is a real literal of that value: `12<in>` is `12.0<in>`.
+- A literal with a unit takes its width from context exactly as §2.3 says: `9.81<m/s^2>` beside a
+  `real32<m>` is a `real32<m/s^2>`.
+
+### 13.3 Arithmetic and conversion
+
+- **`+`, `-` and the comparisons need operands of the same dimension.** Of the same unit, the
+  operation is the plain one. Of the same dimension and different scales, the right operand is
+  converted to the **left operand's unit**, with the ratio of the two factors folded at compile
+  time: `10.0<mm> + 1.0<in>` is `35.4<mm>`, and `1.0<ft> > 300.0<mm>` compares in feet. Of
+  different dimensions they are a compile error: `1.0<in> + 1.0<lbf>` is *"cannot add in and lbf:
+  length and force are different dimensions"*.
+- **`*` and `/` combine units**: `3.0<m> / 2.0<s>` is a `real<m/s>`, and `2.0 * x` keeps `x`'s
+  unit. A product keeps the names it was made from (`1.0<mm> * 1.0<in>` is `real<mm in>`, an area
+  whose factor is 0.001 × 0.0254).
+- **`^` takes a constant exponent** when its base carries a unit: `x^2` is `real<m^2>` for
+  `x: real<m>`, and a rational exponent is allowed (`<m^(1/2)>`). `x^n` with `n` not a compile-time
+  constant needs a dimensionless `x`.
+- **A bare literal is dimensionless.** With `x: real<m>`, `x + 1.0` and `x > 0.0` are compile errors;
+  write `x + 1.0<m>` and `x > 0.0<m>`.
+- **An expected type converts** (**PROPOSED**): a binding, an argument, a returned value or an
+  assignment of the same dimension and another scale is converted to the target's unit, as `+`
+  converts its right operand. `val d: real<mm> = 1.0<in>` holds `25.4<mm>`. A different dimension
+  is a compile error.
+- **`to<u>(x)`** converts explicitly, on a scalar and element-wise on an array: `to<mm>(1.0<in>)` is
+  `25.4<mm>`. A target of another dimension is a compile error.
+- **`strip(x)`** removes the unit and gives the number in `x`'s own unit, dimensionless:
+  `strip(25.4<mm>)` is `25.4`, and `strip(to<m>(d))` is the length in metres. On an array it is a
+  view of the same storage, with no copy. **A unit is attached by multiplying**: `y * 1.0<m>`.
+
+### 13.4 Prelude functions
+
+- `sqrt` halves every exponent: `sqrt(a)` for `a: real<m^2>` is `real<m>`.
+- `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
+  `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
+  `atan2(y, x)` takes two values of one dimension and returns a dimensionless angle.
+- `exp`, `log`, `sin`, `cos`, `tan` and the other elementary functions need a dimensionless argument
+  and return a dimensionless result. **`rad` is dimensionless** (`unit rad = 1`), so
+  `sin(0.5<rad>)` is accepted.
+- `product(a)` has unit `U^n`; for an `a` that carries a unit, `n` must be a static extent
+  (**PROPOSED**), and otherwise it is a compile error that suggests `strip`.
+- `print` and string interpolation show the unit after the value, separated by a space: with
+  `val g = 9.81<m/s^2>`, `print(g)` prints `9.81 m/s^2`. The unit is spelled as the type carries it,
+  in a form that reads back as the same unit (`8.314 J/(mol K)`). An array prints its elements and
+  then its unit once (**PROPOSED**). A dimensionless value prints as it always has.
+
+### 13.5 Generic units
+
+A generic parameter bounded by `Unit` (§2.6) stands for a unit, in the generic-parameter form of
+§3.4:
+
+```nex
+def sqr[U: Unit](x: real<U>) = x * x                   // real<U^2>
+
+def mean[U: Unit](a: [real<U>]) = sum(a) / length(a)   // real<U>
+```
+
+`U` is inferred from the arguments. Units are erased, so a unit parameter adds no
+specialization: `sqr` called on `real<m>` and on `real<s>` is one function.
+
+### 13.6 Linear algebra
+
+Every element of an array carries the array's one unit; a matrix whose columns have different units
+is held stripped. The products and solvers carry units through:
+
+| Operation | Unit |
+|---|---|
+| `A @ x`, `A @ B` | the product of the operands' units |
+| `dot(x, y)` | the product of the operands' units |
+| `sum(a)`, `norm2(a)` | `a`'s unit |
+| `solve(A, b)`, `lstsq(A, b)` | `b`'s unit divided by `A`'s |
+| `inv(A)` | the reciprocal of `A`'s unit (**PROPOSED**) |
+| `det(A)` | `A`'s unit to the power n; `A` carrying a unit needs a static extent n (**PROPOSED**) |
+| `eigvals`, `eigh`, `svdvals`; the `R` of `qr`, the `U` of `lu`, the `s` of `svd` | `A`'s unit; the other factors are dimensionless (**PROPOSED**) |
+| `chol(A)` | the square root of `A`'s unit (**PROPOSED**) |
+
+### 13.7 C and Fortran
+
+**An `extern` parameter never carries a unit.** Passing a unit-carrying value to one is a compile
+error that names `strip`: `cbrt(strip(v))`. An array strips as a view, with no copy, so
+`cblas_ddot(n, strip(x), 1, strip(y), 1)` copies nothing. A result is given its unit by
+multiplying: `cbrt(strip(v)) * 1.0<m>`. A nex function passed as a callback (§10.2.1) has
+unit-free parameters and result for the same reason.
+
+### 13.8 Cost
+
+Units exist only in the type checker and are erased before MLIR is emitted, so a program with units
+compiles to the same code as the same program without them. **Mixing scales costs one
+multiplication by a constant**: the ratio of two exact factors, rounded once to the operand's width
+at compile time — the same single rounding a hand conversion makes. Where no scales are mixed, no
+conversion is emitted.
+
+### 13.9 The prelude units
+
+| Units | Definitions |
+|---|---|
+| SI base | `m` `kg` `s` `A` `K` `mol` `cd` |
+| SI derived | `N = kg m / s^2`, `J = N m`, `W = J / s`, `Pa = N / m^2`, `Hz = 1 / s`, `C = A s`, `V = W / A`, `ohm = V / A`, `rad = 1` |
+| SI scaled | `mm = 0.001 m`, `cm = 0.01 m`, `km = 1000 m`, `g = 0.001 kg`, `ms = 0.001 s`, `us = 0.000001 s`, `ns = 0.000000001 s`, `kPa = 1000 Pa`, `MPa = 1000000 Pa`, `GPa = 1000000000 Pa`, `kN = 1000 N`, `kJ = 1000 J`, `kW = 1000 W` |
+| Imperial and US customary | `in = 0.0254 m`, `ft = 12 in`, `yd = 3 ft`, `mi = 5280 ft`, `lb = 0.45359237 kg`, `oz = 0.0625 lb`, `lbf = 4.4482216152605 N`, `slug = lbf s^2 / ft`, `psi = lbf / in^2`, `ksi = 1000 psi`, `BTU = 1055.05585262 J`, `hp = 550 ft lbf / s`, `usgal = 231 in^3`, `ukgal = 0.00454609 m^3` |
+
+`in`, `lb` and `lbf` are the international definitions (1959), `lbf` is `lb` times standard
+gravity 9.80665 m/s², `BTU` is the International Table BTU and `hp` the mechanical horsepower.
+**There is no `gal`**: the US and UK gallons differ by a fifth, so a program says which. Temperature
+is in `K` until the affine units of §15 arrive.
+
+---
+
+## 14. Where this differs from the reference specification
 
 | Subject | Reference | Here | Change |
 |---|---|---|---|
@@ -1244,7 +1415,7 @@ Inside a scope that binds `i`, write the unit some other way (`complex(0.0, 1.0)
 | Whole-array reduction order | — | §9.2.1 | blocked pairwise tree, the same with or without `parallel` |
 | FFI, BLAS, LAPACK | §6.11, §11.2 | §10 | `extern def`, `@link`, `@symbol`, `@strided`, `@pure`, `@c` structs, callbacks, complex by value; LAPACK value forms trap, `inout` forms return `info` |
 | Calling Fortran | — | §10.6 | `bind(c)` and plain gfortran procedures through `@fortran` |
-| Keywords | §2.3 | §11 | `inout`, `parallel`, `extern`, `enum`, `exit`, `cycle`, `stop` |
+| Keywords | §2.3 | §11 | `inout`, `parallel`, `extern`, `enum`, `exit`, `cycle`, `stop`; contextual `unit` |
 | `^` and unary minus | — | §11 | `^` binds tighter than unary minus (`-x^2` is `-(x^2)`) and is right-associative |
 | Loop control | — | §11.1 | `exit`, `cycle`, named loops, `stop n`, `by` in a `for` header |
 | Program entry | — | §11.2 | `main()` or `main(args: [string])`, 1-based `args`; declarations only at the top level; `eprint` |
@@ -1253,13 +1424,17 @@ Inside a scope that binds `i`, write the unit some other way (`complex(0.0, 1.0)
 | Reductions | §10 | §7.4 | Fortran names: `minval`, `maxval`, `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`; `dim =` in place of the reference's `sum_axis`; `dot` conjugates |
 | Array elements | §3.3 | §3.1 | any element type but an array; structs and tuples of scalars stored inline |
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
+| Units of measure | — | §13 | `unit` declarations (base, derived, scaled by an exact factor); `9.81<m/s^2>`, `real<m>`, `[real<Pa>; :, :]`; same-dimension scales convert to the left operand's unit, other dimensions are a compile error; `to<u>`, `strip`; erased before code generation |
+| Unit generics | §6.10 | §2.6, §13.5 | `U: Unit` parameters (`real<U^2>`) |
+| Prelude units | — | §13.9 | SI base, derived and scaled, imperial and US customary; `usgal` / `ukgal`, no `gal` |
+| `unit` | §3.1 | §11, §13.1 | still the type; also a contextual word that declares a unit at the top level |
 
 Unchanged, and restated only to fix their meaning beside the new rules: `i` and its shadowing
 (§12), silent auto-clone insertion (ref §8.3), scalar-only broadcasting (ref §4.5).
 
 ---
 
-## 14. Later
+## 15. Later
 
 Decided directions that are not in the first language. Each is kept here so it is not lost, and
 each has an item in PLAN.md's later list.
@@ -1273,6 +1448,14 @@ each has an item in PLAN.md's later list.
   prove slower than a vendor's batched `gemm`.
 - **More LAPACK** (§10.5): banded and tridiagonal solvers, generalized eigenproblems,
   `rcond` / `cond`.
+- **Affine temperature units** `degC` and `degF` (§13). Until they arrive, temperatures are in `K`.
+  They are not scaled units: 20 °C is 293.15 K, an offset and not a multiplication, so converting a
+  temperature is `x + 273.15` where converting a length is `x * 0.001`. And a temperature
+  **difference** converts without the offset — a rise of 20 °C is a rise of 20 K — so an affine unit
+  needs two types, a point and a difference, with point − point giving a difference and point + point
+  refused. That is a rule of its own, not a factor in the table of §13.9.
+- **Unit-polymorphic externs**: an `extern` declaration whose parameters carry units (§13.7), so a C
+  routine can be given its units once in its declaration instead of `strip` at every call.
 
 Not in the language, and not planned: implicit parallelism (§9.3), static extents as generic
 parameters (§3.4), batched `@` on rank ≥ 3 (§7.2), a call-site marker for `inout` (§8.1).

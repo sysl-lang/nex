@@ -143,6 +143,9 @@ v @ v                               // 61.0
 - The rank-1 product does **not** conjugate, for complex operands as for real: `u @ v` is
   `Σ u[k] * v[k]`. The Hermitian inner product is `dot(u, v)`, which conjugates `u` as Fortran's
   `dot_product` does (§5.7), or `conj(u) @ v`.
+- **Units multiply**: a `[real<N/m>; :, :]` times a `[real<m>]` is a `[real<N>]`. Element-wise
+  `+` and `-` need operands of one dimension and convert the right operand's scale to the left's,
+  exactly as for scalars ([Units of measure](/spec/13-units/)).
 
 ### 5.5.1 BLAS
 

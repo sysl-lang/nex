@@ -192,6 +192,12 @@ pub       trait     type      where     yield
 - `reduce` introduces the reduction clause of a `parallel for`
   ([chapter 10](/spec/10-parallelism/)). Everywhere else `reduce` is the prelude function of that
   name.
+- `unit` followed by a name at the start of a top-level declaration declares a unit of measure
+  (`unit ft = 12 in`, [chapter 13](/spec/13-units/)). Everywhere else `unit` is the type.
+
+**Units of measure** are written in angle brackets directly after a numeric literal or a type
+name, with no space: `9.81<m/s^2>`, `real<mm>`. Inside the brackets, names are unit names, so `in`
+is the inch there. A `<` anywhere else, or after a space, is the comparison.
 
 **Type names are not keywords.** `integer`, `real`, `complex`, `int8` … `int64`, `uint8` …
 `uint64`, `real16`, `real32`, `real64`, `bool`, `string` and `unit` are names the prelude defines

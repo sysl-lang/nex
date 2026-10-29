@@ -7,7 +7,8 @@ static shapes, 1-based indexing and inclusive `..` ranges as in Fortran, the `is
 names, slices as views, `end`-relative indexing with no negative wrap, `inout` borrows,
 reproducible parallel loops and reductions, and C/BLAS/LAPACK/Fortran through `extern`. No part of the
 reference's structure is carried over. The backend is MLIR from the first program compiled, and
-there is no interpreter: `nex run` compiles and runs.
+`nex run` compiles and runs. The compiler is the source of truth; an interpreter is a later, gated
+item that executes the compiler's own typed form (below).
 
 This implementation is also a **stressor for sysl**: a real compiler for a real numerical language,
 so every gap it meets in sysl is reported to sysl first (org rule 9) rather than routed around here.
@@ -251,7 +252,11 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    `parallel for … reduce`, `parallel` expressions and `extern def` with its attributes.
 2. **M2 — the typed IR.** Elaboration, inference over the precision lattice, generics and `Rank`
    parameters monomorphized, auto-clone and view copies made explicit, the `inout` exclusivity check,
-   the parallel-safety check and the module-`var` effect summary both use. *Exit*: all 425
+   the parallel-safety check and the module-`var` effect summary both use. **Units of measure**
+   (DESIGN §13): `unit` declarations reduced to base exponents and an exact rational factor, unit
+   inference through every operator, prelude function, generic `U: Unit` parameter and the linear
+   algebra of §13.6, same-dimension conversions made explicit as one multiplication by a folded
+   constant, and the units erased from the typed IR handed to emission. *Exit*: all 425
    elaborate; the reference's elaborator stage 1–3 cases ported (positive ones by the printed IR,
    negative ones by their diagnostic); a negative case for each rule of DESIGN §8.3 and §9.4 and for
    each narrowing that §2.2 refuses (same-width signed/unsigned mixing, a promoted `[real64]` stored
@@ -260,7 +265,14 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    split-form suggestion, and the same three forms accepted for an `inout` window beside a read-mode
    window of one array under rule 2 (`axpy(2.0, a[1..4], a[5..8])`); a negative case for an
    unmarked scalar function applied to an array, for a `main` of any other signature, for a
-   top-level statement, and for `exit` and a nested `parallel` in a parallel body.
+   top-level statement, and for `exit` and a nested `parallel` in a parallel body. For units: the
+   typed IR of `10.0<mm> + 1.0<in>` shows the folded factor 25.4 on the right operand and that of
+   `1.0<m> + 2.0<m>` shows none; `sqr[U: Unit]` infers `real<m^2>`; `N` and `kg m / s^2` unify, and
+   so do `ft` and `12 in`; and a negative case, by its diagnostic, for each refusal of §13 —
+   adding different dimensions (the message names both units and both dimensions), a bare literal
+   beside a unit (`x + 1.0`, with the suggestion `1.0<m>`), a dimensioned argument to `exp`, a
+   non-constant exponent on a dimensioned base, `to` across dimensions, a unit-carrying argument to
+   an `extern` (suggesting `strip`), a circular `unit` declaration, and an unknown unit name.
 3. **M3 — scalars and the pipeline: 151.** Emission for scalars of every width, control flow,
    functions, strings and printing; the driver and the runtime's printing per width and trapping
    integer division and overflow at every width, IEEE real division and `--fpe-trap`; `exit`,
@@ -270,7 +282,11 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    assignment (8), functions (43), string interpolation (19), const fn calls (5), `inout` by-ref (6)
    — 151 pass; and `v2` **precision** programs (every type of DESIGN §2.1 printed, each promotion
    rule, each conversion's trap, unsigned overflow and underflow traps, literal adoption, a `real64`
-   scalar promoting a `real32` array, `real32` printing) pass.
+   scalar promoting a `real32` array, `real32` printing) pass; and `v2` **units** programs (every
+   prelude unit of DESIGN §13.9 converted to its SI base and printed, `print` showing the unit, mixed
+   `mm` and `in` arithmetic and comparison, `to` and `strip`, a projectile in `real<m>` and
+   `real<m/s>`) pass, each with a twin written without units whose emitted MLIR differs only in the
+   unit strings it prints.
 4. **M4 — aggregates and closures: 38 more, 189.** Structs, tuples, enums, escaping closures, the
    handle tables. *Exit*: structs (8), tuple destructuring (6), paren-less tuple construction (8),
    sum types (13), closure escape (3) pass.
@@ -283,7 +299,8 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    `pipeline.txt` becomes the revised sequential list. *Exit*: arrays (96), auto-clone (14), byte
    buffers (5) pass; 313-02's emitted loop count is one; `v2` **rank-N** programs (rank-3 literals,
    indexing, element-wise, `sum(a, dim = 2)`, `reshape`/`flatten` round trips at rank 3, static
-   shape compile errors) pass; and an `inout` array call emits no `memref.copy`.
+   shape compile errors) pass, as do arrays of `real<Pa>` printed with their unit and `to<mm>` over
+   a rank-2 array fused into its expression; and an `inout` array call emits no `memref.copy`.
 7. **M7 — views: 35 more, 375.** Every slice a `tensor.extract_slice`, the runtime's `memrefCopy`,
    `end`, bounds and stride traps, `by` on every axis, slice assignment in place, the escape and
    source-written copies of DESIGN §6.2. `views.mlir` and `view-then-write.mlir` join the toolchain
@@ -349,14 +366,16 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     failure traps with its message (`solve` on a singular matrix, `chol` on an indefinite one) and
     its `inout` form returns the same `info`; `eig` of a rotation matrix returns complex
     eigenvalues; `A @ B` above the threshold emits a call and below it a `linalg.matmul`, checked in
-    the emitted MLIR; and the BLAS gemm kernel below meets its bar.
+    the emitted MLIR; `solve` on a stiffness matrix in `real<N/m>` and loads in `real<N>` returns
+    `real<m>`, and `strip` of an array passed to `cblas_ddot` emits no copy; and the BLAS gemm kernel
+    below meets its bar.
 11. **M11 — modules and `nex test`.** The module loader, the source prelude found by
     `--prelude-path` / `NEX_HOME`, `@test` discovery; `nex test` prints a line per failure and a
     summary, filters by a name substring, and keeps running after a test traps. *Exit*: the reference's module loader,
     sysroot, prelude integration and test runner cases ported.
 12. **M12 — performance.** *Exit*: the perf oracle below, met on every kernel.
 
-**Later** (DESIGN §14), each its own item once M12 is done, none dropped:
+**Later** (DESIGN §15), each its own item once M12 is done, none dropped:
 
 - **Structs by value across the FFI** — `@c` structs passed and returned by value, with clang's
   per-target aggregate classification. Kept on the list at the user's request.
@@ -365,6 +384,38 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
 - **Batched BLAS** — a vendor batched `gemm` behind an explicit routine, if the
   `parallel for k … C[:, :, k] = A[:, :, k] @ B[:, :, k]` idiom measures slower.
 - **Banded and tridiagonal LAPACK solvers**, generalized eigenproblems, `rcond` / `cond`.
+- **Affine temperature units** `degC` / `degF`, with a point type and a difference type.
+- **Unit-polymorphic externs** — units in an `extern` declaration's parameters.
+- **The interpreter.** The compiler stays the source of truth: the interpreter executes the same
+  typed intermediate form the compiler lowers, so there is one front end, and it calls the same
+  runtime (the sysl runtime below) directly. `nex test --interp` runs the tests through it, and
+  `nex test --both` runs every test and every corpus program both ways and byte-diffs the output,
+  plus a fuzzer generating programs for the same diff. For the diff to hold, the compiler does not
+  contract floating point (`-ffp-contract=off`) unless nex itself says so, and the reproducible
+  reduction tree (DESIGN §9.2.1) lets a single-threaded interpreter match parallel runs bit for bit.
+  **Gate**: it is built only if the measured compile + load latency of a typical script exceeds
+  about 0.5 s; otherwise compiling is the interpreter. *Exit*: `nex test --both` is clean over the
+  corpus, the `v2` programs and a fuzzer run of a fixed seed and size.
+- **nex as a 3D modeller's scripting language.** Requirements: fast edit-and-rerun — compile a
+  script to a shared library and `dlopen` it, or run it through MLIR's ORC JIT, with a module cache,
+  against a stated latency target; small static-shape arrays (`[real; 3]`, `[real; 4, 4]`) held in
+  registers or on the stack, never on the heap; an embedding API, in which the host exposes its
+  geometry kernel through the C FFI and callbacks and calls into compiled scripts; and a sandbox mode
+  (no `extern`, no file I/O, no `stop`) for models from untrusted sources. Units (`mm` and `in` in
+  one model, DESIGN §13) are the CAD selling point. *Exit*: a sample host loads a script, calls it
+  with a transform and a point array, re-runs an edited script within the latency target, and
+  refuses a sandboxed script with an `extern`.
+
+**The runtime in sysl** (its own item, now: a proof before M3 depends on the C runtime). Replace
+`experiments/mlir/runtime/nex_rt.c` with a runtime written in sysl, built as a host archive
+(`sysl build-c`) and linked into the three existing MLIR proofs — 316, 313 and 145 — each printing
+its `.out` byte for byte. It proves three things: one `main` and one allocator across the sysl
+archive and the MLIR-generated code; `@export` functions that take an MLIR memref descriptor by
+pointer (what `llvm.emit_c_interface` passes); and traps that are catchable from MLIR-generated
+frames, as `assert_traps` needs. The interpreter later calls this same runtime directly. A wall in
+sysl is reported to sysl as a gap (org rule 9), never routed around in C. *Exit*: the three proofs
+link only the sysl archive and print their `.out`; `nex_rt.c` is gone; and a proof that traps
+inside an MLIR function is caught and resumed by the runtime.
 
 **The playground** (its own item, any time after M3). A page in `docs/` with an editor; **Run**
 sends the source to a small service that compiles it with the ordinary pipeline and **runs the
