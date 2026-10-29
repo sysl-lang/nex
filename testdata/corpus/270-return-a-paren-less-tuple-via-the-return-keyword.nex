@@ -1,6 +1,6 @@
 
 def first_positive(xs: [real]) =
-  for x in xs do
+  for x in xs
     if x > 0.0 then return x, true
   end for
   0.0, false

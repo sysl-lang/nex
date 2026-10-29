@@ -2,7 +2,7 @@
 def newton_sqrt(x: real, tol: real) =
   var guess = x / 2.0
   var delta = guess
-  while abs(delta) > tol do
+  while abs(delta) > tol
     val next = (guess + x / guess) / 2.0
     delta = next - guess
     guess = next

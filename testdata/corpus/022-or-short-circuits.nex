@@ -1,1 +1,1 @@
-def main() = print(true or (1 / 0 == 0))
+def main() = print(true or (1 div 0 == 0))

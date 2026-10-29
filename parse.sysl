@@ -2,8 +2,9 @@
 //
 // Each function reads one construct of spec chapters 4 to 9 and is named for it. Precedence is the
 // table of §4.3, loosest first: `,` (a tuple), `->` (a lambda), `or`, `and`, comparison, `..`,
-// `+ -`, `* / div % @`, juxtaposition, `^`, unary `-` and `not`, then calls, indexing and `.`.
-// A postfix `match` may follow any expression short of a tuple.
+// `+ -`, `* / div % @`, juxtaposition, unary `-` and `not`, `^`, then calls, indexing and `.`.
+// A postfix `match` may follow any expression short of a tuple. A loop label, `name:`, is told
+// from a name by the `for` or `while` two tokens on.
 //
 // **Two places look ahead before they commit**, and both are where the language puts the deciding
 // token after the part that is ambiguous: a parenthesised lambda head (`(x, y) -> ...` against the
@@ -348,10 +349,15 @@ struct Parser
             return Err(error(self.toks.here(), "`mut` is not a parameter mode: a parameter the callee writes is `inout`"))
 
         val mode = if self.accept("inout") then Inout else Read
+        var type_attrs: Buf[Attribute] = buf()
+
+        while self.accept("@")
+            type_attrs.push(self.attribute()?)
+
         val typ = self.type_expr()?
         val default = if self.accept("=") then Some(self.expr()?) else None
 
-        Ok(Param(attrs, name, typ, mode, default))
+        Ok(Param(attrs, name, type_attrs, typ, mode, default))
     end param
 
     // `[T, U: Numeric]` after a generic declaration's name, or nothing.
@@ -379,7 +385,8 @@ struct Parser
         Ok(Field(name, self.type_expr()?))
 
     // The lines of an indented block, each read by `item`, with the newline before the block and
-    // the dedent after it taken.
+    // the dedent after it taken. An item ends at a newline or a `;`; anything else after it is an
+    // error rather than the start of the next item.
     lines[T](*self, what: string, item: (*Parser) -> Result[T, Diagnostic]) -> Result[Buf[T], Diagnostic]
         var out: Buf[T] = buf()
 
@@ -390,9 +397,11 @@ struct Parser
 
         loop
             out.push(item(self)?)
-            self.skip_separators()
+
+            val separated = self.skip_separators()
 
             if is_dedent(self.tok(0)) then break
+            if !separated then return self.fail("the end of the line")
 
         self.bump()
         Ok(out)
@@ -517,8 +526,7 @@ struct Parser
         Ok(ex(self.toks.span_from(m), Assign(op, target, value)))
     end statement
 
-    // A branch of an `if`, a loop body after `do`, a `match` arm: an indented block, or an inline
-    // statement.
+    // A branch of an `if` or a `match` arm: an indented block, or an inline statement.
     branch(*self) -> Result[Expr, Diagnostic] =
         if self.at_block() then self.block() else self.statement(false)
 
@@ -819,6 +827,7 @@ struct Parser
         Ok(ex(span, Chain(operands, ops)))
     end comparison
 
+    // `lo..hi` or `lo..<hi`, with a `by` step where one is written: `n..1 by -1`.
     range(*self) -> Result[Expr, Diagnostic]
         val m = self.toks.mark()
         val lo = self.additive()?
@@ -829,8 +838,13 @@ struct Parser
         self.bump()
 
         val hi = self.additive()?
+        var stride: Option[Expr] = None
 
-        Ok(ex(self.toks.span_from(m), Range(Some(lo), Some(hi), inclusive, None)))
+        if self.at_word("by")
+            self.bump()
+            stride = Some(self.additive()?)
+
+        Ok(ex(self.toks.span_from(m), Range(Some(lo), Some(hi), inclusive, stride)))
     end range
 
     additive(*self) -> Result[Expr, Diagnostic]
@@ -878,37 +892,26 @@ struct Parser
 
         val text = self.tok(n) match
             Num(t) -> t
-            _ -> return self.power()
+            _ -> return self.unary()
 
         // A contextual word after a number is the clause it opens (`0..10 by 2`, `0..n reduce s: +`),
         // never something the number multiplies.
         self.tok(n + 1) match
             Ident(w) ->
-                if w == "by" || w == "reduce" then return self.power()
+                if w == "by" || w == "reduce" then return self.unary()
             t ->
-                if !is_kw(t, "(") then return self.power()
+                if !is_kw(t, "(") then return self.unary()
 
         if negative then self.bump()
         self.bump()
 
         val coeff = number(self.toks.span_from(m), text, negative)?
-        val base = self.postfix()?
-        val body = if self.accept("^") then ex(self.toks.span_from(m), BinOp("^", base, self.power()?)) else base
+        val body = self.power()?
 
         Ok(ex(self.toks.span_from(m), Juxtapose(coeff, body)))
     end juxtaposition
 
-    // `^` is right-associative and binds looser than a unary operator: `-2^2` is `(-2)^2`.
-    power(*self) -> Result[Expr, Diagnostic]
-        val m = self.toks.mark()
-        val base = self.unary()?
-
-        if !self.accept("^") then return Ok(base)
-
-        val exponent = self.power()?
-
-        Ok(ex(self.toks.span_from(m), BinOp("^", base, exponent)))
-
+    // A unary `-` or `not` applies to a whole power: `-x^2` is `-(x^2)` and `-2^2` is `-4`.
     unary(*self) -> Result[Expr, Diagnostic]
         val m = self.toks.mark()
 
@@ -918,8 +921,20 @@ struct Parser
 
                 return Ok(ex(self.toks.span_from(m), Unary(op, operand)))
 
-        self.postfix()
+        self.power()
     end unary
+
+    // `^` binds tighter than a unary operator on its left and is right-associative: `2^3^2` is
+    // `2^(3^2)`. Its exponent may carry a sign of its own, `x^-y`.
+    power(*self) -> Result[Expr, Diagnostic]
+        val m = self.toks.mark()
+        val base = self.postfix()?
+
+        if !self.accept("^") then return Ok(base)
+
+        val exponent = self.unary()?
+
+        Ok(ex(self.toks.span_from(m), BinOp("^", base, exponent)))
 
     // A primary expression and the calls, indexing and field accesses after it.
     postfix(*self) -> Result[Expr, Diagnostic]
@@ -1046,6 +1061,16 @@ struct Parser
 
                 return Ok(ex(self.toks.span_from(m), Interp(parts, format)))
             Ident(name) ->
+                if is_kw(self.tok(1), ":") && (is_kw(self.tok(2), "for") || is_kw(self.tok(2), "while"))
+                    self.bump()
+                    self.bump()
+
+                    if self.accept("for") then return self.for_rest(m, Some(name))
+
+                    self.bump()
+                    return self.while_rest(m, Some(name))
+                end if
+
                 self.bump()
                 return Ok(ex(self.toks.span_from(m), ExprKind.Name(name)))
             _ -> ()
@@ -1080,8 +1105,8 @@ struct Parser
         end if
 
         if self.accept("if") then return self.if_rest(m)
-        if self.accept("for") then return self.for_rest(m)
-        if self.accept("while") then return self.while_rest(m)
+        if self.accept("for") then return self.for_rest(m, None)
+        if self.accept("while") then return self.while_rest(m, None)
 
         if self.accept("parallel")
             if self.accept("for") then return self.parallel_for_rest(m)
@@ -1094,6 +1119,14 @@ struct Parser
             val value = if self.at_expression() then Some(self.expr_tuple()?) else None
 
             return Ok(ex(self.toks.span_from(m), Return(value)))
+
+        if self.accept("exit") then return Ok(ex(self.toks.span_from(m), Exit(self.loop_label())))
+        if self.accept("cycle") then return Ok(ex(self.toks.span_from(m), Cycle(self.loop_label())))
+
+        if self.accept("stop")
+            val code = if self.at_expression() then Some(self.expr()?) else None
+
+            return Ok(ex(self.toks.span_from(m), Stop(code)))
 
         // An `end` that starts a line is an end marker (DESIGN §5.2), out of place wherever it has
         // reached an expression; one anywhere else is an index, which only a subscript has.
@@ -1143,11 +1176,28 @@ struct Parser
     block_or(*self, want: string) -> Result[Expr, Diagnostic] =
         if self.at_block() then self.block() else self.fail(want)
 
-    // A loop body: `do` and a branch, or an indented block.
-    loop_body(*self) -> Result[Expr, Diagnostic] =
-        if self.accept("do") then self.branch() else self.block_or("'do' or an indented block")
+    // A loop body: `do` and a statement on the header's line, or an indented block with no `do`.
+    loop_body(*self) -> Result[Expr, Diagnostic]
+        if self.accept("do")
+            if self.at_block()
+                return Err(error(self.toks.previous(), "`do` introduces a one-line body: drop it before an indented block"))
 
-    for_rest(*self, m: usize) -> Result[Expr, Diagnostic]
+            return self.statement(false)
+        end if
+
+        self.block_or("'do' or an indented block")
+    end loop_body
+
+    // The label after an `exit` or a `cycle`, where one is written on its line.
+    loop_label(*self) -> Option[string]
+        val label = self.tok(0) match
+            Ident(n) -> n
+            _ -> return None
+
+        self.bump()
+        Some(label)
+
+    for_rest(*self, m: usize, label: Option[string]) -> Result[Expr, Diagnostic]
         val pat = self.pattern_list()?
 
         self.expect("in")?
@@ -1157,7 +1207,7 @@ struct Parser
         val span = self.toks.span_from(m)
 
         self.end_marker()
-        Ok(ex(span, For(pat, iterable, body)))
+        Ok(ex(span, For(label, pat, iterable, body)))
     end for_rest
 
     // `parallel for i in r (, j in s)* [reduce v: op (, w: op)*]` and a loop body (DESIGN §9.1, §9.2).
@@ -1203,13 +1253,13 @@ struct Parser
         Ok(ex(span, ParallelFor(clauses, reductions, body)))
     end parallel_for_rest
 
-    while_rest(*self, m: usize) -> Result[Expr, Diagnostic]
+    while_rest(*self, m: usize, label: Option[string]) -> Result[Expr, Diagnostic]
         val cond = self.expr()?
         val body = self.loop_body()?
         val span = self.toks.span_from(m)
 
         self.end_marker()
-        Ok(ex(span, While(cond, body)))
+        Ok(ex(span, While(label, cond, body)))
     end while_rest
 
     // The pieces of an interpolated literal as parts of the tree: each `${...}` hole is read here, in
@@ -1276,10 +1326,10 @@ private number(span: Span, text: string, negative: bool) -> Result[Expr, Diagnos
     for (prefix, base) in prefixes
         if text.starts_with(prefix)
             val v = digits_value(text[2..<text.len], base) match
-                Some(v) -> i64(v)
+                Some(v) -> i64.wrap(v)
                 None -> return Err(error(span, "this literal does not fit in 64 bits"))
 
-            return Ok(ex(span, IntLit(if negative then -v else v)))
+            return Ok(ex(span, IntLit(if negative then 0 -% v else v)))
 
     for c in text.bytes
         if c == u8('.') || c == u8('e') || c == u8('E')

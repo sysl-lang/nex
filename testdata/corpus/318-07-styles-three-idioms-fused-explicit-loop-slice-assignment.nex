@@ -10,7 +10,7 @@ def normalize_loop(v: [real]) =
   if mag == 0.0 then v
   else
     var out = fill(n, 0.0)
-    for i in 1..n do
+    for i in 1..n
       out[i] = v[i] / mag
     end for
     out
