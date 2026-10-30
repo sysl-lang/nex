@@ -1,41 +1,10 @@
-// The prelude functions that rearrange an array's axes — `permute`, and `reverse` on an axis known
-// only at run time (a written one is a view, `elab_view.sysl`) — and `assert_approx` (DESIGN §7.4,
-// §4.3).
+// `permute`, which rearranges an array's axes (DESIGN §4.3), and `assert_approx` (§4.3).
 
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
 impl Emitter
     // -- rearranging ------------------------------------------------------------------------------
-
-    // `reverse(a, k)` for a `k` computed at run time: a new array, axis `k` reversed; a `k` that is
-    // not an axis traps.
-    reversed_on(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
-        val a = args[0]
-        val v = self.ex(a)
-        val r = rank_of(a.ty)
-        val k = self.widen64(self.ex(args[1]), bits_of(args[1].ty), is_signed(args[1].ty))
-
-        self.trap_if(self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64"), "not an axis of the array")
-
-        var dims: Buf[string] = buf()
-
-        for x in 1..r
-            dims.push(self.dim(span, v, a.ty, x))
-
-        val g = self.generate_open(span, t, dims)
-        var idx: Buf[string] = buf()
-
-        // Tensor dimension `d` is nex axis `r − d`.
-        for d in 0..<r
-            val i = self.def(s"linalg.index $d : index")
-            val last = self.def(s"arith.subi ${dims[r - d - 1]}, ${self.index_const(1)} : index")
-            val flip = self.def(s"arith.cmpi eq, $k, ${self.def(s"arith.constant ${r - d} : i64")} : i64")
-
-            idx.push(self.def(s"arith.select $flip, ${self.def(s"arith.subi $last, $i : index")}, $i : index"))
-
-        self.generate_close(span, t, self.def(s"tensor.extract $v[${joined(idx)}] : ${self.tensor_ty(span, a.ty)}"))
-        g
 
     // `permute(a, (p1, …, pR))`: result axis `n` is source axis `p_n`. A permutation written out is
     // one `linalg.transpose`; one computed at run time is checked, and traps where it is not one.

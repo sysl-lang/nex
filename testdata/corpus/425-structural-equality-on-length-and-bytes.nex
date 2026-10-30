@@ -1,4 +1,3 @@
-
 def main() =
   var a: [uint8] = zeros(2)
   a[1] = 9
@@ -10,6 +9,6 @@ def main() =
   c[1] = 9
   c[2] = 11
   val d: [uint8] = zeros(3)
-  print(a == b)
-  print(a == c)
-  print(a == d)
+  print(all(a == b))
+  print(all(a == c))
+  print(size(a) == size(d) and all(a == d))

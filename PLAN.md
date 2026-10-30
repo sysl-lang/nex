@@ -174,7 +174,7 @@ The design's proofs (`views.mlir`, `view-then-write.mlir`, `parallel.mlir`, `bla
 ```
 canonicalize, cse, func.func(linalg-fuse-elementwise-ops), canonicalize, cse,
 one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops},
-drop-equivalent-buffer-results,
+canonicalize, drop-equivalent-buffer-results, canonicalize, cse, canonicalize,
 buffer-deallocation-pipeline, convert-bufferization-to-memref,
 convert-linalg-to-loops, convert-scf-to-cf, convert-complex-to-standard,
 expand-strided-metadata, lower-affine, finalize-memref-to-llvm, convert-math-to-llvm,
@@ -182,7 +182,7 @@ convert-complex-to-llvm, convert-arith-to-llvm, convert-func-to-llvm, convert-cf
 reconcile-unrealized-casts
 ```
 
-Three passes and two settings are new, each forced by a program that fails without it:
+Each pass and setting below is new, forced by a program that fails or copies without it:
 
 - `canonicalize, cse` before fusion — the emitter checks the shapes of element-wise operands and
   sizes each result from an operand's extents, and those `tensor.dim` uses of an intermediate
@@ -195,6 +195,12 @@ Three passes and two settings are new, each forced by a program that fails witho
   it returns nothing instead, which is the `inout` calling convention; without it
   `buffer-deallocation-pipeline` clones the returned buffer, a whole-array copy per call
   (`parallel.mlir`).
+- `canonicalize` around it, then `cse, canonicalize` — a callee whose `inout` array is carried
+  round a loop returns the loop's result, which is its argument only once the bufferized loop is
+  folded away, so the canonicalize before `drop-equivalent-buffer-results` lets it drop the result.
+  The caller's `insert_slice` of an `inout` window then copies the window onto itself; `cse` makes
+  the two subviews one value and the last `canonicalize` erases the self-copy
+  (`tests_run_view.sysl`).
 - `convert-bufferization-to-memref` — lowers the `bufferization.clone`s the deallocation pipeline
   still makes (`parallel.mlir`).
 - `lower-affine` — `expand-strided-metadata` leaves `affine.apply` for a subview of a dynamic-shape

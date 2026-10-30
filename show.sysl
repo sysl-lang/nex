@@ -245,7 +245,7 @@ show_decl(d: Decl) -> string
             items.push(name)
 
             factor match
-                Some(f) -> items.push(show_expr(f))
+                Some(f) -> items.push(f)
                 None -> ()
 
             body match
