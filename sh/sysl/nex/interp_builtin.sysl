@@ -321,6 +321,12 @@ impl Interp
                 self.printing.pop()
                 slot.p.push(p)
                 return p
+            // A value with a unit inside a tuple or a struct, as `print` shows one (DESIGN §13.4).
+            Measured(b, u) ->
+                val number = self.printer(*b)
+                val unit = " " + spell(*u)
+
+                return (v) -> number(v) + unit
             _ -> ()
 
         (v) -> scalar_text(v, t)

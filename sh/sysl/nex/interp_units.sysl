@@ -1,0 +1,37 @@
+module sh.sysl.nex
+
+// Units of measure, interpreted (DESIGN §13.8). The program the interpreter runs has its units erased
+// (`erased`), so a value with a unit is its number and printing one is an interpolation the
+// elaborator wrote. What is left is a `TRescale`: one multiplication by the exact ratio of the two
+// scales rounded once to the operand's width (`factor_at`, which the compiler uses too), each part of
+// a complex on its own, and on an array each element. A `TUnitAs` is the value itself.
+
+import sh.sysl.parsing.Span
+
+impl Interp
+    rescale(*self, span: Span, v: TExpr, t: Ty, factor: Ratio) -> Code
+        val f: Op1 = base_of(elem_or(t)) match
+            Real(bits) ->
+                val mul = real_op("*", bits, self.m.fpe).unwrap()
+                val k = VReal(factor_at(factor, bits))
+
+                (x) -> mul(x, k)
+            Complex(bits) ->
+                val mul = real_op("*", bits, self.m.fpe).unwrap()
+                val k = VReal(factor_at(factor, bits))
+
+                (x) ->
+                    val re = mul(VReal(re_of(x)), k)?
+
+                    Ok(VComplex(real_of(re), real_of(mul(VReal(im_of(x)), k)?)))
+            _ -> return self.later(span, s"a conversion of ${show_ty(t)} to another scale")
+
+        if is_array(t)
+            val a = self.lent(v)
+
+            return (c) -> map1(f, a(c)?)
+
+        val a = self.ex(v)
+
+        (c) -> f(a(c)?)
+end Interp

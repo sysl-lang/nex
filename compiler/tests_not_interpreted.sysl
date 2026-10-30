@@ -3,10 +3,11 @@
 // The programs the interpreter does not run yet (`tests_engines.sysl`), by the stage of PLAN.md M13
 // that brings what each lacks: a `testdata/` program by its file stem, a program written into a test
 // by the test's function name or the case name it passes. I3-LA is `@` and the LAPACK functions; I4
-// units of measure and `parallel`.
+// `parallel`.
 val NOT_INTERPRETED: []const (string, string) = [
     ("017-reshape-and-flatten-at-rank-3", "I3-LA"),
     ("018-static-shapes", "I3-LA"),
+    ("033-units-on-arrays", "I3-LA"),
     ("074-ffi-blas-dispatch", "I3-LA"),
     ("075-ffi-lapack", "I3-LA"),
     ("149-matrix-vector-via", "I3-LA"),
@@ -15,32 +16,18 @@ val NOT_INTERPRETED: []const (string, string) = [
     ("la_runtime_matches_compiled", "I3-LA"),
     ("linear-algebra", "I3-LA"),
     ("run_lapack_uncaught", "I3-LA"),
-    ("030-units-imperial-and-si", "I4"),
-    ("031-units-rational-exponents", "I4"),
-    ("032-units-through-the-language", "I4"),
-    ("033-units-on-arrays", "I4"),
     ("060-parallel-for-writes-owned-elements", "I4"),
     ("061-parallel-reductions-over-every-operator", "I4"),
     ("062-parallel-expressions-agree-with-sequential", "I4"),
     ("063-parallel-traps-strings-and-closures", "I4"),
     ("064-inout-windows-in-parallel-and-through-function-values", "I4"),
-    ("077-units-literal-shorthand", "I4"),
-    ("078-units-angles", "I4"),
-    ("079-default-arguments", "I4"),
     ("axpy", "I4"),
     ("captured", "I4"),
     ("fused", "I4"),
     ("lambda", "I4"),
     ("trap", "I4"),
     ("windows", "I4"),
-    ("426-a-unit-literal-prints-with-its-unit", "I4"),
-    ("427-a-product-converts-to-a-derived-unit", "I4"),
-    ("428-a-sum-takes-the-left-operands-unit", "I4"),
-    ("429-to-converts-between-scaled-units", "I4"),
-    ("430-a-function-generic-over-a-unit", "I4"),
-    ("431-strip-drops-the-unit", "I4"),
     ("lines", "I4"),
     ("parallel-strings-and-closures", "I4"),
-    ("parallel-traps", "I4"),
-    ("run_conversion_overflow", "I4")
+    ("parallel-traps", "I4")
 ]

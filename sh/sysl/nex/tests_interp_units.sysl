@@ -1,0 +1,34 @@
+module sh.sysl.nex
+@tests
+
+// Units of measure, interpreted: a conversion's factor at each width and on each part of a complex
+// and each element of an array, its overflow with and without `--fpe-trap`, a unit printed inside a
+// tuple, an array and a struct, and a renaming that changes no number. Each expectation is what the
+// compiled program prints for the same text.
+
+@test("a conversion multiplies by the factor rounded once at the operand's width, on real32, complex parts and array elements")
+itp_units_rescale()
+    assert_eq(interpreted(main_of(["print(to<mm>(2.5<m>))", "val x: real32<m> = 3.0<m>", "print(to<mm>(x))", "print(to<ft>(1.0<m>))",
+                                   "print(to<m>((1.0 + 2.0i)<km>))", "print(to<mm>([1.0, 2.0]<m>))", "print(strip(to<cm>(1.0<in>)))"])),
+              "2500.0 mm\n3000.0 mm\n3.2808398950131235 ft\n1000.0+2000.0i m\n[1000.0, 2000.0] mm\n2.54\nexit 0")
+
+@test("a conversion past the width's range is an infinity, and traps an overflow under --fpe-trap")
+itp_units_rescale_overflow()
+    val program = main_of(["val d = 1.0e306<km>", "print(\"before\")", "print(to<mm>(d))"])
+
+    assert_eq(interpreted(program), "before\ninf mm\nexit 0")
+    assert_eq(interpreted(program, fpe = true), "before\ntrap: floating-point overflow")
+
+@test("a unit inside a tuple, an array of tuples, a struct and an enum's variant prints after its number")
+itp_units_printed_inside_aggregates()
+    val program = "struct Beam\n  length: real<m>\n  xs: [real<mm>]\n\nenum Q =\n  A(x: real<s>)\n  B\n\n" +
+                  main_of(["val t = (1.0<m>, 2.0<s>, [1.0, 2.0]<mm>)", "print(t)", "print(f\"${t}!\")", "print([(1.0<m>, 2)])",
+                           "print(Beam(1.0<m>, [3.0, 4.0]<mm>))", "print([A(1.0<s>), B])"])
+
+    assert_eq(interpreted(program), "(1.0 m, 2.0 s, [1.0 mm, 2.0 mm])\n(1.0 m, 2.0 s, [1.0 mm, 2.0 mm])!\n[(1.0 m, 2)]\n" +
+                                    "Beam { length=1.0 m, xs=[3.0 mm, 4.0 mm] }\n[A(1.0 s), B]\nexit 0")
+
+@test("strip and a renaming between equal scales change no number; a value with a unit compares as its number")
+itp_units_renaming()
+    assert_eq(interpreted(main_of(["val v = 2.0<m>", "print(strip(v) + 1.0)", "print(v == 2.0<m>)", "print(v < 3.0<m>)", "print(to<m>(v))"])),
+              "3.0\ntrue\ntrue\n2.0 m\nexit 0")

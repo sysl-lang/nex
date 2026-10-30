@@ -54,7 +54,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
         kept.push(a)
 
     val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf())
+    var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf())
     val init = it.program(test)
 
     if it.diags.len() > 0
@@ -70,7 +70,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
 // Nothing is run.
 interpretable(p: TProgram) -> Buf[Diagnostic]
     val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf())
+    var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf())
 
     it.program(None)
     shut(m)
@@ -410,7 +410,7 @@ impl Interp
     unheld_in(*self, t: Ty, seen: *Buf[string]) -> Option[string]
         t match
             Array(e, _) -> return self.unheld_in(*e, seen)
-            Measured(_, _) -> return Some("a value with a unit of measure")
+            Measured(b, _) -> return self.unheld_in(*b, seen)
             CPtr -> return Some("a C pointer")
             Nominal(name, _) ->
                 for s in *seen
@@ -630,8 +630,8 @@ impl Interp
             TMatch(s, arms) -> return self.match_expr(e.span, s, arms)
             TArray(a) -> return self.array(e, *a)
             TParallel(_) -> return self.later(e.span, "a `parallel` construct")
-            TRescale(_, _) -> return self.later(e.span, "a value with a unit of measure")
-            TUnitAs(_) -> return self.later(e.span, "a value with a unit of measure")
+            TRescale(v, factor) -> return self.rescale(e.span, v, e.ty, factor)
+            TUnitAs(v) -> return self.ex(v)
             TTuple(elems) -> return self.aggregate(0, elems)
             TNew(args) -> return self.aggregate(0, args)
             TVariant(_, tag, args) -> return self.aggregate(tag, args)

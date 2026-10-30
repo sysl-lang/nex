@@ -1,0 +1,188 @@
+module sh.sysl.nex
+
+// A program with every unit of measure taken out of its types (DESIGN §13.8), but for what printing
+// reads: what an engine that dispatches on types sees. A unit changes no number — a `TRescale` already holds its factor and a
+// `TUnitAs` is the value itself — so with the units gone every type is one the engine already runs.
+// The nodes are the program's own, rebuilt with each type `erase`d; nothing else changes.
+
+import sysl.buf.{Buf, buf}
+
+erased(p: TProgram) -> TProgram
+    var decls: Buf[TDecl] = buf()
+
+    for d in p.decls
+        decls.push(erased_decl(d))
+
+    var locals: Buf[LocalInfo] = buf()
+
+    for l in p.locals
+        locals.push(LocalInfo(l.name, erase(l.ty), l.kind))
+
+    var lambdas: Buf[TLambda] = buf()
+
+    for l in p.lambdas
+        lambdas.push(TLambda(l.name, l.params, erase(l.ret), l.captures, ex(l.body), l.escapes, l.copies))
+
+    TProgram(decls, locals, lambdas, p.loops, p.tests, p.test_build)
+
+// A struct's and an enum's fields keep their units, which printing one shows; every operation on a
+// field dispatches on the type under its unit.
+private erased_decl(d: TDecl) -> TDecl = d match
+    StructDecl(_) -> d
+    EnumDecl(_) -> d
+    GlobalDecl(g) -> GlobalDecl(TGlobal(g.span, g.name, g.kind, erase(g.ty), ex(g.init)))
+    TupleGlobalDecl(g) -> TupleGlobalDecl(TGlobalTuple(g.span, g.kind, g.pat, erase(g.ty), ex(g.init)))
+    FunDecl(f) ->
+        var defaults: Buf[Option[TExpr]] = buf()
+
+        for x in f.defaults
+            defaults.push(opt(x))
+
+        FunDecl(TFun(f.span, f.name, f.params, defaults, erase(f.ret), ex(f.body)))
+    ExternDecl(x) ->
+        var params: Buf[Ty] = buf()
+
+        for t in x.params
+            params.push(erase(t))
+
+        ExternDecl(TExtern(x.span, x.name, params, x.modes, erase(x.ret), x.symbol, x.links, x.frameworks, x.pure, x.strided, x.partner, x.fortran))
+
+private opt(x: Option[TExpr]) -> Option[TExpr] = x.map(v -> ex(v))
+
+private exs(xs: Buf[TExpr]) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    for x in xs
+        out.push(ex(x))
+
+    out
+
+private ex(e: TExpr) -> TExpr = texpr(e.span, erase(e.ty), kind_of(*e.kind))
+
+private kind_of(k: TKind) -> TKind = k match
+    TPromote(v) -> TPromote(ex(v))
+    TConvert(v, traps) -> TConvert(ex(v), traps)
+    TRescale(v, f) -> TRescale(ex(v), f)
+    TUnitAs(v) -> TUnitAs(ex(v))
+    TMakeComplex(re, im) -> TMakeComplex(ex(re), ex(im))
+    TComplexPart(v, imag) -> TComplexPart(ex(v), imag)
+    TBinary(op, l, r) -> TBinary(op, ex(l), ex(r))
+    TLogical(op, l, r) -> TLogical(op, ex(l), ex(r))
+    TUnary(op, v) -> TUnary(op, ex(v))
+    TChain(operands, links) ->
+        var ls: Buf[Link] = buf()
+
+        for l in links
+            ls.push(Link(l.op, ex(l.lhs), ex(l.rhs)))
+
+        TChain(exs(operands), ls)
+    TCall(callee, args) -> TCall(ex(callee), exs(args))
+    TBuiltin(name, args) ->
+        if name != "print" && name != "eprint" then return TBuiltin(name, exs(args))
+
+        var out: Buf[TExpr] = buf()
+
+        for a in args
+            out.push(printed(a))
+
+        TBuiltin(name, out)
+    TBorrow(place) -> TBorrow(ex(place))
+    TInterp(parts, format) ->
+        var ps: Buf[TPart] = buf()
+
+        for part in parts
+            ps.push(part match
+                TText(t) -> TText(t)
+                TValue(v, spec) -> TValue(printed(v), spec))
+
+        TInterp(ps, format)
+    TIf(cond, a, b) -> TIf(ex(cond), ex(a), opt(b))
+    TWhile(id, cond, body) -> TWhile(id, ex(cond), ex(body))
+    TFor(id, v, lo, hi, inclusive, step, body) -> TFor(id, v, ex(lo), ex(hi), inclusive, opt(step), ex(body))
+    TBlock(items, result) -> TBlock(exs(items), ex(result))
+    TLet(id, init) -> TLet(id, ex(init))
+    TAssign(op, target, value) -> TAssign(op, ex(target), ex(value))
+    TAssignTuple(target, value) -> TAssignTuple(target_of(target), ex(value))
+    TReturn(v) -> TReturn(opt(v))
+    TStop(code) -> TStop(opt(code))
+    TTuple(elems) -> TTuple(exs(elems))
+    TTupleField(v, k) -> TTupleField(ex(v), k)
+    TNew(args) -> TNew(exs(args))
+    TField(v, name, k) -> TField(ex(v), name, k)
+    TVariant(name, tag, args) -> TVariant(name, tag, exs(args))
+    TMatch(s, arms) ->
+        var out: Buf[TArm] = buf()
+
+        for a in arms
+            out.push(TArm(a.pat, ex(a.body)))
+
+        TMatch(ex(s), out)
+    TDestructure(kind, pat, init) -> TDestructure(kind, pat, ex(init))
+    TArray(a) -> TArray(arr_of(*a))
+    TParallel(op) -> TParallel(par_of(*op))
+    _ -> k
+
+private target_of(t: TTarget) -> TTarget = t match
+    TPlace(place) -> TPlace(ex(place))
+    TDrop -> TDrop
+    TTargets(elems) ->
+        var out: Buf[TTarget] = buf()
+
+        for x in elems
+            out.push(target_of(x))
+
+        TTargets(out)
+
+private subs_of(subs: Buf[TSub]) -> Buf[TSub]
+    var out: Buf[TSub] = buf()
+
+    for s in subs
+        out.push(s match
+            TSubAt(i) -> TSubAt(ex(i))
+            TSubAll -> TSubAll
+            TSubWindow(lo, hi, inclusive, stride) -> TSubWindow(opt(lo), opt(hi), inclusive, opt(stride)))
+
+    out
+
+private arr_of(a: TArr) -> TArr = a match
+    TArrayLit(items) -> TArrayLit(exs(items))
+    TRangeValue(lo, hi, inclusive, step) -> TRangeValue(ex(lo), ex(hi), inclusive, opt(step))
+    TIndex(target, subs) -> TIndex(ex(target), subs_of(subs))
+    TView(target, subs) -> TView(ex(target), subs_of(subs))
+    TOrigin(source, firsts) -> TOrigin(ex(source), exs(firsts))
+    TCopy(v, why) -> TCopy(ex(v), why)
+    TTransfer(v, d) -> TTransfer(ex(v), d)
+    TElementwise(op, l, r) -> TElementwise(op, ex(l), ex(r))
+    TElementwiseUnary(op, v) -> TElementwiseUnary(op, ex(v))
+    TMatMul(l, r) -> TMatMul(ex(l), ex(r))
+    TElemental(name, args) -> TElemental(name, exs(args))
+    TElementalConvert(v, traps) -> TElementalConvert(ex(v), traps)
+    TElementalCall(callee, args) -> TElementalCall(ex(callee), exs(args))
+    TBroadcast(v) -> TBroadcast(ex(v))
+    TShapeCheck(v) -> TShapeCheck(ex(v))
+    TReduction(name, args, dim) -> TReduction(name, exs(args), opt(dim))
+    TForEach(id, var_id, xs, body) -> TForEach(id, var_id, ex(xs), ex(body))
+    _ -> a
+
+private par_of(p: TPar) -> TPar = p match
+    TParFor(id, clauses, reductions, body) ->
+        var cs: Buf[TParClause] = buf()
+
+        for c in clauses
+            cs.push(TParClause(c.var_id, ex(c.lo), ex(c.hi), c.inclusive, opt(c.step)))
+
+        var rs: Buf[TReduce] = buf()
+
+        for r in reductions
+            rs.push(TReduce(ex(r.target), r.op match
+                RBuiltin(name) -> RBuiltin(name)
+                RUser(f) -> RUser(ex(f))))
+
+        TParFor(id, cs, rs, ex(body))
+    TContribute(target, value, index) -> TContribute(ex(target), ex(value), opt(index))
+    TParExpr(v) -> TParExpr(ex(v))
+
+// A value printed keeps its type, so a unit inside a tuple or an array of them is printed after its
+// number (DESIGN §13.4); the value under it is erased. A struct's fields are printed from its
+// declaration, which keeps its units.
+private printed(v: TExpr) -> TExpr = if ty_eq(erase(v.ty), v.ty) then ex(v) else texpr(v.span, v.ty, TUnitAs(ex(v)))
