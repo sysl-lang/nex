@@ -6,9 +6,9 @@
 // (`testdata/ffi/nexffi.c`) through windows, roots and paths the `testdata/v2` programs do not reach.
 
 import sysl.buf.{Buf, buf}
-import sysl.fs.{read_text, write_text}
+import sysl.fs.{exists, read_text, write_text}
 import sysl.process.{Status, Var, capture}
-import sysl.testing.compiler
+import sysl.testing.{compiler, skip}
 import sysl.text.{join, replace_all, split}
 
 private val M = "def main() = ()\n"
@@ -56,9 +56,58 @@ extern_c_ptr()
     assert_eq(refused("extern def f(f: (real) -> real, x: @data(f) real)\n" + M), "error: a `@data` parameter is C's `void *` for its callback's user data, so `x` is declared `c_ptr` @1:45")
     assert_eq(refused("extern def f(p: @data(g) c_ptr)\n" + M), "error: `@data(g)` names no parameter of this `extern` @1:26")
     assert_eq(refused("extern def f(n: int32, p: @data(n) c_ptr)\n" + M), "error: `@data(n)` names the callback its user data goes with, and `n` is int32, not a function @1:36")
-    assert_eq(refused("extern def f(f: (real) -> real, p: inout @data(f) c_ptr)\n" + M), "error: a `c_ptr` is a callback's user data, passed by value, so `p` cannot be `inout` @1:51")
+    assert_eq(refused("extern def f(f: (real, c_ptr) -> real, p: inout @data(f) c_ptr)\n" + M), "error: a `c_ptr` is a callback's user data, passed by value, so `p` cannot be `inout` @1:58")
     assert_eq(refused("extern def f(p: @keep c_ptr)\n" + M), "error: `@keep` is not an attribute of an `extern` parameter's type, which takes `@data(f)` @1:23")
-    assert_eq(refused("extern def q(f: (real) -> real, x: real): real\ndef g(x: real) = x\ndef main() = print(q(g, 1.0))\n"), "error: a call of an `extern` taking a callback is not elaborated yet @3:20")
+    assert_eq(refused("extern def f(f: (real, c_ptr) -> real, p: @data(f) c_ptr, q: @data(f) c_ptr)\n" + M), "error: `f` has one user data, and a second `@data(f)` names it @1:71")
+
+// -- callbacks --------------------------------------------------------------------------------------
+
+private val INTEGRATE = "extern def integrate(f: (real, c_ptr) -> real, data: @data(f) c_ptr, a: real, b: real): real\nextern def plain(f: (real) -> real, x: real): real\ndef sq(x: real) = x * x\n"
+
+@test("a callback's type crosses by value: numbers, bool and complexes, never inout, and a c_ptr exactly where it has a @data partner")
+callback_types()
+    assert_eq(refused("extern def f(g: (int8, uint16, bool, complex[real32], real16) -> complex, h: (c_ptr, int64) -> void, d: @data(h) c_ptr)\n" + M), "ok")
+    assert_eq(refused("extern def f(g: (inout real) -> real)\n" + M), "error: C passes a callback its arguments by value, so parameter 1 of `g` cannot be `inout` @1:17")
+    assert_eq(refused("extern def f(g: (real, [real]) -> real)\n" + M), "error: C passes a callback numbers, `bool` and complexes by value, and parameter 2 of `g` is [real64] @1:17")
+    assert_eq(refused("extern def f(g: (string) -> real)\n" + M), "error: C passes a callback numbers, `bool` and complexes by value, and parameter 1 of `g` is string @1:17")
+    assert_eq(refused("extern def f(g: (real) -> [real])\n" + M), "error: a callback returns a number, a `bool`, a complex or nothing to C, and `g` returns [real64] @1:17")
+    assert_eq(refused("extern def f(g: (real) -> real, d: @data(g) c_ptr)\n" + M), "error: `g` has a `@data` partner, so its type takes one `c_ptr`, where C hands the user data back @1:17")
+    assert_eq(refused("extern def f(g: (c_ptr, c_ptr) -> real, d: @data(g) c_ptr)\n" + M), "error: `g` has a `@data` partner, so its type takes one `c_ptr`, where C hands the user data back @1:17")
+    assert_eq(refused("extern def f(g: (real, c_ptr) -> real)\n" + M), "error: a `c_ptr` in a callback's type is the user data C hands back: declare a `@data(g) c_ptr` parameter beside `g` @1:17")
+
+@test("a call passes a def or a non-capturing lambda as a bare callback, and any function with its user data, the @data argument omitted")
+callback_calls()
+    assert_eq(refused(INTEGRATE + "def main() =\n  val k = 2.0\n  val f: (real) -> real = sq\n  print(plain(sq, 1.0))\n  print(plain(x -> x + 1.0, 1.0))\n  print(integrate(sq, 0.0, 1.0))\n  print(integrate(x -> k * x, 0.0, 1.0))\n  print(integrate(f, 0.0, 1.0))\n"), "ok")
+    assert_eq(elaborated(INTEGRATE + "def main() = print(integrate(x -> x, 0.0, 1.0))\n"),
+        "(extern integrate ((real64, c_ptr) -> real64, c_ptr, real64, real64) -> real64 @data(2 -> 1))\n(extern plain ((real64) -> real64, real64) -> real64)\n(def sq ((x#0 real64)) real64 (*:real64 x#0 x#0))\n(def main () void (print (call:real64 integrate (lambda 0) 0.0 1.0)))\n(lambda 0 _ ((x#1 real64)) real64 (captures) passed x#1)")
+
+@test("a bare callback refuses an environment, and a call names every argument but the @data ones")
+callback_calls_refused()
+    assert_eq(refused(INTEGRATE + "def main() =\n  val k = 2.0\n  print(plain(x -> k * x, 1.0))\n"), "error: this lambda captures `k`, and a callback with no `@data` partner is a bare C function pointer, with no environment to carry it @6:15")
+    assert_eq(refused(INTEGRATE + "def main() =\n  val f: (real) -> real = sq\n  print(plain(f, 1.0))\n"), "error: a callback with no `@data` partner is a bare C function pointer, so it takes a function named directly or a lambda that captures nothing @6:15")
+    assert_eq(refused(INTEGRATE + "def main() = print(integrate(sq, 0.0))\n"), "error: `integrate` takes 3 arguments, and 2 are given @4:20")
+    assert_eq(refused(INTEGRATE + "def main() = print(integrate(sq, 0, 0.0, 1.0))\n"), "error: `integrate` takes 3 arguments, and 4 are given @4:20")
+    assert_eq(refused(INTEGRATE + "def main() = print(plain((x: int32) -> 1.0, 1.0))\n"), "error: argument 1 must be (real64) -> real64, but this is (int32) -> real64 @4:26")
+    assert_eq(refused(INTEGRATE + "def main() = print(integrate((x: real, d: real) -> x, 0.0, 1.0))\n"), "error: argument 1 must be (real64) -> real64, but this is (real64, real64) -> real64 @4:30")
+
+@test("an extern is a function value where everything it takes and returns crosses by value")
+extern_values()
+    assert_eq(refused("extern def cbrt(x: real): real\nextern def nf_mix(a: int8, z: complex): complex\ndef main() =\n  val f = cbrt\n  val g = nf_mix\n  print(f(8.0))\n  print(g(1, 1i))\n"), "ok")
+    assert_eq(refused("extern def r(x: [real]): real\ndef main() =\n  val f = r\n"), "error: `r` is an `extern` taking or returning more than numbers, `bool` and complexes by value, which only a call of it passes; call it, or wrap the call in a `def` @3:11")
+    assert_eq(refused("extern def w(x: inout real)\ndef main() =\n  val f = w\n"), "error: `w` is an `extern` taking or returning more than numbers, `bool` and complexes by value, which only a call of it passes; call it, or wrap the call in a `def` @3:11")
+    assert_eq(refused(INTEGRATE + "def main() =\n  val f = plain\n"), "error: `plain` is an `extern` taking or returning more than numbers, `bool` and complexes by value, which only a call of it passes; call it, or wrap the call in a `def` @5:11")
+
+@test("a callback crosses through a trampoline of its C type, clang's widening and all; an extern passed bare is itself")
+emit_callbacks()
+    val m = emitted("extern def each(f: (int8, bool, c_ptr) -> complex, d: @data(f) c_ptr)\nextern def bare(f: (real) -> real)\nextern def cos(x: real): real\ndef main() =\n  val k: int8 = 2\n  each((a, b) -> if b and a > k then 1i else 0i)\n  bare(cos)\n").unwrap()
+
+    assert(m.contains("func.func private @\"each\"(!llvm.ptr, !llvm.ptr)"), m)
+    assert(m.contains("(%c0: i8 {llvm.signext}, %c1: i1 {llvm.zeroext}, %c2: !llvm.ptr) -> (!llvm.struct<(f64, f64)>)"), m)
+    assert(m.contains("func.call @nex_cb_begin()"), m)
+    assert(m.contains("func.call @nex_cb_end()"), m)
+    assert(m.contains("func.call @nex_cb_run("), m)
+    assert(m.contains("func.constant @\"cos\" : (f64) -> f64"), m)
+    assert(!m.contains("@\"r.cos\""), m)
 
 @test("a @c struct holds numbers, bool and @c structs; any other field, a generic one or another attribute is refused")
 c_structs()
@@ -139,7 +188,7 @@ extern_abi_matches_clang()
     val clang = declarations(read_text(ll).unwrap(), "define ")
     var checked = 0
 
-    for file in ["065-ffi-libm-and-scalars", "066-ffi-arrays-strides-and-leading-dimension", "067-ffi-complex-by-value", "068-ffi-c-struct-by-reference"]
+    for file in ["065-ffi-libm-and-scalars", "066-ffi-arrays-strides-and-leading-dimension", "067-ffi-complex-by-value", "068-ffi-c-struct-by-reference", "069-ffi-callbacks"]
         val out = ran(b, read_text(s"testdata/v2/$file.nex").unwrap(), links = ffi_fixture(b).view())
 
         assert(out.status.ok(), out.err.unwrap_or(""))
@@ -263,3 +312,47 @@ run_extern_command_links()
     assert(unlinked.err.unwrap_or("").contains("nf_inc8"), unlinked.err.unwrap_or(""))
     assert(dangling.status == Status.Exited(1), s"${dangling.status}")
     assert(dangling.err.unwrap_or("").contains("`-l` needs a value"), dangling.err.unwrap_or(""))
+
+@test("a trap in a callback with nothing catching ends the program at the trap; a callback called after its call or on C's own thread ends it too")
+run_callback_traps_uncaught()
+    val b = bench()
+    val links = ffi_fixture(b)
+    val uncaught = ran(b, "@link(\"nexffi\")\nextern def nf_sum_calls(f: (real, c_ptr) -> real, data: @data(f) c_ptr, n: int32): real\ndef main() =\n  print(\"before\")\n  val m = 2\n  print(nf_sum_calls(x -> 1.0 * (10 div (m - int64(x))), 3))\n", links = links.view())
+    val thread = ran(b, "@link(\"nexffi\")\nextern def nf_call_on_thread(f: (real) -> real, x: real): real\ndef twice(x: real) = 2.0 * x\ndef main() =\n  print(\"before\")\n  print(nf_call_on_thread(twice, 4.0))\n", links = links.view())
+    val kept = ran(b, "@link(\"nexffi\")\nextern def nf_keep(f: (real) -> real)\n@link(\"nexffi\")\nextern def nf_call_kept(x: real): real\ndef twice(x: real) = 2.0 * x\ndef main() =\n  nf_keep(twice)\n  assert_traps(() -> print(nf_call_kept(4.0)))\n", links = links.view())
+
+    finish(b)
+    assert_eq(uncaught.text, "before\n")
+    assert_eq(uncaught.err.unwrap_or(""), "trap: integer division by zero\n")
+    assert(uncaught.status == Status.Signalled(6), s"${uncaught.status}")
+
+    for out in [thread, kept]
+        assert_eq(out.err.unwrap_or(""), "trap: a callback was called outside the extern call that passed it: after the call returned, or on a thread of C's own\n")
+        assert(out.status == Status.Signalled(6), s"${out.status}")
+
+    assert_eq(thread.text, "before\n")
+    assert_eq(kept.text, "")
+
+@test("a callback call after a return in its statement is not made; @pure externs call back from a parallel body, a trap there raised after the region")
+run_callbacks_skipped_and_parallel()
+    val b = bench()
+    val links = ffi_fixture(b)
+    val head = "@link(\"nexffi\")\n@pure\nextern def nf_integrate(f: (real, c_ptr) -> real, data: @data(f) c_ptr, a: real, b: real, n: int32): real\n"
+    val out = ran(b, head + "def f(n: integer): real = nf_integrate(x -> x, 0.0, if n > 0 then return -1.0 else 2.0, 2)\ndef g() =\n  var z: [real] = zeros(8)\n  parallel for i in 1..8\n    z[i] = nf_integrate(x -> 1.0 * (1 div (i - 5)), 0.0, 1.0, 2)\n  print(z)\ndef main() =\n  print(f(1))\n  print(f(0))\n  var y: [real] = zeros(8)\n  parallel for i in 1..8\n    y[i] = nf_integrate(x -> x * i, 0.0, 2.0, 2)\n  print(y)\n  assert_traps(() -> g(), \"division by zero\")\n  print(\"after\")\n", links = links.view())
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "-1.0\n2.0\n[2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0]\nafter\n")
+
+@test("callbacks with closures, their traps caught among them, leak nothing")
+run_callbacks_leak_nothing()
+    if !exists("/usr/bin/leaks") then skip("no leaks tool")
+
+    val b = bench()
+    val links = ffi_fixture(b)
+    val out = ran(b, read_text("testdata/v2/069-ffi-callbacks.nex").unwrap(), links = links.view())
+    val leaks = capture("/usr/bin/leaks", ["--atExit", "--", s"${b.work}/program"], stderr = true).unwrap()
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)

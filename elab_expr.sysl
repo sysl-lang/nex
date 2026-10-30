@@ -281,7 +281,7 @@ impl Elab
 
                 return texpr(span, ty, TGlobalRef(g))
             Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(g))
-            Some(TopExtern(k)) -> return texpr(span, self.extern_type(k), TFnRef(g))
+            Some(TopExtern(k)) -> return self.extern_value(span, k, g)
             None -> ()
 
         self.find_generic_fun(g) match

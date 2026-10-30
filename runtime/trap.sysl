@@ -195,3 +195,69 @@ par_end()
     stopped.store(0, Release)
     note_trap(region_message)
     raise_trap()
+
+// -- callbacks --------------------------------------------------------------------------------------
+//
+// A nex function C calls back (DESIGN §10.2.1) runs through `nex_cb_run`, between the `nex_cb_begin`
+// and `nex_cb_end` around the extern call that passed it. A trap inside it must not `longjmp` across
+// the C frames between the callback and that call, which no unwinding table describes and which may
+// hold what C will give back only by returning. So under a catch a callback runs under one of its
+// own, as a parallel region's thread does: the trap's message is kept, every later callback of the
+// call returns zero without running, and `nex_cb_end` raises the trap once C has returned. With
+// nothing catching, the trap ends the program where it happens, as any trap does.
+
+// How many extern calls passing callbacks this thread is inside, and the trap one of their callbacks
+// raised.
+@thread_local private var callback_calls = 0
+@thread_local private var callback_trapped = false
+@thread_local private var callback_message = ""
+
+@export("nex_cb_begin")
+cb_begin()
+    callback_calls += 1
+
+// The extern call is over: a callback's trap is raised here, in the nex frame that made it.
+@export("nex_cb_end")
+cb_end()
+    callback_calls -= 1
+
+    if !callback_trapped then return
+
+    callback_trapped = false
+    note_trap(callback_message)
+    callback_message = ""
+    raise_trap()
+
+// One callback: `code(env, frame)`, where `frame` holds its arguments and receives its result, which
+// is left zero where it does not run. Outside every extern call on this thread — after the call that
+// passed it returned, or on a thread C started — there is no nex frame to give a trap back to, so
+// the call itself ends the program.
+@export("nex_cb_run")
+cb_run(code: *extern(*u8, *u8) -> unit, env: *u8, frame: *u8)
+    if callback_calls == 0
+        flush_output()
+        put(2, "trap: a callback was called outside the extern call that passed it: after the call returned, or on a thread of C's own\n")
+        abort()
+
+    if callback_trapped then return
+
+    if depth == 0
+        code(env, frame)
+        return
+
+    val saved = catch_env
+    val mark = open_catch()
+
+    depth += 1
+
+    val trapped = setjmp(&catch_env[0]) != 0
+
+    if !trapped then code(env, frame)
+
+    depth -= 1
+    catch_env = saved
+    close_catch(mark)
+
+    if trapped
+        callback_trapped = true
+        callback_message = last_message

@@ -1294,8 +1294,27 @@ A call passes an ordinary closure for `f` and **omits** `data`:
 `f`'s C type, passes the closure's environment as `data`, and the trampoline unpacks it and calls
 the closure. The closure is **borrowed for the call** and may not escape it: a library that keeps
 the pointer past its return is outside the model. A capturing closure for a callback parameter with
-no `@data` partner is a compile error. A trap inside a callback unwinds to the nex frame that made
-the extern call *(unverified)*.
+no `@data` partner is a compile error, as is a function value held in a variable: without a partner
+the argument is a `def` or an `extern` named directly, or a lambda that captures nothing.
+
+**A callback's types cross by value.** Its parameters and result are numbers, `bool` and complexes
+as the table above passes them, never `inout`; an array, a string or a struct does not cross to a
+callback, since C hands over no extent with a pointer. Its type holds one `c_ptr`, where C hands the
+user data back, exactly when it has a `@data` partner, and an extern has one `@data` per callback.
+
+**A trap inside a callback never crosses C's frames.** The callback stops, C's call goes on, and
+every callback C makes after it in the same call returns zero (or nothing) without running; when C
+returns, the trap is raised in the nex frame that made the extern call, where `assert_traps` or the
+program's end sees it like any other. A trap in a callback of a callback ends the inner extern call,
+then the outer. With nothing to catch it, a trap ends the program where it happens, as any trap does.
+
+**A callback runs on the thread that made the extern call, while the call runs.** Called after the
+call returned, or on a thread C started, it has no nex frame to give a trap back to and no hold on
+its closure, and the program ends with a trap saying so.
+
+**An `extern` is a function value** where everything it takes and returns crosses by value — numbers,
+`bool` and complexes, none `inout`: `val f = cbrt`. Passed for a callback with no `@data` partner it
+is C's own function pointer. Any other extern is only called.
 
 ### 10.3 Strides and the leading dimension
 

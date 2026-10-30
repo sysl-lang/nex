@@ -48,7 +48,16 @@ impl Elab
 
         // A `@data(f)` partner names a parameter of function type, which may stand after it.
         for j in 0..<x.params.len()
-            partner.push(self.data_partner(x.params[j], tys[j], names, tys))
+            val f = self.data_partner(x.params[j], tys[j], names, tys)
+
+            f match
+                Some(i) -> if has_data(partner, i) then self.fail(x.params[j].typ.span, s"`${names[i]}` has one user data, and a second `@data(${names[i]})` names it")
+                None -> ()
+
+            partner.push(f)
+
+        for j in 0..<x.params.len()
+            if is_callback(tys[j]) then self.check_callback(x.params[j], tys[j], has_data(partner, j))
 
         val ret = x.ret match
             Some(t) ->
@@ -113,6 +122,27 @@ impl Elab
             CPtr -> if p.mode == Inout then self.fail(p.typ.span, s"a `c_ptr` is a callback's user data, passed by value, so `${p.name}` cannot be `inout`")
             _ -> self.fail(p.typ.span, s"${show_ty(ty)} does not cross to C: an `extern` takes numbers, `bool`, `string`, arrays of numbers, `@c` structs and callbacks")
 
+    // A callback's own parameters and result cross by value, as a C extern's do. Its type holds a
+    // `c_ptr`, where C hands the user data back, exactly when it has a `@data` partner.
+    private check_callback(*self, p: Param, ty: Ty, with_data: bool)
+        val sig = base_of(ty) match
+            Fn(s) -> s
+            _ -> return
+
+        var ptrs = 0
+
+        for k in 0..<sig.params.len()
+            val t = sig.params[k]
+
+            if is_c_ptr(t) then ptrs += 1
+            elif sig.modes[k] == Inout then self.fail(p.typ.span, s"C passes a callback its arguments by value, so parameter ${k + 1} of `${p.name}` cannot be `inout`")
+            elif !c_scalar(t) && !is_error(t) then self.fail(p.typ.span, s"C passes a callback numbers, `bool` and complexes by value, and parameter ${k + 1} of `${p.name}` is ${show_ty(t)}")
+
+        if !c_scalar(sig.ret) && !is_void(sig.ret) && !is_error(sig.ret) then self.fail(p.typ.span, s"a callback returns a number, a `bool`, a complex or nothing to C, and `${p.name}` returns ${show_ty(sig.ret)}")
+
+        if with_data && ptrs != 1 then self.fail(p.typ.span, s"`${p.name}` has a `@data` partner, so its type takes one `c_ptr`, where C hands the user data back")
+        elif !with_data && ptrs > 0 then self.fail(p.typ.span, s"a `c_ptr` in a callback's type is the user data C hands back: declare a `@data(${p.name}) c_ptr` parameter beside `${p.name}`")
+
     // Whether the parameter is marked `@strided`, which only an array parameter may be.
     private strided_attr(*self, p: Param, ty: Ty) -> bool
         var marked = false
@@ -158,7 +188,9 @@ impl Elab
             _ -> false
 
         if is_ptr && out.is_none() && p.type_attrs.len() == 0 then self.fail(p.typ.span, s"a `c_ptr` is a callback's user data: declare `${p.name}: @data(f) c_ptr`, naming the callback parameter it goes with")
-        elif !is_ptr && out.is_some() then self.fail(p.typ.span, s"a `@data` parameter is C's `void *` for its callback's user data, so `${p.name}` is declared `c_ptr`")
+        elif !is_ptr && out.is_some()
+            self.fail(p.typ.span, s"a `@data` parameter is C's `void *` for its callback's user data, so `${p.name}` is declared `c_ptr`")
+            return None
 
         out
 
@@ -191,23 +223,25 @@ impl Elab
 
     extern_type(self, k: usize) -> Ty = fn_type(self.xout[k].params, self.xout[k].modes, self.xout[k].ret)
 
-    // A call of the `k`th extern: positional arguments, each a plain number where it is one.
+    // A call of the `k`th extern: positional arguments, each a plain number where it is one. A `@data`
+    // parameter is omitted, the compiler passing it (DESIGN §10.2.1), so the call's arguments are the
+    // other parameters', in order.
     call_extern(*self, span: Span, at: Span, k: usize, args: Buf[Expr]) -> TExpr
         val x = self.xout[k]
+        var given: Buf[usize] = buf()
 
-        for t in x.params
-            if is_callback(t)
-                self.later(span, "a call of an `extern` taking a callback")
-                return self.invalid(span)
+        for j in 0..<x.params.len()
+            if x.partner[j].is_none() then given.push(j)
 
-        if args.len() != x.params.len()
-            self.fail(span, s"`${x.name}` takes ${x.params.len()} argument${if x.params.len() == 1 then "" else "s"}, and ${args.len()} ${if args.len() == 1 then "is" else "are"} given")
+        if args.len() != given.len()
+            self.fail(span, s"`${x.name}` takes ${given.len()} argument${if given.len() == 1 then "" else "s"}, and ${args.len()} ${if args.len() == 1 then "is" else "are"} given")
             return self.invalid(span)
 
         var out: Buf[TExpr] = buf()
 
-        for j in 0..<args.len()
-            val a = args[j]
+        for i in 0..<args.len()
+            val a = args[i]
+            val j = given[i]
             val ty = x.params[j]
 
             *a.kind match
@@ -221,16 +255,72 @@ impl Elab
                 out.push(self.borrow(a, ty, ""))
                 continue
 
+            if is_callback(ty)
+                out.push(self.callback_arg(a, ty, has_data(x.partner, j), i))
+                continue
+
             val v = self.elab(a, Some(ty))
 
             if carries_unit(v.ty)
                 self.fail(a.span, s"`${x.name}` is an `extern`, whose parameters never carry a unit; pass the number: `${x.name}(strip(x))`")
                 out.push(self.invalid(a.span))
             else
-                out.push(self.coerce(v, ty, s"argument ${j + 1}"))
+                out.push(self.coerce(v, ty, s"argument ${i + 1}"))
 
-        texpr(span, x.ret, TCall(texpr(at, self.extern_type(k), TFnRef(x.name)), out))
+        // The callee is typed as the call sees it, without the `@data` parameters it omits.
+        var params: Buf[Ty] = buf()
+        var modes: Buf[Mode] = buf()
+
+        for j in given
+            params.push(x.params[j])
+            modes.push(x.modes[j])
+
+        texpr(span, x.ret, TCall(texpr(at, fn_type(params, modes, x.ret), TFnRef(x.name)), out))
     end call_extern
+
+    // The argument `a`, the `i`th, for a callback parameter of type `ty`, borrowed for the call. With
+    // a `@data` partner it is any function of the type without its `c_ptr`, its environment crossing
+    // as the user data. Without one C gets a bare function pointer, with no environment to carry: a
+    // function named directly, an extern among them, or a lambda that captures nothing.
+    private callback_arg(*self, a: Expr, ty: Ty, with_data: bool, i: usize) -> TExpr
+        val want = if with_data then without_c_ptr(ty) else ty
+
+        self.pass_lambda(a)
+
+        val v = self.coerce(self.elab(a, Some(want)), want, s"argument ${i + 1}")
+
+        if with_data || is_error(v.ty) then return v
+
+        val bare = *v.kind match
+            TFnRef(_) -> true
+            TLambdaRef(id) ->
+                for c in self.captures
+                    if c.lambda == id
+                        self.fail(a.span, s"this lambda captures `${self.locals[c.local].name}`, and a callback with no `@data` partner is a bare C function pointer, with no environment to carry it")
+                        return self.invalid(a.span)
+
+                true
+            _ -> false
+
+        if bare then return v
+
+        self.fail(a.span, "a callback with no `@data` partner is a bare C function pointer, so it takes a function named directly or a lambda that captures nothing")
+        self.invalid(a.span)
+
+    // The `k`th extern as a function value, which a call through it reaches by its own C signature:
+    // only one whose parameters and result all cross by value.
+    extern_value(*self, span: Span, k: usize, name: string) -> TExpr
+        val x = self.xout[k]
+        var ok = c_scalar(x.ret) || is_void(x.ret)
+
+        for j in 0..<x.params.len()
+            if x.modes[j] == Inout || !c_scalar(x.params[j]) then ok = false
+
+        if !ok
+            self.fail(span, s"`${display_name(x.name)}` is an `extern` taking or returning more than numbers, `bool` and complexes by value, which only a call of it passes; call it, or wrap the call in a `def`")
+            return self.invalid(span)
+
+        texpr(span, self.extern_type(k), TFnRef(name))
 end Elab
 
 private val LINK_FORM = "`@link` names a library, `@link(\"m\")`, or a framework, `@link(framework = \"Accelerate\")`"
@@ -248,6 +338,36 @@ c_scalar(ty: Ty) -> bool = ty match
 private is_callback(ty: Ty) -> bool = base_of(ty) match
     Fn(_) -> true
     _ -> false
+
+private is_c_ptr(ty: Ty) -> bool = base_of(ty) match
+    CPtr -> true
+    _ -> false
+
+// Whether some parameter is the `@data` partner of parameter `j`.
+has_data(partner: Buf[Option[usize]], j: usize) -> bool
+    for p in partner
+        p match
+            Some(f) -> if f == j then return true
+            None -> ()
+
+    false
+
+// A callback type without its `c_ptr`: the function a nex caller passes for it.
+without_c_ptr(ty: Ty) -> Ty
+    val sig = base_of(ty) match
+        Fn(s) -> s
+        _ -> return ty
+
+    var params: Buf[Ty] = buf()
+    var modes: Buf[Mode] = buf()
+
+    for k in 0..<sig.params.len()
+        if is_c_ptr(sig.params[k]) then continue
+
+        params.push(sig.params[k])
+        modes.push(sig.modes[k])
+
+    fn_type(params, modes, sig.ret)
 
 private has_attr(attrs: Buf[Attribute], name: string) -> bool
     for a in attrs

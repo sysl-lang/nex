@@ -636,6 +636,10 @@ struct Emitter
 
     // A top-level `def` as a value, through a wrapper that takes and ignores an environment.
     fn_value(*self, span: Span, name: string) -> string
+        self.find_extern(name) match
+            Some(x) -> return self.extern_fn_value(span, x)
+            None -> ()
+
         val f = self.find_fun(name)
 
         if f.is_none()

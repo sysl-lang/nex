@@ -177,7 +177,7 @@ run_v2()
 
     finish(b)
     assert(failed.len() == 0, join(failed.view(), "\n"))
-    assert_eq(passed, 43)
+    assert_eq(passed, 44)
 
 @test("a trap nothing catches writes its message to standard error after what was printed, and aborts")
 run_uncaught_trap()

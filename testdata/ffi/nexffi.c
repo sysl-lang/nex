@@ -4,6 +4,7 @@
 // a wrong number.
 
 #include <complex.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -160,3 +161,103 @@ void nf_pair_swap(Pair *p) {
 }
 
 int64_t nf_sizeof_body(void) { return (int64_t)sizeof(Body); }
+
+// Composite Simpson's rule over [a, b] in n panels (n even), of f with its user data, as GSL's
+// integrators take a function and a `void *`.
+double nf_integrate(double (*f)(double, void *), void *data, double a, double b, int32_t n) {
+    double h = (b - a) / n;
+    double s = f(a, data) + f(b, data);
+    for (int32_t i = 1; i < n; i++) s += f(a + i * h, data) * (i % 2 ? 4.0 : 2.0);
+    return s * h / 3.0;
+}
+
+// The same with a bare function pointer.
+double nf_integrate_plain(double (*f)(double), double a, double b, int32_t n) {
+    double h = (b - a) / n;
+    double s = f(a) + f(b);
+    for (int32_t i = 1; i < n; i++) s += f(a + i * h) * (i % 2 ? 4.0 : 2.0);
+    return s * h / 3.0;
+}
+
+// x[0..n) sorted by cmp, with qsort's contract: negative, zero or positive.
+void nf_sort(int32_t n, double *x, int32_t (*cmp)(double, double)) {
+    for (int32_t i = 1; i < n; i++)
+        for (int32_t j = i; j > 0 && cmp(x[j - 1], x[j]) > 0; j--) {
+            double t = x[j];
+            x[j] = x[j - 1];
+            x[j - 1] = t;
+        }
+}
+
+// The same with the user data first, where BSD's qsort_r passes it.
+void nf_sort_r(int32_t n, double *x, void *data, int32_t (*cmp)(void *, double, double)) {
+    for (int32_t i = 1; i < n; i++)
+        for (int32_t j = i; j > 0 && cmp(data, x[j - 1], x[j]) > 0; j--) {
+            double t = x[j];
+            x[j] = x[j - 1];
+            x[j - 1] = t;
+        }
+}
+
+// f applied twice: a complex crossing to the callback and back by value.
+double _Complex nf_twice(double _Complex (*f)(double _Complex), double _Complex z) { return f(f(z)); }
+
+float _Complex nf_twice32(float _Complex (*f)(float _Complex, void *), void *data, float _Complex z) {
+    return f(f(z, data), data);
+}
+
+// How many of x[0..n) pred holds for: narrow integers and a bool crossing to the callback and back.
+int32_t nf_count_if(int32_t n, const int8_t *x, bool (*pred)(int8_t, uint16_t, void *), void *data, uint16_t k) {
+    int32_t c = 0;
+    for (int32_t i = 0; i < n; i++)
+        if (pred(x[i], k, data)) c++;
+    return c;
+}
+
+// f(k) for k = 1 … n, a callback with no result.
+void nf_each(int32_t n, void (*f)(int32_t, void *), void *data) {
+    for (int32_t k = 1; k <= n; k++) f(k, data);
+}
+
+// f(1) + … + f(n), and how many calls C made, whatever the callbacks did.
+static int32_t calls_made;
+
+double nf_sum_calls(double (*f)(double, void *), void *data, int32_t n) {
+    double s = 0.0;
+    calls_made = 0;
+    for (int32_t k = 1; k <= n; k++) {
+        s += f(k, data);
+        calls_made++;
+    }
+    return s;
+}
+
+int32_t nf_calls_made(void) { return calls_made; }
+
+// f(x) called on a thread C starts.
+typedef struct {
+    double (*f)(double);
+    double x;
+    double y;
+} Job;
+
+static void *run_job(void *p) {
+    Job *j = p;
+    j->y = j->f(j->x);
+    return NULL;
+}
+
+double nf_call_on_thread(double (*f)(double), double x) {
+    Job j = {f, x, 0.0};
+    pthread_t t;
+    pthread_create(&t, NULL, run_job, &j);
+    pthread_join(t, NULL);
+    return j.y;
+}
+
+// A callback C keeps past the call that passed it, and calls later.
+static double (*kept)(double);
+
+void nf_keep(double (*f)(double)) { kept = f; }
+
+double nf_call_kept(double x) { return kept(x); }

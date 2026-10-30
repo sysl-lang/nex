@@ -1,0 +1,243 @@
+// Callbacks: a nex function C calls through a function pointer (DESIGN §10.2.1); and an extern used
+// as a function value.
+//
+// **C calls a trampoline**, a function of the callback's C type declared as clang declares the same
+// prototype: complexes as the array and the struct of their parts, narrow integers and `bool`
+// widened. It stores its arguments in a frame on its stack and hands the frame to the runtime's
+// `nex_cb_run` with its inner half (`<name>.in`), which reads the arguments as nex values, calls the
+// nex code and stores the result back in the frame. The trampoline returns what the frame holds: a
+// zero where the callback did not run. The runtime decides whether it runs, and catches a trap inside
+// it, so that a trap never crosses C's frames (`runtime/trap.sysl`).
+//
+// **What the inner half calls** is fixed at compile time where the callback has no `@data` partner:
+// the code of the function named, or of the lambda, which captures nothing, given a null
+// environment. An extern named there is passed as itself. With a partner, the user data is the
+// address of a slot in the caller's frame holding the function value, borrowed for the call: the
+// inner half calls the value's code with its environment, so one trampoline serves every callback of
+// one C type.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// What C is passed for a callback: the function pointer, and the user data its `@data` partner
+// passes (`""` where it has none).
+struct CCallback
+    code: string
+    data: string
+
+impl Emitter
+    // The callback argument `a` for a parameter of type `t`, as C receives it.
+    c_callback(*self, a: TExpr, t: Ty, with_data: bool) -> CCallback
+        val sig = callback_sig(t)
+
+        if with_data
+            val slot = self.alloca(CLOSURE)
+
+            self.op(s"llvm.store ${self.ex(a)}, $slot : $CLOSURE, !llvm.ptr")
+            return CCallback(self.trampoline(a.span, sig, ""), slot)
+
+        val code = *a.kind match
+            TFnRef(name) ->
+                self.find_extern(name) match
+                    Some(x) -> return CCallback(self.c_function(a.span, x), "")
+                    None -> ()
+
+                self.fn_value(a.span, name)
+                s"r.$name"
+            TLambdaRef(id) ->
+                self.lambda_value(a.span, id)
+                s"l.$id"
+            _ ->
+                self.later(a.span, "this callback")
+                return CCallback(self.def("llvm.mlir.zero : !llvm.ptr"), "")
+
+        CCallback(self.trampoline(a.span, sig, code), "")
+
+    // The address of the C function `x`.
+    private c_function(*self, span: Span, x: TExtern) -> string
+        val fty = s"(${joined(self.declare_c(span, x))}) -> ${result_text(self.c_result_ty(span, x.ret))}"
+        val c = self.def(s"func.constant @\"${x.symbol}\" : $fty")
+
+        self.def(s"builtin.unrealized_conversion_cast $c : $fty to !llvm.ptr")
+
+    // The address of the trampoline for a callback of type `sig` calling `code`, or with `code` empty,
+    // the function value its user data holds.
+    private trampoline(*self, span: Span, sig: &FnSig, code: string) -> string
+        var ctys: Buf[string] = buf()
+
+        for t in sig.params
+            ctys.push(self.c_param_ty(span, t, Mode.Read))
+
+        val rt = self.c_result_ty(span, sig.ret)
+        val fty = s"(${joined(ctys)}) -> ${result_text(rt)}"
+        val key = s"cb $code $fty"
+        var k = self.wrappers.len()
+
+        for j in 0..<self.wrappers.len()
+            if self.wrappers[j] == key then k = j
+
+        if k == self.wrappers.len()
+            self.wrappers.push(key)
+            self.callback_code(span, s"cb.$k", sig, code, ctys, rt)
+
+        val c = self.def(s"func.constant @\"cb.$k\" : $fty")
+
+        self.def(s"builtin.unrealized_conversion_cast $c : $fty to !llvm.ptr")
+
+    // The trampoline `name` and its inner half.
+    private callback_code(*self, span: Span, name: string, sig: &FnSig, code: string, ctys: Buf[string], rt: string)
+        // The frame: each argument but the user data, as C passed it, then the result.
+        var fields: Buf[string] = buf()
+        var field: Buf[usize] = buf()
+        var head: Buf[string] = buf()
+        var data = "%null"
+
+        for k in 0..<sig.params.len()
+            head.push(s"%c$k: ${ctys[k]}${c_ext(sig.params[k], Mode.Read)}")
+            field.push(fields.len())
+
+            if is_c_ptr_ty(sig.params[k]) then data = s"%c$k" else fields.push(ctys[k])
+
+        if rt != "" then fields.push(rt)
+
+        val frame = s"!llvm.struct<(${joined(fields)})>"
+        val result = fields.len() - 1
+        var slots = ""
+
+        for i in 0..<fields.len()
+            slots += s"    %p$i = llvm.getelementptr %f[0, $i] : (!llvm.ptr) -> !llvm.ptr, $frame\n"
+
+        var outer = "    %null = llvm.mlir.zero : !llvm.ptr\n"
+
+        if fields.len() == 0 then outer += "    %f = llvm.mlir.zero : !llvm.ptr\n"
+        else outer += s"    %one = arith.constant 1 : i64\n    %f = llvm.alloca %one x $frame : (i64) -> !llvm.ptr\n$slots"
+
+        for k in 0..<sig.params.len()
+            if !is_c_ptr_ty(sig.params[k]) then outer += s"    llvm.store %c$k, %p${field[k]} : ${ctys[k]}, !llvm.ptr\n"
+
+        if rt != "" then outer += s"    %z = llvm.mlir.zero : $rt\n    llvm.store %z, %p$result : $rt, !llvm.ptr\n"
+
+        self.external("nex_cb_run", "!llvm.ptr, !llvm.ptr, !llvm.ptr", "")
+
+        outer += s"    %i = func.constant @\"${name}.in\" : (!llvm.ptr, !llvm.ptr) -> ()\n"
+        outer += "    %ip = builtin.unrealized_conversion_cast %i : (!llvm.ptr, !llvm.ptr) -> () to !llvm.ptr\n"
+        outer += s"    func.call @nex_cb_run(%ip, ${if code == "" then data else "%null"}, %f) : (!llvm.ptr, !llvm.ptr, !llvm.ptr) -> ()\n"
+        outer += if rt == "" then "    func.return\n" else s"    %r = llvm.load %p$result : !llvm.ptr -> $rt\n    func.return %r : $rt\n"
+
+        // The inner half: the arguments as nex values, the call, the result as C takes it.
+        var inner = slots
+        var args: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+
+        args.push(if code == "" then "%e" else "%env")
+        tys.push("!llvm.ptr")
+
+        for k in 0..<sig.params.len()
+            val t = sig.params[k]
+
+            if is_c_ptr_ty(t) then continue
+
+            inner += s"    %c$k = llvm.load %p${field[k]} : !llvm.ptr -> ${ctys[k]}\n"
+            base_of(t) match
+                Complex(b) ->
+                    inner += nex_complex_text(s"%a$k", s"%c$k", ctys[k], b)
+                    args.push(s"%a$k")
+                _ -> args.push(s"%c$k")
+
+            tys.push(self.ty(span, t))
+
+        val nr = self.ty(span, sig.ret)
+        val cty = s"(${joined(tys)}) -> ${result_text(nr)}"
+        var call = s"func.call @\"$code\"(${joined(args)}) : $cty"
+
+        if code == ""
+            inner += s"    %fv = llvm.load %env : !llvm.ptr -> $CLOSURE\n    %code = llvm.extractvalue %fv[0] : $CLOSURE\n    %e = llvm.extractvalue %fv[1] : $CLOSURE\n"
+            inner += s"    %fn = builtin.unrealized_conversion_cast %code : !llvm.ptr to $cty\n"
+            call = s"func.call_indirect %fn(${joined(args)}) : $cty"
+
+        if nr == "" then inner += s"    $call\n"
+        else
+            inner += s"    %v = $call\n"
+
+            val w = base_of(sig.ret) match
+                Complex(b) ->
+                    inner += c_complex_text("%w", "%v", rt, b)
+                    "%w"
+                _ -> "%v"
+
+            inner += s"    llvm.store $w, %p$result : $rt, !llvm.ptr\n"
+
+        val res = if rt == "" then "" else s" -> ($rt${c_ext(sig.ret, Mode.Read)})"
+
+        self.funcs.push(s"  func.func private @\"$name\"(${joined(head)})$res {\n$outer  }\n\n")
+        self.funcs.push(s"  func.func private @\"${name}.in\"(%env: !llvm.ptr, %f: !llvm.ptr) {\n${inner}    func.return\n  }\n\n")
+    end callback_code
+
+    // The extern `x` as a function value: code of a function value's signature, `(env, params…)`,
+    // calling the C function with the arguments as C takes them.
+    extern_fn_value(*self, span: Span, x: TExtern) -> string
+        val name = s"r.${x.name}"
+        var tys: Buf[string] = buf()
+
+        tys.push("!llvm.ptr")
+
+        for t in x.params
+            tys.push(self.ty(span, t))
+
+        val nr = self.ty(span, x.ret)
+
+        if !contains(self.wrappers, name)
+            self.wrappers.push(name)
+
+            val ctys = self.declare_c(span, x)
+            val rt = self.c_result_ty(span, x.ret)
+            var head: Buf[string] = buf()
+            var args: Buf[string] = buf()
+            var text = ""
+
+            head.push("%env: !llvm.ptr")
+
+            for k in 0..<x.params.len()
+                head.push(s"%a$k: ${tys[k + 1]}")
+                base_of(x.params[k]) match
+                    Complex(b) ->
+                        text += c_complex_text(s"%x$k", s"%a$k", ctys[k], b)
+                        args.push(s"%x$k")
+                    _ -> args.push(s"%a$k")
+
+            val call = s"func.call @\"${x.symbol}\"(${joined(args)}) : (${joined(ctys)}) -> ${result_text(rt)}"
+
+            if rt == "" then text += s"    $call\n    func.return\n"
+            else
+                text += s"    %r = $call\n"
+                base_of(x.ret) match
+                    Complex(b) -> text += nex_complex_text("%v", "%r", rt, b) + s"    func.return %v : $nr\n"
+                    _ -> text += s"    func.return %r : $nr\n"
+
+            self.funcs.push(s"  func.func private @\"$name\"(${joined(head)})${arrow_text(nr)} {\n$text  }\n\n")
+
+        self.closure(name, s"(${joined(tys)}) -> ${result_text(nr)}", self.def("llvm.mlir.zero : !llvm.ptr"))
+end Emitter
+
+// Whether a parameter of type `t` is a callback.
+is_callback_ty(t: Ty) -> bool = base_of(t) match
+    Fn(_) -> true
+    _ -> false
+
+private is_c_ptr_ty(t: Ty) -> bool = base_of(t) match
+    CPtr -> true
+    _ -> false
+
+private callback_sig(t: Ty) -> &FnSig = base_of(t) match
+    Fn(s) -> s
+    _ -> FnSig(buf(), buf(), Void)
+
+// The lines defining `dst`, the complex `src` of `b`-bit parts as `ty`, the array or struct of its
+// parts C takes.
+private c_complex_text(dst: string, src: string, ty: string, b: int) -> string
+    s"    ${dst}.re = complex.re $src : complex<f$b>\n    ${dst}.im = complex.im $src : complex<f$b>\n    ${dst}.u = llvm.mlir.undef : $ty\n    ${dst}.h = llvm.insertvalue ${dst}.re, ${dst}.u[0] : $ty\n    $dst = llvm.insertvalue ${dst}.im, ${dst}.h[1] : $ty\n"
+
+// The lines defining `dst`, the complex of `b`-bit parts from `src`, the array or struct `ty` of its
+// parts C gives.
+private nex_complex_text(dst: string, src: string, ty: string, b: int) -> string
+    s"    ${dst}.re = llvm.extractvalue ${src}[0] : $ty\n    ${dst}.im = llvm.extractvalue ${src}[1] : $ty\n    $dst = complex.create ${dst}.re, ${dst}.im : complex<f$b>\n"
