@@ -32,8 +32,10 @@ extern abort() -> never
 
 // The innermost catch's saved context, and how deep the catches are nested; at depth zero a trap
 // aborts. Each catch saves the context it replaces and restores it on the way out. Every thread has
-// its own: a `longjmp` never leaves the thread that trapped.
-@thread_local private var catch_env: [JMP_BUF_WORDS]u64 = [0; JMP_BUF_WORDS]
+// its own: a `longjmp` never leaves the thread that trapped. One word more than `jmp_buf`: Darwin's
+// arm64 `longjmp` reads its last field, an `int` at byte 188 of the 192, as eight bytes, which runs
+// past the end where the context is the last thing in its thread's block, as under Guard Malloc.
+@thread_local private var catch_env: [JMP_BUF_WORDS + 1]u64 = [0; JMP_BUF_WORDS + 1]
 @thread_local private var depth = 0
 @thread_local private var last_message = ""
 
