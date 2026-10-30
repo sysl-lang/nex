@@ -57,8 +57,14 @@ show_tprogram(p: TProgram) -> string
         val name = if l.name.len == 0 then "_" else l.name
 
         val passed = if l.escapes then "" else " passed"
+        var copies: Buf[string] = buf()
 
-        out.push(s"(lambda ${k} ${name} ${show_params(p, l.params, nodefaults)} ${show_ty(l.ret)} ${tform("captures", caps)}${passed} ${show_texpr(p, l.body)})")
+        for c in l.copies
+            copies.push(local_name(p, c))
+
+        val copied = if copies.len() == 0 then "" else " " + tform("copies", copies)
+
+        out.push(s"(lambda ${k} ${name} ${show_params(p, l.params, nodefaults)} ${show_ty(l.ret)} ${tform("captures", caps)}${passed}${copied} ${show_texpr(p, l.body)})")
 
     join(out.view(), "\n")
 end show_tprogram
@@ -291,23 +297,20 @@ private show_tarr(p: TProgram, ty: Ty, op: TArr) -> string
                 None -> ()
 
             s"(${typed("range", ty)} ${range})"
-        TIndex(target, subs) ->
-            items.push(show_texpr(p, target))
+        TIndex(target, subs) -> show_subscripted(p, typed("index", ty), target, subs)
+        TView(target, subs) -> show_subscripted(p, typed("view", ty), target, subs)
+        TOrigin(source, firsts) ->
+            items.push(show_texpr(p, source))
+            texprs_into(p, &items, firsts)
+            tform(typed("origin", ty), items)
+        TCopy(v, why) ->
+            val word = why match
+                IntoVar -> "copy-into-var"
+                Escape -> "copy-escape"
+                Rebase -> "rebase"
 
-            for s in subs
-                items.push(s match
-                    TSubAt(x) -> show_texpr(p, x)
-                    TSubAll -> ":"
-                    TSubWindow(lo, hi, inclusive, stride) ->
-                        var w = s"(${show_bound(p, lo)} ${if inclusive then ".." else "..<"} ${show_bound(p, hi)}"
-
-                        stride match
-                            Some(k) -> w = w + " by " + show_texpr(p, k)
-                            None -> ()
-
-                        w + ")")
-
-            tform(typed("index", ty), items)
+            s"(${word} ${show_texpr(p, v)})"
+        TTransfer(v, d) -> s"(${if d.clones then "clone" else "move"} ${show_texpr(p, v)})"
         TEnd(axis) -> s"(end ${axis})"
         TElementwise(o, l, r) -> s"(${typed("." + o, ty)} ${show_texpr(p, l)} ${show_texpr(p, r)})"
         TElementwiseUnary(o, x) -> s"(${typed("." + o, ty)} ${show_texpr(p, x)})"
@@ -332,6 +335,27 @@ private show_tarr(p: TProgram, ty: Ty, op: TArr) -> string
             tform(typed(name, ty), items)
         TForEach(id, v, a, body) -> s"(for ${loop_name(p, id)} ${local_name(p, v)}:${show_ty(p.locals[v].ty)} (in ${show_texpr(p, a)}) ${show_texpr(p, body)})"
 end show_tarr
+
+// An index list's target and its subscripts, under the head `head`.
+private show_subscripted(p: TProgram, head: string, target: TExpr, subs: Buf[TSub]) -> string
+    var items: Buf[string] = buf()
+
+    items.push(show_texpr(p, target))
+
+    for s in subs
+        items.push(s match
+            TSubAt(x) -> show_texpr(p, x)
+            TSubAll -> ":"
+            TSubWindow(lo, hi, inclusive, stride) ->
+                var w = s"(${show_bound(p, lo)} ${if inclusive then ".." else "..<"} ${show_bound(p, hi)}"
+
+                stride match
+                    Some(k) -> w = w + " by " + show_texpr(p, k)
+                    None -> ()
+
+                w + ")")
+
+    tform(head, items)
 
 private show_bound(p: TProgram, b: Option[TExpr]) -> string = b match
     Some(x) -> show_texpr(p, x)

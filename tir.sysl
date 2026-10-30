@@ -154,6 +154,9 @@ enum LocalKind
     LParam(mode: Mode)
     // A loop variable, read-only.
     LLoop
+    // A `val` holding an `origin` view: read-only, and indexed from the first indices its
+    // initializer's `TOrigin` gives (DESIGN §6.4).
+    LOrigin
 
 struct LocalInfo
     name: string
@@ -171,6 +174,9 @@ struct TLambda
     // Whether the lambda may outlive the call it was made in: false only for one written straight
     // as an argument, which the callee borrows for the call (DESIGN §8.3).
     escapes: bool
+    // The captured views a lambda that escapes copies to dense arrays when it is made (DESIGN §6.2
+    // rule 3).
+    copies: Buf[usize]
 
 // A loop, by the label it was given (`""` for none).
 struct TLoop

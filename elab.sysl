@@ -27,13 +27,14 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
     var e = elab(p)
 
     e.run()
+    e.finish_views()
 
     if e.diags.len() > 0 then return Err(e.diags)
 
     Ok(e.program())
 
 private elab(p: Program) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views())
 
 // How far a declaration has got.
 enum Progress
@@ -144,6 +145,8 @@ struct Elab
     // The axis (from 1) each open index list is elaborating a subscript of, innermost last: what an
     // `end` stands for.
     ends: Buf[usize]
+    // The locals holding views, and what the lifetime pass needs (`elab_view.sysl`).
+    vw: Views
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -273,9 +276,11 @@ struct Elab
         self.fx = empty_fx()
         self.fx.in_const = g.kind == Const
 
-        val init = g.typ match
+        val v = g.typ match
             Some(t) -> self.check(g.init, self.resolve_type(t), "this binding")
             None -> self.bound_value(g.init, g.name)
+
+        val init = self.escaping(v, "bound at module level")
 
         self.fx = saved
         self.gty.set(k, init.ty)
@@ -394,16 +399,16 @@ struct Elab
             items.push(v)
             return texpr(v.span, Void, TBlock(items, texpr(v.span, Void, TLiteral(VoidVal, false))))
 
-        if frame.ret_known then return self.check(body, frame.ret, "the result")
+        if frame.ret_known then return self.escaping(self.check(body, frame.ret, "the result"), "returned")
 
         val v = self.infer(body)
         val now = self.fx.frames[top]
 
         // A `return` inside fixed the type first; the body's own value has to agree with it.
-        if now.ret_known then return self.coerce(v, now.ret, "the result")
+        if now.ret_known then return self.escaping(self.coerce(v, now.ret, "the result"), "returned")
 
         self.fx.frames.set(top, Frame(now.lambda, v.ty, true, now.loop_base))
-        v
+        self.escaping(v, "returned")
     end body_of
 
     // Lambdas still waiting for their parameter types when the body that bound them ends. Where the
@@ -574,11 +579,16 @@ struct Elab
         for l in 0..<self.lambdas.len()
             val x = self.lambdas[l]
             var caps: Buf[usize] = buf()
+            var copies: Buf[usize] = buf()
 
             for c in self.captures
-                if c.lambda == l then caps.push(c.local)
+                if c.lambda != l then continue
 
-            lambdas.push(TLambda(x.name, x.params, x.ret, caps, x.body, x.escapes))
+                caps.push(c.local)
+
+                if x.escapes && self.is_view_local(c.local) then copies.push(c.local)
+
+            lambdas.push(TLambda(x.name, x.params, x.ret, caps, x.body, x.escapes, copies))
 
         TProgram(decls, self.locals, lambdas, self.loops)
     end program

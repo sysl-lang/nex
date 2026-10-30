@@ -323,7 +323,7 @@ impl Elab
 
             if is_void(v.ty) then self.fail(elems[k].span, "a tuple element holds a value, and this is void")
 
-            out.push(v)
+            out.push(self.escaping(v, "stored in a tuple"))
             tys.push(v.ty)
 
         texpr(span, Ty.Tuple(tys), TTuple(out))
@@ -471,7 +471,7 @@ impl Elab
 
         for j in 0..<slots.len()
             slots[j] match
-                Some(a) -> out.push(self.check(a, fields[j].ty, s"the field `${fields[j].name}`"))
+                Some(a) -> out.push(self.escaping(self.check(a, fields[j].ty, s"the field `${fields[j].name}`"), s"stored in `${what}`"))
                 None ->
                     self.fail(span, s"`${what}` needs its field `${fields[j].name}`")
                     out.push(self.invalid(span))
@@ -854,6 +854,7 @@ impl Elab
                 LParam(m) ->
                     if m == Inout && escapes then self.fail(span, s"this lambda captures the `inout` parameter `${info.name}` and may outlive the call that lent it; pass the lambda straight as an argument, or copy `${info.name}` into a `val`")
                 LVar -> if is_array(info.ty) && self.depth[c.local] == frame then self.claim(lid, c.local, span)
+                LOrigin -> if escapes then self.fail(span, origin_leaves(s"captured by this lambda, which may outlive the call", info.name))
                 _ -> ()
 
         escapes

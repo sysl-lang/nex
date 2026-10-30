@@ -61,7 +61,7 @@ array_ranges_and_for()
 @test("an index list collapses integer axes, keeps the others and writes out the trailing ones")
 array_index_lists()
     assert_eq(elaborated("def f(m: [real; 3, :]) =\n  print(m[2])\n  print(m[:, 1])\n  print(m[1..2, 2..<4 by 2])\n  print(m[1][2])\n" + MAIN),
-        "(def f ((m#0 [real64; 3, :])) void (block (print (index:[real64] m#0 2 :)) (print (index:[real64; 3] m#0 : 1)) (print (index:[real64; :, :] m#0 (1 .. 2) (2 ..< 4 by 2))) (print (index:real64 (index:[real64] m#0 1 :) 2))))\n(def main () void ())")
+        "(def f ((m#0 [real64; 3, :])) void (block (print (view:[real64] m#0 2 :)) (print (view:[real64; 3] m#0 : 1)) (print (view:[real64; :, :] m#0 (1 .. 2) (2 ..< 4 by 2))) (print (index:real64 (view:[real64] m#0 1 :) 2))))\n(def main () void ())")
     assert_eq(refused("def f(a: [real]) = a[1, 2]\n" + MAIN), "error: this array has rank 1, and 2 subscripts are given @1:20")
     assert_eq(refused("def f(x: real) = x[1]\n" + MAIN), "error: this is real64 and cannot be indexed @1:18")
     assert_eq(refused("def f(a: [real]) = a[1.5]\n" + MAIN), "error: an index must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @1:22")
@@ -69,7 +69,7 @@ array_index_lists()
 @test("end is the extent of the axis its subscript indexes, and a negative stride walks down")
 array_end_and_negative_strides()
     assert_eq(elaborated("def main() =\n  val a = [10, 20, 30]\n  print(a[.. by -1])\n  print(a[end..1 by -1])\n  print(a[2..<end])\n"),
-        "(def main () void (block (val a#0:[int64] (array:[int64] 10 20 30)) (print (index:[int64] a#0 (_ .. _ by -1))) (print (index:[int64] a#0 ((end 1) .. 1 by -1))) (print (index:[int64] a#0 (2 ..< (end 1))))))")
+        "(def main () void (block (val a#0:[int64] (array:[int64] 10 20 30)) (print (view:[int64] a#0 (_ .. _ by -1))) (print (view:[int64] a#0 ((end 1) .. 1 by -1))) (print (view:[int64] a#0 (2 ..< (end 1))))))")
     assert_eq(elaborated("def f(m: [real; :, :], b: [integer]) = m[end, b[end]]\n" + MAIN),
         "(def f ((m#0 [real64; :, :]) (b#1 [int64])) real64 (index:real64 m#0 (end 1) (index:int64 b#1 (end 1))))\n(def main () void ())")
     assert_eq(elaborated("def f(m: [real; :, :]) = m[1, end - 1]\n" + MAIN),

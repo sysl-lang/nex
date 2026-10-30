@@ -109,7 +109,8 @@ impl Elab
             Name(_) -> ()
             Field(_, _) -> ()
             TupleField(_, _) -> ()
-            Index(_, _) -> return self.not_yet(arg.span, "an element or a slice passed `inout`")
+            // An element, or a slice borrowed as the window it names and written in place.
+            Index(_, _) -> ()
             _ ->
                 self.fail(arg.span, "an `inout` argument is a variable the callee can write to")
                 return self.invalid(arg.span)
@@ -249,12 +250,7 @@ impl Elab
             self.fail(span, s"`${name}` is a type, not a conversion; only the numeric types convert")
             return self.invalid(span)
 
-        if is_complex(target) && args.len() == 2
-            val part = Real(bits_of(target))
-            val re = self.check(args[0], part, "the real part")
-            val im = self.check(args[1], part, "the imaginary part")
-
-            return texpr(span, target, TMakeComplex(re, im))
+        if is_complex(target) && args.len() == 2 then return self.make_complex(span, target, args[0], args[1])
 
         if args.len() != 1
             self.fail(span, s"`${name}(...)` converts one value")

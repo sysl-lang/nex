@@ -164,7 +164,8 @@ beside a `real32`), and with no context `pi`, `e`, `inf`, `nan` are `real64` and
 
 Every numeric type name is also its conversion function, on a scalar and element-wise on an array:
 `real32(x)`, `int16(n)`, `uint8(k)`, `complex[real32](z)`, `complex[real32](re, im)`,
-`real64(a)`.
+`real64(a)`. In the two-argument form each part converts as `real32(re)` would, and either part may
+be an array, the other then an array of the same shape or a scalar that broadcasts.
 
 | From → to | Behaviour |
 |---|---|
@@ -563,7 +564,9 @@ an owned array is never observable, only its cost: **a view is a value**, fixed 
    being **returned** from the function, **stored** in a struct, tuple or enum payload, **captured**
    by an escaping closure, or bound at **module level**, is copied to a dense owned array at that
    point. Passing a view as an argument is not an escape (the callee borrows it, ref §8.4), and
-   neither is binding it to a local `val`.
+   neither is binding it to a local `val`. The copy is made where the value is known to be a view
+   (a slice, `reverse`, a local `val` bound to one, a branch giving one); a parameter is not known
+   to be one, so a function that returns its parameter copies nothing.
 4. **The source does not change under it.** If the source is a `var` and is written while a view of
    it is still live, the view keeps the values it had when it was taken: the compiler copies the view
    before the write. A view whose last use comes before the write costs nothing
@@ -614,7 +617,13 @@ for k in -r..r do acc += w[k] * x[i - k]
   parameter starts at 1 and no function ever asks what its array's bounds are.
 - `rebase(w)` is an ordinary 1-based copy of an offset view's elements (`rebase(w)[1]` is `w[-r]`),
   and is what crosses a function boundary. A function that wants the offset takes it as an ordinary
-  argument and calls `origin` itself.
+  argument and calls `origin` itself. `rebase` of an ordinary array is a dense copy of it.
+- **Only a `val` holds an offset view, and only indexing reads its offsets.** Binding one to a `var`,
+  assigning it, or giving it as the value of an `if`, a `match` or a block is a compile error naming
+  `origin`, as escaping is. Read as a value — by an operator, `sum`, `print`, `for x in w` — it is
+  its elements, and the result is 1-based like every other value. A slice of an offset view
+  (`w[-1..1]`) is an ordinary 1-based view, as a Fortran section is. `origin(w, …)` of an offset
+  view replaces its first indices.
 
 ---
 
@@ -781,6 +790,14 @@ A trap inside the callee leaves the writes it made before the trap in place; not
 The uniqueness rule (ref §8.2) loses its `mut` case: a `var` array is moved only by `return` and by
 assignment to another `var` (and the auto-clone pass makes the latter a copy when the source is used
 again, ref §8.3). An `inout` call is not a move and needs no clone.
+
+**Where the auto-clone pass clones.** An array local bound or assigned to a `var` (`var b = a`,
+`b = a`) is **moved** when the source is a `val` or `var` bound in the same function that nothing
+uses afterwards: no later read or write, no loop around the transfer that the source was bound
+outside of, and no lambda capturing it. Otherwise it is **cloned**, and always when the source is
+a parameter (the caller keeps it, `inout` or not), a module-level binding, a loop variable or a
+name bound by destructuring or a `match`. A view bound or assigned to a `var` is copied (§6.2 rule
+2). A `val` bound to a `var` array shares it, as a view of a `var` does (§6.2 rule 4).
 
 **Lowering.** An `inout` array is a tensor argument whose updated value is returned and bound back
 to the caller's variable. Every nex function except `main` is emitted `private`; with

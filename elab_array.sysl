@@ -475,7 +475,7 @@ impl Elab
             if slice && !is_array(v.ty) && !is_wild(v.ty)
                 return texpr(span, Void, TAssign(op, p, texpr(v.span, p.ty, TArray(TBroadcast(self.coerce(v, elem, "the value"))))))
 
-            return texpr(span, Void, TAssign(op, p, self.coerce(v, p.ty, "the value")))
+            return texpr(span, Void, TAssign(op, p, self.stored(p, self.coerce(v, p.ty, "the value"))))
 
         val bop = op[0..<op.len - 1]
         val class = self.literal_class(value)
@@ -744,7 +744,7 @@ private root_global(place: TExpr) -> Option[string] = *place.kind match
     _ -> None
 
 // The expressions directly inside `e`.
-private children(e: TExpr) -> Buf[TExpr]
+children(e: TExpr) -> Buf[TExpr]
     var out: Buf[TExpr] = buf()
 
     *e.kind match
@@ -831,18 +831,13 @@ private array_children(op: TArr, out: *Buf[TExpr])
             step match
                 Some(s) -> out.push(s)
                 None -> ()
-        TIndex(target, subs) ->
-            out.push(target)
-
-            for s in subs
-                s match
-                    TSubAt(x) -> out.push(x)
-                    TSubAll -> ()
-                    TSubWindow(lo, hi, _, stride) ->
-                        for b in [lo, hi, stride]
-                            b match
-                                Some(x) -> out.push(x)
-                                None -> ()
+        TIndex(target, subs) -> subscript_children(target, subs, out)
+        TView(target, subs) -> subscript_children(target, subs, out)
+        TOrigin(source, firsts) ->
+            out.push(source)
+            out.extend(firsts.view())
+        TCopy(v, _) -> out.push(v)
+        TTransfer(v, _) -> out.push(v)
         TEnd(_) -> ()
         TElementwise(_, l, r) ->
             out.push(l)
@@ -868,3 +863,16 @@ private array_children(op: TArr, out: *Buf[TExpr])
             out.push(a)
             out.push(b)
 end array_children
+
+private subscript_children(target: TExpr, subs: Buf[TSub], out: *Buf[TExpr])
+    out.push(target)
+
+    for s in subs
+        s match
+            TSubAt(x) -> out.push(x)
+            TSubAll -> ()
+            TSubWindow(lo, hi, _, stride) ->
+                for b in [lo, hi, stride]
+                    b match
+                        Some(x) -> out.push(x)
+                        None -> ()
