@@ -22,6 +22,12 @@ parse_program(src: Source) -> Result[Program, Diagnostic]
 
     p.program()
 
+// One file of a project, its text between `from` and `to` in the project's text `src`.
+parse_file(src: Source, from: usize, to: usize) -> Result[Program, Diagnostic]
+    var p = parser(src, lex_file(src, from, to)?)
+
+    p.program()
+
 // One expression standing alone, as a `${...}` hole holds and as tests write them.
 parse_expression(src: Source) -> Result[Expr, Diagnostic]
     var p = parser(src, lex(src)?)

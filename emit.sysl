@@ -754,13 +754,31 @@ struct Emitter
 
             self.release_from(m)
 
-        self.op("func.call @\"n.main\"() : () -> ()")
+        if self.prog.test_build then self.run_test(self.prog.tests) else self.op("func.call @\"n.main\"() : () -> ()")
+
         self.call("nex_finish", "", "", "")
 
         val z = self.def("arith.constant 0 : i32")
 
         self.op(s"func.return $z : i32")
         self.end("  func.func @main(%argc: i32, %argv: !llvm.ptr) -> i32")
+
+    // The test build's entry: the test the first argument numbers, from 0, is run, and nothing else.
+    // The runner of `nex test` runs the program once per test, so each test starts from the
+    // module-level bindings' initial values and a trap in one ends only that one.
+    run_test(*self, tests: Buf[string])
+        self.external("atoi", "!llvm.ptr", "i32")
+
+        val slot = self.def("llvm.getelementptr %argv[1] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")
+        val text = self.def(s"llvm.load $slot : !llvm.ptr -> !llvm.ptr")
+        val n = self.def(s"func.call @atoi($text) : (!llvm.ptr) -> i32")
+        val k = self.def(s"arith.index_cast $n : i32 to index")
+        var cases = s"scf.index_switch $k\n"
+
+        for j in 0..<tests.len()
+            cases += s"    case $j {\n      func.call @\"n.${tests[j]}\"() : () -> ()\n      scf.yield\n    }\n"
+
+        self.op(cases + "    default {\n      scf.yield\n    }")
 end Emitter
 
 val CLOSURE = "!llvm.struct<(ptr, ptr)>"
