@@ -5,7 +5,7 @@
 // (`tests_run.sysl`), and the toolchain proofs of negative strides in `tests_toolchain.sysl`.
 
 import sysl.buf.{Buf, buf}
-import sysl.text.join
+import sysl.text.{join, split}
 
 private val VIEW_CATEGORIES = ["view-style slicing", "rank-2 view-style slicing", "rank-2 sub-rectangle view-style slicing",
                                "rank-1 strided view-style slicing"]
@@ -47,6 +47,35 @@ literal_var_written_through_a_window()
     assert_eq(out.text, "[1, 12, 0, 4]\n")
     assert_eq(occurrences(buffers, "memref.alloc"), 1)
     assert_eq(occurrences(buffers, "memref.copy"), 1)
+
+// An array a lambda captures, lent to calls whole, as a window and as an element: each call checks
+// that the cell is the array's only holder and copies it only where it is not, and is otherwise
+// handed the cell's own buffer, so nothing else is allocated or copied (DESIGN §8.4).
+@test("an inout argument held in storage is lent as its own buffer: a call copies it only where it is shared")
+stored_inout_lent_in_place()
+    val b = bench()
+    val text = "def bump(v: inout [integer]) =\n  for k in 1..length(v)\n    v[k] += 1\n\ndef inc(x: inout integer) =\n  x += 1\n\ndef main() =\n  var a = [1, 2, 3, 4]\n  val f = () ->\n    bump(a)\n    bump(a[2..3])\n    inc(a[4])\n  f()\n  print(a)\n"
+    val buffers = lowered_until(b, emitted(text).unwrap(), "buffer-deallocation-pipeline")
+    val lambda = split(split(buffers, "func.func private @l.0(")[1], "func.func")[0]
+    val out = ran(b, text)
+
+    finish(b)
+    assert_eq(out.text, "[2, 4, 5, 6]\n")
+    assert_eq(occurrences(lambda, "call @nex_count"), 3)
+    assert_eq(occurrences(lambda, "nex_array_alloc"), 3)
+    assert_eq(occurrences(lambda, "memref.copy"), 3)
+    assert_eq(occurrences(lambda, "memref.alloc"), 0)
+
+// A callee rebinding its `inout` parameter to an array of another shape cannot write that into the
+// caller's buffer, and hands it back only when it returns.
+@test("a callee's rebinding of its inout parameter to another shape stays when a trap ends the call",
+      ignore: "an inout array crosses as a buffer the callee writes, which cannot take an array of another shape until the call returns")
+rebinding_kept_through_a_trap()
+    val b = bench()
+    val out = ran(b, "def regrow(v: inout [integer]) =\n  v[1] = 8\n  v = [5, 6, 7]\n  assert(false, \"boom\")\n\ndef main() =\n  var q = [1, 2, 3, 4]\n  assert_traps(() -> regrow(q), \"boom\")\n  print(q)\n")
+
+    finish(b)
+    assert_eq(out.text, "[5, 6, 7]\n")
 
 // One-shot bufferization copies the read window before the call, though the two windows are
 // constants that cannot overlap (`experiments/mlir/disjoint-read-inout.mlir`).

@@ -942,13 +942,28 @@ to the caller's variable. Every nex function except `main` is emitted `private`;
 `drop-equivalent-buffer-results` before `buffer-deallocation-pipeline`, a result that is its own
 argument's buffer disappears, the function returns nothing and writes the caller's buffer in place
 (`parallel.mlir`, `axpy`). Kept public, the same function returns its argument and the deallocation
-pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer argument. An element
-of an array of numbers passed `inout` (`a[i]`, `m[:, j][i]`) is a value in its array's tensor: its
-indices are evaluated and bounds-checked once before the call, its value crosses in a stack slot whose
-address is the argument (to a `def`, a function value or a C scalar parameter; inside a rank-0
-descriptor to a `[*; ..]` one), and after the call the slot is inserted at the same indices into what
-the array place holds then. An element of an array of anything else has storage of its own and
-crosses as its address. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
+pipeline clones it: a whole-array copy per call. Inside the callee, assigning the whole parameter an
+array of the shape it has (`v = v * s`, `v += 1`) copies the computed value over the argument's
+buffer; only an array of another shape rebinds the parameter, and reaches the caller when the call
+returns.
+
+The callee writes where the caller can see each write as it is made, so a trap leaves them there. An
+array the caller holds in storage — a `var` a lambda captures, a module-level `var`, a field of a
+struct `var` — is first made the only holder of its buffer (copied where another holder shares it or
+the statement around the call is reading it, as a loop over it does), and that buffer itself is what
+the call is lent, whole or as a window; after the call the handed-back value is that buffer, or, where
+the callee rebound the parameter to another shape, a new one stored into the place. An array in SSA
+form needs nothing: a trap leaves its function's frame, and nothing reads it again.
+
+A scalar `inout` is a pointer argument. An element of an array of numbers passed `inout` (`a[i]`,
+`m[:, j][i]`) is a value in its array's tensor: its indices are evaluated and bounds-checked once
+before the call. Where the array is held in storage (made its buffer's only holder as above) or is one
+a `parallel for` body writes in place, the element crosses as its address in that buffer; otherwise
+its value crosses in a stack slot. Either address is the argument (to a `def`, a function value or a C
+scalar parameter; inside a rank-0 descriptor to a `[*; ..]` one). After the call, unless the element
+crossed in an array held in storage, what the address holds is inserted at the same indices into what
+the array place holds then. An element of an array of anything
+else has storage of its own and crosses as its address. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
 a row, a strided or reversed window and a line of a rank-3 array each reach the callee as a
 `memref.subview` of the caller's buffer, with no allocation and no copy, in a `parallel for` body as
 in sequential code. A call through a function value (a local `def`, a lambda, a `val` bound to a
