@@ -16,7 +16,8 @@
 // accepts, so one unknown name gives one diagnostic and not one at every operator it reaches.
 //
 // The expressions are elaborated in `elab_expr.sysl`, the calls in `elab_call.sysl`, the structs,
-// enums, tuples and `match` in `elab_aggregate.sysl`, and the prelude in `elab_prelude.sysl`.
+// enums, tuples and `match` in `elab_aggregate.sysl`, the arrays in `elab_array.sysl` and the
+// prelude's array functions in `elab_prelude.sysl`.
 
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.{Diagnostic, Span, error, nearest_name}
@@ -32,7 +33,7 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
     Ok(e.program())
 
 private elab(p: Program) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf())
 
 // How far a declaration has got.
 enum Progress
@@ -140,6 +141,9 @@ struct Elab
     fx: Fx
     // The structs, enums and module-level destructuring bindings (`elab_aggregate.sysl`).
     agg: Aggregates
+    // The axis (from 1) each open index list is elaborating a subscript of, innermost last: what an
+    // `end` stands for.
+    ends: Buf[usize]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -168,6 +172,9 @@ struct Elab
                 TopValue(k) -> self.ensure_global(k)
                 TopFun(k) -> self.ensure_body(k)
 
+        for k in 0..<self.funs.len()
+            self.check_elemental(k)
+
         self.check_main()
     end run
 
@@ -193,7 +200,7 @@ struct Elab
                 Fun(name, tparams, params, ret, body) ->
                     if tparams.len() > 0 then
                         self.later(d.span, "a generic function")
-                    elif d.attrs.len() > 0 then
+                    elif d.attrs.len() > 0 && !only_elemental(d.attrs) then
                         self.later(d.span, s"the attribute `@${d.attrs[0].name}`")
                     else
                         body match

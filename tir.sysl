@@ -121,6 +121,8 @@ enum TKind
     TMatch(scrutinee: TExpr, arms: Buf[TArm])
     // `val a, (b, _) = t` inside a body: the tuple taken apart into the locals `pat` names.
     TDestructure(kind: BindKind, pat: TBind, init: TExpr)
+    // An array node: `tir_array.sysl`.
+    TArray(op: &TArr)
     // What could not be elaborated, after its diagnostic.
     TInvalid
 end TKind

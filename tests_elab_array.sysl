@@ -1,0 +1,199 @@
+@tests
+
+// The typed IR of arrays and the diagnostics the elaborator gives for them (DESIGN §3–§7), each
+// rule with the program it accepts and the one it refuses.
+
+private val MAIN = "def main() = ()\n"
+
+// -- literals and types -----------------------------------------------------------------------------
+
+@test("a literal of rank 1, 2 or 3 is brackets nested that deep, its elements in one type")
+array_literal_ranks()
+    assert_eq(elaborated("def main() =\n  val t = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]\n  print(t[2, 1, 2])\n"),
+        "(def main () void (block (val t#0:[int64; :, :, :] (array:[int64; :, :, :] (array:[int64; :, :] (array:[int64] 1 2) (array:[int64] 3 4)) (array:[int64; :, :] (array:[int64] 5 6) (array:[int64] 7 8)))) (print (index:int64 t#0 2 1 2))))")
+    assert_eq(elaborated("def main() = print([1, 2.5])\n"), "(def main () void (print (array:[real64] (adopt:real64 1) 2.5)))")
+    assert_eq(elaborated("def f(x: real32) = [x, 1]\n" + MAIN), "(def f ((x#0 real32)) [real32] (array:[real32] x#0 (adopt:real32 1)))\n(def main () void ())")
+    assert_eq(elaborated("def f(n: integer) = [n, 2.5]\n" + MAIN), "(def f ((n#0 int64)) [real64] (array:[real64] (promote:real64 n#0) 2.5))\n(def main () void ())")
+
+@test("a literal takes a static shape from its annotation, every visible extent checked")
+array_literal_static_shape()
+    assert_eq(elaborated("def main() =\n  val s: [real; 2, 3] = [[1, 2, 3], [4, 5, 6]]\n"),
+        "(def main () void (block (val s#0:[real64; 2, 3] (array:[real64; 2, 3] (array:[real64] (adopt:real64 1) (adopt:real64 2) (adopt:real64 3)) (array:[real64] (adopt:real64 4) (adopt:real64 5) (adopt:real64 6)))) ()))")
+    assert_eq(refused("def main() =\n  val a: [real; 3] = [1.0, 2.0]\n"), "error: this literal has 2 items along axis 1, and its type has 3 @2:22")
+    assert_eq(refused("def main() =\n  val m: [real; :, 2] = [[1.0, 2.0, 3.0]]\n"), "error: this literal has 3 items along axis 2, and its type has 2 @2:25")
+
+@test("a jagged literal, an empty one with no type and mixed elements are refused")
+array_literal_refusals()
+    assert_eq(refused("def main() =\n  val m = [[1, 2, 3], [4, 5]]\n"), "error: this row has 2 items, and the first has 3: an array is not jagged @2:23")
+    assert_eq(refused("def main() = print([])\n"), "error: an empty array literal has no element type; write its type: `val a: [real] = []` @1:20")
+    assert_eq(elaborated("def main() =\n  val e: [real] = []\n"), "(def main () void (block (val e#0:[real64] (array:[real64])) ()))")
+    assert_eq(refused("def main() = print([1, \"a\"])\n"), "error: an element of this array must be string, but this is int64 @1:21")
+    assert_eq(refused("def f(n: integer) = [n, \"a\"]\n" + MAIN), "error: the elements of this array differ: int64 and string @1:25")
+    assert_eq(refused("def f(v: [real], x: real) = [v, x]\n" + MAIN), "error: the items of this array differ in rank: 1 and 0 @1:33")
+
+@test("a static shape converts to the dynamic one; a dynamic shape to a static one is checked at run time")
+array_shape_conversions()
+    assert_eq(elaborated("def f(d: [real], s: [real; 3]) =\n  val a: [real; 3] = d\n  val b: [real] = s\n" + MAIN),
+        "(def f ((d#0 [real64]) (s#1 [real64; 3])) void (block (val a#2:[real64; 3] (shape-check:[real64; 3] d#0)) (val b#3:[real64] (promote:[real64] s#1)) ()))\n(def main () void ())")
+    assert_eq(refused("def f(s: [real; 3]) =\n  val c: [real; 4] = s\n" + MAIN), "error: `c` must be [real64; 4], but this is [real64; 3]: axis 1 is 3 here, and 4 is required @2:22")
+    assert_eq(refused("def f(s: [real; :, :]) =\n  val c: [real] = s\n" + MAIN), "error: `c` must be [real64], but this is [real64; :, :]: its rank is 2, not 1 @2:19")
+    assert_eq(refused("def f(s: [real]) =\n  val c: real = s\n" + MAIN), "error: `c` must be real64, but this is [real64] @2:17")
+
+@test("an array widens element by element where it is stored, and never narrows")
+array_store_widens_not_narrows()
+    assert_eq(elaborated("def f(a: [real32]) =\n  val b: [real] = a\n" + MAIN),
+        "(def f ((a#0 [real32])) void (block (val b#1:[real64] (promote:[real64] a#0)) ()))\n(def main () void ())")
+    assert_eq(refused("def f(x: real64) =\n  var a: [real32] = [1.0, 2.0]\n  a = x * a\n" + MAIN),
+        "error: the value must be [real32], but this is [real64]: that would narrow it; convert it explicitly, `real32(...)` @3:7")
+
+// -- ranges -----------------------------------------------------------------------------------------
+
+@test("a range as a value is a rank-1 integer array, and a for may walk any array")
+array_ranges_and_for()
+    assert_eq(elaborated("def main() =\n  for x in 1..<4 by 2\n    print(x)\n  for y in [1.5, 2.5]\n    print(y)\n  val r = 0..<5\n"),
+        "(def main () void (block (for L0 x#0:int64 (1 ..< 4 by 2) (print x#0)) (for L1 y#1:real64 (in (array:[real64] 1.5 2.5)) (print y#1)) (val r#2:[int64] (range:[int64] 0 ..< 5)) ()))")
+    assert_eq(elaborated("def main() =\n  val r: [int32] = 1..3\n"), "(def main () void (block (val r#0:[int32] (range:[int32] (adopt:int32 1) .. (adopt:int32 3))) ()))")
+    assert_eq(refused("def main() = print(1.0..2.0)\n"), "error: a range counts in integers; this one is real64 (`linspace` spaces reals) @1:20")
+    assert_eq(refused("def f(x: real) =\n  for y in x do print(y)\n" + MAIN), "error: a `for` walks a range or an array; this is real64 @2:12")
+
+// -- indexing ---------------------------------------------------------------------------------------
+
+@test("an index list collapses integer axes, keeps the others and writes out the trailing ones")
+array_index_lists()
+    assert_eq(elaborated("def f(m: [real; 3, :]) =\n  print(m[2])\n  print(m[:, 1])\n  print(m[1..2, 2..<4 by 2])\n  print(m[1][2])\n" + MAIN),
+        "(def f ((m#0 [real64; 3, :])) void (block (print (index:[real64] m#0 2 :)) (print (index:[real64; 3] m#0 : 1)) (print (index:[real64; :, :] m#0 (1 .. 2) (2 ..< 4 by 2))) (print (index:real64 (index:[real64] m#0 1 :) 2))))\n(def main () void ())")
+    assert_eq(refused("def f(a: [real]) = a[1, 2]\n" + MAIN), "error: this array has rank 1, and 2 subscripts are given @1:20")
+    assert_eq(refused("def f(x: real) = x[1]\n" + MAIN), "error: this is real64 and cannot be indexed @1:18")
+    assert_eq(refused("def f(a: [real]) = a[1.5]\n" + MAIN), "error: an index must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @1:22")
+
+@test("end is the extent of the axis its subscript indexes, and a negative stride walks down")
+array_end_and_negative_strides()
+    assert_eq(elaborated("def main() =\n  val a = [10, 20, 30]\n  print(a[.. by -1])\n  print(a[end..1 by -1])\n  print(a[2..<end])\n"),
+        "(def main () void (block (val a#0:[int64] (array:[int64] 10 20 30)) (print (index:[int64] a#0 (_ .. _ by -1))) (print (index:[int64] a#0 ((end 1) .. 1 by -1))) (print (index:[int64] a#0 (2 ..< (end 1))))))")
+    assert_eq(elaborated("def f(m: [real; :, :], b: [integer]) = m[end, b[end]]\n" + MAIN),
+        "(def f ((m#0 [real64; :, :]) (b#1 [int64])) real64 (index:real64 m#0 (end 1) (index:int64 b#1 (end 1))))\n(def main () void ())")
+    assert_eq(elaborated("def f(m: [real; :, :]) = m[1, end - 1]\n" + MAIN),
+        "(def f ((m#0 [real64; :, :])) real64 (index:real64 m#0 1 (-:int64 (end 2) 1)))\n(def main () void ())")
+
+// -- assignment -------------------------------------------------------------------------------------
+
+@test("an element, a slice and a compound slice are assignment targets; a scalar fills a slice")
+array_assignment()
+    assert_eq(elaborated("def main() =\n  var m = [[1.0, 2.0], [3.0, 4.0]]\n  m[1, :] = 0\n  m[:, 2] += 1\n  m[2, 2] = 7\n  m[2, :] = [5.0, 6.0]\n"),
+        "(def main () void (block (var m#0:[real64; :, :] (array:[real64; :, :] (array:[real64] 1.0 2.0) (array:[real64] 3.0 4.0))) (= (index:[real64] m#0 1 :) (broadcast:[real64] (adopt:real64 0))) (+= (index:[real64] m#0 : 2) (adopt:real64 1)) (= (index:real64 m#0 2 2) (adopt:real64 7)) (= (index:[real64] m#0 2 :) (array:[real64] 5.0 6.0))))")
+    assert_eq(refused("def main() =\n  val a = [1, 2]\n  a[1] = 5\n"), "error: `a` cannot be assigned: it is a `val` @3:3")
+    assert_eq(refused("def main() =\n  var a = [1, 2]\n  a[1..2] = [[1, 2]]\n"), "error: the value must be [int64], but this is [int64; :, :]: its rank is 2, not 1 @3:13")
+    assert_eq(refused("def f(x: real64) =\n  var a: [real32] = [1.0]\n  a[1..1] += x\n" + MAIN), "error: `+=` computes [real64], which the target ([real32]) cannot hold without narrowing @3:3")
+
+// -- element-wise operators -------------------------------------------------------------------------
+
+@test("a typed real64 scalar promotes a real32 array, and a literal adapts to it")
+array_scalar_promotes()
+    assert_eq(elaborated("def f(x: real64, a: [real32]) = x * a\ndef g(a: [real32]) = 2.0 * a\n" + MAIN),
+        "(def f ((x#0 real64) (a#1 [real32])) [real64] (.*:[real64] x#0 (promote:[real64] a#1)))\n(def g ((a#2 [real32])) [real32] (.*:[real32] (adopt:real32 2.0) a#2))\n(def main () void ())")
+    assert_eq(elaborated("def f(a: [integer], b: [real]) = a + b\n" + MAIN),
+        "(def f ((a#0 [int64]) (b#1 [real64])) [real64] (.+:[real64] (promote:[real64] a#0) b#1))\n(def main () void ())")
+
+@test("an element-wise operation keeps static extents, and compares element by element")
+array_elementwise_shapes()
+    assert_eq(elaborated("def f(a: [real; 3], b: [real]) = a - b\n" + MAIN), "(def f ((a#0 [real64; 3]) (b#1 [real64])) [real64; 3] (.-:[real64; 3] a#0 b#1))\n(def main () void ())")
+    assert_eq(elaborated("def f(a: [integer]) = a < 5\n" + MAIN), "(def f ((a#0 [int64])) [bool] (.<:[bool] a#0 5))\n(def main () void ())")
+    assert_eq(elaborated("def f(a: [real]) = -a ^ 2\n" + MAIN), "(def f ((a#0 [real64])) [real64] (.-:[real64] (.^:[real64] a#0 2)))\n(def main () void ())")
+
+@test("element-wise operands of different rank or static shape, or of no number, are refused")
+array_elementwise_refusals()
+    assert_eq(refused("def f(v: [real], m: [real; :, :]) = v + m\n" + MAIN), "error: `+` combines arrays of one rank; these have rank 1 and rank 2 @1:37")
+    assert_eq(refused("def f(a: [real; 3], b: [real; 4]) = a + b\n" + MAIN), "error: `+` combines arrays of one shape; axis 1 is 3 in one and 4 in the other @1:37")
+    assert_eq(refused("def f(s: [string]) = s + s\n" + MAIN), "error: element-wise `+` needs numbers; found [string] and [string] @1:22")
+    assert_eq(refused("def f(a: [real]) = 0 < a < 1\n" + MAIN), "error: a chained comparison compares scalars; this compares real64 with [real64] @1:20\nerror: a chained comparison compares scalars; this compares [real64] with real64 @1:24")
+
+@test("not, and and or apply element by element to bools, and the branches of an if meet as arrays")
+array_logical_and_branches()
+    assert_eq(elaborated("def f(c: bool, a: [integer], b: [real; 3], p: [bool]) =\n  print(if c then a else b)\n  print(not p)\n  print(a > 1 and p)\n  print(p or true)\n" + MAIN),
+        "(def f ((c#0 bool) (a#1 [int64]) (b#2 [real64; 3]) (p#3 [bool])) void (block (print (if:[real64] c#0 (promote:[real64] a#1) (promote:[real64] b#2))) (print (.not:[bool] p#3)) (print (.and:[bool] (.>:[bool] a#1 1) p#3)) (print (.or:[bool] p#3 true))))\n(def main () void ())")
+    assert_eq(refused("def f(p: [integer]) = not p\n" + MAIN), "error: `not` needs bools; found [int64] @1:23")
+    assert_eq(refused("def f(p: [integer]) = p and true\n" + MAIN), "error: an operand of `and` must be bool or [bool], but this is [int64] @1:23")
+    assert_eq(refused("def f(c: bool, p: [integer], q: [integer; :, :]) = if c then p else q\n" + MAIN), "error: the branches of this `if` differ: [int64] and [int64; :, :] @1:52")
+
+@test("a whole array takes a compound assignment, and a slice of a place is a place")
+array_compound_and_nested_places()
+    assert_eq(elaborated("def f(a: [integer]) =\n  var x = [1, 2, 3]\n  x[2..3][1] = 9\n  x += 1\n  x *= a\n" + MAIN),
+        "(def f ((a#0 [int64])) void (block (var x#1:[int64] (array:[int64] 1 2 3)) (= (index:int64 (index:[int64] x#1 (2 .. 3)) 1) 9) (+= x#1 1) (*= x#1 a#0)))\n(def main () void ())")
+
+// -- `@` --------------------------------------------------------------------------------------------
+
+@test("@ takes ranks 1 and 2, carrying static extents into its result")
+array_matmul()
+    assert_eq(elaborated("def f(a: [real; 3, 4], b: [real; 4, :], v: [real], w: [integer]) =\n  print(a @ b)\n  print(v @ w)\n  print(a @ v)\n  print(v @ b)\n" + MAIN),
+        "(def f ((a#0 [real64; 3, 4]) (b#1 [real64; 4, :]) (v#2 [real64]) (w#3 [int64])) void (block (print (@:[real64; 3, :] a#0 b#1)) (print (@:real64 v#2 (promote:[real64] w#3))) (print (@:[real64; 3] a#0 v#2)) (print (@:[real64] v#2 b#1))))\n(def main () void ())")
+
+@test("a batched @, mismatched inner extents and a scalar operand are refused")
+array_matmul_refusals()
+    assert_eq(refused("def f(a: [real; :, :, :], b: [real; :, :]) = a @ b\n" + MAIN), "error: `@` takes ranks 1 and 2, and this has rank 3; a batch of products is a loop over the trailing axis: `C[:, :, k] = A[:, :, k] @ B[:, :, k]` @1:46")
+    assert_eq(refused("def f(a: [real; 2, 3], b: [real; 2, 3]) = a @ b\n" + MAIN), "error: `@` needs the inner extents to agree; they are 3 and 2 @1:43")
+    assert_eq(refused("def f(a: [real; 2, 3]) = 2.0 @ a\n" + MAIN), "error: `@` multiplies matrices and vectors; this is real64 @ [real64; 2, 3] (scale with `*`) @1:26")
+
+// -- elemental functions ----------------------------------------------------------------------------
+
+@test("the prelude's scalar functions and the conversions apply element by element")
+array_elemental_prelude()
+    assert_eq(elaborated("def f(a: [integer], b: [real32], c: [real]) =\n  print(sqrt(a))\n  print(max(b, 0.0))\n  print(real32(c))\n  print(int8(a))\n" + MAIN),
+        "(def f ((a#0 [int64]) (b#1 [real32]) (c#2 [real64])) void (block (print (.sqrt:[real64] (promote:[real64] a#0))) (print (.max:[real32] b#1 (adopt:real32 0.0))) (print (.convert:[real32] c#2)) (print (.convert-trap:[int8] a#0))))\n(def main () void ())")
+    assert_eq(refused("def f(a: [real; 2], b: [real; 3]) = atan2(a, b)\n" + MAIN), "error: `atan2` combines arrays of one shape; axis 1 is 2 in one and 3 in the other @1:37")
+
+@test("an @elemental function applies to every element; an unmarked one is refused on an array")
+array_elemental_user()
+    assert_eq(elaborated("@elemental def sq(x: real) = x * x\ndef main() =\n  print(sq([1.0, 2.0]))\n  print(sq(3.0))\n"),
+        "(def sq ((x#0 real64)) real64 (*:real64 x#0 x#0))\n(def main () void (block (print (.call:[real64] sq (array:[real64] 1.0 2.0))) (print (call:real64 sq 3.0))))")
+    assert_eq(refused("def sq(x: real) = x * x\ndef main() = print(sq([1.0, 2.0]))\n"), "error: `sq` takes real64, and this is [real64]: mark it `@elemental` to apply it to every element, or write `map(a, sq)` @2:23")
+    assert_eq(elaborated("@elemental def f(x: real, k: real) = x * k\ndef g(a: [real; 2]) = f(a, 2)\n" + MAIN),
+        "(def f ((x#0 real64) (k#1 real64)) real64 (*:real64 x#0 k#1))\n(def g ((a#2 [real64; 2])) [real64; 2] (.call:[real64; 2] f a#2 (adopt:real64 2)))\n(def main () void ())")
+    assert_eq(refused("@elemental def f(x: real, k: real) = x * k\ndef g(a: [real; 2], b: [real; 3]) = f(a, b)\n" + MAIN), "error: an elemental call combines arrays of one shape; axis 1 is 2 in one and 3 in the other @2:37")
+
+@test("an @elemental function takes scalars, none inout, gives a value and has no effects but print")
+array_elemental_rules()
+    assert_eq(refused("var total = 0.0\n@elemental def bump(x: real) =\n  total = total + x\n  x\n" + MAIN), "error: an `@elemental` function may be run in any order, so it cannot write the module variable `total` @2:1")
+    assert_eq(refused("@elemental def twice(x: inout real) = x\n" + MAIN), "error: an `@elemental` function takes no `inout` parameter, and `x` is one @1:1")
+    assert_eq(refused("@elemental def p(x: real) = print(x)\n" + MAIN), "error: an `@elemental` function gives a value for each element, and `p` returns nothing @1:1")
+    assert_eq(refused("@elemental def q(v: [real]) = 1.0\n" + MAIN), "error: an `@elemental` function takes scalars, and `v` is [real64] @1:1")
+    assert_eq(refused("@elemental def e(x: real) =\n  eprint(x)\n  x\n" + MAIN), "error: an `@elemental` function may be run in any order, so it cannot do I/O with `eprint` @1:1")
+
+// -- the prelude ------------------------------------------------------------------------------------
+
+@test("a reduction gives a scalar, or along dim = an array of one rank less")
+array_reductions()
+    assert_eq(elaborated("def f(m: [real; 2, 3], b: [bool]) =\n  print(sum(m))\n  print(maxval(m, dim = 2))\n  print(maxloc(m))\n  print(count(b))\n  print(norm2([3, 4]))\n  print(dot([1.0], [2]))\n" + MAIN),
+        "(def f ((m#0 [real64; 2, 3]) (b#1 [bool])) void (block (print (sum:real64 m#0)) (print (maxval:[real64; 2] m#0 (dim 2))) (print (maxloc:(int64, int64) m#0)) (print (count:int64 b#1)) (print (norm2:real64 (promote:[real64] (array:[int64] 3 4)))) (print (dot:real64 (array:[real64] 1.0) (promote:[real64] (array:[int64] 2))))))\n(def main () void ())")
+
+@test("a dim = that names no axis, and a reduction of the wrong elements, are refused")
+array_reduction_refusals()
+    assert_eq(refused("def f(m: [real; :, :]) = sum(m, dim = 3)\n" + MAIN), "error: there is no axis 3: this array has rank 2 @1:39")
+    assert_eq(refused("def f(m: [real; :, :]) = sum(m, dim = 0)\n" + MAIN), "error: there is no axis 0: this array has rank 2 @1:39")
+    assert_eq(refused("def f(m: [real]) = sum(m, 1)\n" + MAIN), "error: `sum` takes one array, and optionally `dim =` the axis to reduce along @1:20")
+    assert_eq(refused("def f(m: [real]) = any(m)\n" + MAIN), "error: `any` takes an array of bools; this is [real64] @1:24")
+    assert_eq(refused("def f(m: [real]) = dot(m, m, dim = 1)\n" + MAIN), "error: `dot` takes no named arguments @1:30")
+
+@test("the shape functions and constructors type their results by rank")
+array_shape_functions()
+    assert_eq(elaborated("def main() =\n  val z: [real32; :, :] = zeros((4, 4))\n  var b: [uint8] = zeros(4)\n  print(to_integers(b))\n  print(shape(z))\n  print(transpose(z))\n  print(extents(z))\n  print(reshape([1, 2, 3, 4], 2, 2))\n"),
+        "(def main () void (block (val z#0:[real32; :, :] (zeros:[real32; :, :] 4 4)) (var b#1:[uint8] (zeros:[uint8] 4)) (print (promote:[int64] b#1)) (print (shape:(int64, int64) z#0)) (print (transpose:[real32; :, :] z#0)) (print (extents:[int64; 2] z#0)) (print (reshape:[int64; :, :] (array:[int64] 1 2 3 4) 2 2))))")
+    assert_eq(refused("def f(v: [real]) = rows(v)\n" + MAIN), "error: `rows` takes a matrix (rank 2); this has rank 1 @1:25")
+    assert_eq(refused("def f(m: [real; :, :]) = extent(m, 3)\n" + MAIN), "error: there is no axis 3: this array has rank 2 @1:36")
+    assert_eq(refused("def f(m: [real; :, :]) = permute(m, (1, 1))\n" + MAIN), "error: axis 1 is given twice @1:41")
+    assert_eq(refused("def f(x: real) = length(x)\n" + MAIN), "error: `length` takes an array; this is real64 @1:25")
+
+@test("map, filter, reduce and flatMap give a lambda its parameter types from the array")
+array_higher_order()
+    assert_eq(elaborated("def main() =\n  val xs = [1, 2, 3]\n  print(map(xs, x -> x * 1.5))\n  print(filter(xs, x -> x > 1))\n  print(reduce(xs, 0, (acc, x) -> acc + x))\n  print(flatMap(xs, x -> [x, x]))\n"),
+        "(def main () void (block (val xs#0:[int64] (array:[int64] 1 2 3)) (print (map:[real64] xs#0 (lambda 0))) (print (filter:[int64] xs#0 (lambda 1))) (print (reduce:int64 xs#0 0 (lambda 2))) (print (flatMap:[int64] xs#0 (lambda 3)))))\n(lambda 0 _ ((x#1 int64)) real64 (captures) passed (*:real64 (promote:real64 x#1) 1.5))\n(lambda 1 _ ((x#2 int64)) bool (captures) passed (>:bool x#2 1))\n(lambda 2 _ ((acc#3 int64) (x#4 int64)) int64 (captures) passed (+:int64 acc#3 x#4))\n(lambda 3 _ ((x#5 int64)) [int64] (captures) passed (array:[int64] x#5 x#5))")
+    assert_eq(refused("def f(k: inout integer, a: [integer]) = map(a, x -> x + k)\n" + MAIN), "ok")
+    assert_eq(refused("def f(a: [real]) = filter(a, x -> x + 1.0)\n" + MAIN), "error: the predicate given to `filter` returns bool, and this one returns real64 @1:30")
+    assert_eq(refused("def f(a: [real]) = map(a, x -> print(x))\n" + MAIN), "error: the function given to `map` gives one element for each, and this one returns void @1:27")
+    assert_eq(refused("def f(a: [real]) = map(a, (x, y) -> x)\n" + MAIN), "error: the function given to `map` takes 1 parameter; this one has 2 @1:27")
+    assert_eq(refused("def g(s: string) = 1\ndef f(a: [real]) = map(a, g)\n" + MAIN), "error: the function given to `map` is called with (real64); this is (string) -> int64 @2:27")
+
+@test("assert_approx compares two values of one rank, and assert_traps takes a function of nothing")
+array_assertions()
+    assert_eq(elaborated("def main() =\n  assert_approx([1, 2], [1, 2], 1.0e-12)\n  assert_traps(() -> print(1 div 0), \"division\")\n"),
+        "(def main () void (block (assert_approx (promote:[real64] (array:[int64] 1 2)) (promote:[real64] (array:[int64] 1 2)) 1e-12) (assert_traps (lambda 0) \"division\")))\n(lambda 0 _ () void (captures) passed (print (div:int64 1 0)))")
+    assert_eq(refused("def f(a: [real], m: [real; :, :]) = assert_approx(a, m, 0.1)\n" + MAIN), "error: `assert_approx` compares values of one rank; these are [real64] and [real64; :, :] @1:37")

@@ -1,0 +1,576 @@
+// The prelude's array functions: the shape functions and constructors (DESIGN §4.2, §4.3), the
+// reductions (§7.4), the higher-order functions, the byte conversions and the array assertions.
+//
+// **Each is typed by rule**, as the scalar prelude is in `elab_call.sysl`: the result's element type
+// from the arguments' (or, for `zeros`, `ones` and `identity`, from the type the position expects),
+// its rank from theirs. A reduction's `dim =` removes the axis it names; where `dim` is written as a
+// number it is checked against the rank at compile time.
+//
+// **A function argument takes its parameter types from the array**: `map(xs, x -> x * 2)` gives `x`
+// the element type, a lambda bound earlier without them is fixed by them, and any other function
+// value must accept them.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+private val REDUCTIONS = ["sum", "product", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot"]
+
+private is_reduction(name: string) -> bool
+    for r in REDUCTIONS
+        if r == name then return true
+
+    false
+
+private ints(n: usize) -> Buf[Ty]
+    var out: Buf[Ty] = buf()
+
+    for _ in 0..<n
+        out.push(INTEGER)
+
+    out
+
+private reads(n: usize) -> Buf[Mode]
+    var out: Buf[Mode] = buf()
+
+    for _ in 0..<n
+        out.push(Read)
+
+    out
+
+// An integer written as a number, `3` or `-1`.
+private int_written(e: Expr) -> Option[i64] = *e.kind match
+    IntLit(v) -> Some(v)
+    Unary(op, x) -> if op == "-" then (*x.kind match
+        IntLit(v) -> Some(-v)
+        _ -> None) else None
+    _ -> None
+
+private fn_ret(t: Ty) -> Ty = t match
+    Fn(sig) -> sig.ret
+    _ -> Error
+
+impl Elab
+    array_builtin(*self, span: Span, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        var pos: Buf[Expr] = buf()
+        var dim: Option[Expr] = None
+
+        for a in args
+            *a.kind match
+                NamedArg(n, v) ->
+                    if n == "dim" && is_reduction(name) && name != "dot" && dim.is_none()
+                        dim = Some(v)
+                    else
+                        self.fail(a.span, if is_reduction(name) && name != "dot" then s"`${name}` takes one named argument, `dim =`" else s"`${name}` takes no named arguments")
+                        return self.invalid(span)
+                _ -> pos.push(a)
+
+        if is_reduction(name) then return self.reduction(span, name, pos, dim)
+        if name == "origin" || name == "rebase" then return self.not_yet(span, s"the view function `${name}`")
+        if name == "zeros" || name == "ones" || name == "fill" || name == "identity" then return self.constructor(span, name, pos, want)
+        if name == "map" || name == "filter" || name == "flatMap" || name == "reduce" then return self.higher_order(span, name, pos)
+        if name == "assert_approx" || name == "assert_traps" then return self.array_assert(span, name, pos)
+
+        if name == "linspace"
+            if pos.len() != 3 then return self.arity(span, name, "a first value, a last value and a count")
+
+            var ends: Buf[Expr] = buf()
+
+            ends.push(pos[0])
+            ends.push(pos[1])
+
+            var out = self.unified(span, name, ends)
+            val ty = if is_int(out[0].ty) then REAL else out[0].ty
+
+            if !is_real(ty) && !is_error(ty) then self.fail(span, s"`linspace` spaces reals; these are ${show_ty(ty)}")
+
+            for k in 0..<2
+                out.set(k, promote(out[k], ty))
+
+            out.push(self.check(pos[2], INTEGER, "the count"))
+            return texpr(span, Ty.Array(ty, dynamic_axes(1)), TBuiltin(name, out))
+
+        if name == "read_bytes"
+            if pos.len() != 1 then return self.arity(span, name, "a path")
+
+            var out: Buf[TExpr] = buf()
+
+            out.push(self.check(pos[0], Ty.Str, "the path"))
+            return texpr(span, Ty.Array(Int(8, false), dynamic_axes(1)), TBuiltin(name, out))
+
+        if name == "write_bytes"
+            if pos.len() != 2 then return self.arity(span, name, "a path and the bytes, `[uint8]`")
+
+            var out: Buf[TExpr] = buf()
+
+            out.push(self.check(pos[0], Ty.Str, "the path"))
+            out.push(self.check(pos[1], Ty.Array(Int(8, false), dynamic_axes(1)), "the bytes"))
+            return texpr(span, Void, TBuiltin(name, out))
+
+        // The rest take an array first.
+        if pos.len() == 0 then return self.arity(span, name, "an array")
+
+        val a = self.array_arg(name, pos[0])
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        val e = elem_of(a.ty)
+        val r = rank_of(a.ty)
+        val axes = axes_of(a.ty)
+        var out: Buf[TExpr] = buf()
+
+        out.push(a)
+
+        if name == "to_integers" || name == "to_bytes"
+            if pos.len() != 1 then return self.arity(span, name, "one array")
+
+            if !is_int(e)
+                self.fail(pos[0].span, s"`${name}` converts integers; this is ${show_ty(a.ty)}")
+                return self.invalid(span)
+
+            return self.elemental_conversion(span, name, if name == "to_bytes" then Int(8, false) else INTEGER, a)
+
+        if name == "extent" || name == "reverse"
+            if pos.len() != 2 && !(name == "reverse" && pos.len() == 1) then return self.arity(span, name, if name == "extent" then "an array and an axis" else "an array and an optional axis")
+
+            if pos.len() == 2 then out.push(self.axis(pos[1], r, "an axis"))
+
+            return texpr(span, if name == "extent" then INTEGER else a.ty, TBuiltin(name, out))
+
+        if name == "reshape"
+            if pos.len() < 2 then return self.arity(span, name, "an array and its new extents, `reshape(a, (2, 3))`")
+
+            var dims: Buf[Expr] = buf()
+
+            for k in 1..<pos.len()
+                dims.push(pos[k])
+
+            val shape = self.extents_of(span, dims)
+
+            out.extend(shape.view())
+            return texpr(span, Ty.Array(e, dynamic_axes(self.shape_rank(shape))), TBuiltin(name, out))
+
+        if name == "permute" then return self.permute(span, a, pos)
+
+        if pos.len() != 1 then return self.arity(span, name, "one array")
+
+        if name == "rank" || name == "size" || name == "length" then return texpr(span, INTEGER, TBuiltin(name, out))
+        if name == "extents" then return texpr(span, Ty.Array(INTEGER, self.fixed_axis(r)), TBuiltin(name, out))
+        if name == "flatten" then return texpr(span, Ty.Array(e, dynamic_axes(1)), TBuiltin(name, out))
+        if name == "shape" then return texpr(span, if r == 1 then INTEGER else Ty.Tuple(ints(r)), TBuiltin(name, out))
+
+        if name == "enumerate"
+            var pair: Buf[Ty] = buf()
+
+            pair.push(INTEGER)
+            pair.push(e)
+            return texpr(span, Ty.Array(Ty.Tuple(pair), dynamic_axes(1)), TBuiltin(name, out))
+
+        if name == "diag"
+            if r == 1 then return texpr(span, Ty.Array(e, dynamic_axes(2)), TBuiltin(name, out))
+            if r == 2 then return texpr(span, Ty.Array(e, dynamic_axes(1)), TBuiltin(name, out))
+
+            self.fail(pos[0].span, s"`diag` takes a vector or a matrix; this has rank ${r}")
+            return self.invalid(span)
+
+        // `rows`, `cols`, `transpose`: matrices only.
+        if r != 2
+            self.fail(pos[0].span, s"`${name}` takes a matrix (rank 2); this has rank ${r}")
+            return self.invalid(span)
+
+        if name == "transpose"
+            var swapped: Buf[Extent] = buf()
+
+            swapped.push(axes[1])
+            swapped.push(axes[0])
+            return texpr(span, Ty.Array(e, swapped), TBuiltin(name, out))
+
+        texpr(span, INTEGER, TBuiltin(name, out))
+    end array_builtin
+
+    // An argument that must be an array.
+    array_arg(*self, name: string, e: Expr) -> TExpr
+        val v = self.infer(e)
+
+        if is_array(v.ty) || is_error(v.ty) then return v
+
+        self.fail(e.span, s"`${name}` takes an array; this is ${show_ty(v.ty)}")
+        self.invalid(e.span)
+
+    // An axis number of an array of rank `rank`, checked at compile time where it is written as one.
+    axis(*self, e: Expr, rank: usize, what: string) -> TExpr
+        int_written(e) match
+            Some(k) -> if k < 1 || k > i64(rank) then self.fail(e.span, s"there is no axis ${k}: this array has rank ${rank}")
+            None -> ()
+
+        self.check(e, INTEGER, what)
+
+    private fixed_axis(self, n: usize) -> Buf[Extent]
+        var out: Buf[Extent] = buf()
+
+        out.push(Fixed(u64(n)))
+        out
+
+    // The extents of a shape argument: integers, one per axis, or a single tuple of them written
+    // out (`(2, 3)`) or as a value (`shape(m)`).
+    extents_of(*self, span: Span, dims: Buf[Expr]) -> Buf[TExpr]
+        var out: Buf[TExpr] = buf()
+
+        if dims.len() == 1
+            *dims[0].kind match
+                ExprKind.Tuple(elems) ->
+                    for x in elems
+                        out.push(self.check(x, INTEGER, "an extent"))
+
+                    return out
+                _ -> ()
+
+            val v = self.elab(dims[0], Some(INTEGER))
+
+            v.ty match
+                Ty.Tuple(ts) ->
+                    for t in ts
+                        if !is_int(t) then self.fail(dims[0].span, s"a shape is a tuple of integers; this is ${show_ty(v.ty)}")
+                _ -> out.push(self.coerce(v, INTEGER, "an extent"))
+
+            if out.len() == 0 then out.push(v)
+
+            return out
+
+        for x in dims
+            out.push(self.check(x, INTEGER, "an extent"))
+
+        out
+    end extents_of
+
+    // The rank a shape argument gives: one per extent, or one per field of a tuple value.
+    private shape_rank(self, shape: Buf[TExpr]) -> usize
+        if shape.len() == 1
+            shape[0].ty match
+                Ty.Tuple(ts) -> return ts.len()
+                _ -> ()
+
+        shape.len()
+
+    // `zeros(shape)`, `ones(shape)`, `fill(shape, v)`, `identity(n)` (DESIGN §4.2).
+    constructor(*self, span: Span, name: string, pos: Buf[Expr], want: Option[Ty]) -> TExpr
+        val wanted = want match
+            Some(Array(e, _)) -> if is_numeric(*e) then Some(*e) else None
+            _ -> None
+
+        if name == "fill"
+            if pos.len() != 2 then return self.arity(span, name, "a shape and a value")
+        elif pos.len() != 1
+            return self.arity(span, name, if name == "identity" then "an extent" else "a shape: an extent, or a tuple of them")
+
+        var dims: Buf[Expr] = buf()
+
+        dims.push(pos[0])
+
+        var out = self.extents_of(span, dims)
+        val rank = if name == "identity" then 2 else self.shape_rank(out)
+
+        if name == "identity" && out.len() != 1
+            self.fail(pos[0].span, "`identity` takes one extent: `identity(3)`")
+            return self.invalid(span)
+
+        var elem = wanted.unwrap_or(INTEGER)
+
+        if name == "fill"
+            val v = self.elab(pos[1], wanted)
+
+            if is_void(v.ty) then self.fail(pos[1].span, "an array cannot be filled with nothing: this is void")
+            if is_array(v.ty) then self.fail(pos[1].span, s"an array element is not an array; this is ${show_ty(v.ty)}")
+
+            elem = v.ty
+            out.push(v)
+
+        texpr(span, Ty.Array(elem, dynamic_axes(rank)), TBuiltin(name, out))
+    end constructor
+
+    // `permute(a, (p1, ..., pR))`: result axis `n` is source axis `p_n`; the permutation is written
+    // out and checked (DESIGN §4.3).
+    permute(*self, span: Span, a: TExpr, pos: Buf[Expr]) -> TExpr
+        if pos.len() != 2 then return self.arity(span, "permute", "an array and its axes in their new order, `permute(a, (3, 1, 2))`")
+
+        val r = rank_of(a.ty)
+
+        val elems = *pos[1].kind match
+            ExprKind.Tuple(es) -> es
+            _ ->
+                self.fail(pos[1].span, "the new order of the axes is written out: `permute(a, (3, 1, 2))`")
+                return self.invalid(span)
+
+        if elems.len() != r
+            self.fail(pos[1].span, s"this array has rank ${r}, and ${elems.len()} axes are given")
+            return self.invalid(span)
+
+        var out: Buf[TExpr] = buf()
+        var axes: Buf[Extent] = buf()
+        var seen: Buf[i64] = buf()
+        val source = axes_of(a.ty)
+
+        out.push(a)
+
+        for x in elems
+            out.push(self.axis(x, r, "an axis"))
+
+            int_written(x) match
+                Some(k) ->
+                    for s in seen
+                        if s == k then self.fail(x.span, s"axis ${k} is given twice")
+
+                    seen.push(k)
+                    axes.push(if k >= 1 && k <= i64(r) then source[usize(k - 1)] else Dynamic)
+                None -> axes.push(Dynamic)
+
+        texpr(span, Ty.Array(elem_of(a.ty), axes), TBuiltin("permute", out))
+    end permute
+
+    // -- reductions -------------------------------------------------------------------------------
+
+    // A whole-array reduction, or one along `dim` to rank R − 1 (DESIGN §7.4).
+    reduction(*self, span: Span, name: string, pos: Buf[Expr], dim: Option[Expr]) -> TExpr
+        if name == "dot"
+            if pos.len() != 2 then return self.arity(span, name, "two vectors")
+
+            val out = self.unified(span, name, pos)
+
+            for k in 0..<2
+                if rank_of(out[k].ty) != 1 && !is_error(out[k].ty)
+                    self.fail(pos[k].span, s"`dot` takes two vectors (rank 1); this is ${show_ty(out[k].ty)}")
+                    return self.invalid(span)
+
+            val ty = elem_of(out[0].ty)
+
+            if !is_numeric(ty) && !is_error(ty)
+                self.fail(span, s"`dot` needs numbers; these are ${show_ty(out[0].ty)}")
+                return self.invalid(span)
+
+            if self.shape_meet(span, "`dot`", axes_of(out[0].ty), axes_of(out[1].ty)).is_none() then return self.invalid(span)
+
+            return texpr(span, ty, TArray(TReduction(name, out, None)))
+
+        if pos.len() != 1 then return self.arity(span, name, "one array, and optionally `dim =` the axis to reduce along")
+
+        var a = self.array_arg(name, pos[0])
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        val e = elem_of(a.ty)
+        val r = rank_of(a.ty)
+        var need = ""
+        var per = e
+
+        if name == "sum" || name == "product"
+            if !is_numeric(e) then need = "numbers"
+        elif name == "minval" || name == "maxval"
+            if !is_ordered(e) then need = "integers or reals"
+        elif name == "minloc" || name == "maxloc"
+            if !is_ordered(e) then need = "integers or reals"
+
+            per = INTEGER
+        elif name == "any" || name == "all"
+            if !ty_eq(e, Bool) then need = "bools"
+        elif name == "count"
+            if !ty_eq(e, Bool) then need = "bools"
+
+            per = INTEGER
+        else
+            // `norm2`: a real or complex array, an integer one widened to `real64`.
+            if is_int(e)
+                a = promote(a, with_elem(a.ty, REAL))
+                per = REAL
+            elif is_complex(e)
+                per = Real(bits_of(e))
+            elif !is_real(e)
+                need = "numbers"
+
+        if need.len > 0
+            self.fail(pos[0].span, s"`${name}` takes an array of ${need}; this is ${show_ty(a.ty)}")
+            return self.invalid(span)
+
+        var args: Buf[TExpr] = buf()
+
+        args.push(a)
+
+        dim match
+            None ->
+                val ty = if (name == "minloc" || name == "maxloc") && r >= 2 then Ty.Tuple(ints(r)) else per
+
+                texpr(span, ty, TArray(TReduction(name, args, None)))
+            Some(d) ->
+                val k = self.axis(d, r, "`dim`")
+                var kept: Buf[Extent] = buf()
+                val written = int_written(d)
+                val axes = axes_of(a.ty)
+
+                for j in 0..<r
+                    written match
+                        Some(n) -> if i64(j + 1) != n then kept.push(axes[j])
+                        None -> if j > 0 then kept.push(Dynamic)
+
+                val ty = if r == 1 then per else Ty.Array(per, kept)
+
+                texpr(span, ty, TArray(TReduction(name, args, Some(k))))
+    end reduction
+
+    // -- higher-order functions -------------------------------------------------------------------
+
+    // `map(a, f)`, `filter(a, p)`, `flatMap(a, f)`, `reduce(a, init, f)`.
+    higher_order(*self, span: Span, name: string, pos: Buf[Expr]) -> TExpr
+        if pos.len() != (if name == "reduce" then 3 else 2) then return self.arity(span, name, if name == "reduce" then "an array, a first value and a function" else "an array and a function")
+
+        val a = self.array_arg(name, pos[0])
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        val e = elem_of(a.ty)
+        var out: Buf[TExpr] = buf()
+
+        out.push(a)
+
+        if name == "reduce"
+            val class = self.literal_class(pos[1])
+            val init = if class != NOT_LITERAL then self.elab(pos[1], Some(adoption(class, e).unwrap_or(default_of(class)))) else self.infer(pos[1])
+            var ptys: Buf[Ty] = buf()
+
+            ptys.push(init.ty)
+            ptys.push(e)
+
+            val f = self.fn_arg(pos[2], ptys, "the function given to `reduce`")
+            val ret = fn_ret(f.ty)
+
+            if !promotes(ret, init.ty)
+                self.fail(pos[2].span, s"the function given to `reduce` returns ${show_ty(ret)}, and the accumulator is ${show_ty(init.ty)}")
+
+            out.push(init)
+            out.push(f)
+            return texpr(span, init.ty, TBuiltin(name, out))
+
+        var ptys: Buf[Ty] = buf()
+
+        ptys.push(e)
+
+        val f = self.fn_arg(pos[1], ptys, s"the function given to `${name}`")
+        val ret = fn_ret(f.ty)
+
+        out.push(f)
+
+        if is_error(ret) then return texpr(span, Error, TBuiltin(name, out))
+
+        if name == "map"
+            if is_void(ret) || is_array(ret)
+                self.fail(pos[1].span, s"the function given to `map` gives one element for each, and this one returns ${show_ty(ret)}")
+                return self.invalid(span)
+
+            return texpr(span, Ty.Array(ret, axes_of(a.ty)), TBuiltin(name, out))
+
+        if name == "filter"
+            if !ty_eq(ret, Bool)
+                self.fail(pos[1].span, s"the predicate given to `filter` returns bool, and this one returns ${show_ty(ret)}")
+                return self.invalid(span)
+
+            return texpr(span, Ty.Array(e, dynamic_axes(1)), TBuiltin(name, out))
+
+        if rank_of(ret) != 1
+            self.fail(pos[1].span, s"the function given to `flatMap` returns a vector (rank 1) for each element, and this one returns ${show_ty(ret)}")
+            return self.invalid(span)
+
+        texpr(span, Ty.Array(elem_of(ret), dynamic_axes(1)), TBuiltin(name, out))
+    end higher_order
+
+    // A function argument of a prelude function whose parameters are `ptys`: a lambda that leaves a
+    // parameter's type out takes it from there, and any function must accept them.
+    fn_arg(*self, e: Expr, ptys: Buf[Ty], what: string) -> TExpr
+        val f = *e.kind match
+            Lambda(params, body) ->
+                if params.len() != ptys.len()
+                    self.fail(e.span, s"${what} takes ${ptys.len()} parameter${if ptys.len() == 1 then "" else "s"}; this one has ${params.len()}")
+                    return self.invalid(e.span)
+
+                var names: Buf[string] = buf()
+                var tys: Buf[Ty] = buf()
+
+                for k in 0..<params.len()
+                    names.push(params[k].name)
+                    tys.push(params[k].typ match
+                        Some(t) -> self.resolve_type(t)
+                        None -> ptys[k])
+
+                val lid = self.reserve_lambda(e.span)
+
+                // Written straight as the argument, it is borrowed for the call and does not escape.
+                self.agg.passed.push(lid)
+                texpr(e.span, self.lambda_body(lid, "", e.span, names, tys, reads(names.len()), None, body), TLambdaRef(lid))
+            _ -> self.elab(e, Some(fn_type(ptys, reads(ptys.len()), Error)))
+
+        f.ty match
+            Fn(sig) ->
+                var fits = sig.params.len() == ptys.len()
+
+                if fits
+                    for k in 0..<ptys.len()
+                        if !promotes(ptys[k], sig.params[k]) || sig.modes[k] == Inout then fits = false
+
+                if !fits
+                    self.fail(e.span, s"${what} is called with (${show_tys_of(ptys)}); this is ${show_ty(f.ty)}")
+                    return self.invalid(e.span)
+            Error -> ()
+            _ ->
+                self.fail(e.span, s"${what} must be a function; this is ${show_ty(f.ty)}")
+                return self.invalid(e.span)
+
+        f
+    end fn_arg
+
+    // -- assertions -------------------------------------------------------------------------------
+
+    // `assert_approx(a, b, tol)` on two scalars or two arrays of one rank, element by element, an
+    // integer widened to `real64`; `assert_traps(f, message)` on a function of no parameters.
+    array_assert(*self, span: Span, name: string, pos: Buf[Expr]) -> TExpr
+        if name == "assert_traps"
+            if pos.len() < 1 || pos.len() > 2 then return self.arity(span, name, "a function of no parameters and an optional message")
+
+            var out: Buf[TExpr] = buf()
+
+            out.push(self.fn_arg(pos[0], buf(), "the function given to `assert_traps`"))
+            if pos.len() == 2 then out.push(self.check(pos[1], Ty.Str, "the message"))
+
+            return texpr(span, Void, TBuiltin(name, out))
+
+        if pos.len() != 3 then return self.arity(span, name, "two values and a tolerance")
+
+        var pair: Buf[Expr] = buf()
+
+        pair.push(pos[0])
+        pair.push(pos[1])
+
+        var out = self.unified(span, name, pair)
+        val e = elem_of(out[0].ty)
+
+        if rank_of(out[0].ty) != rank_of(out[1].ty) && !has_error(out[0].ty) && !has_error(out[1].ty)
+            self.fail(span, s"`assert_approx` compares values of one rank; these are ${show_ty(out[0].ty)} and ${show_ty(out[1].ty)}")
+            return self.invalid(span)
+
+        if !is_numeric(e) && !is_error(e)
+            self.fail(span, s"`assert_approx` compares numbers; these are ${show_ty(out[0].ty)}")
+            return self.invalid(span)
+
+        if is_int(e)
+            for k in 0..<2
+                out.set(k, promote(out[k], with_elem(out[k].ty, REAL)))
+
+        out.push(self.check(pos[2], REAL, "the tolerance"))
+        texpr(span, Void, TBuiltin(name, out))
+    end array_assert
+end Elab
+
+private show_tys_of(ts: Buf[Ty]) -> string
+    var out = ""
+
+    for k in 0..<ts.len()
+        if k > 0 then out = out + ", "
+
+        out = out + show_ty(ts[k])
+
+    out

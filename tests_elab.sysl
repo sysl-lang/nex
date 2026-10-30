@@ -271,6 +271,6 @@ elab_type_names()
 
 @test("what the elaborator does not handle yet is said to be that")
 elab_not_yet()
-    assert_eq(refused("def main() = print([1, 2])\n"), "error: an array literal is not elaborated yet @1:20")
+    assert_eq(refused("def main() = print(origin([1, 2], 0))\n"), "error: the view function `origin` is not elaborated yet @1:20")
     assert_eq(refused("struct P[T]\n  x: T\n" + MAIN), "error: a generic struct is not elaborated yet @1:1")
     assert_eq(refused("def id[T](x: T) = x\n" + MAIN), "error: a generic function is not elaborated yet @1:1")

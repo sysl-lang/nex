@@ -224,6 +224,7 @@ show_texpr(p: TProgram, e: TExpr) -> string
 
             tform(typed("match", e.ty), items)
         TDestructure(kind, pat, init) -> s"(${bind_word(kind)} ${show_bind(p, pat)} ${show_texpr(p, init)})"
+        TArray(op) -> show_tarr(p, e.ty, *op)
         TInvalid -> "?"
 end show_texpr
 
@@ -283,3 +284,68 @@ private show_pat(p: TProgram, pat: TPat) -> string = pat match
 private texprs_into(p: TProgram, out: *Buf[string], es: Buf[TExpr])
     for e in es
         out.push(show_texpr(p, e))
+
+// An array node. An element-wise operation prints with a dot before its operator or function, as
+// Julia writes it: `(.+:[real64] a#0 b#1)`, `(.sqrt:[real64] a#0)`. A subscript prints as its index,
+// `:`, or its window, `(2 .. _ by -1)` with `_` for an open bound; `end` prints as the axis it
+// stands for, `(end 1)`.
+private show_tarr(p: TProgram, ty: Ty, op: TArr) -> string
+    var items: Buf[string] = buf()
+
+    op match
+        TArrayLit(elems) ->
+            texprs_into(p, &items, elems)
+            tform(typed("array", ty), items)
+        TRangeValue(lo, hi, inclusive, step) ->
+            var range = s"${show_texpr(p, lo)} ${if inclusive then ".." else "..<"} ${show_texpr(p, hi)}"
+
+            step match
+                Some(s) -> range = range + " by " + show_texpr(p, s)
+                None -> ()
+
+            s"(${typed("range", ty)} ${range})"
+        TIndex(target, subs) ->
+            items.push(show_texpr(p, target))
+
+            for s in subs
+                items.push(s match
+                    TSubAt(x) -> show_texpr(p, x)
+                    TSubAll -> ":"
+                    TSubWindow(lo, hi, inclusive, stride) ->
+                        var w = s"(${show_bound(p, lo)} ${if inclusive then ".." else "..<"} ${show_bound(p, hi)}"
+
+                        stride match
+                            Some(k) -> w = w + " by " + show_texpr(p, k)
+                            None -> ()
+
+                        w + ")")
+
+            tform(typed("index", ty), items)
+        TEnd(axis) -> s"(end ${axis})"
+        TElementwise(o, l, r) -> s"(${typed("." + o, ty)} ${show_texpr(p, l)} ${show_texpr(p, r)})"
+        TElementwiseUnary(o, x) -> s"(${typed("." + o, ty)} ${show_texpr(p, x)})"
+        TMatMul(l, r) -> s"(${typed("@", ty)} ${show_texpr(p, l)} ${show_texpr(p, r)})"
+        TElemental(name, args) ->
+            texprs_into(p, &items, args)
+            tform(typed("." + name, ty), items)
+        TElementalConvert(v, traps) -> s"(${typed(if traps then ".convert-trap" else ".convert", ty)} ${show_texpr(p, v)})"
+        TElementalCall(f, args) ->
+            items.push(show_texpr(p, f))
+            texprs_into(p, &items, args)
+            tform(typed(".call", ty), items)
+        TBroadcast(v) -> s"(${typed("broadcast", ty)} ${show_texpr(p, v)})"
+        TShapeCheck(v) -> s"(${typed("shape-check", ty)} ${show_texpr(p, v)})"
+        TReduction(name, args, dim) ->
+            texprs_into(p, &items, args)
+
+            dim match
+                Some(d) -> items.push(s"(dim ${show_texpr(p, d)})")
+                None -> ()
+
+            tform(typed(name, ty), items)
+        TForEach(id, v, a, body) -> s"(for ${loop_name(p, id)} ${local_name(p, v)}:${show_ty(p.locals[v].ty)} (in ${show_texpr(p, a)}) ${show_texpr(p, body)})"
+end show_tarr
+
+private show_bound(p: TProgram, b: Option[TExpr]) -> string = b match
+    Some(x) -> show_texpr(p, x)
+    None -> "_"

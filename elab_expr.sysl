@@ -37,8 +37,10 @@ private is_ordering(op: string) -> bool = op == "<" || op == "<=" || op == ">" |
 private max_class(a: int, b: int) -> int = if a > b then a else b
 
 // The type a literal of `class` takes beside, or in the place of, a value of type `other`; `None`
-// where it cannot take that type and keeps its own.
-adoption(class: int, other: Ty) -> Option[Ty]
+// where it cannot take that type and keeps its own. Beside an array it takes the element type.
+adoption(class: int, of: Ty) -> Option[Ty]
+    val other = elem_of(of)
+
     if class == INT_LITERAL && is_numeric(other) then return Some(other)
     if class == REAL_LITERAL && (is_real(other) || is_complex(other)) then return Some(other)
 
@@ -99,6 +101,7 @@ impl Elab
 
     // `v` where a `ty` is required: as it is, widened along the lattice, or refused.
     coerce(*self, v: TExpr, ty: Ty, what: string) -> TExpr
+        if (is_array(v.ty) || is_array(ty)) && !is_wild(v.ty) && !has_error(ty) then return self.coerce_array(v, ty, what)
         if promotes(v.ty, ty) then return promote(v, ty)
 
         var message = s"${what} must be ${show_ty(ty)}, but this is ${show_ty(v.ty)}"
@@ -216,10 +219,10 @@ impl Elab
             Assign(op, target, value) -> self.assign(span, op, target, value)
             Block(items, result) -> self.block(span, items, result, want)
             Measured(_, _) -> self.not_yet(span, "a value with a unit of measure")
-            Range(_, _, _, _) -> self.not_yet(span, "a range as a value (an integer array)")
-            ExprKind.Array(_) -> self.not_yet(span, "an array literal")
+            Range(lo, hi, inclusive, stride) -> self.range_value(span, lo, hi, inclusive, stride, want)
+            ExprKind.Array(elems) -> self.array_literal(span, elems, want)
             ExprKind.Tuple(elems) -> self.tuple(span, elems, want)
-            Index(_, _) -> self.not_yet(span, "indexing")
+            Index(target, indices) -> self.index(span, self.infer(target), indices)
             TupleField(receiver, index) -> self.tuple_field(span, receiver, index)
             ParallelFor(_, _, _) -> self.not_yet(span, "a `parallel for`")
             Parallel(_) -> self.not_yet(span, "a `parallel` expression")
@@ -230,9 +233,7 @@ impl Elab
             AxisAll ->
                 self.fail(span, "`:` stands only in an index list")
                 self.invalid(span)
-            End ->
-                self.fail(span, "`end` as an index stands only in an index list")
-                self.invalid(span)
+            End -> self.end_index(span)
     end elab
 
     not_yet(*self, span: Span, what: string) -> TExpr
@@ -353,13 +354,15 @@ impl Elab
 
     binary(*self, span: Span, op: string, l: Expr, r: Expr, want: Option[Ty]) -> TExpr
         if op == "and" || op == "or"
-            val a = self.check(l, Bool, s"an operand of `${op}`")
-            val b = self.check(r, Bool, s"an operand of `${op}`")
+            val x = self.infer(l)
+            val y = self.infer(r)
 
-            return texpr(span, Bool, TLogical(op, a, b))
+            if is_array(x.ty) || is_array(y.ty) then return self.elementwise_logical(span, op, x, y)
+
+            return texpr(span, Bool, TLogical(op, self.coerce(x, Bool, s"an operand of `${op}`"), self.coerce(y, Bool, s"an operand of `${op}`")))
 
         if op == "^" then return self.power(span, l, r, want)
-        if op == "@" then return self.not_yet(span, "the matrix product `@`")
+        if op == "@" then return self.matmul(span, l, r)
 
         val o = self.operands(l, r, want)
 
@@ -382,7 +385,7 @@ impl Elab
     // An arithmetic or comparison operator on two elaborated operands.
     apply(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
         if is_error(a.ty) || is_error(b.ty) then return texpr(span, Error, TBinary(op, a, b))
-        if is_array(a.ty) || is_array(b.ty) then return self.not_yet(span, "an element-wise operation on arrays")
+        if is_array(a.ty) || is_array(b.ty) then return self.elementwise(span, op, a, b)
 
         if is_comparison(op)
             if is_numeric(a.ty) && is_numeric(b.ty)
@@ -445,6 +448,13 @@ impl Elab
             base = self.infer(l)
             exp = self.infer(r)
 
+        if is_array(base.ty) || is_array(exp.ty) then return self.elementwise(span, "^", base, exp)
+
+        self.power_of(span, base, exp)
+    end power
+
+    // `^` on two elaborated scalar operands.
+    power_of(*self, span: Span, base: TExpr, exp: TExpr) -> TExpr
         if is_error(base.ty) || is_error(exp.ty) then return texpr(span, Error, TBinary("^", base, exp))
 
         if !is_numeric(base.ty) || !is_numeric(exp.ty)
@@ -456,10 +466,15 @@ impl Elab
         val c = self.common_of(span, "^", base.ty, exp.ty).unwrap_or(Error)
 
         texpr(span, c, TBinary("^", promote(base, c), promote(exp, c)))
-    end power
+    end power_of
 
     unary(*self, span: Span, op: string, x: Expr, want: Option[Ty]) -> TExpr
-        if op == "not" then return texpr(span, Bool, TUnary(op, self.check(x, Bool, "the operand of `not`")))
+        if op == "not"
+            val v = self.infer(x)
+
+            if is_array(v.ty) then return self.elementwise_unary(span, op, v)
+
+            return texpr(span, Bool, TUnary(op, self.coerce(v, Bool, "the operand of `not`")))
 
         // A minus written on a number is part of the literal, so `-128` fits an `int8`.
         *x.kind match
@@ -468,6 +483,8 @@ impl Elab
             _ -> ()
 
         val v = self.elab(x, want)
+
+        if is_array(v.ty) then return self.elementwise_unary(span, op, v)
 
         if !is_numeric(v.ty) && !is_error(v.ty)
             self.fail(span, s"`-` needs a number; found ${show_ty(v.ty)}")
@@ -568,6 +585,10 @@ impl Elab
                 Some(t) -> return t
                 None -> ()
 
+        array_common(a, b) match
+            Some(t) -> return t
+            None -> ()
+
         if statement then return Void
 
         self.fail(span, s"the branches of this `if` differ: ${show_ty(a)} and ${show_ty(b)}")
@@ -598,7 +619,7 @@ impl Elab
 
         val (lo, hi, inclusive, stride) = *iterable.kind match
             Range(Some(lo), Some(hi), inclusive, stride) -> (lo, hi, inclusive, stride)
-            _ -> return self.not_yet(iterable.span, "a `for` over an array")
+            _ -> return self.for_each(span, label, name, pat.span, iterable, body)
 
         val bounds = self.operands(lo, hi, None)
         var ty = self.common_of(iterable.span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
@@ -853,7 +874,7 @@ impl Elab
             Name(n) -> n
             Field(receiver, name) -> return self.select_field(span, self.place(receiver), name)
             TupleField(receiver, index) -> return self.select_element(span, self.place(receiver), index)
-            Index(_, _) -> return self.not_yet(span, "assignment to an element")
+            Index(t, indices) -> return self.index(span, self.place(t), indices)
             _ ->
                 self.fail(span, "only a variable, an element or a field can be assigned")
                 return self.invalid(span)
@@ -894,6 +915,7 @@ impl Elab
 
         val p = self.place(target)
 
+        if is_array(p.ty) then return self.array_assign(span, op, target, p, value)
         if op == "=" then return texpr(span, Void, TAssign(op, p, self.check(value, p.ty, "the value")))
 
         // `x op= v` computes `x op v` and stores it back, which must not narrow `x` (DESIGN §2.2).
@@ -964,7 +986,7 @@ pattern_names(p: Pattern) -> Buf[string]
 end pattern_names
 
 // Where the value of `v` is written: a block's is its last line's.
-private value_span(v: TExpr) -> Span = *v.kind match
+value_span(v: TExpr) -> Span = *v.kind match
     TBlock(_, result) -> value_span(result)
     _ -> v.span
 
