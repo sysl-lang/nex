@@ -63,9 +63,11 @@ struct TypeParam
     name: string
     constraint: Option[string]
 
+// `name: type [= default]`, a struct's field or a variant's.
 struct Field
     name: string
     typ: Type
+    default: Option[Expr]
 
 // One variant of an `enum`: bare (`Diverged`) or with fields (`Converged(x: real)`).
 struct Variant

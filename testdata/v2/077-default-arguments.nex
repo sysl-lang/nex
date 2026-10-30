@@ -1,0 +1,34 @@
+// Default arguments and default field values: each one left out is filled in at the call and
+// evaluated there, afresh every time.
+
+var calls = 0
+
+def next_id(): integer =
+  calls += 1
+  calls
+
+struct Style
+  segments: integer = 64
+  centred: bool = false
+  id: integer = next_id()
+
+def cylinder(r: real<mm>, h: real<mm> = 10.0<mm>, segments: integer = 64, style: Style = Style()) =
+  print(s"cylinder r=${r} h=${h} segments=${segments} style=${style.segments} ${style.centred} #${style.id}")
+
+def scaled(x: real, f: (real) -> real = v -> v * 2.0, offset: real = base()): real = f(x) + offset
+
+def base(): real = 0.5
+
+def show[T](x: T, label: string = "value") = print(s"${label}: ${x}")
+
+def main() =
+  cylinder(5.0<mm>)
+  cylinder(5.0<mm>, segments = 8)
+  cylinder(h = 2.0<cm>, r = 1.0<mm>)
+  cylinder(1.0<mm>, style = Style(centred = true))
+  print(scaled(3.0))
+  print(scaled(3.0, v -> v + 1.0))
+  print(scaled(3.0, offset = 0.0))
+  show(42)
+  show(2.5, "ratio")
+  print(calls)

@@ -77,8 +77,34 @@ struct Aggregates
     passing: bool
     // The lambda each captured `var` array has moved into.
     owners: Buf[Capture]
+    // Each struct's field defaults, by the struct's name, elaborated at its first construction.
+    defaults: Buf[FieldDefaults]
 
-empty_aggregates() -> Aggregates = Aggregates(buf(), buf(), buf(), buf(), buf(), false, buf())
+// The elaborated defaults of a struct's fields, one per field, `None` where it has none.
+struct FieldDefaults
+    owner: string
+    values: Buf[Option[TExpr]]
+
+empty_aggregates() -> Aggregates = Aggregates(buf(), buf(), buf(), buf(), buf(), false, buf(), buf())
+
+// Whether the written type `t` names one of the type parameters `tps`.
+private mentions_param(t: Type, tps: Buf[TypeParam]) -> bool = *t.kind match
+    Named(n) ->
+        for p in tps
+            if p.name == n then return true
+
+        false
+    Applied(_, args) -> any_mentions(args, tps)
+    TypeKind.Array(elem, _) -> mentions_param(elem, tps)
+    TypeKind.Tuple(elems) -> any_mentions(elems, tps)
+    Func(params, _, ret) -> mentions_param(ret, tps) || any_mentions(params, tps)
+    Measured(base, _) -> mentions_param(base, tps)
+
+private any_mentions(ts: Buf[Type], tps: Buf[TypeParam]) -> bool
+    for t in ts
+        if mentions_param(t, tps) then return true
+
+    false
 
 impl Elab
     // -- declarations -----------------------------------------------------------------------------
@@ -167,6 +193,24 @@ impl Elab
                 variants.push(VariantInfo(v.name, self.resolve_fields(e.decl.span, v.name, v.fields)))
 
             self.agg.enums.set(k, EnumSrc(e.decl, e.name, false, e.src, variants))
+
+        for s in self.agg.structs
+            if !s.generic then continue
+
+            val tps = *s.decl.kind match
+                Struct(_, tps, _) -> tps
+                _ -> buf()
+
+            for f in s.src
+                if f.default.is_some() && mentions_param(f.typ, tps)
+                    self.fail(f.default.unwrap().span, s"the field `${f.name}` has no default: its type depends on a type parameter, and a default must be of its type in every instance")
+
+        for e in self.agg.enums
+            for v in e.src
+                for f in v.fields
+                    f.default match
+                        Some(d) -> self.fail(d.span, s"a variant's field has no default: `${v.name}` is built and matched with all of its fields")
+                        None -> ()
 
         for s in self.agg.structs
             if !s.generic then self.check_contains_self(s.decl.span, s.name)
@@ -492,7 +536,7 @@ impl Elab
 
                 if s.generic then return Some(self.generic_construct(span, at, n, args, want))
 
-                return Some(texpr(span, Nominal(n, buf()), TNew(self.field_args(span, n, s.fields, args))))
+                return Some(texpr(span, Nominal(n, buf()), TNew(self.field_args(span, n, s.fields, self.struct_defaults(k), args))))
             None -> ()
 
         val v = self.find_variant(n) match
@@ -509,11 +553,49 @@ impl Elab
             self.fail(at, s"`${n}` carries no fields; write it without parentheses")
             return Some(self.invalid(span))
 
-        Some(texpr(span, Nominal(e.name, buf()), TVariant(n, v.tag, self.field_args(span, n, fields, args))))
+        Some(texpr(span, Nominal(e.name, buf()), TVariant(n, v.tag, self.field_args(span, n, fields, buf(), args))))
     end construct
 
-    // A constructor's arguments, by position or by field name, each checked against its field.
-    private field_args(*self, span: Span, what: string, fields: Buf[FieldInfo], args: Buf[Expr]) -> Buf[TExpr]
+    // The defaults of the struct `k`'s fields, elaborated at its first construction in the struct's
+    // module with no local in scope, as a parameter's default is (DESIGN §11.4); an instance of a
+    // generic struct has its own, its type parameters bound. Recorded before they are elaborated,
+    // so a default that builds its own struct finds none.
+    struct_defaults(*self, k: usize) -> Buf[Option[TExpr]]
+        val s = self.agg.structs[k]
+
+        for d in self.agg.defaults
+            if d.owner == s.name then return d.values
+
+        var values: Buf[Option[TExpr]] = buf()
+
+        for _ in s.src
+            values.push(None)
+
+        self.agg.defaults.push(FieldDefaults(s.name, values))
+
+        val saved = self.fx
+
+        self.fx = empty_fx()
+        self.fx.subst = self.instance_bindings(s.name)
+
+        for f in s.src
+            self.fx.params.push(f.name)
+
+        for j in 0..<s.src.len()
+            s.src[j].default match
+                Some(d) ->
+                    val v = self.check(d, s.fields[j].ty, s"the default of `${s.src[j].name}`")
+
+                    values.set(j, Some(self.escaping(v, s"stored in `${s.name}`")))
+                None -> ()
+
+        self.fx = saved
+        values
+    end struct_defaults
+
+    // A constructor's arguments, by position or by field name, each checked against its field; a
+    // field left out takes its default.
+    private field_args(*self, span: Span, what: string, fields: Buf[FieldInfo], defaults: Buf[Option[TExpr]], args: Buf[Expr]) -> Buf[TExpr]
         var slots: Buf[Option[Expr]] = buf()
         var named = false
         var next: usize = 0
@@ -551,8 +633,13 @@ impl Elab
             slots[j] match
                 Some(a) -> out.push(self.escaping(self.check(a, fields[j].ty, s"the field `${fields[j].name}`"), s"stored in `${what}`"))
                 None ->
-                    self.fail(span, s"`${what}` needs its field `${fields[j].name}`")
-                    out.push(self.invalid(span))
+                    val default = if j < defaults.len() then defaults[j] else None
+
+                    default match
+                        Some(d) -> out.push(d)
+                        None ->
+                            self.fail(span, s"`${what}` needs its field `${fields[j].name}`")
+                            out.push(self.invalid(span))
 
         out
     end field_args

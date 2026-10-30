@@ -1,0 +1,80 @@
+module sh.sysl.nex
+@tests
+
+// Default arguments and default field values (DESIGN §11.3, §11.4): the call or the constructor
+// fills each one left out with the default's expression, evaluated there, and the refusals.
+
+private val MAIN = "def main() = ()\n"
+
+private val TICK = "var count = 0\ndef tick(): integer =\n  count += 1\n  count\n"
+
+// -- parameters -------------------------------------------------------------------------------------
+
+@test("a default is filled into each call that leaves its argument out, as an expression evaluated there")
+dft_filled_per_call()
+    assert_eq(elaborated(TICK + "def f(n: integer = tick(), m: integer = if count > 1 then 100 else 200) = print(n + m)\ndef main() =\n  f()\n  f(7)\n"),
+        "(var count int64 0)\n(def tick () int64 (block:int64 (+= count 1) count))\n(def f ((n#0 int64 (call:int64 tick)) (m#1 int64 (if:int64 (>:bool count 1) 100 200))) void (print (+:int64 n#0 m#1)))\n(def main () void (block (call f (call:int64 tick) (if:int64 (>:bool count 1) 100 200)) (call f 7 (if:int64 (>:bool count 1) 100 200))))")
+
+@test("a default may call a function declared after it, and any parameter may have one")
+dft_forward_and_any_order()
+    assert_eq(elaborated("def f(a: integer = g(), b: integer) = print(a + b)\ndef g(): integer = 1\ndef main() = f(b = 2)\n"),
+        "(def f ((a#0 int64 (call:int64 g)) (b#1 int64)) void (print (+:int64 a#0 b#1)))\n(def g () int64 1)\n(def main () void (call f (call:int64 g) 2))")
+    assert_eq(refused("def f(a: integer = 1, b: integer) = print(a + b)\ndef main() = f(2)\n"), "error: `f` needs its argument `b` @2:14")
+    assert_eq(refused("def f(n: integer = g()) = print(n)\ndef g() = print(1)\n" + MAIN), "error: this default must be int64, but this is void @1:20")
+
+@test("a default is checked against its parameter's type, units included")
+dft_typed()
+    assert_eq(elaborated("def cyl(r: real<mm>, h: real<mm> = 10.0<mm>, segments: integer = 64) = print(r * h)\ndef main() = cyl(5.0<mm>, segments = 8)\n"),
+        "(def cyl ((r#0 real64<mm>) (h#1 real64<mm> 10.0<mm>) (segments#2 int64 64)) void (print (s (strip:real64 (*:real64<mm^2> r#0 h#1)) \" mm^2\")))\n(def main () void (call cyl 5.0<mm> 10.0<mm> 8))")
+    assert_eq(elaborated("def f(x: real = 1) = print(x)\ndef main() = f()\n"), "(def f ((x#0 real64 (adopt:real64 1))) void (print x#0))\n(def main () void (call f (adopt:real64 1)))")
+    assert_eq(elaborated("def f(r: real<mm> = 0.5<cm>) = print(r)\ndef main() = f()\n"),
+        "(def f ((r#0 real64<mm> (rescale:real64<mm> 10.0 0.5<cm>))) void (print (s (strip:real64 r#0) \" mm\")))\n(def main () void (call f (rescale:real64<mm> 10.0 0.5<cm>)))")
+    assert_eq(refused("def f(n: integer = 1.5) = print(n)\n" + MAIN), "error: this default must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @1:20")
+    assert_eq(refused("def f(r: real<mm> = 5.0<s>) = print(r)\n" + MAIN), "error: this default must be real64<mm>, but this is real64<s>: time and length are different dimensions @1:21")
+    assert_eq(refused("def f(r: real<mm> = 5.0) = print(r)\n" + MAIN), "error: this default must be real64<mm>, but this is real64: a bare literal is dimensionless; write it with its unit, `5.0<mm>` @1:21")
+
+@test("a default sees module-level names only, never another parameter nor the caller's locals")
+dft_scope()
+    assert_eq(refused("def cyl(r: real, h: real = 2.0 * r) = print(h)\n" + MAIN), "error: a default cannot use `r`: it is evaluated at the call, before any parameter or field is bound @1:34")
+    assert_eq(refused("def f(g: (integer) -> integer, n: integer = g(1)) = print(n)\n" + MAIN), "error: a default cannot use `g`: it is evaluated at the call, before any parameter or field is bound @1:45")
+    assert_eq(refused("val n = 3\ndef f(n: integer, m: integer = n) = print(m)\n" + MAIN), "error: a default cannot use `n`: it is evaluated at the call, before any parameter or field is bound @2:32")
+    assert_eq(refused("def main() =\n  val q = 3\n  f()\ndef f(n: integer = q) = print(n)\n"), "error: unknown name `q`; did you mean `f`? @4:20")
+    assert_eq(elaborated("def f(n: integer = 2, g: (integer) -> integer = n -> n * 2) = print(g(n))\ndef main() = f()\n"),
+        "(def f ((n#0 int64 2) (g#1 (int64) -> int64 (lambda 0))) void (print (call:int64 g#1 n#0)))\n(def main () void (call f 2 (lambda 0)))\n(lambda 0 _ ((n#2 int64)) int64 (captures) (*:int64 n#2 2))")
+
+@test("a generic function's default is of its parameter's type in every instance")
+dft_generic()
+    assert_eq(elaborated("def f[T](x: T, n: integer = 2) = print(x)\ndef main() = f(2.5)\n"),
+        "(def main () void (call f[real64] 2.5 2))\n(def f[real64] ((x#0 real64) (n#1 int64 2)) void (print x#0))")
+    assert_eq(refused("def f[T](x: T, y: T = 1) = print(x)\n" + MAIN), "error: this default must be T, but this is int64: a type parameter's value is of that one type and widens to no other @1:23")
+
+@test("an inout parameter, an extern's parameter and a local def's parameter have no default")
+dft_refused_kinds()
+    assert_eq(refused("def f(x: inout integer = 2) = print(x)\n" + MAIN), "error: an `inout` parameter cannot have a default: it borrows a variable of the caller's @1:26")
+    assert_eq(refused("extern def c(x: integer = 2)\n" + MAIN), "error: an `extern` parameter has no default: an `extern` declares the C function as it is, and a default belongs to a `def` that wraps it @1:17")
+    assert_eq(refused("def main() =\n  def g(x: integer = 2) = print(x)\n  g(1)\n"), "error: a local `def` is a function value, and a call through a function value gives every argument: its parameters have no defaults @2:22")
+
+@test("a function value carries no defaults: a call through one gives every argument")
+dft_function_value()
+    assert_eq(refused("def f(x: integer, n: integer = 64) = print(x + n)\ndef main() =\n  val g = f\n  g(1)\n"), "error: this function takes 2 arguments, and 1 is given @4:3")
+    assert_eq(refused("def ap(g: (integer) -> void) = g(1)\ndef f(x: integer, n: integer = 2) = print(x + n)\ndef main() = ap(f)\n"), "error: argument `g` must be (integer -> void), but this is (int64, int64) -> void @3:17")
+    assert_eq(refused("def f(x: integer, n: integer = 64) = print(x + n)\ndef main() =\n  val g = f\n  g(1, 2)\n"), "ok")
+
+// -- fields -----------------------------------------------------------------------------------------
+
+@test("a struct's field default is filled into each constructor that leaves it out")
+dft_field_filled()
+    assert_eq(elaborated(TICK + "struct P\n  x: real\n  y: real = 0.0\n  n: integer = tick()\ndef main() =\n  print(P(1.0).n)\n  print(P(y = 2.0, x = 1.0, n = 9).y)\n"),
+        "(struct P (x real64) (y real64) (n int64))\n(var count int64 0)\n(def tick () int64 (block:int64 (+= count 1) count))\n(def main () void (block (print (.n:int64 (new:P 1.0 0.0 (call:int64 tick)))) (print (.y:real64 (new:P 1.0 2.0 9)))))")
+    assert_eq(elaborated("struct C\n  r: real<mm> = 5.0<mm>\n  segs: integer = 64\ndef cyl(c: C = C()) = print(c.segs)\ndef main() = cyl()\n"),
+        "(struct C (r real64<mm>) (segs int64))\n(def cyl ((c#0 C (new:C 5.0<mm> 64))) void (print (.segs:int64 c#0)))\n(def main () void (call cyl (new:C 5.0<mm> 64)))")
+    assert_eq(elaborated("struct Q[T]\n  v: T\n  n: integer = 3\ndef main() = print(Q(1.5).n)\n"),
+        "(struct Q[real64] (v real64) (n int64))\n(def main () void (print (.n:int64 (new:Q[real64] 1.5 3))))")
+    assert_eq(refused("struct P\n  x: real\n  y: real = 0.0\ndef main() = print(P(y = 1.0).x)\n"), "error: `P` needs its field `x` @4:20")
+
+@test("a field default is checked where it is declared, sees no other field, and a variant's field has none")
+dft_field_refused()
+    assert_eq(refused("struct P\n  x: integer = 1.5\n" + MAIN), "error: the default of `x` must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @2:16")
+    assert_eq(refused("struct P\n  x: integer\n  y: integer = x\n" + MAIN), "error: a default cannot use `x`: it is evaluated at the call, before any parameter or field is bound @3:16")
+    assert_eq(refused("struct Q[T]\n  v: T = 1\n" + MAIN), "error: the field `v` has no default: its type depends on a type parameter, and a default must be of its type in every instance @2:10")
+    assert_eq(refused("enum E =\n  A(x: integer = 1)\n" + MAIN), "error: a variant's field has no default: `A` is built and matched with all of its fields @2:18")

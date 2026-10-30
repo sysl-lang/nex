@@ -1647,6 +1647,33 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
   type its first use expects, and keeps it: a later call with another type is checked against it.
   One whose types nothing fixes is a compile error. A `def` inside a body is a named lambda; it may
   call itself where it declares its result type.
+- **A default argument is an expression filled in at the call** (ref §6.5, the knob a CAD call
+  leaves out: `cylinder(r: real<mm>, h: real<mm> = 10<mm>, segments: integer = 64)`). Where nex
+  differs from Fortran's `optional` and `present()`: a parameter left out has a value, its default,
+  and the callee cannot tell it was left out. The rules:
+  - **It is evaluated at every call that leaves the argument out, afresh**, in its parameter's
+    place among the arguments, which a call evaluates in parameter order: `id: integer = next_id()`
+    calls `next_id` once per such call.
+    Nothing is evaluated once and shared, so a default never remembers an earlier call.
+  - **It sees the module-level names of the function's own module**, as a module-level binding's
+    initializer does — functions (declared anywhere in it), bindings, constants, and the private
+    ones too, wherever the call is. **It may not name a parameter**, its own or another's
+    (`h: real = 2 * r` is a compile error): it is evaluated before any parameter is bound. Nor does
+    it see the caller's locals.
+  - **It is checked against its parameter's type** as an initializer is (§2.2–§2.4): a literal adopts
+    it (`x: real = 1`), an integer widens, a narrowing is an error, and a measured parameter needs a
+    default of its dimension (`r: real<mm> = 5<mm>`; `= 5.0` is an error, and `= 0.5<cm>` converts).
+    In a generic `def`, it must have its parameter's type for every instance, so a parameter of type
+    `T` takes no literal default.
+  - **Any parameter may have one, in any position.** Positional arguments fill the leading
+    parameters, so a defaulted parameter before a required one is left out only by naming the later
+    one (`f(b = 2)`), as a Fortran `optional` dummy before a required one is.
+  - **An `inout` parameter has none** (it borrows the caller's variable), **nor has an `extern`'s**
+    (an `extern` transcribes the C prototype; a default belongs to a `def` that wraps it).
+  - **A function value carries no defaults.** A function type has no parameter names or defaults,
+    so a call through a function value, a function-typed parameter or a returned closure gives every
+    argument, by position; a `def` with defaults passed as a value has its full type (`(int64,
+    int64) -> void`). A local `def` is a function value, so its parameters take no default.
 
 ### 11.4 Structs, tuples, enums and `match`
 
@@ -1655,7 +1682,14 @@ with these rules (**PROPOSED** where marked).
 
 - **A constructor takes its fields by position or by name**, as a call takes its arguments, a
   Fortran structure constructor's keyword components: `Point(y = 2.0, x = 1.0)`,
-  `Rect(h = 2, w = 1)`. Every field is given; a field has no default. **PROPOSED.**
+  `Rect(h = 2, w = 1)`. **PROPOSED.**
+- **A struct's field may have a default** (`segments: integer = 64`), which a constructor that
+  leaves the field out takes, under exactly the rules of a parameter's default (§11.3): evaluated
+  afresh at each such constructor, seeing the struct's module and no other field, checked against
+  the field's type. A field with no default is given. A generic struct's field whose type names a
+  type parameter has no default, as a generic parameter of type `T` takes no literal one. **A
+  variant's field has no default**: a variant is built and matched with all of its fields, and a
+  pattern that left one out would not say which.
 - **A variant's fields may be of any type**, not only the scalars the reference allows; §3.1 and
   §6.2 already store arrays and views in enum payloads. **PROPOSED.**
 - **A struct or an enum cannot contain itself** by value, directly or through other structs, enums
@@ -2086,7 +2120,8 @@ is in `K` until the affine units of §15 arrive.
 | Reductions | §10 | §7.4 | Fortran names: `minval`, `maxval`, `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`; `dim =` in place of the reference's `sum_axis`; `dot` conjugates |
 | Array elements | §3.3 | §3.1 | any element type but an array; structs and tuples of scalars stored inline |
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
-| Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; variant fields of any type; no type contains itself by value |
+| Default arguments | §6.5 | §11.3 | a defaulted parameter may stand anywhere, not only in a trailing run; a default sees the function's module and no parameter; `inout`, `extern` and local-`def` parameters and function values take none |
+| Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; a struct's field may have a default, a variant's may not; variant fields of any type; no type contains itself by value |
 | Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
 | Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed, and a bare `import m` gives qualified access, `m.x`; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |
 | Field places, `x.f(args)` | §4.16 | §11.4 | fields, tuple elements and `z.re`/`z.im` are assignable and passable `inout`; a function field is called |

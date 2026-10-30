@@ -261,6 +261,16 @@ impl Elab
             End -> self.end_index(span)
     end elab
 
+    // Whether `n`, read inside a default, names one of the function's parameters or the struct's
+    // fields: a default is evaluated at the call, before any of them is bound, so it may not.
+    names_a_parameter(*self, span: Span, n: string) -> bool
+        for p in self.fx.params
+            if p == n
+                self.fail(span, s"a default cannot use `${n}`: it is evaluated at the call, before any parameter or field is bound")
+                return true
+
+        false
+
     not_yet(*self, span: Span, what: string) -> TExpr
         self.later(span, what)
         self.invalid(span)
@@ -271,6 +281,8 @@ impl Elab
         self.lookup_local(n) match
             Some(id) -> return self.local_ref(span, id, want)
             None -> ()
+
+        if self.names_a_parameter(span, n) then return self.invalid(span)
 
         val g = self.global(span, n)
 
@@ -843,7 +855,9 @@ impl Elab
         var modes: Buf[Mode] = buf()
 
         for p in params
-            if p.default.is_some() then self.later(span, "a default on a local function's parameter")
+            p.default match
+                Some(d) -> self.fail(d.span, "a local `def` is a function value, and a call through a function value gives every argument: its parameters have no defaults")
+                None -> ()
 
             names.push(p.name)
             tys.push(self.resolve_type(p.typ))
@@ -1140,4 +1154,4 @@ copy_fx(fx: Fx) -> Fx
     var reds: Buf[RedVar] = buf()
 
     reds.extend(fx.reds.view())
-    Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance)
+    Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance, fx.params)

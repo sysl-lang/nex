@@ -543,7 +543,12 @@ struct Parser
         val name = self.ident("a field name")?
 
         self.expect(":")?
-        Ok(Field(name, self.type_expr()?))
+
+        val typ = self.type_expr()?
+        val default = if self.accept("=") then Some(self.expr()?) else None
+
+        Ok(Field(name, typ, default))
+    end field
 
     // The lines of an indented block, each read by `item`, with the newline before the block and
     // the dedent after it taken. An item ends at a newline or a `;`; anything else after it is an

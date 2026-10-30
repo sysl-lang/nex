@@ -134,6 +134,14 @@ mod_qualified_shadow()
     assert_eq(project_refused([("main.nex", "import lib\nstruct Box\n  y: integer\ndef get(lib: Box) = lib.x\ndef main() = print(get(Box(1)))\n"), lib]),
         "error: `Box` has no field `x`; did you mean `y`? @main.nex:4:21")
 
+@test("a default is resolved in its declaring module, private names included, wherever it is called")
+mod_default_in_its_module()
+    val lib = ("lib/lib.nex", "private val secret = 41\nprivate def bump(n: integer): integer = n + 1\ndef f(n: integer = bump(secret)) = print(n)\nstruct P\n  n: integer = secret\n")
+
+    assert_eq(elab_project(project([("main.nex", "import lib\ndef main() =\n  lib.f()\n  print(lib.P().n)\n"), lib])),
+        "(struct lib.P (n int64))\n(val lib.secret int64 41)\n(def lib.bump ((n#0 int64)) int64 (+:int64 n#0 1))\n(def lib.f ((n#1 int64 (call:int64 lib.bump lib.secret))) void (print n#1))\n(def main () void (block (call lib.f (call:int64 lib.bump lib.secret)) (print (.n:int64 (new:lib.P lib.secret)))))")
+    assert_eq(project_refused([("main.nex", "import lib\nval secret = 1\ndef main() = print(secret)\n"), lib]), "ok")
+
 @test("a private or missing member is not reached through `m.x`")
 mod_qualified_private()
     assert_eq(with_geom("import geom\ndef main() = print(geom.secret())\n"), "error: the module `geom` has no public member `secret` @main.nex:2:20")

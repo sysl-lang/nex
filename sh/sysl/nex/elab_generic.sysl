@@ -138,6 +138,7 @@ struct Mark
     views: usize
     fun_insts: usize
     agg_insts: usize
+    defaults: usize
 
 private copied[T](b: Buf[T]) -> Buf[T]
     var out: Buf[T] = buf()
@@ -554,6 +555,13 @@ impl Elab
         Some(name)
     end instantiate_agg
 
+    // The type parameters bound in the struct or enum instance `name`, or none where it is not one.
+    instance_bindings(self, name: string) -> Buf[Binding]
+        for i in self.gen.agg_insts
+            if i.name == name then return binds_of(self.gen.aggs[i.generic].tparams, i.args)
+
+        buf()
+
     private instance_fields(*self, src: Buf[Field]) -> Buf[FieldInfo]
         var out: Buf[FieldInfo] = buf()
 
@@ -709,7 +717,7 @@ impl Elab
             copied(self.gstate), copied(self.gty), self.gout.len(), self.locals.len(), self.lambdas.len(), self.captures.len(),
             self.loops.len(), self.pending.len(), self.agg.structs.len(), self.agg.enums.len(), self.agg.variants.len(),
             self.agg.groups.len(), self.agg.passed.len(), self.agg.owners.len(), self.agg.passing, self.vw.locals.len(),
-            self.gen.fun_insts.len(), self.gen.agg_insts.len())
+            self.gen.fun_insts.len(), self.gen.agg_insts.len(), self.agg.defaults.len())
 
     private undo(*self, m: Mark)
         self.funs.truncate(m.funs)
@@ -738,6 +746,7 @@ impl Elab
         self.vw.locals.truncate(m.views)
         self.gen.fun_insts.truncate(m.fun_insts)
         self.gen.agg_insts.truncate(m.agg_insts)
+        self.agg.defaults.truncate(m.defaults)
     end undo
 
     // The body state a function starts in: empty, with an instance's generic parameters bound.
@@ -1329,14 +1338,20 @@ impl Elab
             None -> return self.invalid(span)
 
         val fields = if a.is_enum then self.agg.enums[self.find_enum(inst).unwrap()].variants[tag].fields else self.agg.structs[self.find_struct(inst).unwrap()].fields
+        val defaults = if a.is_enum then buf() else self.struct_defaults(self.find_struct(inst).unwrap())
         var out: Buf[TExpr] = buf()
 
         for j in 0..<slots.len()
             slots[j] match
                 Some(i) -> out.push(self.settle_arg(arg_value(args[i]), pre[i], fields[j].ty, Read, what[j]))
                 None ->
-                    self.fail(span, s"`${n}` needs its field `${names[j]}`")
-                    out.push(self.invalid(span))
+                    val default = if j < defaults.len() then defaults[j] else None
+
+                    default match
+                        Some(d) -> out.push(d)
+                        None ->
+                            self.fail(span, s"`${n}` needs its field `${names[j]}`")
+                            out.push(self.invalid(span))
 
         if a.is_enum then texpr(span, Nominal(inst, buf()), TVariant(n, tag, out)) else texpr(span, Nominal(inst, buf()), TNew(out))
     end generic_construct

@@ -509,6 +509,7 @@ structs()
     assert_eq(parsed("private struct P\n  x: real\n"), "(private struct P (x real))")
     assert_eq(parsed("struct Box[T]\n  v: T\nend Box"), "(struct Box[T] (v T))")
     assert_eq(parsed("struct S[T: Num, U]\n  a: T\n"), "(struct S[T: Num, U] (a T))")
+    assert_eq(parsed("struct C\n  r: real<mm> = 5<mm>\n  segments: integer = 64\n"), "(struct C (r real<mm> 5<mm>) (segments integer 64))")
 
 @test("an enum of bare variants")
 enums()
