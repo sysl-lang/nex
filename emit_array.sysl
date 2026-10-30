@@ -184,7 +184,10 @@ impl Emitter
     index_const(*self, n: usize) -> string = self.def(s"arith.constant $n : index")
 
     // The extent of nex axis `axis` (from 1) of the tensor `v` of array type `t`, as an `index`.
+    // An array of non-numbers keeps its extents in its object (`emit_items.sysl`).
     dim(*self, span: Span, v: string, t: Ty, axis: usize) -> string
+        if is_items(t) then return self.def(s"arith.index_cast ${self.items_extent(v, axis)} : i64 to index")
+
         val r = rank_of(t)
 
         self.def(s"tensor.dim $v, ${self.index_const(r - axis)} : ${self.tensor_ty(span, t)}")
@@ -444,7 +447,7 @@ impl Emitter
     // that nothing the statement does frees the storage under it.
     stored_view(*self, span: Span, h: string, t: Ty) -> string
         self.pin(h, t, 1)
-        self.temps.push(Temp(h, t))
+        self.hold_temp(h, t)
 
         val m =self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")} : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
 
@@ -692,6 +695,8 @@ impl Emitter
 
     // `v` of array type `from` seen as type `to`, where only static extents differ.
     cast(*self, span: Span, v: string, from: Ty, to: Ty) -> string
+        if is_items(from) then return v
+
         val a = self.tensor_ty(span, from)
         val b = self.tensor_ty(span, to)
 
@@ -714,6 +719,8 @@ impl Emitter
         if ok == "" then return self.cast(span, v, from, to)
 
         self.trap_if(self.not(ok), "shape mismatch")
+
+        if is_items(from) then return v
 
         // The cast only where the shape fits: where the trap is taken and the shape is known when
         // compiling, the cast would be one between two static shapes that differ, which is invalid.
@@ -1373,15 +1380,15 @@ impl Emitter
         s"memref<${self.shape_text(t)}${self.elem_ty(span, elem_of(t))}, strided<[$strides], offset: ?>>"
 
     // The code a function value holds for `code`: `code` itself, or where an array crosses the call,
-    // an adapter taking and giving buffers, since a call through a pointer cannot be bufferized.
+    // an adapter taking and giving buffers, since a call through a pointer cannot be bufferized. An
+    // `inout` array parameter is the caller's buffer, written in place: the adapter hands `code` a
+    // writable tensor over it and writes what `code` hands back over it, which bufferization makes
+    // nothing, so the adapter gives back only the value.
     adapted(*self, span: Span, code: string, params: Buf[usize], ret: Ty) -> string
         var arrays = is_arr(ret)
 
         for id in params
             if is_arr(self.prog.locals[id].ty) then arrays = true
-            if self.inout_array(id)
-                self.later(span, "a function value with an `inout` array parameter")
-                return code
 
         if !arrays then return code
 
@@ -1406,7 +1413,7 @@ impl Emitter
 
             if is_arr(t)
                 head.push(s"%a$k: ${self.boundary_ty(span, t)}")
-                text += s"    %t$k = bufferization.to_tensor %a$k restrict : ${self.boundary_ty(span, t)} to ${self.tensor_ty(span, t)}\n"
+                text += s"    %t$k = bufferization.to_tensor %a$k restrict${if self.inout_array(params[k]) then " writable" else ""} : ${self.boundary_ty(span, t)} to ${self.tensor_ty(span, t)}\n"
                 args.push(s"%t$k")
                 tys.push(self.tensor_ty(span, t))
             else
@@ -1415,16 +1422,35 @@ impl Emitter
                 tys.push(self.param_ty(span, params[k]))
 
         val r = self.ty(span, ret)
-        val call = s"func.call @\"$code\"(${joined(args)}) : (${joined(tys)}) -> ${result_text(r)}"
+        val first: usize = if r == "" then 0 else 1
+        var count = first
+
+        for id in params
+            if self.inout_array(id) then count += 1
+
+        text += s"    ${result_def("%r", count)}func.call @\"$code\"(${joined(args)}) : (${joined(tys)}) -> ${result_text(self.results_text(span, params, ret))}\n"
+
+        // Each `inout` array as the call left it, over the caller's buffer.
+        var next = first
+
+        for k in 0..<params.len()
+            if !self.inout_array(params[k]) then continue
+
+            val t = self.prog.locals[params[k]].ty
+
+            text += s"    bufferization.materialize_in_destination ${result_name("%r", next, count)} in restrict writable %a$k : (${self.tensor_ty(span, t)}, ${self.boundary_ty(span, t)}) -> ()\n"
+            next += 1
+
+        val value = result_name("%r", 0, count)
 
         if r == ""
-            text += s"    $call\n    func.return\n"
+            text += "    func.return\n"
         elif is_arr(ret)
             val b = self.memref_ty(span, ret)
 
-            text += s"    %r = $call\n    %m = bufferization.to_buffer %r : $r to $b\n    func.return %m : $b\n"
+            text += s"    %m = bufferization.to_buffer $value : $r to $b\n    func.return %m : $b\n"
         else
-            text += s"    %r = $call\n    func.return %r : $r\n"
+            text += s"    func.return $value : $r\n"
 
         self.funcs.push(s"  func.func private @\"$name\"(${joined(head)})${arrow_text(if is_arr(ret) then self.memref_ty(span, ret) else r)} {\n$text  }\n\n")
         name
@@ -1467,6 +1493,78 @@ impl Emitter
             self.close_place(span, back[k].place, result_name(v, first + k, n), back[k].frames, true)
 
         if r == "" then "" else self.own(result_name(v, 0, n), ret)
+
+    // A function that calls the code of a function value, `(code, env, args…)`, where `args` hold
+    // `inout` arrays: each crosses as a tensor and goes to the code as its buffer, written in place,
+    // and comes back as the call left it. Bufferization sees an ordinary call handing back an `inout`
+    // array (DESIGN §8.4), so a window of a place is written where it lies and nothing is copied.
+    through_value(*self, span: Span, args: Buf[TExpr], ret: Ty) -> string
+        val name = s"b.${self.wrappers.len()}"
+
+        self.wrappers.push(name)
+
+        var head: Buf[string] = buf()
+        var crossed: Buf[string] = buf()
+        var crossed_tys: Buf[string] = buf()
+        // The tensor type of each `inout` array argument, `""` for any other.
+        var borrowed_tys: Buf[string] = buf()
+        var outs: Buf[string] = buf()
+        var out_tys: Buf[string] = buf()
+        var text = ""
+
+        for k in 0..<args.len()
+            val a = args[k]
+            val borrowed = *a.kind match
+                TBorrow(place) -> Some(place)
+                _ -> None
+
+            if borrowed.is_some() && is_arr(borrowed.unwrap().ty)
+                val t = borrowed.unwrap().ty
+                val tt = self.tensor_ty(span, t)
+                val b = self.boundary_ty(span, t)
+
+                head.push(s"%x$k: $tt")
+                text += s"    %m$k = bufferization.to_buffer %x$k : $tt to $b\n"
+                crossed.push(s"%m$k")
+                crossed_tys.push(b)
+                borrowed_tys.push(tt)
+            else
+                val t = if borrowed.is_some() then "!llvm.ptr" elif is_arr(a.ty) then self.boundary_ty(span, a.ty) else self.ty(span, a.ty)
+
+                head.push(s"%x$k: $t")
+                borrowed_tys.push("")
+                crossed.push(s"%x$k")
+                crossed_tys.push(t)
+
+        val r = self.ty(span, ret)
+        val rb = if is_arr(ret) then self.memref_ty(span, ret) else r
+        val fty = s"(!llvm.ptr, ${joined(crossed_tys)}) -> ${result_text(rb)}"
+
+        text += s"    %f = builtin.unrealized_conversion_cast %code : !llvm.ptr to $fty\n"
+        text += s"    ${if r == "" then "" else "%v = "}func.call_indirect %f(%env, ${joined(crossed)}) : $fty\n"
+
+        if is_arr(ret)
+            text += s"    %value = bufferization.to_tensor %v restrict : $rb to $r\n"
+            outs.push("%value")
+            out_tys.push(r)
+        elif r != ""
+            outs.push("%v")
+            out_tys.push(r)
+
+        for k in 0..<args.len()
+            val tt = borrowed_tys[k]
+
+            if tt == "" then continue
+
+            text += s"    %now$k = bufferization.to_tensor %m$k restrict : ${crossed_tys[k]} to $tt\n"
+            text += s"    %o$k = bufferization.materialize_in_destination %now$k in %x$k : ($tt, $tt) -> $tt\n"
+            outs.push(s"%o$k")
+            out_tys.push(tt)
+
+        text += s"    func.return ${joined(outs)} : ${joined(out_tys)}\n"
+        self.funcs.push(s"  func.func private @\"$name\"(%code: !llvm.ptr, %env: !llvm.ptr, ${joined(head)}) -> (${joined(out_tys)}) {\n$text  }\n\n")
+        name
+    end through_value
 
     // -- loops ------------------------------------------------------------------------------------
 

@@ -63,7 +63,7 @@ par_run_thread_counts()
 
     finish(b)
     assert(failed.len() == 0, join(failed.view(), "\n"))
-    assert_eq(names.len(), 4)
+    assert_eq(names.len(), 5)
 
 @test("each print in a parallel body writes its whole line at once, in any order")
 par_run_atomic_lines()
@@ -208,10 +208,85 @@ par_run_vectorized_bits_and_traps()
 
     finish(b)
 
-@test("a parallel body writing a module-level array, or reducing a counted value, is refused by the emitter")
+@test("traps in parallel bodies, caught many times on seven threads, give back what every abandoned iteration held")
+par_traps_leak_nothing()
+    if !exists("/usr/bin/leaks") then skip("no leaks tool")
+
+    val b = bench()
+    val name = "parallel-traps"
+    val exe = s"${b.work}/traps"
+    val expected = read_text(s"testdata/leaks/$name.out").unwrap()
+
+    build(b, read_text(s"testdata/leaks/$name.nex").unwrap(), exe)
+
+    val plain = run_with(exe, "7")
+    val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
+    val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
+
+    finish(b)
+    assert_eq(plain.text, expected)
+    assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
+    assert_eq(guarded.text, expected)
+    assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
+
+@test("a parallel body writing a module-level array or an array a lambda inside it captures, or reducing a counted value, is refused by the emitter")
 par_emit_refusals()
     assert_eq(emitted("var g: [real] = zeros(4)\ndef main() =\n  parallel for i in 1..4\n    g[i] = 1.0\n").err().unwrap_or(""),
         "error: a parallel body writing a module-level array is not compiled yet @3:3")
     assert_eq(emitted("def join2(a: string, b: string): string = a + b\ndef main() =\n  var s = \"\"\n  parallel for i in 1..4 reduce s: join2\n    s = join2(s, \"x\")\n  print(s)\n").err().unwrap_or(""),
         "error: a reduction over string, which holds a count, is not compiled yet @4:3")
     assert(emitted("var g: [real] = zeros(4)\ndef main() =\n  var h = g\n  parallel for i in 1..4\n    h[i] = g[i] + 1.0\n  print(h)\n").is_ok())
+    assert_eq(emitted("def main() =\n  var m = fill((2, 3), 0)\n  parallel for j in 1..3\n    m[1, j] = j\n    val f = () -> m[2, j]\n    print(f())\n").err().unwrap_or(""),
+        "error: a parallel body writing an array a lambda inside it captures is not compiled yet @3:3")
+
+// The program of `testdata/v2/064-…` in small: windows of an array `main` allocates, passed `inout`
+// in a parallel body and through a local `def` and a function value.
+private val WINDOWS_IN_PARALLEL = "def bump(v: inout [integer], by: integer) =\n  for k in 1..length(v)\n    v[k] += by\n\ndef main() =\n  var m = fill((3, 4), 0)\n  def twice(v: inout [integer]) =\n    bump(v, 1)\n    bump(v, 1)\n  parallel for j in 1..4\n    bump(m[:, j], j)\n    bump(m[.. by -2, j], 10)\n  parallel for i in 1..3\n    twice(m[i, 2..])\n  val f = bump\n  f(m[2, 1..4 by 3], 100)\n  twice(m[:, 1])\n  print(m)\n"
+
+@test("a window passed inout in a parallel body, to a local def or through a function value is written in place, the same on every thread count")
+par_windows_in_place()
+    val b = bench()
+    val buffers = lowered_until(b, emitted(WINDOWS_IN_PARALLEL).unwrap(), "buffer-deallocation-pipeline")
+    val exe = s"${b.work}/windows"
+
+    build(b, WINDOWS_IN_PARALLEL, exe)
+
+    var outs: Buf[string] = buf()
+
+    for t in THREADS
+        outs.push(run_with(exe, t).text)
+
+    finish(b)
+    assert_eq(outs[0], "[[13, 14, 15, 16], [103, 4, 5, 106], [13, 14, 15, 16]]\n")
+    assert_eq(outs[1], outs[0])
+    assert_eq(outs[2], outs[0])
+    // The one array of `main`, and nothing else.
+    assert_eq(occurrences(buffers, "memref.alloc"), 1)
+    assert_eq(occurrences(buffers, "memref.copy"), 0)
+    assert_eq(occurrences(buffers, "bufferization.clone"), 0)
+
+// An array a lambda captures lives in a cell, as a counted object; a parallel body writes that
+// object's buffer in place once nothing else holds it.
+private val CAPTURED_IN_PARALLEL = "def bump(v: inout [integer], by: integer) =\n  for k in 1..length(v)\n    v[k] += by\n\ndef main() =\n  var m = fill((3, 4), 1)\n  def show() = print(m)\n  parallel for j in 1..4\n    bump(m[:, j], j)\n  show()\n"
+
+@test("a captured array written by a parallel body is written in place, copied only while a val shares it")
+par_captured_in_place()
+    val b = bench()
+    val buffers = lowered_until(b, emitted(CAPTURED_IN_PARALLEL).unwrap(), "buffer-deallocation-pipeline")
+    val exe = s"${b.work}/captured"
+
+    build(b, CAPTURED_IN_PARALLEL, exe)
+
+    var outs: Buf[string] = buf()
+
+    for t in THREADS
+        outs.push(run_with(exe, t).text)
+
+    finish(b)
+    assert_eq(outs[0], "[[2, 3, 4, 5], [2, 3, 4, 5], [2, 3, 4, 5]]\n")
+    assert_eq(outs[1], outs[0])
+    assert_eq(outs[2], outs[0])
+    // The fill copied into the cell's object when `m` is bound, and the copy made only where
+    // something else still holds that object, which nothing does here; none for the region.
+    assert_eq(occurrences(buffers, "memref.copy"), 2)
+    assert_eq(occurrences(buffers, "memref.alloc"), 1)

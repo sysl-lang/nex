@@ -691,6 +691,14 @@ and bufferization copies only when a later write would be visible (`view-then-wr
 Element access through a dynamic strided view needs `lower-affine` after `expand-strided-metadata`,
 which the pipeline gains (PLAN.md).
 
+**An array whose elements are not numbers** — strings, functions, tuples, structs, enums — is not a
+tensor but a counted object holding its elements, and the same windows (offset, extent and stride per
+axis, `by` and `origin` included) are taken of it with the same checks. Read as a value, a slice of
+one is a new array holding a count on each element of the window: one allocation, the elements
+shared rather than copied, which only the cost tells apart from a view. Slice assignment, a write
+through a slice of a place, and an `inout` slice write the source's own elements in place, so a
+callee that traps leaves its earlier writes in the caller's array (§8.4).
+
 ### 6.4 Offset views: `origin`
 
 Arrays are 1-based, always; there are no declared lower bounds. Where a computation reads better
@@ -926,8 +934,13 @@ to the caller's variable. Every nex function except `main` is emitted `private`;
 argument's buffer disappears, the function returns nothing and writes the caller's buffer in place
 (`parallel.mlir`, `axpy`). Kept public, the same function returns its argument and the deallocation
 pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer argument
-*(unverified)*. An `inout` slice argument (§8.2) is the subview of §6.3 written in place
-*(unverified)*.
+*(unverified)*. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
+a row, a strided or reversed window and a line of a rank-3 array each reach the callee as a
+`memref.subview` of the caller's buffer, with no allocation and no copy, in a `parallel for` body as
+in sequential code. A call through a function value (a local `def`, a lambda, a `val` bound to a
+function, a parameter of function type) passes an `inout` array as its buffer: the code behind the
+value writes it in place and returns only its value, so the same window is written where it lies
+there too.
 
 ---
 
@@ -1139,8 +1152,11 @@ some arrays and writes others as an `inout` argument is written (§8), so a writ
 in place by every thread at the elements it owns — inside an enclosing loop too — and is copied
 first only where the caller still needs its old value or the call also reads it. Inside the code a
 written array is a `restrict writable` tensor over that buffer, written back over it at the end,
-which bufferization turns into nothing. The result of a `parallel` element-wise expression is a
-buffer allocated before the region and freed by the deallocation pipeline.
+which bufferization turns into nothing. An array a lambda captures is held in a cell as a counted
+object; one the body writes crosses as that object's own buffer, written in place, after the cell
+is given a copy of its own if anything else (a `val` sharing it, §8.4) still holds the object. The
+result of a `parallel` element-wise expression is a buffer allocated before the region and freed by
+the deallocation pipeline.
 
 **Counts are atomic while a parallel region runs, and plain otherwise.** Strings, cells and closure
 environments are counted objects, and a parallel body may copy and drop one shared from outside —
@@ -1560,9 +1576,19 @@ with these rules (**PROPOSED** where marked).
   it has built. **A cycle is not reclaimed**: a lambda stored into a `var` it captures itself, local
   `def`s that call one another, and a local `def` that calls itself and is captured by another
   lambda too keep themselves alive for the rest of the run. A local `def` that calls itself and is
-  captured by nothing else makes no cycle. Neither is what the frames a caught trap (`assert_traps`)
-  abandons held. Both are bounded by the program's shape, not by how long it runs, except where the
-  cycle is made inside a loop.
+  captured by nothing else makes no cycle. A cycle is bounded by the program's shape, not by how long
+  it runs, except where it is made inside a loop.
+- **A caught trap gives back everything the frames it abandons held**: their strings, function
+  values, cells, aggregates and arrays, and the storage of every array they computed, as returning
+  would have, on every thread a `parallel` construct runs. What the trapping code already stored
+  outside those frames stays stored (§8.4). So a program that catches a trap any number of times
+  (`assert_traps` in a loop, a parallel loop that traps in every round) holds no more afterwards than
+  before. The cost falls on the path that does not trap only where something is owned: a function
+  holding a counted value registers its slots with the runtime on entry and takes them off on
+  return (two calls and a store per slot), each temporary is also written to a slot of the frame
+  and cleared when released, and each array buffer carries two links on a per-thread list. A
+  function of numbers and arrays alone registers nothing. A trap releases what it abandons before
+  it returns to the catch, while those frames are still on the stack.
 
 ---
 

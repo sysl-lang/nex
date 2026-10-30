@@ -418,15 +418,18 @@ impl Emitter
     // only where every extent agrees.
     array_equal(*self, span: Span, a: string, b: string, t: Ty) -> string
         val items = is_items(t)
-
-        if items && rank_of(t) != 1 then return self.unsupported(span, s"`==` on a ${show_ty(t)} inside an aggregate")
-
         val ea = self.extents(span, a, t)
-        val eb = self.extents(span, b, t)
         var same = self.def("arith.constant true")
 
-        for k in 0..<ea.len()
-            same = self.def(s"arith.andi $same, ${self.def(s"arith.cmpi eq, ${ea[k]}, ${eb[k]} : index")} : i1")
+        if items
+            // Every extent agrees; the elements are then compared in storage order.
+            for k in 1..rank_of(t)
+                same = self.def(s"arith.andi $same, ${self.def(s"arith.cmpi eq, ${self.items_extent(a, k)}, ${self.items_extent(b, k)} : i64")} : i1")
+        else
+            val eb = self.extents(span, b, t)
+
+            for k in 0..<ea.len()
+                same = self.def(s"arith.andi $same, ${self.def(s"arith.cmpi eq, ${ea[k]}, ${eb[k]} : index")} : i1")
 
         val r = self.fresh()
 

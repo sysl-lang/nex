@@ -227,3 +227,18 @@ array_assertions()
     assert_eq(elaborated("def main() =\n  assert_approx([1, 2], [1, 2], 1.0e-12)\n  assert_traps(() -> print(1 div 0), \"division\")\n"),
         "(def main () void (block (assert_approx (promote:[real64] (array:[int64] 1 2)) (promote:[real64] (array:[int64] 1 2)) 1e-12) (assert_traps (lambda 0) \"division\")))\n(lambda 0 _ () void (captures) passed (print (div:int64 1 0)))")
     assert_eq(refused("def f(a: [real], m: [real; :, :]) = assert_approx(a, m, 0.1)\n" + MAIN), "error: `assert_approx` compares values of one rank; these are [real] and [real; :, :] @1:37")
+
+@test("a void expression is refused where a value is needed, at that expression")
+void_is_not_a_value()
+    val g = "def g() = ()\nstruct P\n  x: real\n"
+    assert_eq(elaborated("def main() =\n  val n = 3\n  val m = map(1..n, k -> real(k) / n)\n"),
+        "(def main () void (block (val n#0:int64 3) (val m#2:[real64] (map:[real64] (range:[int64] 1 .. n#0) (lambda 0))) ()))\n(lambda 0 _ ((k#1 int64)) real64 (captures n#0) passed (/:real64 (promote:real64 k#1) (promote:real64 n#0)))")
+    assert_eq(refused("def main() =\n  val n = 3\n  val x = [for k in 1..n do real(k) / n]\n"),
+        "error: an array element holds a value, and a `for` has none: nex has no array comprehensions; write `map(1..n, k -> e)` @3:12")
+    assert_eq(refused(g + "def main() = print([1.0, g()])\n"), "error: an array element holds a value, and this is void @4:26")
+    assert_eq(refused(g + "def main() = print([[1.0], [g()]])\n"), "error: an array element holds a value, and this is void @4:29")
+    assert_eq(refused(g + "def main() = print((g(), 1))\n"), "error: a tuple element holds a value, and this is void @4:21")
+    assert_eq(refused(g + "def main() = print(P(g()))\n"), "error: the field `x` must be real64, but this is void @4:22")
+    assert_eq(refused(g + "def main() =\n  val v = g()\n"), "error: `v` would hold nothing: this is void @5:11")
+    assert_eq(refused(g + "def main() = print(sin(g()))\n"), "error: `sin` does not take void @4:20")
+    assert_eq(refused(g + "def main() = print(1 + g())\n"), "error: `+` needs numbers; found int64 and void @4:20")

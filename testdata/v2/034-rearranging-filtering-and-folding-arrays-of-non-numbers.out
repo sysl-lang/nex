@@ -1,0 +1,46 @@
+[[a, d], [b, e], [c, f]]
+(3, 2)
+[[a, d], [b, e], [c, f]]
+[[a, b, c], [d, e, f]]
+[[a, d], [b, e], [c, f]]
+[[a, e], [d, c], [b, f]]
+[a, d, b, e, c, f]
+g
+[a, e, b, f, c, g, d, h]
+(1, 2, 4)
+[apple, kiwi, banana]
+[a, d, c, f]
+[]
+apple
+fig
+kiwi
+banana
+[fig]
+applefigkiwibanana
+applefigkiwibanana
+>adbecf
+figkiwi
+b
+P { name=kiwiapplefig, n=6 }
+[apple, apple, fig, fig, kiwi, kiwi, banana, banana]
+[apple, apple, fig, apple, fig, kiwi]
+[0, 1, 2, 0, 0]
+[]
+12
+2
+[x, y]
+[(3, kiwi), (4, banana)]
+[[(1, a)], [(2, b)]]
+[[a, b, c], [d, e, f]]
+[[z, d], [b, e], [c, f]]
+[[q, e], [d, c], [b, f]]
+[apple, fig, kiwi, banana]
+[X, fig, kiwi, banana]
+true
+true
+false
+true
+true
+false
+true
+false

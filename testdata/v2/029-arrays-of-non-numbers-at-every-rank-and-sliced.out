@@ -1,0 +1,50 @@
+[[a, b, c], [d, e, f]]
+[d, e, f]
+[b, e]
+f
+e
+(2, 3)
+6
+2
+3
+[[b, c], [e, f]]
+[[d, e, f], [a, b, c]]
+[[c, a], [f, d]]
+[f, e, d]
+[[d, e, f], [a, b, c]]
+[[c, b, a], [f, e, d]]
+[[c, b, a], [f, e, d]]
+fa
+b
+e
+c
+f
+[[A!, B, q], [D!!, E!, q!]]
+[[a, b, c], [d, e, f]]
+[a, ck, c, d!]
+[a, w, c]
+[A!, B, q]
+[A!, yy]
+[zz, D!!]
+zz
+q!
+[B, E!]
+zz
+f
+[[c, d], [g, h]]
+[[e, f], [g, h]]
+30
+3
+r
+[[0, 0], [30, 4]]
+[[#, door], [hall, #]]
+(3, three)
+[(2, two), (4, four)]
+49
+[11, 9]
+[ann?, bob?, cy?]
+[false, true, false]
+[[<1>, <2>], [<3>, <4>]]
+[zz, D!!, B, E!, q, q!]
+[a, b, c]
+[a, b, c]

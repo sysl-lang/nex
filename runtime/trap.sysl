@@ -7,7 +7,9 @@
 //
 // The return is C's `setjmp` and `longjmp`, which is how a nex program's trap crosses frames no
 // unwinding table describes. Nothing a sysl frame owns is held across it: the frames abandoned are
-// generated code, which holds no counts, and the catcher keeps its state in module storage.
+// generated code and the trap entries here, and the catcher keeps its state in module storage and in
+// a `Mark` of plain addresses. What the generated frames owned — their counts and their arrays'
+// storage — the catch gives back as it ends (`unwind.sysl`).
 
 @include("<setjmp.h>")
 
@@ -48,7 +50,10 @@ note_trap(message: string)
 
     last_message = message
 
+// The trap raised: what the frames between here and the catch hold given back while they are still
+// on the stack, then the return to the catch.
 raise_trap() -> never
+    abandon()
     longjmp(&catch_env[0], 1)
 
 // The one entry generated code traps through, with the message the compiler wrote for the check
@@ -56,6 +61,13 @@ raise_trap() -> never
 @export("nex_trap")
 trap(message: *u8) -> never
     note_trap(c_text(message))
+    raise_trap()
+
+// The same for a message built at run time, which the trap releases once it has its text.
+@export("nex_trap_owned")
+trap_owned(message: *u8) -> never
+    note_trap(c_text(message))
+    release(message)
     raise_trap()
 
 @export("nex_trap_complex_div_zero")
@@ -78,6 +90,7 @@ finish()
 @export("nex_catch_trap")
 catch_trap(body: *extern() -> unit) -> bool
     val saved = catch_env
+    val mark = open_catch()
 
     depth += 1
 
@@ -87,11 +100,13 @@ catch_trap(body: *extern() -> unit) -> bool
 
     depth -= 1
     catch_env = saved
+    close_catch(mark)
     trapped
 
 // The same for a nex function value of no parameters: its code, called with its environment.
 private catch_closure(code: *extern(*u8) -> unit, env: *u8) -> bool
     val saved = catch_env
+    val mark = open_catch()
 
     depth += 1
 
@@ -101,6 +116,7 @@ private catch_closure(code: *extern(*u8) -> unit, env: *u8) -> bool
 
     depth -= 1
     catch_env = saved
+    close_catch(mark)
     trapped
 
 // `assert_traps(f)` and `assert_traps(f, text)`: `f` must trap, with a message containing `text`
@@ -140,6 +156,7 @@ par_begin()
 @export("nex_par_run")
 par_run(code: *extern(*u8, long, long) -> unit, env: *u8, worker: long, workers: long)
     val saved = catch_env
+    val mark = open_catch()
 
     depth += 1
 
@@ -149,6 +166,7 @@ par_run(code: *extern(*u8, long, long) -> unit, env: *u8, worker: long, workers:
 
     depth -= 1
     catch_env = saved
+    close_catch(mark)
 
     if trapped
         region_lock.lock()
@@ -158,6 +176,9 @@ par_run(code: *extern(*u8, long, long) -> unit, env: *u8, worker: long, workers:
             stopped.store(1, Release)
 
         region_lock.unlock()
+
+        // The message is the region's now; a worker thread keeps no copy of its own.
+        last_message = ""
 
 // The word that turns nonzero once a trap has ended the region, which generated code reads with an
 // atomic load before each iteration: an iteration not yet started does not start.

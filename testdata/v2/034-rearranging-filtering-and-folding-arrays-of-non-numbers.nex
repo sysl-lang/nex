@@ -1,0 +1,99 @@
+struct P
+  name: string
+  n: integer
+
+enum Cell =
+  Wall
+  Open(label: string)
+
+struct Grid
+  cells: [string; :, :]
+
+enum Board =
+  Blank
+  Full(cells: [string; :, :])
+
+def join2(a: string, b: string): string = a + b
+
+def longer(a: P, b: P): P = if b.n > a.n then b else a
+
+def ax(k: integer) = k
+
+def noisy(w: string): bool =
+  print(w)
+  w == "fig"
+
+def code(w: string): [integer] = if w == "fig" then [1, 2] else [0]
+
+def glyph(c: Cell): string =
+  c match
+    Wall -> "#"
+    Open(l) -> l
+
+def late(p: (integer, string)): bool =
+  val (i, _) = p
+  i > 2
+
+def main() =
+  // Rearranging: storage order is column-major, so `m` is stored a, d, b, e, c, f.
+  val m = [["a", "b", "c"], ["d", "e", "f"]]
+  print(transpose(m))
+  print(shape(transpose(m)))
+  print(permute(m, (2, 1)))
+  print(permute(m, (1, 2)))
+  print(permute(m, (ax(2), ax(1))))
+  print(reshape(m, (3, 2)))
+  print(reshape(m, 6))
+  val c3 = reshape(["a", "b", "c", "d", "e", "f", "g", "h"], (2, 2, 2))
+  print(permute(c3, (3, 1, 2))[2, 1, 2])
+  print(flatten(permute(c3, (3, 1, 2))))
+  print(shape(permute(reshape(c3, (2, 4, 1)), (3, 1, 2))))
+  // Filtering, in storage order, the predicate called once per element.
+  val words = ["apple", "fig", "kiwi", "banana"]
+  val skip = "fig"
+  print(filter(words, w -> w != skip))
+  print(filter(m, x -> x != "b" and x != "e"))
+  print(filter(words, w -> false))
+  print(filter(words, noisy))
+  // Folding, into a string, a struct and a count, by a lambda or a named function.
+  print(reduce(words, "", (a, b) -> a + b))
+  print(reduce(words, "", join2))
+  print(reduce(m, ">", join2))
+  print(reduce(words[2..3], "", join2))
+  val ps = [P("a", 3), P("b", 7), P("c", 5)]
+  print(reduce(ps, P("none", 0), longer).name)
+  print(reduce([3, 1, 2], P("", 0), (p, k) -> P(p.name + words[k], p.n + k)))
+  // Concatenating the arrays a function gives, of non-numbers or of numbers.
+  print(flatMap(words, w -> [w, w]))
+  print(flatMap([1, 2, 3], k -> words[1..k]))
+  print(flatMap(words, code))
+  print(flatMap(filter(words, w -> false), w -> [w]))
+  // Closures, enums and tuples as elements.
+  val fs = [(x: integer) -> x + 1, (x: integer) -> x * 2]
+  print(reduce(fs, 5, (acc, f) -> f(acc)))
+  print(length(filter(fs, f -> f(1) == 2)))
+  val cells = [Open("x"), Wall, Open("y")]
+  print(map(filter(cells, c -> c != Wall), glyph))
+  print(filter(enumerate(words), late))
+  print(transpose([[(1, "a"), (2, "b")]]))
+  // Value semantics: each result is an array of its own.
+  var t = transpose(m)
+  t[1, 1] = "z"
+  var r = reshape(m, (3, 2))
+  r[1, 1] = "q"
+  var fw = filter(words, w -> true)
+  fw[1] = "X"
+  print(m)
+  print(t)
+  print(r)
+  print(words)
+  print(fw)
+  // Equality of aggregates holding arrays at rank 2 and 3: the shape first, then the elements.
+  print(Grid(m) == Grid([["a", "b", "c"], ["d", "e", "f"]]))
+  print(Grid(m) == Grid(transpose(transpose(m))))
+  print(Grid(m) == Grid(reshape(transpose(m), (2, 3))))
+  print(Grid(m) != Grid([["a", "b", "c"], ["d", "e", "x"]]))
+  print(Full(m) == Full(m))
+  print(Full(m) == Blank)
+  print((c3, 0) == (reshape(flatten(c3), (2, 2, 2)), 0))
+  print((c3, 0) == (reshape(flatten(c3), (2, 4, 1)), 0))

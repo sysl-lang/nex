@@ -53,6 +53,9 @@ enum ParCap
     CAddr(id: usize)
     // An array held as a value, crossing as a buffer the body reads, or also `writes`.
     CArray(id: usize, writes: bool)
+    // An array stored in a cell (one a lambda captures) that the body writes: the stored object's
+    // own buffer, made the cell's alone first, written in place.
+    CStored(id: usize)
 
 // A region's code, emitted after the function that runs it: its kind, the types of its
 // environment's fields in order, and for a loop the locals that cross.
@@ -181,12 +184,13 @@ impl Emitter
     elem_at(*self, p: string, k: string, mt: string) -> string =
         self.def(s"llvm.getelementptr $p[$k] : (!llvm.ptr, i64) -> !llvm.ptr, $mt")
 
-    // Storage for `count` (`i64`) values of `t`, which `nex_storage_free` gives back.
+    // Storage for `count` (`i64`) values of `t`, which `nex_storage_free` gives back, or a catch the
+    // region's trap reaches.
     partials(*self, span: Span, t: Ty, count: string) -> string
         val z = self.def("llvm.mlir.zero : !llvm.ptr")
         val bytes = self.def(s"llvm.ptrtoint ${self.elem_at(z, count, self.mem_ty(span, t))} : !llvm.ptr to i64")
 
-        self.call("nex_array_alloc", bytes, "i64", "!llvm.ptr")
+        self.call("nex_storage_alloc", bytes, "i64", "!llvm.ptr")
 
     // -- `parallel for` ---------------------------------------------------------------------------
 
@@ -245,7 +249,14 @@ impl Emitter
                 writes.push(w)
                 slots.push(fields.len() - 1)
             elif self.slot[id] != ""
-                if is_arr(t) && writes_local(body, id) then self.later(span, "a parallel body writing an array a lambda captures")
+                if is_arr(t) && writes_local(body, id)
+                    if self.captured_in(body, id)
+                        self.later(span, "a parallel body writing an array a lambda inside it captures")
+                    else
+                        caps.push(ParCap.CStored(id))
+                        fields.push(self.desc_ty(rank_of(t)))
+                        vals.push(self.unique_stored(span, self.local_ptr(span, id), t))
+                        continue
 
                 caps.push(ParCap.CAddr(id))
                 fields.push("!llvm.ptr")
@@ -414,6 +425,8 @@ impl Emitter
 
         var written: Buf[usize] = buf()
         var bufs: Buf[string] = buf()
+        // The stored arrays the code holds as values, as it holds an array that crosses as one.
+        var unboxed: Buf[usize] = buf()
 
         for c in job.caps
             c match
@@ -430,6 +443,15 @@ impl Emitter
                     if writes
                         written.push(id)
                         bufs.push(m)
+                CStored(id) ->
+                    self.boxed.set(id, false)
+                    unboxed.push(id)
+
+                    val (m, t) = self.par_in(span, self.env_get(job.fields, f), self.prog.locals[id].ty, true)
+
+                    self.arr.set(id, t)
+                    written.push(id)
+                    bufs.push(m)
 
             f += 1
 
@@ -480,7 +502,43 @@ impl Emitter
         self.par_accs = buf()
         self.finish_body(span, "")
         self.end(s"  func.func private @\"p.$n\"(%env: !llvm.ptr, %w: i64, %nw: i64)")
+
+        for id in unboxed
+            self.boxed.set(id, true)
     end loop_body_code
+
+    // The descriptor of the array object stored at `ptr`, an array of type `t` a parallel body
+    // writes in place: where anything besides the place holds the object (a `val` sharing it), the
+    // place is given a copy of its own first, so the writes reach only the place (DESIGN §6.2 rule 4).
+    unique_stored(*self, span: Span, ptr: string, t: Ty) -> string
+        val d = self.desc_ty(rank_of(t))
+
+        self.external("nex_count", "!llvm.ptr", "i64")
+
+        val h = self.def(s"llvm.load $ptr : !llvm.ptr -> !llvm.ptr")
+        val n = self.def(s"func.call @nex_count($h) : (!llvm.ptr) -> i64")
+        val holders = self.def(s"arith.subi $n, ${self.def(s"llvm.load ${self.pins_ptr(h, t)} : !llvm.ptr -> i64")} : i64")
+
+        self.op(s"scf.if ${self.def(s"arith.cmpi ne, $holders, %one : i64")} {")
+
+        val m = self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> $d")} : $d to ${self.memref_ty(span, t)}")
+
+        self.store_array(span, ptr, self.def(s"bufferization.to_tensor $m restrict : ${self.memref_ty(span, t)} to ${self.tensor_ty(span, t)}"), t)
+        self.op("}")
+        self.def(s"llvm.load ${self.def(s"llvm.load $ptr : !llvm.ptr -> !llvm.ptr")} : !llvm.ptr -> $d")
+
+    // Whether a lambda made in `e` captures local `id`.
+    captured_in(*self, e: TExpr, id: usize) -> bool
+        *e.kind match
+            TLambdaRef(l) ->
+                for c in self.prog.lambdas[l].captures
+                    if c == id then return true
+            _ -> ()
+
+        for c in children(e)
+            if self.captured_in(c, id) then return true
+
+        false
 
     // Iterations `lo` to `hi − 1` of the box the clauses span, numbered with the first clause's index
     // varying fastest: each sets the indices and runs the body.

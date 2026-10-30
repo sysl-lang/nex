@@ -1,0 +1,177 @@
+// What a caught trap gives back: everything the frames it abandons held (DESIGN §11).
+//
+// A trap returns to its catch by `longjmp` (`trap.sysl`), which skips the ends of the frames between,
+// where those frames would have released what they own. Two kinds of thing are owned there, and each
+// is kept where the catch can find it:
+//
+// - **Counts.** A generated function that owns counted values — its locals' slots, its statements'
+//   temporaries, the slot a `return` stores into — registers a *frame record* on entry and takes it
+//   off on the way out. The record lists every such slot with the function that releases what the slot
+//   holds; a slot holds zero until something is stored in it, and is zeroed again as its temporary is
+//   released, so at any instant the record says exactly which counts the frame holds.
+// - **Storage.** Every buffer the generated code allocates for an array (MLIR's `memref.alloc`, and
+//   the partials of a parallel reduction) is a *block* with two links before it, kept on a ring
+//   belonging to the innermost catch of the thread that allocated it. A block freed goes off whatever
+//   ring it is on; one still on the ring when a catch ends normally moves to the enclosing catch's
+//   ring, and one still on it when a trap ends the catch is freed.
+//
+// The trap gives them back **before** its `longjmp`, while the frames it abandons are still on the
+// stack: a frame record lives in its function's frame, and once the catch has the stack again its
+// own calls write over that memory.
+//
+// Both are per thread: a trap never leaves the thread that raised it, and a buffer is freed by the
+// thread that allocated it, as MLIR's deallocation frees a buffer in the function that made it.
+// Outside every catch a block is a ring of its own, which costs its free nothing.
+
+import sysl.raw.ptr_cast
+
+@needs(os)
+extern malloc(n: usize) -> *u8
+
+// The links before a block's storage.
+struct Block
+    next: *Block
+    prev: *Block
+
+private val LINKS: usize = 16
+
+// One slot a frame record lists, and what releases the value stored in it.
+struct Guard
+    slot: *u8
+    drop: *extern(*u8) -> unit
+
+// A frame record's head; its `count` guards follow it.
+struct Frame
+    prev: *Frame
+    count: long
+
+// The innermost frame record, and the ring of the innermost catch (null outside every catch).
+@thread_local private var frames: *Frame = null
+@thread_local private var scope: *Block = null
+
+// -- storage ----------------------------------------------------------------------------------------
+
+// What `memref.alloc` calls (`finalize-memref-to-llvm{use-generic-functions}`).
+@export("_mlir_memref_to_llvm_alloc")
+block_alloc(size: long) -> *u8 = tracked(malloc(usize(size) + LINKS))
+
+@export("_mlir_memref_to_llvm_free")
+block_free(p: *u8)
+    if p == null then return
+
+    val b: *Block = ptr_cast(usize(p) - LINKS)
+
+    b.prev.next = b.next
+    b.next.prev = b.prev
+    free(ptr_cast(b))
+
+// `bytes` of zeroed storage on the current catch's ring, which `block_free` gives back.
+storage_block(bytes: long) -> *u8 = tracked(calloc(usize(bytes) + LINKS, 1))
+
+// The block at `base` put on the current ring, and its storage.
+private tracked(base: *u8) -> *u8
+    val b: *Block = ptr_cast(base)
+
+    on_ring(b, scope)
+    &base[LINKS]
+
+private on_ring(b: *Block, ring: *Block)
+    if ring == null
+        b.next = b
+        b.prev = b
+        return
+
+    b.next = ring.next
+    b.prev = ring
+    ring.next.prev = b
+    ring.next = b
+
+// -- frame records ----------------------------------------------------------------------------------
+
+@export("nex_frame_enter")
+frame_enter(f: *Frame)
+    f.prev = frames
+    frames = f
+
+@export("nex_frame_leave")
+frame_leave(f: *Frame)
+    frames = f.prev
+
+// What a guard calls for a slot holding one counted reference.
+@export("nex_release_slot")
+release_slot(slot: *u8)
+    val p: **u8 = ptr_cast(slot)
+
+    release(p[0])
+
+// -- catches ----------------------------------------------------------------------------------------
+
+// The innermost catch's frame record and open sink as it began.
+@thread_local private var base: *Frame = null
+@thread_local private var base_sink: long = 0
+
+// What a catch restores as it ends: the enclosing catch's ring, frame record and sink.
+struct Mark
+    scope: *Block
+    base: *Frame
+    sink: long
+
+// A catch begun: a ring of its own for what is allocated under it.
+open_catch() -> Mark
+    val ring: *Block = ptr_cast(malloc(LINKS))
+    val m = Mark(scope, base, base_sink)
+
+    ring.next = ring
+    ring.prev = ring
+    scope = ring
+    base = frames
+    base_sink = open_sinks()
+    m
+
+// What the frames between a trap and the innermost catch hold, given back as the trap is raised:
+// every frame record above the catch's released, every sink opened since closed, every block on the
+// catch's ring freed.
+abandon()
+    while frames != base && frames != null
+        val f = frames
+        val guards: *Guard = ptr_cast(usize(f) + 16)
+
+        frames = f.prev
+
+        for k in 0..<usize(f.count)
+            guards[k].drop(guards[k].slot)
+
+    close_sinks(base_sink)
+
+    val ring = scope
+
+    if ring == null then return
+
+    var b = ring.next
+
+    while b != ring
+        val next = b.next
+
+        free(ptr_cast(b))
+        b = next
+
+    ring.next = ring
+    ring.prev = ring
+
+// The catch begun at `m` ended, by a return or by a trap `abandon` has already cleaned up after: the
+// blocks still on its ring move to the enclosing one.
+close_catch(m: Mark)
+    val ring = scope
+    var b = ring.next
+
+    while b != ring
+        val next = b.next
+
+        on_ring(b, m.scope)
+        b = next
+
+    frames = base
+    scope = m.scope
+    base = m.base
+    base_sink = m.sink
+    free(ptr_cast(ring))
