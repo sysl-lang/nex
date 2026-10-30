@@ -255,6 +255,19 @@ run_extern_command_links()
     assert(dangling.status == Status.Exited(1), s"${dangling.status}")
     assert(dangling.err.unwrap_or("").contains("`-l` needs a value"), dangling.err.unwrap_or(""))
 
+// A callback writing a module-level array and a captured local one through `inout` calls, the second
+// of C's calls trapping: the writes the first call and the trapping one made before the trap stay.
+private val CALLBACK_INOUT_TRAP = "@link(\"nexffi\")\nextern def nf_sum_calls(f: (real, c_ptr) -> real, data: @data(f) c_ptr, n: int32): real\n\nvar g = [0.0, 0.0, 0.0]\n\ndef step(x: real): real =\n  bump(g, x)\n  set_el(g[3], x)\n  x\n\ndef bump(v: inout [real], x: real) =\n  v[1] += x\n  if x == 2.0 then assert(false, \"boom\")\n\ndef set_el(y: inout real, x: real) =\n  y += 10.0 * x\n\ndef k(a: inout [real], x: real): real =\n  a[int64(x)] = x\n  if x == 2.0 then assert(false, \"boom\")\n  x\n\ndef local_array() =\n  var a = [0.0, 0.0, 0.0]\n  val f = () -> print(nf_sum_calls(x -> k(a, x), 3))\n  assert_traps(f, \"boom\")\n  print(a)\n\ndef main() =\n  assert_traps(() -> print(nf_sum_calls(x -> step(x), 3)), \"boom\")\n  print(g)\n  local_array()\n"
+
+@test("a trap in a callback leaves what the callback wrote through inout arguments before it")
+run_callback_trap_keeps_inout_writes()
+    val b = bench()
+    val out = ran(b, CALLBACK_INOUT_TRAP, links = ffi_fixture(b).view())
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[3.0, 0.0, 10.0]\n[1.0, 2.0, 0.0]\n")
+
 @test("a trap in a callback with nothing catching ends the program at the trap; a callback called after its call or on C's own thread ends it too")
 run_callback_traps_uncaught()
     val b = bench()

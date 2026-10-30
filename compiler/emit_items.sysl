@@ -259,17 +259,20 @@ impl Emitter
         val r = rank_of(frames[0].src.ty)
         val win = self.items_win(s, o, z, t)
         val x = self.call("nex_items_window", s"${frames[0].cur}, ${self.def(s"arith.constant $r : i64")}, $win, ${self.def(s"arith.constant ${rank_of(place.ty)} : i64")}", "!llvm.ptr, i64, !llvm.ptr, i64", "!llvm.ptr")
-        val lent = self.alloca("!llvm.ptr")
+        // A slot of the frame record, so that a trap ending the call gives back what it holds.
+        val lent = self.zeroed_alloca("!llvm.ptr")
 
+        self.guards.push(Guard(lent, self.drop_for(place.ty)))
         self.op(s"llvm.store $x, $lent : !llvm.ptr, !llvm.ptr")
         ItemsLent(slot, win, r, x, lent)
 
     // After the call: an array the callee put in place of the lent window written into the window,
-    // which it must still fit, and what the slot holds given back.
+    // which it must still fit, and what the slot holds given back, the slot cleared.
     items_hand_back(*self, l: ItemsLent)
         val back = self.def(s"llvm.load ${l.lent} : !llvm.ptr -> !llvm.ptr")
 
         self.call("nex_items_hand_back", s"${l.slot}, ${self.def(s"arith.constant ${l.rank} : i64")}, ${l.win}, ${l.view}, $back", "!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr", "")
+        self.op(s"llvm.store ${self.def("llvm.mlir.zero : !llvm.ptr")}, ${l.lent} : !llvm.ptr, !llvm.ptr")
         self.release_ref(back)
 
     // -- nodes ------------------------------------------------------------------------------------

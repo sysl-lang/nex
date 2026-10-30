@@ -460,22 +460,26 @@ impl Emitter
                     if self.boxed[id] || is_inout(self.prog.locals[id].kind) then self.bind_borrowed(id, a)
                     else self.slot.set(id, a)
                 CArray(id, writes) ->
-                    val (m, t) = self.par_in(span, self.env_get(job.fields, f), self.prog.locals[id].ty, writes)
+                    val d = self.env_get(job.fields, f)
+                    val (m, t) = self.par_in(span, d, self.prog.locals[id].ty, writes)
 
                     self.arr.set(id, t)
 
                     if writes
                         written.push(id)
                         bufs.push(m)
+                        self.par_bufs.push(ParBuf(id, d))
                 CStored(id) ->
                     self.boxed.set(id, false)
                     unboxed.push(id)
 
-                    val (m, t) = self.par_in(span, self.env_get(job.fields, f), self.prog.locals[id].ty, true)
+                    val d = self.env_get(job.fields, f)
+                    val (m, t) = self.par_in(span, d, self.prog.locals[id].ty, true)
 
                     self.arr.set(id, t)
                     written.push(id)
                     bufs.push(m)
+                    self.par_bufs.push(ParBuf(id, d))
                     f += 1
 
                     // A lambda made here captures the cell, whose object's buffer is the one the
@@ -529,6 +533,7 @@ impl Emitter
             self.par_back(span, self.arr[written[k]], bufs[k], self.prog.locals[written[k]].ty)
 
         self.par_accs = buf()
+        self.par_bufs = buf()
         self.finish_body(span, "")
         self.end(s"  func.func private @\"p.$n\"(%env: !llvm.ptr, %w: i64, %nw: i64)")
 

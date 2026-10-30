@@ -1486,6 +1486,12 @@ impl Emitter
         if op == "="
             if self.par_assign(target, value) || self.fused_assign(target, value) then return
 
+            self.inout_param(target) match
+                Some(id) ->
+                    self.param_assign(span, id, self.cast(span, self.ex(value), value.ty, target.ty), target.ty, false)
+                    return
+                None -> ()
+
             // A place in memory takes a copy of what it is given anyway.
             self.set_place(target, if self.reads_storage(target) then self.ex(value) else self.lasting(value), false)
             return
@@ -1498,7 +1504,9 @@ impl Emitter
         val bop = op[0..<op.len - 1]
         val r = self.mapped(texpr(span, target.ty, TLiteral(VoidVal, false)), operands, texpr(span, elem_of(target.ty), self.scalar_op(bop, chain_leaf(target, 0), chain_leaf(value, 1))))
 
-        self.set_place(target, r, true)
+        self.inout_param(target) match
+            Some(id) -> self.param_assign(span, id, r, target.ty, true)
+            None -> self.set_place(target, r, true)
 
     // -- calls ------------------------------------------------------------------------------------
 
@@ -1625,7 +1633,7 @@ impl Emitter
         val first: usize = if r == "" then 0 else 1
 
         for k in 0..<back.len()
-            self.close_place(span, back[k].place, result_name(v, first + k, n), back[k].frames, true)
+            self.close_place(span, back[k].place, result_name(v, first + k, n), back[k].frames, true, back[k].root)
 
         if r == "" then "" else self.own(result_name(v, 0, n), ret)
 
