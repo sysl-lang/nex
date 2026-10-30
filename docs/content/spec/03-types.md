@@ -96,6 +96,10 @@ A `complex[realN]` is a pair of `realN` values, its real and imaginary parts, st
 `realN`s, the layout of Fortran's `complex` and of C's `_Complex`. `z.re` and `z.im` are the parts,
 and `abs(z)` and `arg(z)` the modulus and argument.
 
+A product is the textbook `(ac - bd) + (ad + bc)i`, each of its four products and two sums rounded on
+its own, as gfortran computes it. An infinite part is not recovered from a NaN, as C's Annex G would
+do: `complex(inf, 1.0) * complex(1.0, 0.0)` is `inf-nani`.
+
 `complex[real32]` is what LAPACK's `c` routines take and `complex[real64]` what its `z` routines
 take. Because the type names its part, `real32` promotes to `complex[real32]` with no change of
 width.

@@ -95,6 +95,46 @@ the ratio is against the twin of the same run. Point distance now meets the bar 
 its twin does: the two 80 MB buffers per pass are gone, and BLAS gemm's two per product with them.
 Stencil, naive gemm and gemv carry no array whose buffer changes, and stay where they were.
 
+## With the complex product in two lanes
+
+Complex axpy was the last kernel over the bar, and the load was not the reason: interleaved runs of
+the twin and nex held 1.46× at a load of 22, and user CPU agreed (0.26 s against 0.18 s). The
+multiply was never the Annex G kind — nex already wrote `(ac - bd) + (ad + bc)i` and no recovery
+branches — and the loop was one fused `linalg.generic` with no temporary. The cost was the shape
+LLVM's loop vectorizer gave it: two complexes per pass, split by `ld2` into a vector of real parts
+and one of imaginary parts and joined again by `st2`, with eight vector operations per pass.
+gfortran keeps one complex per 128-bit register (`ldr q`, two `fcmla`, `fadd`, `str q`). Its `fcmla`
+is a fused multiply-add, which DESIGN §2.5 rules out for nex, but the fusion is not where its speed
+comes from: C kernels over the same data, best of 15 with the arrays in cache (2000 complexes, ns per
+pass, load 65), give
+
+| loop | ns per pass |
+|---|---:|
+| gfortran (`fcmla`, fused) | 547 |
+| nex (`ld2` / `st2`) | 1123 |
+| C, unfused textbook, vectorized as nex is | 1008 |
+| C, fused | 838 |
+| C, unfused, one complex per register: `[ar, ar] * x + [-ai, ai] * swap(x)` | 732 |
+| nex's MLIR with that product written into the generic by hand | 706 |
+
+and at 10⁷, where the loop is near memory speed, the last form ran as fast as the twin. Its values
+are the scalar form's bit for bit: `(-ai) * xi` is exactly `-(ai * xi)`, and `x + -y` is `x - y`.
+The emitter now writes a complex product in an element-wise `linalg.generic` that way (DESIGN
+§2.5), and LLVM keeps it: `fmul <2 x double>`, a lane swap and `fadd`, with no `<4 x double>`
+interleaving. A scalar product keeps the scalar form, which MLIR folds where its operands are
+constants, as it always has.
+
+2026-10-30 16:08 EDT, best of nine runs of each, interleaved, at a load of 30 to 37. *Before* is dev
+at `efd44c1`:
+
+| kernel | gfortran | nex before | nex after | ratio before | ratio after | allocs (nex/twin) |
+|---|---:|---:|---:|---:|---:|---:|
+| complex axpy | 4.53 | 5.83 | 4.54 | 1.29 | **1.00** | 2 / 2 |
+
+`zsh bench/run.zsh complex-axpy axpy point-distance` from this checkout, at a load of 33 to 37,
+gives 1.10, 1.06 and 0.95: every kernel of the oracle now meets its bar. The same change makes
+`y = x * a + y` 1.16× faster (6.26 to 5.40 ms) and leaves `y = x * y` as it was (5.36 and 5.39 ms).
+
 ## The misses of the baseline, ranked by ratio
 
 The diagnoses come from `nex emit` (MLIR) and `zsh bench/run.zsh --ir <kernel>` (the LLVM IR as

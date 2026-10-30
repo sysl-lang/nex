@@ -210,6 +210,15 @@ be an array, the other then an array of the same shape or a scalar that broadcas
   machine has a fused instruction. The compiled engine emits plain `fmul` and `fadd`, with no
   `contract` flag and no `llvm.fmuladd`. A fused operation happens only where the source asks for it:
   `fma(a, b, c)` (§7.3).
+- **A complex product is (ac − bd) + (ad + bc)i**, its four products and two sums each rounded once at
+  the width, as gfortran computes it under its default `-fcx-fortran-rules` (less the fused
+  instruction gfortran uses where the machine has one). There is no C Annex G recovery of an
+  infinity from a NaN part — `complex(inf, 1.0) * complex(1.0, 0.0)` is `inf-nani` — and no
+  rescaling against overflow. The two engines give the same parts bit for bit; the sign of a NaN part
+  is not specified, as IEEE 754 leaves it, and nothing nex prints shows it. In an element-wise
+  expression the compiled engine computes the two parts side by side in one two-lane vector,
+  `[a, a] * [c, d] + [-b, b] * [d, c]`, which is the same arithmetic: `(-b) * d` is exactly
+  `-(b * d)`.
 - **Real arithmetic does not trap by default.** `1.0 / 0.0` is `inf`, `0.0 / 0.0` is `nan`, and an
   overflow is `±inf`, as IEEE specifies. `nex build --fpe-trap` (and `nex run --fpe-trap`) traps on
   real division by zero, invalid operations and overflow instead, like gfortran's

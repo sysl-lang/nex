@@ -130,6 +130,9 @@ struct Emitter
     // (`emit_view.sysl`); `""` for any other local.
     places: Buf[string]
     keepers: Buf[string]
+    // Whether the body of an element-wise `linalg.generic` is being emitted, where a complex product
+    // computes its two parts in the lanes of one vector (`complex_mul_lanes`).
+    in_elementwise: bool
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -910,7 +913,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
                     buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf(),
-                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf(), buf(), buf(), buf(), buf(), buf())
+                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf(), buf(), buf(), buf(), buf(), buf(), false)
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)

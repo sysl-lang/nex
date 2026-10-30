@@ -993,8 +993,13 @@ impl Emitter
         self.op(s"$v = linalg.generic {indexing_maps = [$maps], iterator_types = [${parallel_iterators(r)}]} ${ins_text}outs($init : $ot) {")
         self.op(s"^bb0(${joined(args)}):")
 
+        val outer = self.in_elementwise
+
+        self.in_elementwise = true
+
         val y = self.in_frame(frame, scalar)
 
+        self.in_elementwise = outer
         self.op(s"linalg.yield $y : ${self.elem_ty(span, elem_of(out))}")
         self.op(s"} -> $ot")
         v

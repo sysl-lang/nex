@@ -389,6 +389,32 @@ impl Emitter
         self.trap_if(self.def(s"arith.andi $r_inf, $fin : i1"), REAL_OVERFLOW)
         r
 
+    // The product (ac - bd) + (ad + bc)i of a = (ar, ai) and b = (br, bi), its two parts computed side
+    // by side in the lanes of one two-element vector: [ar, ar] * [br, bi] + [-ai, ai] * [bi, br].
+    // The values are those of the scalar form, bit for bit: `(-ai) * bi` is exactly `-(ai * bi)` and
+    // `x + -y` is `x - y`, each product and sum rounded once at the width and never fused. A complex
+    // array then stays one element per register, its (re, im) pair loaded and stored whole, where the
+    // scalar form has LLVM split the parts into separate vectors of real and imaginary parts and
+    // interleave them again (`ld2` and `st2`), which makes the complex axpy about 1.3 times slower.
+    // Only an element-wise body takes this form. A scalar product keeps the scalar form, which MLIR
+    // folds where its operands are constants, so a function of it (`tan(1.5 - 0.5i)`) is folded by
+    // MLIR, as the interpreter computes it, rather than by LLVM, whose fold of the `exp`, `sin` and
+    // `cos` inside it lands a last bit away.
+    complex_mul_lanes(*self, ar: string, ai: string, br: string, bi: string, bits: int) -> string
+        val f = s"f$bits"
+        val v = s"vector<2x$f>"
+        val undef = self.def(s"llvm.mlir.undef : $v")
+        val lane0 = self.def("llvm.mlir.constant(0 : i32) : i32")
+        val lane1 = self.def("llvm.mlir.constant(1 : i32) : i32")
+        val pair = (x: string, y: string) -> self.def(s"llvm.insertelement $y, ${self.def(s"llvm.insertelement $x, $undef[$lane0 : i32] : $v")}[$lane1 : i32] : $v")
+        val straight = self.def(s"arith.mulf ${pair(ar, ar)}, ${pair(br, bi)} : $v")
+        val crossed = self.def(s"arith.mulf ${pair(self.def(s"arith.negf $ai : $f"), ai)}, ${pair(bi, br)} : $v")
+        val sum = self.def(s"arith.addf $straight, $crossed : $v")
+        val re = self.def(s"llvm.extractelement $sum[$lane0 : i32] : $v")
+        val im = self.def(s"llvm.extractelement $sum[$lane1 : i32] : $v")
+
+        self.def(s"complex.create $re, $im : complex<$f>")
+
     complex_binary(*self, op: string, a: string, b: string, bits: int) -> string
         val c = s"complex<f$bits>"
         val f = s"f$bits"
@@ -401,6 +427,8 @@ impl Emitter
         val ai = self.def(s"complex.im $a : $c")
         val br = self.def(s"complex.re $b : $c")
         val bi = self.def(s"complex.im $b : $c")
+
+        if op == "*" && bits != 16 && self.in_elementwise then return self.complex_mul_lanes(ar, ai, br, bi, bits)
 
         if op == "*"
             // (ac - bd) + (ad + bc)i, as nex writes the product rather than the dialect's lowering.

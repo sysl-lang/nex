@@ -28,6 +28,34 @@ run_rounding_scalars()
     assert_eq(out.text, "0.0\n0.0\n0.0\n0.0\n0.0+2.0000000074505806i\n0.0-1.0000000018626451i\n" +
                         "[0.0+2.0000000074505806i, -2.0000000074505806-3.725290298461914E-9i]\n[0.0-1.0000000018626451i]\n")
 
+// Complex products at the edges of the number line, scalar, element-wise and broadcast, each part's
+// sign read through its reciprocal where it is a zero. The expected values are C's for the textbook
+// (ac - bd) + (ad + bc)i, four products and two sums each rounded once: no Annex G recovery of an
+// infinity from a NaN part, and no rescaling of an overflow.
+private val COMPLEX_EDGES = "def main() =\n  val z = 0.0\n  val big = 1.0e300\n" +
+    "  val zs = [complex(-z, z), complex(-z, -z), complex(-z, z), complex(-z, -z), complex(inf, 1.0), complex(inf, 0.0), complex(big, big), complex(nan, 1.0), complex(1.0e-160, 1.0), complex(0.1, 0.2)]\n" +
+    "  val ws = [complex(z, -z), complex(-z, z), complex(1.0, z), complex(1.0, z), complex(1.0, 0.0), complex(0.0, 1.0), complex(1.0e10, -1.0e10), complex(2.0, 3.0), complex(1.0e-160, 0.0), complex(0.3, 0.7)]\n" +
+    "  val ps = zs * ws\n  for k in 1..10\n    val p = zs[k] * ws[k]\n    print(p)\n    print(1.0 / p.re)\n    print(1.0 / p.im)\n    print(1.0 / ps[k].re)\n    print(1.0 / ps[k].im)\n" +
+    "  print(ps)\n  print(zs * complex(-z, 1.0))\n  print(complex(1.0, -z) * zs)\n" +
+    "  val h: real32 = 0.0\n  val one: real32 = 1.0\n  val b32: real32 = 1.0e30\n  val t32: real32 = 1.0e10\n" +
+    "  val z32 = [complex[real32](-h, h), complex[real32](b32, b32), complex[real32](one / 10.0, one / 5.0)]\n" +
+    "  val w32 = [complex[real32](one, h), complex[real32](t32, -t32), complex[real32](one * 0.3, one * 0.7)]\n" +
+    "  print(z32 * w32)\n  print(z32[3] * w32[3])\n  print(one / (z32[1] * w32[1]).re)\n"
+
+@test("a complex product is (ac - bd) + (ad + bc)i at the edges: signed zeros, infinities, nan, subnormals and overflow, scalar, element-wise and broadcast, real64 and real32, on both engines")
+run_rounding_complex_edges()
+    val b = bench()
+    val out = ran(b, COMPLEX_EDGES)
+
+    finish(b)
+    assert_eq(out.text, "0.0+0.0i\ninf\ninf\ninf\ninf\n0.0+0.0i\ninf\ninf\ninf\ninf\n0.0+0.0i\n-inf\ninf\n-inf\ninf\n0.0+0.0i\ninf\n-inf\ninf\n-inf\n" +
+                        "inf-nani\n0.0\nnan\n0.0\nnan\nnan+infi\nnan\n0.0\nnan\n0.0\ninf-nani\n0.0\nnan\n0.0\nnan\nnan-nani\nnan\nnan\nnan\nnan\n" +
+                        "1.0E-320+1.0E-160i\ninf\n1.0E160\ninf\n1.0E160\n-0.10999999999999999+0.13i\n-9.090909090909092\n7.692307692307692\n-9.090909090909092\n7.692307692307692\n" +
+                        "[0.0+0.0i, 0.0+0.0i, 0.0+0.0i, 0.0+0.0i, inf-nani, nan+infi, inf-nani, nan-nani, 1.0E-320+1.0E-160i, -0.10999999999999999+0.13i]\n" +
+                        "[0.0+0.0i, 0.0+0.0i, 0.0+0.0i, 0.0+0.0i, nan+infi, nan+infi, -1.0E300+1.0E300i, nan-nani, -1.0+1.0E-160i, -0.2+0.1i]\n" +
+                        "[0.0+0.0i, 0.0+0.0i, 0.0+0.0i, 0.0+0.0i, inf-nani, inf-nani, 1.0E300+1.0E300i, nan-nani, 1.0E-160+1.0i, 0.1+0.2i]\n" +
+                        "[0.0+0.0i, inf-nani, -0.11+0.13i]\n-0.11+0.13i\n-inf\n")
+
 @test("a product summed by @, dot, sum or an element-wise expression is rounded first, serial and parallel, on both engines")
 run_rounding_products()
     val b = bench()

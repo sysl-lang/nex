@@ -106,6 +106,39 @@ run_no_contraction()
     assert(!body.contains("contract"), body)
     assert(!body.contains("fast"), body)
 
+// A complex axpy at each width, over data whose answer the two forms of the product would print alike.
+private val CAXPY = "def caxpy(a: complex, x: [complex], y: inout [complex]) =\n  y = a * x + y\n\n" +
+                    "def caxpy32(a: complex[real32], x: [complex[real32]], y: inout [complex[real32]]) =\n  y = a * x + y\n\n" +
+                    "def main() =\n  var y: [complex] = [complex(1.0, 2.0), complex(3.0, 4.0)]\n" +
+                    "  caxpy(complex(0.5, -1.0), [complex(2.0, 1.0), complex(-1.0, 0.25)], y)\n  print(y)\n" +
+                    "  var y32: [complex[real32]] = [complex[real32](1.0, 2.0)]\n" +
+                    "  caxpy32(complex[real32](0.5, -1.0), [complex[real32](2.0, 1.0)], y32)\n  print(y32)\n"
+
+@test("a complex product keeps each element's two parts in one register: no split into real and imaginary vectors, nothing fused, at real64 and real32")
+run_complex_product_lanes()
+    val b = bench()
+    val out = ran(b, CAXPY)
+    val m = emitted(CAXPY) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+    val ir = optimized_ir(m, b.work, b.tc) match
+        Ok(ir) -> ir
+        Err(e) -> fail_with(e)
+
+    finish(b)
+    assert_eq(out.text, "[3.0+0.5i, 2.75+5.125i]\n[3.0+0.5i]\n")
+
+    for name in ["n.caxpy", "n.caxpy32"]
+        val f = if name == "n.caxpy" then "double" else "float"
+        val body = function_ir(ir, name)
+
+        assert(body.contains(s"fmul <2 x $f>"), s"$name: $body")
+        assert(!body.contains(s"<4 x $f>"), s"$name: $body")
+        assert(!body.contains("fsub"), s"$name: $body")
+        assert(!body.contains("fmuladd"), s"$name: $body")
+        assert(!body.contains("llvm.fma"), s"$name: $body")
+        assert(!body.contains("contract"), s"$name: $body")
+
 @test("fma lowers to the fused instruction on its own: llvm.fma in the optimized IR, at each width")
 run_fma_lowers()
     val b = bench()
