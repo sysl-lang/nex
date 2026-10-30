@@ -1,0 +1,831 @@
+module sh.sysl.nex
+
+// The array prelude as the interpreter computes it (DESIGN §4, §7.4): the shape functions, the
+// constructors, rearranging, the higher-order functions and the reductions, each as
+// `compiler/emit_array_fn.sysl` and `compiler/emit_prelude.sysl` compute them.
+//
+// **A reduction combines as the compiled program does, so its bits are the same** (DESIGN §9.2.1):
+// `sum`, `product`, `dot` and `norm2` reduce blocks of 4096 elements in storage order, each from the
+// operation's identity, and combine the block partials in the fixed pairwise tree; the others run
+// from the identity through every element in order.
+
+import nex_runtime.sh.sysl.nex_runtime.{NEGATIVE_EXTENT, NOT_AN_AXIS, NOT_A_PERMUTATION, RESHAPE_SIZE, SHAPE_MISMATCH}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The prelude's LAPACK functions (DESIGN §10.5), which the interpreter does not compute yet.
+private val LINEAR_ALGEBRA = ["solve", "lstsq", "inv", "det", "lu", "chol", "qr", "eigvals", "eig", "eigh", "svd", "svdvals", "solve_inplace", "lu_inplace", "chol_inplace",
+                              "qr_inplace"]
+
+// The elements a block of a tree reduction holds.
+private val BLOCK: usize = 4096
+
+// A reduction: where it starts, how an element joins it, how two partial results combine, and what
+// is done with the result; `tree` where it combines blocks pairwise. `sum` where it is `sum` or
+// `dot` of `real64` with nothing trapping, which `reduce_all` adds directly.
+private[nex] struct Red
+    tree: bool
+    identity: Value
+    step: Op2
+    combine: Op2
+    finish: Op1
+    sum: bool
+
+// An integer extent, or why there is none.
+private type Extent64 = &Fn(&Cells) -> Result[long, Signal]
+
+// `xs` reduced by `r`.
+private[nex] reduce_all(r: Red, xs: Buf[Value]) -> Answer
+    val step = r.step
+    val combine = r.combine
+    val finish = r.finish
+
+    if !r.tree
+        var acc = r.identity
+
+        for x in xs
+            acc = step(acc, x)?
+
+        return finish(acc)
+
+    var partials: Buf[Value] = buf()
+    var lo: usize = 0
+
+    while lo < xs.len()
+        val hi = if lo + BLOCK < xs.len() then lo + BLOCK else xs.len()
+
+        if r.sum
+            var acc = 0.0
+
+            for k in lo..<hi
+                acc = acc + real_of(xs[k])
+
+            partials.push(VReal(acc))
+        else
+            var acc = r.identity
+
+            for k in lo..<hi
+                acc = step(acc, xs[k])?
+
+            partials.push(acc)
+
+        lo = hi
+
+    if partials.len() == 0 then return finish(r.identity)
+
+    // Rounds of the pairwise tree: each pairs neighbours, an odd last one carried up as it is.
+    while partials.len() > 1
+        var next: Buf[Value] = buf()
+        var k: usize = 0
+
+        while k + 1 < partials.len()
+            next.push(combine(partials[k], partials[k + 1])?)
+            k += 2
+
+        if k < partials.len() then next.push(partials[k])
+
+        partials = next
+
+    finish(partials[0])
+
+// The first position (from 1) of the extreme element of `xs`, `better` saying which of two is; 0
+// where there is none. The first element is taken whatever it is, so an array of only `nan` still
+// has a location.
+private[nex] location(better: Op2, start: Value, xs: Buf[Value]) -> Result[long, Signal]
+    var best = start
+    var at: long = 0
+
+    for k in 0..<xs.len()
+        val x = xs[k]
+
+        if bool_of(better(x, best)?) || at == 0
+            best = x
+            at = long(k) + 1
+
+    Ok(at)
+
+// The 1-based index on each axis of extents `ext` of the element at 1-based storage position `k`, a
+// tuple of integers; every index 0 where `k` is.
+private[nex] unflattened(k: long, ext: Buf[long]) -> Value
+    var rest = if k == 0 then 0 else k - 1
+    var out: Buf[Value] = buf()
+
+    for n in ext
+        val d = if n > 1 then n else 1
+
+        out.push(VInt(if k == 0 then 0 else rest % d + 1))
+        rest /= d
+
+    VAgg(0, out)
+
+// The text of an array's extents: `3` at rank 1, `(2, 3)` above.
+private extents_text(ext: Buf[long]) -> string
+    if ext.len() == 1 then return s"${ext[0]}"
+
+    var out = "("
+
+    for k in 0..<ext.len()
+        if k > 0 then out += ", "
+        out += s"${ext[k]}"
+
+    out + ")"
+
+// 0 or 1 of a numeric type, `false` or `true`.
+private[nex] one_or_zero(t: Ty, one: bool) -> Value = base_of(t) match
+    Int(_, _) -> VInt(if one then 1 else 0)
+    Real(_) -> VReal(if one then 1.0 else 0.0)
+    Complex(_) -> VComplex(if one then 1.0 else 0.0, 0.0)
+    Bool -> VBool(one)
+    _ -> VVoid
+
+// `n` copies of `x`.
+private repeated(x: Value, n: long) -> Buf[Value]
+    var out: Buf[Value] = buf()
+
+    for _ in 0..<n
+        out.push(x)
+
+    out
+
+impl Interp
+    // -- reductions --------------------------------------------------------------------------------
+
+    reduction(*self, e: TExpr, name: string, args: Buf[TExpr], dim: Option[TExpr]) -> Code
+        val span = e.span
+        val a = args[0]
+        val et = elem_of(a.ty)
+        val t = e.ty
+        val r = rank_of(a.ty)
+        val loc = name == "minloc" || name == "maxloc"
+
+        if loc && dim.is_none()
+            val v = self.lent(a)
+            val (better, start) = self.locator(span, name, et) match
+                Some(p) -> p
+                None -> return self.later(span, s"`$name` of ${show_ty(et)}")
+
+            return (c) ->
+                val x = arr_of(v(c)?)
+                val k = location(better, start, elements(x))?
+
+                Ok(if r == 1 then int_value(k, t) else unflattened(k, x.ext))
+
+        if name == "dot"
+            val codes = self.operands(args)
+            val pt = elem_of(t)
+            val red = self.reducer(span, "sum", pt, t) match
+                Some(x) -> x
+                None -> return self.later(span, s"`dot` of ${show_ty(pt)}")
+            val mul = self.operator(span, "*", pt, pt) match
+                Some(f) -> f
+                None -> return self.later(span, s"`dot` of ${show_ty(pt)}")
+            val conj = is_complex(base_of(pt))
+
+            return (c) ->
+                val f = codes[0]
+                val g = codes[1]
+                val x = arr_of(f(c)?)
+                val y = arr_of(g(c)?)
+
+                if !same_shape(x, y) then return trapped(SHAPE_MISMATCH)
+
+                val xs = elements(x)
+                val ys = elements(y)
+                var ps: Buf[Value] = buf()
+
+                for k in 0..<xs.len()
+                    val p = if conj then VComplex(re_of(xs[k]), -im_of(xs[k])) else xs[k]
+
+                    ps.push(mul(p, ys[k])?)
+
+                reduce_all(red, ps)
+
+        val v = self.lent(a)
+        val lane_t = if r == 1 then t else elem_of(t)
+        var red_o: Option[Red] = None
+        var locate: Option[(Op2, Value)] = None
+
+        if loc then locate = self.locator(span, name, et) else red_o = self.reducer(span, name, et, lane_t)
+
+        if red_o.is_none() && locate.is_none() then return self.later(span, s"`$name` of ${show_ty(et)}")
+
+        val lane: &Fn(Buf[Value]) -> Answer = locate match
+            Some((better, start)) -> (xs) -> Ok(int_value(location(better, start, xs)?, lane_t))
+            None ->
+                val red = red_o.unwrap()
+
+                (xs) -> reduce_all(red, xs)
+
+        dim match
+            None -> (c) -> lane(elements(arr_of(v(c)?)))
+            Some(d) ->
+                // An axis written as a literal is known to be one; a computed one is checked.
+                val fixed: Option[long] = *d.kind match
+                    TLiteral(IntVal(x), _) -> Some(long(x))
+                    _ -> None
+                val k: Extent64 = fixed match
+                    Some(x) -> (c) -> Ok(x)
+                    None ->
+                        val kc = self.ex(d)
+                        val signed = is_signed(base_of(d.ty))
+
+                        (c) -> Ok(long.wrap(wide(int_of(kc(c)?), signed)))
+
+                (c) ->
+                    val x = arr_of(v(c)?)
+                    val axis = k(c)?
+
+                    if ulong.wrap(axis - 1) >= ulong(r) then return trapped(NOT_AN_AXIS)
+                    if r == 1 then return lane(elements(x))
+
+                    lanes(x, usize(axis - 1), lane)
+    end reduction
+
+    // How an element of type `et` beats the best so far for `minloc` or `maxloc`, and the best to
+    // start from.
+    locator(*self, span: Span, name: string, et: Ty) -> Option[(Op2, Value)]
+        val better = self.operator(span, if name == "minloc" then "<" else ">", et, et) match
+            Some(f) -> f
+            None -> return None
+
+        Some((better, extreme_identity(name == "maxloc", et)))
+
+    // The reduction `name` over elements of type `et`, giving a `t`.
+    reducer(*self, span: Span, name: string, et: Ty, t: Ty) -> Option[Red]
+        val tree = name == "sum" || name == "product" || name == "dot" || name == "norm2"
+        val same: Op1 = (x) -> Ok(x)
+
+        if name == "count"
+            val add: Op2 = (a, b) -> Ok(VInt(long.wrap(i128(int_of(a)) + i128(int_of(b)))))
+
+            return Some(Red(false, VInt(0), (acc, x) -> Ok(VInt(int_of(acc) + (if bool_of(x) then 1 else 0))), add, same, false))
+
+        if name == "any" || name == "all"
+            val all = name == "all"
+            val f: Op2 = (a, b) -> Ok(VBool(if all then bool_of(a) && bool_of(b) else bool_of(a) || bool_of(b)))
+
+            return Some(Red(false, VBool(all), f, f, same, false))
+
+        if name == "minval" || name == "maxval"
+            val high = name == "maxval"
+
+            val pick: Op2 = base_of(t) match
+                Int(_, signed) -> (a, b) ->
+                    val x = wide(int_of(a), signed)
+                    val y = wide(int_of(b), signed)
+
+                    Ok(if (x > y) == high then a else b)
+                Real(_) -> (a, b) -> Ok(VReal(if high then maximum(real_of(a), real_of(b)) else minimum(real_of(a), real_of(b))))
+                _ -> return None
+
+            return Some(Red(false, extreme_identity(high, t), pick, pick, same, false))
+
+        val plus = self.operator(span, "+", t, t) match
+            Some(f) -> f
+            None -> return None
+
+        if name == "sum" || name == "dot"
+            val wide64 = base_of(t) match
+                Real(64) -> true
+                _ -> false
+            val fast = wide64 && !self.m.fpe
+
+            return Some(Red(tree, one_or_zero(t, false), plus, plus, same, fast))
+
+        if name == "product"
+            val times = self.operator(span, "*", t, t) match
+                Some(f) -> f
+                None -> return None
+
+            return Some(Red(tree, one_or_zero(t, true), times, times, same, false))
+
+        if name == "norm2"
+            // Each element squared at the result's width and added, unchecked, as the compiled
+            // step is; the root taken of the sum.
+            val b = bits_of(base_of(t))
+
+            val square: Op1 = base_of(et) match
+                Complex(_) -> (x) -> Ok(VReal(rnd(rnd(re_of(x) * re_of(x), b) + rnd(im_of(x) * im_of(x), b), b)))
+                Real(_) -> (x) -> Ok(VReal(rnd(real_of(x) * real_of(x), b)))
+                Int(_, signed) -> (x) ->
+                    val y = int_to_real(int_of(x), signed, b)
+
+                    Ok(VReal(rnd(y * y, b)))
+                _ -> return None
+
+            val step: Op2 = (acc, x) ->
+                val sq = real_of(square(x)?)
+
+                Ok(VReal(rnd(real_of(acc) + sq, b)))
+
+            return Some(Red(tree, VReal(0.0), step, plus, (x) -> Ok(VReal(real_math("sqrt", real_of(x), b))), false))
+
+        None
+    end reducer
+
+    // -- the prelude's array functions ---------------------------------------------------------------
+
+    array_builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> Code
+        if name == "length" || name == "rows" then return self.extent_fixed(args[0], 0, t)
+        if name == "cols" then return self.extent_fixed(args[0], 1, t)
+        if name == "rank" then return self.constant_code(int_value(long(rank_of(args[0].ty)), t))
+        if name == "shape" && rank_of(args[0].ty) == 1 then return self.extent_fixed(args[0], 0, t)
+
+        if name == "shape" || name == "extents" || name == "size"
+            val v = self.lent(args[0])
+            val tuple = name == "shape"
+            val size = name == "size"
+
+            return (c) ->
+                val a = arr_of(v(c)?)
+
+                if size then return Ok(int_value(count_of(a), t))
+
+                var xs: Buf[Value] = buf()
+
+                for n in a.ext
+                    xs.push(VInt(n))
+
+                Ok(if tuple then VAgg(0, xs) else vector(xs))
+
+        if name == "extent"
+            val v = self.lent(args[0])
+            val k = self.integer(args[1])
+
+            return (c) ->
+                val a = arr_of(v(c)?)
+                val axis = k(c)?
+
+                if ulong.wrap(axis - 1) >= ulong(a.ext.len()) then return trapped(NOT_AN_AXIS)
+
+                Ok(int_value(a.ext[usize(axis - 1)], t))
+
+        if name == "zeros" || name == "ones"
+            val dims = self.shape_args(span, args, 0, args.len())
+            val x = one_or_zero(elem_of(t), name == "ones")
+
+            return (c) ->
+                val ext = extents_of(dims, c)?
+
+                Ok(dense(repeated(x, product_of(ext)), ext))
+
+        if name == "fill"
+            val dims = self.shape_args(span, args, 0, args.len() - 1)
+            val x = self.ex(args[args.len() - 1])
+
+            return (c) ->
+                val ext = extents_of(dims, c)?
+
+                Ok(dense(repeated(x(c)?, product_of(ext)), ext))
+
+        if name == "identity"
+            val n = self.extent_arg(args[0])
+            val one = one_or_zero(elem_of(t), true)
+            val zero = one_or_zero(elem_of(t), false)
+
+            return (c) ->
+                val m = n(c)?
+                var out: Buf[Value] = buf()
+
+                for j in 0..<m
+                    for i in 0..<m
+                        out.push(if i == j then one else zero)
+
+                Ok(dense(out, pair(m, m)))
+
+        if name == "diag"
+            val v = self.lent(args[0])
+            val zero = one_or_zero(elem_of(t), false)
+            val square = rank_of(args[0].ty) == 1
+
+            return (c) ->
+                val a = arr_of(v(c)?)
+                var out: Buf[Value] = buf()
+
+                if square
+                    val m = a.ext[0]
+
+                    for j in 0..<m
+                        for i in 0..<m
+                            out.push(if i == j then a.store.v[usize(a.offset + i * a.str[0])] else zero)
+
+                    return Ok(dense(out, pair(m, m)))
+
+                val m = if a.ext[0] < a.ext[1] then a.ext[0] else a.ext[1]
+
+                for i in 0..<m
+                    out.push(a.store.v[usize(a.offset + i * (a.str[0] + a.str[1]))])
+
+                Ok(vector(out))
+
+        if name == "linspace" then return self.linspace(args, t)
+
+        if name == "flatten"
+            val v = self.lent(args[0])
+
+            return (c) -> Ok(vector(elements(arr_of(v(c)?))))
+
+        if name == "reshape"
+            val v = self.lent(args[0])
+            val dims = self.shape_args(span, args, 1, args.len())
+
+            return (c) ->
+                val a = arr_of(v(c)?)
+                val ext = extents_of(dims, c)?
+
+                if product_of(ext) != count_of(a) then return trapped(RESHAPE_SIZE)
+
+                Ok(dense(elements(a), ext))
+
+        if name == "transpose"
+            val v = self.lent(args[0])
+
+            return (c) ->
+                val a = arr_of(v(c)?)
+
+                Ok(copy_of(Arr(a.store, a.offset, pair(a.ext[1], a.ext[0]), pair(a.str[1], a.str[0]), buf())))
+
+        if name == "reverse"
+            val v = self.lent(args[0])
+            val k = self.integer(args[1])
+
+            return (c) ->
+                val a = arr_of(v(c)?)
+                val axis = k(c)?
+
+                if ulong.wrap(axis - 1) >= ulong(a.ext.len()) then return trapped(NOT_AN_AXIS)
+
+                val j = usize(axis - 1)
+                val last = if a.ext[j] > 0 then a.ext[j] - 1 else 0
+                var str: Buf[long] = buf()
+
+                for x in a.str
+                    str.push(x)
+
+                str.set(j, -a.str[j])
+                Ok(copy_of(Arr(a.store, a.offset + last * a.str[j], a.ext, str, buf())))
+
+        if name == "permute"
+            val v = self.lent(args[0])
+            var order: Buf[Extent64] = buf()
+
+            for k in 1..<args.len()
+                order.push(self.integer(args[k]))
+
+            return (c) ->
+                val a = arr_of(v(c)?)
+                val r = a.ext.len()
+                var ps: Buf[long] = buf()
+
+                for k in 0..<order.len()
+                    val f = order[k]
+
+                    ps.push(f(c)?)
+
+                // Each axis named once, every one in range.
+                for n in 0..<r
+                    if ulong.wrap(ps[n] - 1) >= ulong(r) then return trapped(NOT_A_PERMUTATION)
+
+                    for j in 0..<n
+                        if ps[j] == ps[n] then return trapped(NOT_A_PERMUTATION)
+
+                var ext: Buf[long] = buf()
+                var str: Buf[long] = buf()
+
+                for p in ps
+                    ext.push(a.ext[usize(p - 1)])
+                    str.push(a.str[usize(p - 1)])
+
+                Ok(copy_of(Arr(a.store, a.offset, ext, str, buf())))
+
+        if name == "to_integers" || name == "to_bytes"
+            val v = self.lent(args[0])
+            val from = elem_or(args[0].ty)
+
+            val f: Op1 = from match
+                Bool -> (x) -> Ok(VInt(if bool_of(x) then 1 else 0))
+                _ -> self.conversion(span, from, elem_or(t), name == "to_bytes") match
+                    Some(f) -> f
+                    None -> return self.later(span, s"`$name` of ${show_ty(args[0].ty)}")
+
+            return (c) -> map1(f, v(c)?)
+
+        if name == "map"
+            var leaves: Buf[TExpr] = buf()
+
+            leaves.push(leaf(args[0], 0))
+            return self.mapped(t, args, texpr(span, elem_of(t), TCall(leaf(args[1], 1), leaves)))
+
+        if name == "reduce" then return self.folded(span, args, t)
+        if name == "filter" then return self.filtered(span, args)
+        if name == "flatMap" then return self.flat_mapped(span, args)
+
+        if name == "enumerate" || name == "zip"
+            val codes = self.operands(args)
+            val numbered = name == "enumerate"
+
+            return (c) ->
+                val f = codes[0]
+                val xs = elements(arr_of(f(c)?))
+                var out: Buf[Value] = buf()
+
+                if numbered
+                    for k in 0..<xs.len()
+                        out.push(VAgg(0, pair_of(VInt(long(k) + 1), xs[k])))
+
+                    return Ok(vector(out))
+
+                val g = codes[1]
+                val ys = elements(arr_of(g(c)?))
+                val n = if xs.len() < ys.len() then xs.len() else ys.len()
+
+                for k in 0..<n
+                    out.push(VAgg(0, pair_of(xs[k], ys[k])))
+
+                Ok(vector(out))
+
+        for f in LINEAR_ALGEBRA
+            if f == name then return self.later(span, s"the linear-algebra function `$name`")
+
+        self.later(span, s"`$name` on an array")
+    end array_builtin
+
+    // The extent of axis `k` (from 0) of the array `a`, as a `t`.
+    extent_fixed(*self, a: TExpr, k: usize, t: Ty) -> Code
+        val v = self.lent(a)
+
+        (c) -> Ok(int_value(arr_of(v(c)?).ext[k], t))
+
+    // An integer argument, widened to 64 bits.
+    integer(*self, x: TExpr) -> Extent64
+        val k = self.ex(x)
+        val signed = is_signed(base_of(x.ty))
+
+        (c) -> Ok(long.wrap(wide(int_of(k(c)?), signed)))
+
+    // An extent argument, a negative one trapping.
+    extent_arg(*self, x: TExpr) -> Extent64
+        val k = self.integer(x)
+
+        (c) ->
+            val n = k(c)?
+
+            if n < 0 then trapped_long(NEGATIVE_EXTENT) else Ok(n)
+
+    // The extents arguments `k` to `upto − 1` name: one integer per axis, or one tuple of them.
+    shape_args(*self, span: Span, args: Buf[TExpr], k: usize, upto: usize) -> Buf[Extent64]
+        var out: Buf[Extent64] = buf()
+
+        for j in k..<upto
+            *args[j].kind match
+                TTuple(elems) ->
+                    for x in elems
+                        out.push(self.extent_arg(x))
+                _ ->
+                    if is_int(base_of(args[j].ty)) then out.push(self.extent_arg(args[j]))
+                    else
+                        self.later(span, "a shape that is not a tuple written out")
+
+        out
+
+    // `linspace(lo, hi, n)`: `n` reals from `lo` to `hi` inclusive, `lo + (hi − lo) · k / (n − 1)`
+    // at the element's width; one point is `lo`.
+    linspace(*self, args: Buf[TExpr], t: Ty) -> Code
+        val lo = self.ex(args[0])
+        val hi = self.ex(args[1])
+        val n = self.extent_arg(args[2])
+        val b = bits_of(base_of(elem_of(t)))
+
+        (c) ->
+            val a = real_of(lo(c)?)
+            val z = real_of(hi(c)?)
+            val m = n(c)?
+            val width = rnd(z - a, b)
+            val last = rnd(real(m - 1), b)
+            var out: Buf[Value] = buf()
+
+            for k in 0..<m
+                if m == 1
+                    out.push(VReal(a))
+                else
+                    val scaled = rnd(width * rnd(real(k), b), b)
+
+                    out.push(VReal(rnd(a + rnd(scaled / last, b), b)))
+
+            Ok(vector(out))
+
+    // `reduce(a, init, f)`: `f(…f(f(init, a₁), a₂)…)`, in storage order.
+    folded(*self, span: Span, args: Buf[TExpr], t: Ty) -> Code
+        val codes = self.operands(args)
+        var leaves: Buf[TExpr] = buf()
+
+        leaves.push(texpr(span, t, TChainOperand(1)))
+        leaves.push(texpr(span, elem_of(args[0].ty), TChainOperand(2)))
+
+        val base = self.next
+
+        self.next += 3
+        self.chains.push(base)
+
+        val call = self.ex(texpr(span, t, TCall(texpr(span, args[2].ty, TChainOperand(0)), leaves)))
+
+        self.chains.pop()
+
+        (c) ->
+            val f = codes[0]
+            val g = codes[1]
+            val h = codes[2]
+            val xs = elements(arr_of(f(c)?))
+            var acc = g(c)?
+
+            c.v.set(base, h(c)?)
+
+            for x in xs
+                c.v.set(base + 1, acc)
+                c.v.set(base + 2, x)
+                acc = call(c)?
+
+            Ok(acc)
+
+    // `filter(a, p)`: the elements, in storage order, for which `p` holds; `p` called once for each,
+    // in order.
+    filtered(*self, span: Span, args: Buf[TExpr]) -> Code
+        val codes = self.operands(args)
+        val (base, apply) = self.applying(span, args[1], elem_of(args[0].ty), Bool)
+
+        (c) ->
+            val f = codes[0]
+            val g = codes[1]
+            val xs = elements(arr_of(f(c)?))
+            var out: Buf[Value] = buf()
+
+            c.v.set(base, g(c)?)
+
+            var keep: Buf[bool] = buf()
+
+            for x in xs
+                c.v.set(base + 1, x)
+                keep.push(bool_of(apply(c)?))
+
+            for k in 0..<xs.len()
+                if keep[k] then out.push(xs[k])
+
+            Ok(vector(out))
+
+    // `flatMap(a, f)`: the arrays `f` gives for each element, in storage order, end to end.
+    flat_mapped(*self, span: Span, args: Buf[TExpr]) -> Code
+        val codes = self.operands(args)
+        val ret = args[1].ty match
+            Fn(sig) -> sig.ret
+            _ -> Void
+        val (base, apply) = self.applying(span, args[1], elem_of(args[0].ty), ret)
+
+        (c) ->
+            val f = codes[0]
+            val g = codes[1]
+            val xs = elements(arr_of(f(c)?))
+            var out: Buf[Value] = buf()
+
+            c.v.set(base, g(c)?)
+
+            for x in xs
+                c.v.set(base + 1, x)
+
+                for y in elements(arr_of(apply(c)?))
+                    out.push(y)
+
+            Ok(vector(out))
+
+    // The call of the function value `f` on one element of type `et`, answering a `ret`: compiled
+    // over two slots of the frame, the function then the element, the first of which is answered.
+    applying(*self, span: Span, f: TExpr, et: Ty, ret: Ty) -> (usize, Code)
+        var leaves: Buf[TExpr] = buf()
+
+        leaves.push(texpr(span, et, TChainOperand(1)))
+
+        val base = self.next
+
+        self.next += 2
+        self.chains.push(base)
+
+        val call = self.ex(texpr(span, ret, TCall(texpr(span, f.ty, TChainOperand(0)), leaves)))
+
+        self.chains.pop()
+        (base, call)
+
+    // `assert_approx(a, b, tol)` on two arrays of one shape: every pair of elements no further apart
+    // than `tol`; otherwise a trap that says where and by how much, or how the shapes differ.
+    approx_arrays(*self, args: Buf[TExpr]) -> Code
+        val codes = self.operands(args)
+        val t = base_of(elem_of(args[0].ty))
+        val bits = bits_of(t)
+        val complex = is_complex(t)
+
+        (c) ->
+            val f = codes[0]
+            val g = codes[1]
+            val h = codes[2]
+            val a = arr_of(f(c)?)
+            val b = arr_of(g(c)?)
+            val limit = real_of(h(c)?)
+
+            if !same_shape(a, b)
+                val what = if a.ext.len() == 1 then "the lengths differ" else "the shapes differ"
+
+                return trapped(s"assert_approx: $what, ${extents_text(a.ext)} and ${extents_text(b.ext)}")
+
+            val xs = elements(a)
+            val ys = elements(b)
+
+            for k in 0..<xs.len()
+                val x = xs[k]
+                val y = ys[k]
+                val d = if complex then complex_abs(rnd(re_of(x) - re_of(y), bits), rnd(im_of(x) - im_of(y), bits), bits)
+                        else real_abs(rnd(real_of(x) - real_of(y), bits))
+
+                if d <= limit then continue
+
+                val at = unflattened(long(k) + 1, a.ext)
+                var where = "element "
+
+                if a.ext.len() == 1 then where += s"${int_of(field_at(at, 0))}: "
+                else
+                    where += "("
+
+                    for j in 0..<a.ext.len()
+                        if j > 0 then where += ", "
+                        where += s"${int_of(field_at(at, j))}"
+
+                    where += "): "
+
+                return trapped(s"assert_approx: $where|${scalar_text(x, t)} - ${scalar_text(y, t)}| = ${scalar_text(VReal(d), Ty.Real(64))} > ${scalar_text(VReal(limit), Ty.Real(64))}")
+
+            Ok(VVoid)
+end Interp
+
+// The identity of `minval` (`high` false) or `maxval` over a `t`: the type's largest or smallest
+// value, `+inf` or `-inf` for a real.
+private extreme_identity(high: bool, t: Ty) -> Value = base_of(t) match
+    Int(bits, signed) ->
+        if signed then VInt(long.wrap(if high then -(i128(1) << (bits - 1)) else (i128(1) << (bits - 1)) - 1))
+        else VInt(if high then 0 else wrapped((i128(1) << bits) - 1, bits, false))
+    Real(_) -> VReal(if high then -1.0 / 0.0 else 1.0 / 0.0)
+    _ -> one_or_zero(t, false)
+
+// Each lane along axis `k` (from 0) of `a`, of rank 2 or more, reduced by `lane`: the result has
+// every other axis.
+private lanes(a: &Arr, k: usize, lane: &Fn(Buf[Value]) -> Answer) -> Answer
+    var ext: Buf[long] = buf()
+    var str: Buf[long] = buf()
+
+    for j in 0..<a.ext.len()
+        if j != k
+            ext.push(a.ext[j])
+            str.push(a.str[j])
+
+    val starts = positions(Arr(a.store, a.offset, ext, str, buf()))
+    var out: Buf[Value] = buf()
+
+    for p in starts
+        var xs: Buf[Value] = buf()
+
+        for i in 0..<a.ext[k]
+            xs.push(a.store.v[usize(p + i * a.str[k])])
+
+        out.push(lane(xs)?)
+
+    Ok(dense(out, ext))
+
+private extents_of(dims: Buf[Extent64], c: &Cells) -> Result[Buf[long], Signal]
+    var out: Buf[long] = buf()
+
+    for k in 0..<dims.len()
+        val f = dims[k]
+
+        out.push(f(c)?)
+
+    Ok(out)
+
+private product_of(ext: Buf[long]) -> long
+    var n: long = 1
+
+    for x in ext
+        n *= x
+
+    n
+
+private pair(a: long, b: long) -> Buf[long]
+    var out: Buf[long] = buf()
+
+    out.push(a)
+    out.push(b)
+    out
+
+private pair_of(a: Value, b: Value) -> Buf[Value]
+    var out: Buf[Value] = buf()
+
+    out.push(a)
+    out.push(b)
+    out
+
+private trapped_long(message: string) -> Result[long, Signal] = Err(Trapped(message))

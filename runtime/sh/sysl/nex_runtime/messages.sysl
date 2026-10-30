@@ -27,6 +27,18 @@ val REAL_OVERFLOW = "floating-point overflow"
 
 val ZERO_STEP = "a `for` step of 0"
 
+// Arrays (DESIGN §3–§7).
+val INDEX_OUT_OF_BOUNDS = "index out of bounds"
+val SLICE_OUT_OF_BOUNDS = "slice out of bounds"
+val ZERO_SLICE_STRIDE = "a slice stride of 0"
+val ZERO_RANGE_STEP = "a range step of 0"
+val SHAPE_MISMATCH = "shape mismatch"
+val SLICE_LENGTH_MISMATCH = "slice assignment length mismatch"
+val NOT_AN_AXIS = "not an axis of the array"
+val NEGATIVE_EXTENT = "a negative extent"
+val RESHAPE_SIZE = "reshape to a different size"
+val NOT_A_PERMUTATION = "not a permutation of the axes"
+
 val ASSERTION_FAILED = "assertion failed"
 val ASSERT_EQ_FAILED = "assert_eq failed"
 val DID_NOT_TRAP = "assert_traps: the function did not trap"
@@ -70,6 +82,11 @@ val TUPLE_OPEN = "("
 val TUPLE_CLOSE = ")"
 val FIELD_SEPARATOR = ", "
 val STRUCT_CLOSE = " }"
+
+// The brackets `print` writes around each axis of an array, nex axis 1 outermost: `[1, 2]`,
+// `[[1, 2], [3, 4]]`; the elements between them separated by `FIELD_SEPARATOR`.
+val ARRAY_OPEN = "["
+val ARRAY_CLOSE = "]"
 
 // A struct's text up to its first field, `name` being the struct's own, without its module or type
 // arguments.

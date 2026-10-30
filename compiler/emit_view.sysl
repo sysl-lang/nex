@@ -14,6 +14,7 @@
 // nothing about it is allocated or copied (DESIGN §6.4).
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{NOT_AN_AXIS, SHAPE_MISMATCH}
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
@@ -195,7 +196,7 @@ impl Emitter
         for a in 1..rank_of(f.slot.ty)
             val n = self.dim(span, f.view, f.slot.ty, a)
 
-            if handed_back then self.trap_if(self.def(s"arith.cmpi ne, ${self.dim(span, v, f.slot.ty, a)}, $n : index"), "shape mismatch")
+            if handed_back then self.trap_if(self.def(s"arith.cmpi ne, ${self.dim(span, v, f.slot.ty, a)}, $n : index"), SHAPE_MISMATCH)
 
             subs.push(TSubAll)
             offs.push(self.index_const(0))
@@ -274,7 +275,7 @@ impl Emitter
         var strides: Buf[string] = buf()
         var subs: Buf[TSub] = buf()
 
-        self.trap_if(self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64"), "not an axis of the array")
+        self.trap_if(self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64"), NOT_AN_AXIS)
 
         for a in 1..r
             val hit = self.def(s"arith.cmpi eq, $k, ${self.def(s"arith.constant $a : i64")} : i64")

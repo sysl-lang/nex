@@ -7,6 +7,7 @@
 // other reductions are exact, so they run once along the elements.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{NEGATIVE_EXTENT, NOT_AN_AXIS, RESHAPE_SIZE, SHAPE_MISMATCH}
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
@@ -109,7 +110,7 @@ impl Emitter
         val k = self.widen64(self.ex(args[1]), bits_of(args[1].ty), is_signed(args[1].ty))
         val r = rank_of(at)
 
-        self.trap_if(self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64"), "not an axis of the array")
+        self.trap_if(self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64"), NOT_AN_AXIS)
 
         var n = self.def("arith.constant 0 : i64")
 
@@ -140,7 +141,7 @@ impl Emitter
     extent_arg(*self, x: TExpr) -> string
         val w = self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
 
-        self.trap_if(self.def(s"arith.cmpi slt, $w, ${self.def("arith.constant 0 : i64")} : i64"), "a negative extent")
+        self.trap_if(self.def(s"arith.cmpi slt, $w, ${self.def("arith.constant 0 : i64")} : i64"), NEGATIVE_EXTENT)
         self.def(s"arith.index_cast $w : i64 to index")
 
     one_or_zero(*self, span: Span, t: Ty, one: bool) -> string = base_of(t) match
@@ -266,7 +267,7 @@ impl Emitter
         for d in dims
             total = self.def(s"arith.muli $total, $d : index")
 
-        self.trap_if(self.def(s"arith.cmpi ne, $total, ${self.dim(span, f, ft, 1)} : index"), "reshape to a different size")
+        self.trap_if(self.def(s"arith.cmpi ne, $total, ${self.dim(span, f, ft, 1)} : index"), RESHAPE_SIZE)
 
         val r = dims.len()
         val dt = self.view_ty(Ty.Array(elem_of(t), dynamic_axes(r)))
@@ -729,7 +730,7 @@ impl Emitter
         val k = self.widen64(self.ex(d), bits_of(d.ty), is_signed(d.ty))
         val outside = self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64")
 
-        self.trap_if(outside, "not an axis of the array")
+        self.trap_if(outside, NOT_AN_AXIS)
 
         if r == 1 then return self.reduce_whole(e.span, name, v, vt, e.ty)
 
@@ -851,7 +852,7 @@ impl Emitter
         val inner_a = self.dim(e.span, a, lt, ra)
         val inner_b = self.dim(e.span, b, rt, 1)
 
-        self.trap_if(self.def(s"arith.cmpi ne, $inner_a, $inner_b : index"), "shape mismatch")
+        self.trap_if(self.def(s"arith.cmpi ne, $inner_a, $inner_b : index"), SHAPE_MISMATCH)
 
         val at = self.tensor_ty(e.span, lt)
         val bt = self.tensor_ty(e.span, rt)

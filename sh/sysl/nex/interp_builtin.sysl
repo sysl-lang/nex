@@ -38,8 +38,12 @@ impl Interp
                 emit(m, stream, text(c)? + "\n")
                 Ok(VVoid)
 
+        if name == "assert_approx" && is_array(args[0].ty) then return self.approx_arrays(args)
+
+        if !name.starts_with("assert") && (is_array(t) || (args.len() > 0 && is_array(args[0].ty) && !self.is_args(args[0])))
+            return self.array_builtin(span, name, args, t)
+
         if name == "length" || name == "size" || name == "rank"
-            if !self.is_args(args[0]) then return self.later(span, s"`$name` of an array")
             if name == "rank" then return self.constant_code(VInt(1))
 
             return (c) -> Ok(VInt(long(m.args.len())))
@@ -270,7 +274,7 @@ impl Interp
 
     // A value's text, under the `f"..."` specifier `spec` where it is not `""`.
     value_text(*self, e: TExpr, spec: string) -> TextCode
-        val a = self.ex(e)
+        val a = self.lent(e)
         val t = base_of(e.ty)
 
         t match
@@ -290,6 +294,10 @@ impl Interp
     // aggregate by each field spelled alone, between the runtime's punctuation.
     printer(*self, t: Ty) -> Printer
         t match
+            Array(e, _) ->
+                val each = self.printer(*e)
+
+                return (v) -> array_text(v, each)
             Tuple(es) ->
                 val parts = self.printers(es)
 

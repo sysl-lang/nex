@@ -34,7 +34,7 @@
 // `parallel` never changes a result's bits.
 
 import nex.sh.sysl.nex.*
-import nex_runtime.sh.sysl.nex_runtime.ZERO_STEP
+import nex_runtime.sh.sysl.nex_runtime.{SHAPE_MISMATCH, ZERO_STEP}
 import sysl.buf.{Buf, buf}
 import sysl.text.str_builder
 import sh.sysl.parsing.Span
@@ -980,7 +980,7 @@ impl Emitter
                     for a in 1..rank_of(t)
                         val x = self.dim(span, vals[f], operands[f].ty, a)
 
-                        self.trap_if(self.def(s"arith.cmpi ne, $x, ${self.dim(span, vals[k], t, a)} : index"), "shape mismatch")
+                        self.trap_if(self.def(s"arith.cmpi ne, $x, ${self.dim(span, vals[k], t, a)} : index"), SHAPE_MISMATCH)
 
         first.unwrap_or(0)
 

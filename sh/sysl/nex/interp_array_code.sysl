@@ -1,0 +1,726 @@
+module sh.sysl.nex
+
+// The array nodes as the interpreter compiles them (`tir_array.sysl`): indexing and slicing, views,
+// literals and ranges, element-wise expressions, conversions and shape checks, each as
+// `compiler/emit_array.sysl` computes it, its traps worded by the runtime both engines share.
+//
+// **An operand is lent, not shared, where nothing can write its place while the operation runs.** A
+// local's array read as an operand, an argument or an index's target marks nothing (`lent`): only
+// the function's own statements write a local no lambda captures, so where no statement is among
+// what is evaluated after it, the operation reads the storage as it was. Anything else reads the
+// array as a value that may be kept (`interp_array.sysl`).
+
+import nex_runtime.sh.sysl.nex_runtime.{SHAPE_MISMATCH, SLICE_LENGTH_MISMATCH, ZERO_RANGE_STEP}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// What an index list does to the array it is given: each subscript evaluated and checked in turn,
+// the array and the window answered.
+private[nex] type Subs = &Fn(&Cells, Value) -> Result[(&Arr, Buf[Cut]), Signal]
+
+// One subscript, on axis `k` (from 0) of the array.
+private type Sub = &Fn(&Cells, &Arr, usize) -> Result[Cut, Signal]
+
+// An optional bound or stride.
+private type Bound = &Fn(&Cells) -> Result[Option[long], Signal]
+
+// Whether evaluating `e` can write a local: an assignment or an `inout` borrow inside it.
+private[nex] writes(e: TExpr) -> bool
+    *e.kind match
+        TAssign(_, _, _) -> return true
+        TAssignTuple(_, _) -> return true
+        TBorrow(_) -> return true
+        _ -> ()
+
+    for x in children(e)
+        if writes(x) then return true
+
+    false
+
+private writes_from(es: Buf[TExpr], k: usize) -> bool
+    for j in k..<es.len()
+        if writes(es[j]) then return true
+
+    false
+
+private subs_write(subs: Buf[TSub]) -> bool
+    for s in subs
+        s match
+            TSubAt(i) -> if writes(i) then return true
+            TSubWindow(lo, hi, _, step) ->
+                for b in [lo, hi, step]
+                    b match
+                        Some(x) -> if writes(x) then return true
+                        None -> ()
+            TSubAll -> ()
+
+    false
+
+// The element type of an array type, or the type of a scalar.
+private[nex] elem_or(t: Ty) -> Ty = base_of(elem_of(t))
+
+// `n` as an integer of type `t`, cut to its width as a narrowing that cannot trap is.
+private[nex] int_value(n: long, t: Ty) -> Value = base_of(t) match
+    Int(bits, signed) -> VInt(wrapped(i128(n), bits, signed))
+    _ -> VInt(n)
+
+// An operand of a scalar body: the `k`th value of the innermost chain frame, of `e`'s element type.
+private[nex] leaf(e: TExpr, k: usize) -> TExpr = texpr(e.span, elem_of(e.ty), TChainOperand(k))
+
+impl Interp
+    // Whether a value of `t` holds an array: is one, or has a field that is, at any depth.
+    holds_array(*self, t: Ty) -> bool
+        var seen: Buf[string] = buf()
+
+        self.holds_array_in(t, &seen)
+
+    holds_array_in(*self, t: Ty, seen: *Buf[string]) -> bool
+        t match
+            Array(_, _) -> return true
+            Nominal(name, _) ->
+                for s in *seen
+                    if s == name then return false
+
+                seen.push(name)
+            _ -> ()
+
+        for f in self.parts(t)
+            if self.holds_array_in(f, seen) then return true
+
+        false
+
+    // `e`'s value, a local's array read without marking its storage shared: for an operation that
+    // only reads it while it runs.
+    lent(*self, e: TExpr) -> Code
+        if self.unheld(e.ty).is_some() then return self.ex(e)
+
+        *e.kind match
+            TLocal(id) ->
+                if !is_array(e.ty) || self.indirect(id) || self.args_local == Some(id) then return self.ex(e)
+
+                val s = self.slot_of(id)
+
+                return (c) -> Ok(c.v[s])
+            TArray(op) -> *op match
+                TView(target, subs) -> return self.view(target, subs, true)
+                TIndex(target, subs) -> if is_array(e.ty) then return self.view(target, subs, true)
+                TTransfer(v, d) -> if !d.clones then return self.lent(v)
+                _ -> ()
+            _ -> ()
+
+        self.ex(e)
+
+    // `e` lent where `quiet` says nothing evaluated after it writes a local.
+    lent_if(*self, e: TExpr, quiet: bool) -> Code = if quiet then self.lent(e) else self.ex(e)
+
+    // Each of `es`, in order, lent where nothing after it writes.
+    operands(*self, es: Buf[TExpr]) -> Buf[Code]
+        var out: Buf[Code] = buf()
+
+        for k in 0..<es.len()
+            out.push(self.lent_if(es[k], !writes_from(es, k + 1)))
+
+        out
+
+    // -- array nodes -------------------------------------------------------------------------------
+
+    array(*self, e: TExpr, op: TArr) -> Code
+        self.on_args(op) match
+            Some(code) -> return code
+            None -> ()
+
+        op match
+            TIndex(target, subs) -> if is_array(e.ty) then self.view(target, subs, false) else self.element(e, target, subs)
+            TView(target, subs) -> self.view(target, subs, false)
+            TArrayLit(items) -> self.literal_array(e, items)
+            TRangeValue(lo, hi, inclusive, step) -> self.range_value(e, lo, hi, inclusive, step)
+            TOrigin(source, firsts) -> self.origin(source, firsts)
+            TCopy(v, _) ->
+                val a = self.lent(v)
+
+                (c) -> Ok(copy_of(arr_of(a(c)?)))
+            TTransfer(v, d) -> if d.clones then self.ex(v) else self.lent(v)
+            TEnd(axis) ->
+                val s = self.ends[self.ends.len() - 1]
+                val t = e.ty
+
+                (c) -> Ok(int_value(last_index(arr_of(c.v[s]), axis - 1), t))
+            TElementwise(o, l, r) -> self.elementwise(e.span, o, l, r)
+            TElementwiseUnary(o, v) -> self.elementwise_unary(e.span, o, v, e.ty)
+            TMatMul(_, _) -> self.later(e.span, "`@`")
+            TElemental(name, args) ->
+                var leaves: Buf[TExpr] = buf()
+
+                for k in 0..<args.len()
+                    leaves.push(leaf(args[k], k))
+
+                self.mapped(e.ty, args, texpr(e.span, elem_of(e.ty), TBuiltin(name, leaves)))
+            TElementalConvert(v, traps) ->
+                val a = self.lent(v)
+
+                self.conversion(e.span, elem_or(v.ty), elem_or(e.ty), traps) match
+                    Some(f) -> (c) -> map1(f, a(c)?)
+                    None -> self.later(e.span, s"a conversion from ${show_ty(v.ty)} to ${show_ty(e.ty)}")
+            TElementalCall(callee, args) ->
+                var leaves: Buf[TExpr] = buf()
+
+                for k in 0..<args.len()
+                    leaves.push(leaf(args[k], k))
+
+                self.mapped(e.ty, args, texpr(e.span, elem_of(e.ty), TCall(callee, leaves)))
+            TBroadcast(v) -> self.ex(v)
+            TShapeCheck(v) -> self.shape_checked(v, e.ty)
+            TReduction(name, args, dim) -> self.reduction(e, name, args, dim)
+            TForEach(id, var_id, a, body) -> self.for_each(id, var_id, a, body)
+    end array
+
+    // -- indexing ----------------------------------------------------------------------------------
+
+    // What the index list `subs` does to the array it is given; `end` inside it reads that array.
+    subscripts(*self, subs: Buf[TSub]) -> Subs
+        val slot = self.next
+
+        self.next += 1
+        self.ends.push(slot)
+
+        var codes: Buf[Sub] = buf()
+
+        for s in subs
+            codes.push(self.sub(s))
+
+        self.ends.pop()
+
+        (c, v) ->
+            c.v.set(slot, v)
+
+            val a = arr_of(v)
+            var axes: Buf[Cut] = buf()
+
+            for k in 0..<codes.len()
+                val f = codes[k]
+
+                axes.push(f(c, a, k)?)
+
+            Ok((a, axes))
+
+    sub(*self, s: TSub) -> Sub = s match
+        TSubAt(i) ->
+            val k = self.ex(i)
+            val signed = is_signed(base_of(i.ty))
+
+            (c, a, axis) -> at_axis(a, axis, long.wrap(wide(int_of(k(c)?), signed)))
+        TSubAll -> (c, a, axis) -> Ok(Cut(0, a.ext[axis], 1, true))
+        TSubWindow(lo, hi, inclusive, step) ->
+            // The stride is evaluated first, then the bounds, as the compiled program does.
+            val st = self.bound(step)
+            val l = self.bound(lo)
+            val h = self.bound(hi)
+
+            (c, a, axis) ->
+                val s = st(c)?
+                val x = l(c)?
+
+                window_axis(a, axis, x, h(c)?, inclusive, s)
+
+    bound(*self, e: Option[TExpr]) -> Bound = e match
+        Some(x) ->
+            val k = self.ex(x)
+            val signed = is_signed(base_of(x.ty))
+
+            (c) -> Ok(Some(long.wrap(wide(int_of(k(c)?), signed))))
+        None -> (c) -> Ok(None)
+
+    // `a[i, j]` read: one element. An element that holds arrays shares their storage with the
+    // array's, as a read out of a place does.
+    element(*self, e: TExpr, target: TExpr, subs: Buf[TSub]) -> Code
+        val t = self.lent_if(target, !subs_write(subs))
+        val take = self.subscripts(subs)
+        val keep = self.holds_array(e.ty)
+
+        (c) ->
+            val (a, axes) = take(c, t(c)?)?
+            var p = a.offset
+
+            for k in 0..<axes.len()
+                p += axes[k].first * a.str[k]
+
+            val x = a.store.v[usize(p)]
+
+            Ok(if keep then shared(x) else x)
+
+    // A slice read as a value: a view of the target's storage (DESIGN §6.1). A view that may be kept
+    // marks the storage shared; one `lend`ed to an operation does not.
+    view(*self, target: TExpr, subs: Buf[TSub], lend: bool) -> Code
+        val t = self.lent_if(target, lend && !subs_write(subs))
+        val take = self.subscripts(subs)
+
+        (c) ->
+            val (a, axes) = take(c, t(c)?)?
+            val v = VArr(view_of(a, axes))
+
+            Ok(if lend then v else shared(v))
+
+    // `origin(a, f1, ..., fk)`: `a`'s elements, indexed from the first indices given (DESIGN §6.4).
+    origin(*self, source: TExpr, firsts: Buf[TExpr]) -> Code
+        val s = self.ex(source)
+        var fs: Buf[Bound] = buf()
+
+        for f in firsts
+            fs.push(self.bound(Some(f)))
+
+        (c) ->
+            val a = arr_of(s(c)?)
+            var shifts: Buf[long] = buf()
+
+            for k in 0..<fs.len()
+                val f = fs[k]
+
+                shifts.push(long.wrap(f(c)?.unwrap_or(1) - 1))
+
+            Ok(VArr(Arr(a.store, a.offset, a.ext, a.str, shifts)))
+
+    // The place `target[subs]`: an element, or a window an `inout` parameter borrows.
+    index_ref(*self, target: TExpr, subs: Buf[TSub]) -> Code
+        val base = self.place_ref(target)
+        val take = self.subscripts(subs)
+
+        (c) ->
+            val r = base(c)?
+            val (a, axes) = take(c, deref(r))?
+            val w = view_of(a, axes)
+
+            Ok(VSub(Win(r, w.offset, w.ext, w.str), buf()))
+
+    // `target[subs] = value`, or `op=`: one element, or a window filled from an array of its shape
+    // or from a scalar, the value evaluated before the first element is written (DESIGN §5.3).
+    assign_index(*self, span: Span, op: string, target: TExpr, subs: Buf[TSub], value: TExpr) -> Code
+        val broadcast = *value.kind match
+            TArray(a) -> *a match
+                TBroadcast(_) -> true
+                _ -> false
+            _ -> false
+        val scalar = broadcast || !is_array(value.ty)
+        val v = self.ex(value)
+        val base = self.place_ref(target)
+        val take = self.subscripts(subs)
+        val et = elem_of(target.ty)
+        val vt = elem_of(value.ty)
+
+        val step: Op2 = if op == "=" then (old, x) -> Ok(x)
+                        else self.operator(span, op[0..<op.len - 1], et, vt) match
+                            Some(f) -> f
+                            None -> return self.later(span, s"`$op` on ${show_ty(et)}")
+        var whole = true
+
+        for s in subs
+            s match
+                TSubAt(_) -> ()
+                _ -> whole = false
+
+        if whole
+            return (c) ->
+                val x = v(c)?
+                val r = base(c)?
+                val (a, axes) = take(c, deref(r))?
+                var p = a.offset
+
+                for k in 0..<axes.len()
+                    p += axes[k].first * a.str[k]
+
+                val y = step(a.store.v[usize(p)], x)?
+
+                owned(r).store.v.set(usize(p), y)
+                Ok(VVoid)
+
+        (c) ->
+            val x = v(c)?
+            val r = base(c)?
+            val (a, axes) = take(c, deref(r))?
+            val w = view_of(a, axes)
+            val n = count_of(w)
+            var xs: Buf[Value] = buf()
+
+            if scalar
+                for _ in 0..<n
+                    xs.push(x)
+            else
+                val src = arr_of(x)
+
+                for k in 0..<w.ext.len()
+                    if src.ext[k] != w.ext[k] then return trapped(SLICE_LENGTH_MISMATCH)
+
+                xs = elements(src)
+
+            if op != "="
+                val old = elements(w)
+
+                for k in 0..<old.len()
+                    xs.set(k, step(old[k], xs[k])?)
+
+            write_window(owned(r).store, w.offset, w.ext, w.str, xs)
+            Ok(VVoid)
+    end assign_index
+
+    // -- literals and ranges -----------------------------------------------------------------------
+
+    // `[a, b, c]` at any rank. A literal nested only of literals is its scalars, evaluated in source
+    // order; any other is its items, each an array of one shape placed along axis 1.
+    literal_array(*self, e: TExpr, items: Buf[TExpr]) -> Code
+        var scalars: Buf[TExpr] = buf()
+
+        if !gathered(e, &scalars) then return self.stacked(e, items)
+
+        val codes = self.operands(scalars)
+        // The extents along each nex axis, from the first item at each depth.
+        var ext: Buf[long] = buf()
+        var at = e
+
+        loop
+            val xs = literal_items(at) match
+                Some(xs) -> xs
+                None -> break
+
+            ext.push(long(xs.len()))
+
+            if xs.len() == 0 then break
+
+            at = xs[0]
+
+        if codes.len() == 0
+            var zero: Buf[long] = buf()
+
+            for _ in 0..<rank_of(e.ty)
+                zero.push(0)
+
+            return (c) -> Ok(dense(buf(), zero))
+
+        // Source order runs the last nex axis fastest; storage order the first.
+        val r = ext.len()
+        var order: Buf[usize] = buf()
+        var total: long = 1
+
+        for x in ext
+            total *= x
+
+        for t in 0..<total
+            var rest = t
+            var source: long = 0
+            var digits: Buf[long] = buf()
+
+            for a in 0..<r
+                digits.push(rest % ext[a])
+                rest /= ext[a]
+
+            for a in 0..<r
+                source = source * ext[a] + digits[a]
+
+            order.push(usize(source))
+
+        (c) ->
+            var vals: Buf[Value] = buf()
+
+            for k in 0..<codes.len()
+                val f = codes[k]
+
+                vals.push(f(c)?)
+
+            var out: Buf[Value] = buf()
+
+            for k in order
+                out.push(vals[k])
+
+            Ok(dense(out, ext))
+    end literal_array
+
+    // A literal whose items are arrays of rank R − 1, every one of the first one's shape.
+    stacked(*self, e: TExpr, items: Buf[TExpr]) -> Code
+        val codes = self.operands(items)
+
+        (c) ->
+            var parts: Buf[&Arr] = buf()
+
+            for k in 0..<codes.len()
+                val f = codes[k]
+
+                parts.push(arr_of(f(c)?))
+
+            val first = parts[0]
+
+            for p in parts
+                if !same_shape(first, p) then return trapped(SHAPE_MISMATCH)
+
+            val n = long(parts.len())
+            val m = count_of(first)
+            var out: Buf[Value] = buf()
+
+            for _ in 0..<n * m
+                out.push(VVoid)
+
+            for j in 0..<parts.len()
+                val xs = elements(parts[j])
+
+                for k in 0..<xs.len()
+                    out.set(usize(long(j) + n * long(k)), xs[k])
+
+            var ext: Buf[long] = buf()
+
+            ext.push(n)
+
+            for x in first.ext
+                ext.push(x)
+
+            Ok(dense(out, ext))
+
+    // `lo..hi by step` as a value: the integers it counts, each `lo + k · step` cut to the width.
+    range_value(*self, e: TExpr, lo_e: TExpr, hi_e: TExpr, inclusive: bool, step_e: Option[TExpr]) -> Code
+        val lo = self.ex(lo_e)
+        val hi = self.ex(hi_e)
+        val step: Code = step_e match
+            Some(s) -> self.ex(s)
+            None -> (c) -> Ok(VInt(1))
+        val checked = step_e.is_some()
+        val (bits, signed) = base_of(elem_of(e.ty)) match
+            Int(b, s) -> (b, s)
+            _ -> (64, true)
+
+        (c) ->
+            val a = wide(int_of(lo(c)?), signed)
+            val b = wide(int_of(hi(c)?), signed)
+            val s = wide(int_of(step(c)?), signed)
+
+            if checked && s == 0 then return trapped(ZERO_RANGE_STEP)
+
+            val n = range_count(a, b, s, inclusive, bits, signed)
+            var out: Buf[Value] = buf()
+
+            for k in 0..<n
+                out.push(VInt(wrapped(a + i128(k) * s, bits, signed)))
+
+            Ok(vector(out))
+
+    // -- element-wise ------------------------------------------------------------------------------
+
+    // `op` between two arrays of one shape, or an array and a scalar, element by element: the
+    // scalar operation chosen for the element types.
+    lifted(*self, span: Span, op: string, lt: Ty, rt: Ty) -> Option[Op2]
+        val la = is_array(lt)
+        val ra = is_array(rt)
+
+        val f: Op2 = if op == "and" then (a, b) -> Ok(VBool(bool_of(a) && bool_of(b)))
+                     elif op == "or" then (a, b) -> Ok(VBool(bool_of(a) || bool_of(b)))
+                     else self.operator(span, op, elem_of(lt), elem_of(rt)) match
+                         Some(f) -> f
+                         None -> return None
+
+        fast_op(op, base_of(elem_of(lt)), base_of(elem_of(rt)), self.m.fpe) match
+            Some(k) -> Some((x, y) -> real_zip(k, x, y, la, ra))
+            None -> Some((x, y) -> zip_with(f, x, y, la, ra))
+
+    elementwise(*self, span: Span, op: string, l: TExpr, r: TExpr) -> Code
+        val f = self.lifted(span, op, l.ty, r.ty) match
+            Some(f) -> f
+            None -> return self.later(span, s"`$op` on ${show_ty(l.ty)}")
+        val a = self.lent_if(l, !writes(r))
+        val b = self.lent(r)
+
+        (c) ->
+            val x = a(c)?
+
+            f(x, b(c)?)
+
+    // `-a` or `not a`, element by element.
+    elementwise_unary(*self, span: Span, op: string, v: TExpr, t: Ty) -> Code
+        val a = self.lent(v)
+
+        val f: Op1 = if op == "not" then (x) -> Ok(VBool(!bool_of(x)))
+                     else base_of(elem_of(v.ty)) match
+                         Int(bits, signed) -> (x) -> int_result(-wide(int_of(x), signed), bits, signed)
+                         Real(_) -> (x) -> Ok(VReal(-real_of(x)))
+                         Complex(_) -> (x) -> Ok(VComplex(-re_of(x), -im_of(x)))
+                         _ -> return self.later(span, s"`$op` on ${show_ty(v.ty)}")
+
+        (c) -> map1(f, a(c)?)
+
+    // The array of type `out` whose every element is `scalar` over the elements of `operands`: each
+    // an array of one shape, or a scalar broadcast. `scalar` reads operand `k` as `TChainOperand(k)`,
+    // from slots of the frame set for each element in turn.
+    mapped(*self, out: Ty, operands: Buf[TExpr], scalar: TExpr) -> Code
+        val codes = self.operands(operands)
+        var arrays: Buf[bool] = buf()
+
+        for o in operands
+            arrays.push(is_array(o.ty))
+
+        val base = self.next
+
+        self.next += operands.len()
+        self.chains.push(base)
+
+        val body = self.ex(scalar)
+
+        self.chains.pop()
+
+        (c) ->
+            var vals: Buf[Value] = buf()
+
+            for k in 0..<codes.len()
+                val f = codes[k]
+
+                vals.push(f(c)?)
+
+            var shape: Option[&Arr] = None
+
+            for k in 0..<vals.len()
+                if !arrays[k] then continue
+
+                val a = arr_of(vals[k])
+
+                shape match
+                    Some(s) -> if !same_shape(s, a) then return trapped(SHAPE_MISMATCH)
+                    None -> shape = Some(a)
+
+            val s = shape.unwrap()
+            var lists: Buf[Buf[Value]] = buf()
+
+            for k in 0..<vals.len()
+                lists.push(if arrays[k] then elements(arr_of(vals[k])) else buf())
+
+            var res: Buf[Value] = buf()
+
+            for j in 0..<count_of(s)
+                for k in 0..<vals.len()
+                    c.v.set(base + k, if arrays[k] then lists[k][usize(j)] else vals[k])
+
+                res.push(body(c)?)
+
+            Ok(dense(res, s.ext))
+    end mapped
+
+    // An array widened element by element, or seen with other static extents.
+    array_converted(*self, span: Span, v: TExpr, to: Ty, traps: bool) -> Code
+        val a = self.ex(v)
+
+        self.conversion(span, elem_or(v.ty), elem_or(to), traps) match
+            Some(f) ->
+                if ty_eq(elem_or(v.ty), elem_or(to)) then return a
+
+                (c) -> map1(f, a(c)?)
+            None -> self.later(span, s"a conversion from ${show_ty(v.ty)} to ${show_ty(to)}")
+
+    // An array given the static shape of `t`, trapping `shape mismatch` where it has another.
+    shape_checked(*self, v: TExpr, t: Ty) -> Code
+        val a = self.ex(v)
+        var fixed: Buf[long] = buf()
+
+        for x in axes_of(t)
+            fixed.push(x match
+                Fixed(n) -> long(n)
+                _ -> -1
+            )
+
+        (c) ->
+            val x = a(c)?
+            val ar = arr_of(x)
+
+            for k in 0..<fixed.len()
+                if fixed[k] >= 0 && ar.ext[k] != fixed[k] then return trapped(SHAPE_MISMATCH)
+
+            Ok(x)
+
+    // Two arrays equal as a field of an aggregate is (DESIGN §11.4): the same shape, and every element
+    // equal as `==` compares the element type.
+    arrays_equal(*self, span: Span, t: Ty) -> Option[Op2]
+        val eq = self.op2(span, "==", elem_of(t)) match
+            Some(f) -> f
+            None -> return None
+
+        Some((x, y) ->
+            val a = arr_of(x)
+            val b = arr_of(y)
+
+            if !same_shape(a, b) then return Ok(VBool(false))
+
+            val xs = elements(a)
+            val ys = elements(b)
+
+            for k in 0..<xs.len()
+                if !bool_of(eq(xs[k], ys[k])?) then return Ok(VBool(false))
+
+            Ok(VBool(true))
+        )
+
+    // `for x in a`: every element in storage order (DESIGN §4.3), the array read once before the
+    // first pass.
+    for_each(*self, id: usize, var_id: usize, xs: TExpr, body: TExpr) -> Code
+        val a = self.ex(xs)
+        val bind = self.local_binder(var_id)
+        val b = self.ex(body)
+
+        (c) ->
+            val items = elements(arr_of(a(c)?))
+
+            for x in items
+                bind(c, x)
+
+                b(c) match
+                    Ok(_) -> ()
+                    Err(sig) ->
+                        val l = landed(sig, id)
+
+                        if l == 0 then return Err(sig)
+                        if l == 1 then break
+
+            Ok(VVoid)
+end Interp
+
+// The items of the literal `e`, or `None` where it is not one.
+private literal_items(e: TExpr) -> Option[Buf[TExpr]] = *e.kind match
+    TArray(op) -> *op match
+        TArrayLit(xs) -> Some(xs)
+        _ -> None
+    _ -> None
+
+// Every scalar of a literal nested only of literals, in source order; false where an item is an
+// array expression or the nesting is ragged.
+private gathered(e: TExpr, out: *Buf[TExpr]) -> bool
+    val items = literal_items(e) match
+        Some(xs) -> xs
+        None -> return false
+
+    if rank_of(e.ty) == 1
+        for x in items
+            out.push(x)
+
+        return true
+
+    var n: Option[usize] = None
+
+    for x in items
+        val ys = literal_items(x) match
+            Some(ys) -> ys
+            None -> return false
+
+        if n.is_some() && n != Some(ys.len()) then return false
+
+        n = Some(ys.len())
+
+        if !gathered(x, out) then return false
+
+    true
+
+// How many integers `lo..hi by step` (or `..<`) counts, at the width as the compiled program counts
+// them; the step is not 0.
+private range_count(lo: i128, hi: i128, step: i128, inclusive: bool, bits: int, signed: bool) -> long
+    val up = !signed || step > 0
+    val empty = if up then (if inclusive then hi < lo else hi <= lo) else (if inclusive then lo < hi else lo <= hi)
+
+    if empty then return 0
+
+    val mask = (i128(1) << bits) - 1
+    var distance = (if up then hi - lo else lo - hi) & mask
+
+    if !inclusive then distance = (distance - 1) & mask
+
+    val magnitude = (if up then step else -step) & mask
+
+    long.wrap(distance / magnitude + 1)

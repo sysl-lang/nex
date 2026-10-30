@@ -32,6 +32,8 @@
 // scalar emitter runs unchanged inside a region.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{ARRAY_CLOSE, ARRAY_OPEN, FIELD_SEPARATOR, INDEX_OUT_OF_BOUNDS, SHAPE_MISMATCH, SLICE_LENGTH_MISMATCH, SLICE_OUT_OF_BOUNDS, ZERO_RANGE_STEP,
+                                        ZERO_SLICE_STRIDE}
 import sysl.buf.{Buf, buf}
 import sysl.text.{StrBuilder, str_builder}
 import sh.sysl.parsing.Span
@@ -229,7 +231,7 @@ impl Emitter
         val z = self.def(s"arith.subi $w, %one : i64")
         val outside = self.def(s"arith.cmpi uge, $z, ${self.to_i64(n)} : i64")
 
-        self.trap_if(outside, "index out of bounds")
+        self.trap_if(outside, INDEX_OUT_OF_BOUNDS)
 
         // 0 where the trap is taken, so no folding meets an index outside the tensor.
         self.def(s"arith.index_cast ${self.def(s"arith.select $outside, ${self.def("arith.constant 0 : i64")}, $z : i64")} : i64 to index")
@@ -719,7 +721,7 @@ impl Emitter
 
         if ok == "" then return self.cast(span, v, from, to)
 
-        self.trap_if(self.not(ok), "shape mismatch")
+        self.trap_if(self.not(ok), SHAPE_MISMATCH)
 
         if is_items(from) then return v
 
@@ -778,7 +780,7 @@ impl Emitter
                     val y = self.dim(span, vals[k], operands[k].ty, a)
                     val ne = self.def(s"arith.cmpi ne, $x, $y : index")
 
-                    self.trap_if(ne, "shape mismatch")
+                    self.trap_if(ne, SHAPE_MISMATCH)
                     mismatch = if mismatch == "" then ne else self.def(s"arith.ori $mismatch, $ne : i1")
 
             ins.push(vals[k])
@@ -986,7 +988,7 @@ impl Emitter
                 val x = self.dim(e.span, vals[0], it, a)
                 val y = self.dim(e.span, vals[j], items[j].ty, a)
 
-                self.trap_if(self.def(s"arith.cmpi ne, $x, $y : index"), "shape mismatch")
+                self.trap_if(self.def(s"arith.cmpi ne, $x, $y : index"), SHAPE_MISMATCH)
 
             var offs: Buf[string] = buf()
             var szs: Buf[string] = buf()
@@ -1017,7 +1019,7 @@ impl Emitter
             Some(s) -> self.ex(s)
             None -> self.int_const("1", bits)
 
-        if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), "a range step of 0")
+        if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), ZERO_RANGE_STEP)
 
         val n = self.range_count(lo, hi, step, inclusive, it)
         val tt = self.tensor_ty(e.span, e.ty)
@@ -1126,7 +1128,7 @@ impl Emitter
                         Some(x) -> self.index64(x)
                         None -> self.def("arith.constant 1 : i64")
 
-                    if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : i64"), "a slice stride of 0")
+                    if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : i64"), ZERO_SLICE_STRIDE)
 
                     // The bounds are read in the direction of travel (DESIGN §5.4): the first is
                     // where the walk starts, the second where it stops, and an open one is the end
@@ -1158,7 +1160,7 @@ impl Emitter
                     val outside = self.def(s"arith.ori $low, $high : i1")
                     val bad = self.def(s"arith.ori $backward, ${self.def(s"arith.andi $outside, ${self.not(empty)} : i1")} : i1")
 
-                    self.trap_if(bad, "slice out of bounds")
+                    self.trap_if(bad, SLICE_OUT_OF_BOUNDS)
 
                     // Past the traps every value below is in range; the selects keep them so where
                     // the traps are taken too, so no folding of them meets an invalid slice.
@@ -1303,7 +1305,7 @@ impl Emitter
         for a in 0..<kept.len()
             val d = self.dim(span, rhs, rhs_ty, a + 1)
 
-            self.trap_if(self.def(s"arith.cmpi ne, $d, ${kept[a]} : index"), "slice assignment length mismatch")
+            self.trap_if(self.def(s"arith.cmpi ne, $d, ${kept[a]} : index"), SLICE_LENGTH_MISMATCH)
             fit.push(self.def(s"arith.minui $d, ${kept[a]} : index"))
 
         var a = 0
@@ -1622,14 +1624,14 @@ impl Emitter
     put_level(*self, span: Span, sink: string, v: string, t: Ty, axis: usize, at: *Buf[string])
         val r = rank_of(t)
 
-        self.put_text(sink, "[")
+        self.put_text(sink, ARRAY_OPEN)
 
         val n = self.dim(span, v, t, axis)
         val iv = self.fresh()
 
         self.op(s"scf.for $iv = ${self.index_const(0)} to $n step ${self.index_const(1)} {")
         self.op(s"scf.if ${self.def(s"arith.cmpi ne, $iv, ${self.index_const(0)} : index")} {")
-        self.put_text(sink, ", ")
+        self.put_text(sink, FIELD_SEPARATOR)
         self.op("}")
         at.push(iv)
 
@@ -1647,7 +1649,7 @@ impl Emitter
 
         at.pop()
         self.op("}")
-        self.put_text(sink, "]")
+        self.put_text(sink, ARRAY_CLOSE)
 end Emitter
 
 // An operand of a scalar body: the `k`th value of the innermost chain frame, of `e`'s element type.

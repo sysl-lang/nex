@@ -50,6 +50,11 @@ private[nex] enum Value
     // fields followed into it, outermost first. An `inout` parameter holds one, and so does a local a
     // lambda captures, whose cell both the function and the lambda reach.
     VRef(cells: &Cells, k: usize, path: Buf[usize])
+    // An array: a window onto storage it may share (`interp_array.sysl`).
+    VArr(a: &Arr)
+    // A place inside the array another place holds: one element, with the fields `path` followed
+    // into it, or a window of elements an `inout` parameter borrows (`interp_array.sysl`).
+    VSub(w: &Win, path: Buf[usize])
     VVoid
 
 // How a computation stopped other than by giving its value: a trap, `stop`, or a `return`, `exit` or
@@ -138,24 +143,32 @@ private[nex] cell(v: Value) -> Value
 // The value at a place, or the value itself where it is not one.
 private[nex] deref(v: Value) -> Value = v match
     VRef(cells, k, path) -> at_path(cells.v[k], path, 0)
+    VSub(w, path) -> sub_value(w, path)
     _ -> v
 
-// `v` stored at the place `r`.
-private[nex] store_through(r: Value, v: Value) = r match
-    VRef(cells, k, path) -> cells.v.set(k, if path.len() == 0 then v else put_path(cells.v[k], path, 0, v))
-    _ -> ()
+// `v` stored at the place `r`; a window an `inout` parameter borrows takes only an array of its own
+// shape.
+private[nex] store_through(r: Value, v: Value) -> Answer = r match
+    VRef(cells, k, path) ->
+        cells.v.set(k, if path.len() == 0 then v else put_path(cells.v[k], path, 0, v))
+        Ok(VVoid)
+    VSub(w, path) -> sub_store(w, path, v)
+    _ -> Ok(VVoid)
 
 // Field `k` of the place `r`.
 private[nex] deeper(r: Value, k: usize) -> Value = r match
-    VRef(cells, slot, path) ->
-        var longer: Buf[usize] = buf()
-
-        for p in path
-            longer.push(p)
-
-        longer.push(k)
-        VRef(cells, slot, longer)
+    VRef(cells, slot, path) -> VRef(cells, slot, longer(path, k))
+    VSub(w, path) -> VSub(w, longer(path, k))
     _ -> r
+
+private longer(path: Buf[usize], k: usize) -> Buf[usize]
+    var out: Buf[usize] = buf()
+
+    for p in path
+        out.push(p)
+
+    out.push(k)
+    out
 
 // -- integers ---------------------------------------------------------------------------------------
 

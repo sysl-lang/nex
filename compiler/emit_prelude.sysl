@@ -1,6 +1,7 @@
 // `permute`, which rearranges an array's axes (DESIGN §4.3), and `assert_approx` (§4.3).
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.NOT_A_PERMUTATION
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
@@ -61,7 +62,7 @@ impl Emitter
             for j in 0..<n
                 bad = self.def(s"arith.ori $bad, ${self.def(s"arith.cmpi eq, ${ps[n]}, ${ps[j]} : i64")} : i1")
 
-        self.trap_if(bad, "not a permutation of the axes")
+        self.trap_if(bad, NOT_A_PERMUTATION)
 
         // Where the trap is taken the extents are the source's, so nothing reads outside it.
         for n in 0..<r

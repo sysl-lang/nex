@@ -4,6 +4,7 @@
 // counted again, so the result is a value like any other.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.RESHAPE_SIZE
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
@@ -43,7 +44,7 @@ impl Emitter
             ns.push(x)
             total = self.def(s"arith.muli $total, $x : i64")
 
-        self.trap_if(self.def(s"arith.cmpi ne, $total, ${self.items_count(v)} : i64"), "reshape to a different size")
+        self.trap_if(self.def(s"arith.cmpi ne, $total, ${self.items_count(v)} : i64"), RESHAPE_SIZE)
 
         val h = self.new_items(span, t, total)
 

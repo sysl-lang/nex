@@ -1,0 +1,442 @@
+module sh.sysl.nex
+
+// The interpreter's arrays (DESIGN §3–§7): their storage, the windows taken of it, and the
+// element-by-element work the array nodes do, each as the compiled program does it.
+//
+// **An array is a window onto storage.** A `Store` holds elements; an `Arr` reads them from an
+// offset, with an extent and a stride per nex axis, axis 1 first. So a slice, a reversed axis and an
+// `origin` view share their source's storage and copy nothing, as the compiled program's views do.
+// An array made here is dense: column-major, axis 1 fastest (DESIGN §3.2).
+//
+// **Storage is copied when a place writes it while it is shared** (DESIGN §6.2 rules 2 and 4). An
+// array read out of a place into anything that can keep it — a binding, a field, a view, a capture —
+// marks the place's storage shared (`share`), so the place's next write copies it first and every
+// other holder keeps the values it had. A read that lives only while one operation runs — an
+// operand, an argument, the target of an index — marks nothing, so a loop that reads and writes one
+// array copies it at most once. The copy keeps the storage's layout, so a window taken of the place
+// before it, which an `inout` parameter holds, is a window of the copy.
+
+import nex_runtime.sh.sysl.nex_runtime.{ARRAY_CLOSE, ARRAY_OPEN, FIELD_SEPARATOR, INDEX_OUT_OF_BOUNDS, SHAPE_MISMATCH, SLICE_OUT_OF_BOUNDS, ZERO_SLICE_STRIDE}
+import sysl.buf.{Buf, buf}
+import sysl.text.{StrBuilder, str_builder}
+
+// Elements, shared by every array value taken of them until a place writes them.
+private[nex] struct Store
+    v: Buf[Value]
+    shared: bool
+
+private[nex] struct Arr
+    store: &Store
+    // The position in the storage of the element whose index is 1 on every axis.
+    offset: long
+    // Per nex axis, axis 1 first: how many elements, and how far apart in the storage.
+    ext: Buf[long]
+    str: Buf[long]
+    // An `origin` view's first index less one on its first axes (DESIGN §6.4); empty for any other
+    // array, whose every axis starts at 1.
+    shifts: Buf[long]
+
+// A window of the array the place `base` holds, as storage positions: one element where `ext` is
+// empty, else the elements an `inout` parameter borrows.
+private[nex] struct Win
+    base: Value
+    offset: long
+    ext: Buf[long]
+    str: Buf[long]
+
+// One axis of a window: its first element's index from 0, how many it takes, the step between
+// them, and whether the axis stays.
+private[nex] struct Cut
+    first: long
+    count: long
+    step: long
+    keep: bool
+
+// -- making and reading arrays ----------------------------------------------------------------------
+
+// `v`, in storage order, as an array of extents `ext`.
+private[nex] dense(v: Buf[Value], ext: Buf[long]) -> Value = VArr(Arr(Store(v, false), 0, ext, strides_of(ext), buf()))
+
+// `v` as a rank-1 array.
+private[nex] vector(v: Buf[Value]) -> Value
+    var ext: Buf[long] = buf()
+
+    ext.push(long(v.len()))
+    dense(v, ext)
+
+// The strides of a dense array of extents `ext`.
+private[nex] strides_of(ext: Buf[long]) -> Buf[long]
+    var out: Buf[long] = buf()
+    var s: long = 1
+
+    for n in ext
+        out.push(s)
+        s *= n
+
+    out
+
+private[nex] arr_of(v: Value) -> &Arr = v match
+    VArr(a) -> a
+    _ -> Arr(Store(buf(), false), 0, buf(), buf(), buf())
+
+private[nex] count_of(a: &Arr) -> long
+    var n: long = 1
+
+    for x in a.ext
+        n *= x
+
+    n
+
+private[nex] same_shape(a: &Arr, b: &Arr) -> bool
+    if a.ext.len() != b.ext.len() then return false
+
+    for k in 0..<a.ext.len()
+        if a.ext[k] != b.ext[k] then return false
+
+    true
+
+// Whether `a` reads its storage from its offset on, one element after another.
+private contiguous(a: &Arr) -> bool
+    var s: long = 1
+
+    for k in 0..<a.ext.len()
+        if a.ext[k] != 1 && a.str[k] != s then return false
+
+        s *= a.ext[k]
+
+    true
+
+// The storage positions of `a`'s elements, in storage order: axis 1 fastest.
+private[nex] positions(a: &Arr) -> Buf[long]
+    val n = count_of(a)
+    var out: Buf[long] = buf()
+
+    if n == 0 then return out
+
+    if contiguous(a)
+        for k in 0..<n
+            out.push(a.offset + k)
+
+        return out
+
+    val r = a.ext.len()
+    var at: Buf[long] = buf()
+
+    for _ in 0..<r
+        at.push(0)
+
+    var p = a.offset
+
+    for _ in 0..<n
+        out.push(p)
+
+        // The next index, axis 1 fastest.
+        var k: usize = 0
+
+        while k < r
+            at.set(k, at[k] + 1)
+            p += a.str[k]
+
+            if at[k] < a.ext[k] then break
+
+            p -= a.str[k] * a.ext[k]
+            at.set(k, 0)
+            k += 1
+
+    out
+
+// `a`'s elements in storage order, a new list. Elements that hold arrays are shared with `a`'s,
+// whose storage is then marked shared too.
+private[nex] elements(a: &Arr) -> Buf[Value]
+    var out: Buf[Value] = buf()
+    val s = a.store.v
+
+    for p in positions(a)
+        out.push(s[usize(p)])
+
+    if out.len() > 0 && holds_parts(out[0])
+        for x in out
+            share(x)
+
+    out
+
+// Element `k` (from 0, storage order) of `a`.
+private[nex] element_at(a: &Arr, k: long) -> Value
+    var rest = k
+    var p = a.offset
+
+    for j in 0..<a.ext.len()
+        p += (rest % a.ext[j]) * a.str[j]
+        rest /= a.ext[j]
+
+    a.store.v[usize(p)]
+
+// A dense copy of `a`, 1-based.
+private[nex] copy_of(a: &Arr) -> Value = dense(elements(a), a.ext)
+
+// -- sharing ------------------------------------------------------------------------------------------
+
+// Whether `v` may hold an array: an aggregate, whose fields may.
+private holds_parts(v: Value) -> bool = v match
+    VAgg(_, _) -> true
+    _ -> false
+
+// `v`, its arrays' storage marked shared: it is being read out of a place into one that can keep
+// it.
+private[nex] shared(v: Value) -> Value
+    share(v)
+    v
+
+private[nex] share(v: Value)
+    v match
+        VArr(a) -> a.store.shared = true
+        VAgg(_, fields) ->
+            for f in fields
+                share(f)
+        _ -> ()
+
+// The array the place `r` holds, its storage the place's own: copied first where it is shared, the
+// copy keeping the layout so that every window taken of the place stays one of the copy.
+private[nex] owned(r: Value) -> &Arr
+    // A window's storage is the storage of the place it is a window of.
+    r match
+        VSub(w, _) ->
+            if w.ext.len() > 0 then return Arr(owned(w.base).store, w.offset, w.ext, w.str, buf())
+
+            // An array inside an element: the array holding the element is made its place's own
+            // first, which marks what its elements hold shared where it is copied.
+            owned(w.base)
+        _ -> ()
+
+    val a = arr_of(deref(r))
+
+    if !a.store.shared then return a
+
+    var v: Buf[Value] = buf()
+
+    for x in a.store.v
+        v.push(x)
+
+    if v.len() > 0 && holds_parts(v[0])
+        for x in v
+            share(x)
+
+    val b: &Arr = Arr(Store(v, false), a.offset, a.ext, a.str, a.shifts)
+
+    store_through(r, VArr(b))
+    b
+
+// -- places inside arrays -----------------------------------------------------------------------------
+
+// The value at the place `VSub(w, path)`: the element and the fields `path` follows into it, or the
+// window's elements as an array.
+private[nex] sub_value(w: &Win, path: Buf[usize]) -> Value
+    val s = arr_of(deref(w.base)).store
+
+    if w.ext.len() == 0 then return at_path(s.v[usize(w.offset)], path, 0)
+
+    VArr(Arr(s, w.offset, w.ext, w.str, buf()))
+
+// `v` stored at the place `VSub(w, path)`. A window takes an array of its own shape, its elements
+// read before the first is written.
+private[nex] sub_store(w: &Win, path: Buf[usize], v: Value) -> Answer
+    if w.ext.len() == 0
+        val s = owned(w.base).store
+        val k = usize(w.offset)
+
+        s.v.set(k, if path.len() == 0 then v else put_path(s.v[k], path, 0, v))
+        return Ok(VVoid)
+
+    val src = arr_of(v)
+
+    if !same_ext(w.ext, src.ext) then return trapped(SHAPE_MISMATCH)
+
+    write_window(owned(w.base).store, w.offset, w.ext, w.str, elements(src))
+    Ok(VVoid)
+
+private same_ext(a: Buf[long], b: Buf[long]) -> bool
+    if a.len() != b.len() then return false
+
+    for k in 0..<a.len()
+        if a[k] != b[k] then return false
+
+    true
+
+// `xs`, in storage order, written over the window of `s` at `offset` with extents `ext` and strides
+// `str`.
+private[nex] write_window(s: &Store, offset: long, ext: Buf[long], str: Buf[long], xs: Buf[Value])
+    val ps = positions(Arr(s, offset, ext, str, buf()))
+
+    for j in 0..<ps.len()
+        s.v.set(usize(ps[j]), xs[j])
+
+// -- windows ----------------------------------------------------------------------------------------
+
+// Index `i` of axis `k` (from 0) of `a`, from 0 again: an `origin` view's first index taken off.
+private[nex] unshift(a: &Arr, k: usize, i: long) -> long = if k < a.shifts.len() then long.wrap(i - a.shifts[k]) else i
+
+// The last index of axis `k` (from 0) of `a`, as `end` reads it.
+private[nex] last_index(a: &Arr, k: usize) -> long = if k < a.shifts.len() then long.wrap(a.shifts[k] + a.ext[k]) else a.ext[k]
+
+// An integer subscript on axis `k`: 1-based after the shift, within the extent.
+private[nex] at_axis(a: &Arr, k: usize, i: long) -> Result[Cut, Signal]
+    val z = long.wrap(unshift(a, k, i) - 1)
+
+    if ulong.wrap(z) >= ulong.wrap(a.ext[k]) then return Err(Trapped(INDEX_OUT_OF_BOUNDS))
+
+    Ok(Cut(z, 1, 1, false))
+
+// `lo..hi by step` (or `..<`) on axis `k`, an open bound `None`: read in the direction of travel,
+// empty where the far bound is one short of the near one, out of bounds past either end
+// (DESIGN §5.1, §5.4).
+private[nex] window_axis(a: &Arr, k: usize, lo_x: Option[long], hi_x: Option[long], inclusive: bool, step_x: Option[long]) -> Result[Cut, Signal]
+    val n = a.ext[k]
+    val step: long = step_x.unwrap_or(1)
+
+    if step == 0 then return Err(Trapped(ZERO_SLICE_STRIDE))
+
+    val down = step < 0
+    val start = lo_x match
+        Some(x) -> unshift(a, k, x)
+        None -> if down then n else 1
+    var stop = hi_x match
+        Some(x) -> unshift(a, k, x)
+        None -> if down then 1 else n
+
+    if !inclusive && hi_x.is_some() then stop = long.wrap(stop - (if down then -1 else 1))
+
+    val lo = if down then stop else start
+    val hi = if down then start else stop
+    val before = long.wrap(lo - 1)
+    val empty = hi == before
+
+    if hi < before || ((lo < 1 || hi > n) && !empty) then return Err(Trapped(SLICE_OUT_OF_BOUNDS))
+    if empty then return Ok(Cut(0, 0, step, true))
+
+    val size = if down then -step else step
+
+    Ok(Cut(start - 1, (hi - lo) / size + 1, step, true))
+
+// The array the window `axes` takes of `a`: a view of its storage, 1-based.
+private[nex] view_of(a: &Arr, axes: Buf[Cut]) -> &Arr
+    var offset = a.offset
+    var ext: Buf[long] = buf()
+    var str: Buf[long] = buf()
+
+    for k in 0..<axes.len()
+        val x = axes[k]
+
+        offset += x.first * a.str[k]
+
+        if x.keep
+            ext.push(x.count)
+            str.push(a.str[k] * x.step)
+
+    Arr(a.store, offset, ext, str, buf())
+
+// -- element by element -----------------------------------------------------------------------------
+
+// `f` of every element of the array `x`.
+private[nex] map1(f: Op1, x: Value) -> Answer
+    val a = arr_of(x)
+    var out: Buf[Value] = buf()
+
+    for v in elements(a)
+        out.push(f(v)?)
+
+    Ok(dense(out, a.ext))
+
+// `f` between the elements of two arrays of one shape, or of an array and a scalar, `xa` and `ya`
+// saying which is an array.
+private[nex] zip_with(f: Op2, x: Value, y: Value, xa: bool, ya: bool) -> Answer
+    var out: Buf[Value] = buf()
+
+    if xa && ya
+        val a = arr_of(x)
+        val b = arr_of(y)
+
+        if !same_shape(a, b) then return trapped(SHAPE_MISMATCH)
+
+        val xs = elements(a)
+        val ys = elements(b)
+
+        for k in 0..<xs.len()
+            out.push(f(xs[k], ys[k])?)
+
+        return Ok(dense(out, a.ext))
+
+    val a = arr_of(if xa then x else y)
+
+    for v in elements(a)
+        out.push(if xa then f(v, y)? else f(x, v)?)
+
+    Ok(dense(out, a.ext))
+
+// `+`, `-`, `*` and `/` on `real64` elements where nothing traps: the operation's number for
+// `real_zip`, which loops over the numbers themselves.
+private[nex] fast_op(op: string, lt: Ty, rt: Ty, fpe: bool) -> Option[int]
+    if fpe then return None
+
+    lt match
+        Real(64) -> ()
+        _ -> return None
+
+    rt match
+        Real(64) -> ()
+        _ -> return None
+
+    if op == "+" then Some(0) elif op == "-" then Some(1) elif op == "*" then Some(2) elif op == "/" then Some(3) else None
+
+private[nex] real_zip(k: int, x: Value, y: Value, xa: bool, ya: bool) -> Answer
+    val a = arr_of(if xa then x else y)
+
+    if xa && ya && !same_shape(a, arr_of(y)) then return trapped(SHAPE_MISMATCH)
+
+    val ps = positions(a)
+    val s = a.store.v
+    var out: Buf[Value] = buf()
+
+    if xa && ya
+        val b = arr_of(y)
+        val qs = positions(b)
+        val t = b.store.v
+
+        for j in 0..<ps.len()
+            out.push(VReal(real_of2(k, real_of(s[usize(ps[j])]), real_of(t[usize(qs[j])]))))
+    elif xa
+        val w = real_of(y)
+
+        for p in ps
+            out.push(VReal(real_of2(k, real_of(s[usize(p)]), w)))
+    else
+        val w = real_of(x)
+
+        for p in ps
+            out.push(VReal(real_of2(k, w, real_of(s[usize(p)]))))
+
+    Ok(dense(out, a.ext))
+
+private real_of2(k: int, a: real, b: real) -> real = if k == 0 then a + b elif k == 1 then a - b elif k == 2 then a * b else a / b
+
+// -- printing ---------------------------------------------------------------------------------------
+
+// An array as `print` writes it: `[1, 2, 3]`, a matrix as its rows `[[1, 2], [3, 4]]`, and so on at
+// every rank, nex axis 1 outermost, each element as `each` spells it.
+private[nex] array_text(v: Value, each: &Fn(Value) -> string) -> string
+    val a = arr_of(v)
+    var out = str_builder()
+
+    put_level(&out, a, 0, a.offset, each)
+    out.finish()
+
+private put_level(out: *StrBuilder, a: &Arr, axis: usize, at: long, each: &Fn(Value) -> string)
+    out.push(ARRAY_OPEN)
+
+    for i in 0..<a.ext[axis]
+        if i > 0 then out.push(FIELD_SEPARATOR)
+
+        val p = at + i * a.str[axis]
+
+        if axis + 1 == a.ext.len() then out.push(each(a.store.v[usize(p)])) else put_level(out, a, axis + 1, p, each)
+
+    out.push(ARRAY_CLOSE)

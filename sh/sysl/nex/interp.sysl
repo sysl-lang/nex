@@ -54,7 +54,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
         kept.push(a)
 
     val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), None, false, buf(), buf(), buf())
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), None, false, buf(), buf(), buf())
     val init = it.program(test)
 
     if it.diags.len() > 0
@@ -70,7 +70,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
 // Nothing is run.
 interpretable(p: TProgram) -> Buf[Diagnostic]
     val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), None, false, buf(), buf(), buf())
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), None, false, buf(), buf(), buf())
 
     it.program(None)
     shut(m)
@@ -146,7 +146,7 @@ private[nex] emit(m: &Machine, s: Stream, text: string)
 
 // What a `while`, a `for` or a `for a in args` does with the signal its body gave: 0 to pass it on, 1
 // for the loop's own `exit`, 2 for its own `cycle`.
-private landed(s: Signal, loop_id: usize) -> int = s match
+private[nex] landed(s: Signal, loop_id: usize) -> int = s match
     Exiting(id) -> if id == loop_id then 1 else 0
     Cycling(id) -> if id == loop_id then 2 else 0
     _ -> 0
@@ -216,6 +216,9 @@ private[nex] struct Interp
     next: usize
     // The first slot of each chain being compiled, innermost last.
     chains: Buf[usize]
+    // The slot holding the target of each index list being compiled, innermost last: what `end`
+    // reads.
+    ends: Buf[usize]
     // `main`'s parameter, the program's arguments.
     args_local: Option[usize]
     // Whether the function being compiled has reported what it lacks; one diagnostic is enough.
@@ -394,14 +397,26 @@ impl Interp
     // Whether a value of `t` is one the interpreter holds, or what it is that it does not.
     // An aggregate is held where every field is.
     unheld(*self, t: Ty) -> Option[string]
+        var seen: Buf[string] = buf()
+
+        self.unheld_in(t, &seen)
+
+    // The same, `seen` naming the structs and enums already being asked about, which a type holding
+    // itself through an array reaches again.
+    unheld_in(*self, t: Ty, seen: *Buf[string]) -> Option[string]
         t match
-            Array(_, _) -> return Some("an array")
+            Array(e, _) -> return self.unheld_in(*e, seen)
             Measured(_, _) -> return Some("a value with a unit of measure")
             CPtr -> return Some("a C pointer")
+            Nominal(name, _) ->
+                for s in *seen
+                    if s == name then return None
+
+                seen.push(name)
             _ -> ()
 
         for f in self.parts(t)
-            self.unheld(f) match
+            self.unheld_in(f, seen) match
                 Some(what) -> return Some(what)
                 None -> ()
 
@@ -472,11 +487,20 @@ impl Interp
 
                 val s = self.slot_of(id)
 
+                // An array read out of a place shares the place's storage, so the place's next
+                // write copies it first (`interp_array.sysl`).
+                if self.holds_array(e.ty)
+                    if self.indirect(id) then return (c) -> Ok(shared(deref(c.v[s])))
+
+                    return (c) -> Ok(shared(c.v[s]))
+
                 if self.indirect(id) then return (c) -> Ok(deref(c.v[s]))
 
                 return (c) -> Ok(c.v[s])
             TGlobalRef(name) ->
                 val g = self.global_number(name)
+
+                if self.holds_array(e.ty) then return (c) -> Ok(shared(m.globals.v[g]))
 
                 return (c) -> Ok(m.globals.v[g])
             TFnRef(name) ->
@@ -580,12 +604,12 @@ impl Interp
 
                     c.v.set(s, r)
                     store_through(r, v(c)?)
-                    Ok(VVoid)
             TAssign(op, target, value) -> return self.assign(e.span, op, target, value)
             TReturn(v) ->
                 v match
                     Some(x) ->
-                        val r = self.ex(x)
+                        // The frame ends with the `return`, so a local's array is handed over.
+                        val r = self.lent(x)
 
                         return (c) -> Err(Returning(r(c)?))
                     None -> return (c) -> Err(Returning(VVoid))
@@ -600,7 +624,7 @@ impl Interp
                         return (c) -> Err(Stopped(int(wrapped(wide(int_of(r(c)?), signed), 32, true))))
                     None -> return (c) -> Err(Stopped(0))
             TMatch(s, arms) -> return self.match_expr(e.span, s, arms)
-            TArray(a) -> return self.array(e.span, *a)
+            TArray(a) -> return self.array(e, *a)
             TParallel(_) -> return self.later(e.span, "a `parallel` construct")
             TRescale(_, _) -> return self.later(e.span, "a value with a unit of measure")
             TUnitAs(_) -> return self.later(e.span, "a value with a unit of measure")
@@ -693,9 +717,7 @@ impl Interp
         TPlace(place) ->
             val r = self.place_ref(place)
 
-            (c, v) ->
-                store_through(r(c)?, v)
-                Ok(VVoid)
+            (c, v) -> store_through(r(c)?, v)
         TDrop -> (c, v) -> Ok(VVoid)
         TTargets(elems) ->
             var parts: Buf[Storer] = buf()
@@ -729,7 +751,10 @@ impl Interp
             TField(v, _, k) -> return self.field_ref(v, k)
             TTupleField(v, k) -> return self.field_ref(v, k)
             TComplexPart(_, _) -> return self.later(e.span, "a complex's part as a place")
-            _ -> return self.later(e.span, "an element as a place")
+            TArray(a) -> *a match
+                TIndex(target, subs) -> return self.index_ref(target, subs)
+                _ -> return self.later(e.span, "an array expression as a place")
+            _ -> return self.later(e.span, "an expression as a place")
 
     field_ref(*self, v: TExpr, k: usize) -> Code
         val r = self.place_ref(v)
@@ -773,6 +798,7 @@ impl Interp
         val used = self.used
         val next = self.next
         val chains = self.chains
+        val ends = self.ends
         var outer: Buf[long] = buf()
 
         for x in l.captures
@@ -782,6 +808,7 @@ impl Interp
         self.used = buf()
         self.next = 0
         self.chains = buf()
+        self.ends = buf()
 
         for p in l.params
             self.slot_of(p)
@@ -815,6 +842,7 @@ impl Interp
         self.used = used
         self.next = next
         self.chains = chains
+        self.ends = ends
 
         for j in 0..<l.captures.len()
             self.slot.set(l.captures[j], outer[j])
@@ -866,6 +894,7 @@ impl Interp
             else None
         Tuple(_) -> self.aggregate_op(span, op, t)
         Nominal(_, _) -> self.aggregate_op(span, op, t)
+        Array(_, _) -> if op == "==" then self.arrays_equal(span, t) else None
         _ -> None
 
     // `==` or `!=` on two structs, tuples or enums of type `t`.
@@ -939,7 +968,9 @@ impl Interp
 
     // The operation of `l op r`, or of `x op= r`, `l` being of the left's type.
     operator(*self, span: Span, op: string, lt: Ty, rt: Ty) -> Option[Op2] =
-        if op == "^" && !ty_eq(lt, rt) then self.power(span, lt, rt) else self.op2(span, op, lt)
+        if is_array(lt) || is_array(rt) then self.lifted(span, op, lt, rt)
+        elif op == "^" && !ty_eq(lt, rt) then self.power(span, lt, rt)
+        else self.op2(span, op, lt)
 
     binary(*self, span: Span, op: string, l: TExpr, r: TExpr) -> Code
         val a = self.ex(l)
@@ -1003,6 +1034,8 @@ impl Interp
     // -- conversions -------------------------------------------------------------------------------
 
     converted(*self, span: Span, v: TExpr, to: Ty, traps: bool) -> Code
+        if is_array(to) then return self.array_converted(span, v, to, traps)
+
         val a = self.ex(v)
 
         self.conversion(span, base_of(v.ty), base_of(to), traps) match
@@ -1086,8 +1119,13 @@ impl Interp
     // -- statements --------------------------------------------------------------------------------
 
     assign(*self, span: Span, op: string, target: TExpr, value: TExpr) -> Code
+        *target.kind match
+            TArray(a) -> *a match
+                TIndex(t, subs) -> return self.assign_index(span, op, t, subs, value)
+                _ -> ()
+            _ -> ()
+
         val v = self.ex(value)
-        val read = self.ex(target)
         val m = self.m
 
         val step: Op2 = if op == "=" then (old, x) -> Ok(x)
@@ -1104,7 +1142,6 @@ impl Interp
                         val x = v(c)?
 
                         store_through(c.v[s], step(deref(c.v[s]), x)?)
-                        Ok(VVoid)
 
                 return (c) ->
                     val x = v(c)?
@@ -1127,7 +1164,6 @@ impl Interp
                     val at = r(c)?
 
                     store_through(at, step(deref(at), x)?)
-                    Ok(VVoid)
 
     while_loop(*self, id: usize, cond: TExpr, body: TExpr) -> Code
         val k = self.ex(cond)
@@ -1251,7 +1287,8 @@ impl Interp
 
     // -- the program's arguments -------------------------------------------------------------------
 
-    array(*self, span: Span, a: TArr) -> Code
+    // `args[k]` and `for a in args`; `None` for any other array node.
+    on_args(*self, a: TArr) -> Option[Code]
         val m = self.m
 
         a match
@@ -1262,14 +1299,14 @@ impl Interp
                             val k = self.ex(i)
                             val signed = is_signed(base_of(i.ty))
 
-                            return (c) -> arg_at(m, long.wrap(wide(int_of(k(c)?), signed)))
+                            return Some((c) -> arg_at(m, long.wrap(wide(int_of(k(c)?), signed))))
                         _ -> ()
             TForEach(id, var_id, xs, body) ->
                 if self.is_args(xs)
                     val bind = self.local_binder(var_id)
                     val b = self.ex(body)
 
-                    return (c) ->
+                    return Some((c) ->
                         for k in 0..<m.args.len()
                             bind(c, VStr(m.args[k]))
 
@@ -1281,10 +1318,10 @@ impl Interp
                                     if l == 0 then return Err(sig)
                                     if l == 1 then break
 
-                        Ok(VVoid)
+                        Ok(VVoid))
             _ -> ()
 
-        self.later(span, "an array")
+        None
 end Interp
 
 private arg_at(m: &Machine, k: long) -> Answer
