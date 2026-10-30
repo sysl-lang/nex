@@ -7,7 +7,8 @@
 //   `github.com/sysl-lang/nex`; `nex.sysl` is its entry.
 // - **`compiler/`**, the `nex` command: the MLIR emitter, the driver that lowers and links a program,
 //   and the test runner.
-// - **`runtime/`**, the archive every compiled program links.
+// - **`runtime/`**, the archive every compiled program links, which this library depends on too: the
+//   interpreter (`interp*.sysl`) prints, formats and words its traps through the same functions.
 //
 //     sysl build compiler -o nex
 //     sysl build-c runtime -o libnex_rt.a
@@ -33,6 +34,7 @@ exclude = ["bench"]
 // off-side rule, its interpolated-literal reader and its diagnostics.
 dependencies {
   parsing { git = "github.com/sysl-lang/parsing", version = "0.13.2" }
+  nex_runtime { workspace = true }
 }
 
 // **`os`** for the loader, which reads a program's files and the source prelude; **`heap`** for every

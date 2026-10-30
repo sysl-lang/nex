@@ -1,3 +1,5 @@
+module sh.sysl.nex_runtime
+
 // Strings, sinks and formatting: what a compiled program's `print`, `eprint` and interpolations call.
 //
 // **A nex string is a pointer to NUL-terminated UTF-8.** A literal is a constant the compiler wrote;
@@ -22,7 +24,6 @@
 // (`unwind.sysl`).
 
 import sysl.buf.{Buf, buf}
-import sysl.fmt.{format_int, format_real, format_str}
 import sysl.sync.SpinLock
 import sysl.text.{StrBuilder, from_utf8_unchecked, str_builder}
 
@@ -157,32 +158,27 @@ put_newline(sink: long)
 
 @export("nex_put_int")
 put_int(sink: long, v: long)
-    put(sink, s"$v")
+    put(sink, int_text(v))
 
 @export("nex_put_uint")
 put_uint(sink: long, v: ulong)
-    put(sink, s"$v")
+    put(sink, uint_text(v))
 
 @export("nex_put_bool")
 put_bool(sink: long, v: bool)
-    put(sink, if v then "true" else "false")
+    put(sink, bool_text(v))
 
-// `${n}%08x`: an integer of `bits` bits, its value arriving widened to 64 by its own signedness.
 @export("nex_put_fmt_int")
 put_fmt_int(sink: long, v: long, bits: int, signed: bool, spec: *u8)
-    val n = if signed then i128(v) else i128(ulong.wrap(v))
+    put(sink, int_spec_text(v, bits, signed, c_text(spec)))
 
-    put(sink, format_int(n, bits, c_text(spec), 0, 0))
-
-// `${x}%.3f`: a real of any width, widened exactly to `real64`.
 @export("nex_put_fmt_real")
 put_fmt_real(sink: long, v: real, spec: *u8)
-    put(sink, format_real(v, c_text(spec), 0, 0))
+    put(sink, real_spec_text(v, c_text(spec)))
 
-// `${s}%-8s`: any value's text, through the width and precision a string takes.
 @export("nex_put_fmt_str")
 put_fmt_str(sink: long, s: *u8, spec: *u8)
-    put(sink, format_str(c_text(s), c_text(spec), 0, 0))
+    put(sink, str_spec_text(c_text(s), c_text(spec)))
 
 @export("nex_str_concat")
 str_concat(a: *u8, b: *u8) -> *u8 = c_string(c_text(a) + c_text(b))
@@ -213,5 +209,5 @@ arg(k: long) -> *u8
     c_string(c_text(argv_saved[k]))
 
 private out_of_bounds(k: long) -> never
-    note_trap(s"index $k out of bounds 1..${argc_saved - 1}")
+    note_trap(arg_index_message(k, long(argc_saved - 1)))
     raise_trap()

@@ -1,0 +1,62 @@
+module sh.sysl.nex_runtime
+
+// The words of the traps and the text of the values both engines share. The compiler writes these
+// messages into the checks it emits, the runtime raises them, and the interpreter returns them as
+// values, so a trap reads the same whichever engine ran the program; and a value printed or
+// interpolated is spelled here once.
+
+import sysl.fmt.{format_int, format_real, format_str}
+
+// An integer type's name: `int8`, `uint64`.
+int_name(bits: int, signed: bool) -> string = if signed then s"int$bits" else s"uint$bits"
+
+// An integer result outside its type's range.
+overflow_message(bits: int, signed: bool) -> string = s"${int_name(bits, signed)} overflow"
+
+// A conversion whose value is outside the target's range, between types named as nex names them.
+out_of_range_message(from: string, to: string) -> string = s"$from value out of range for $to"
+
+val INT_DIVISION_BY_ZERO = "integer division by zero"
+val REMAINDER_BY_ZERO = "`%` by zero"
+val COMPLEX_DIVISION_BY_ZERO = "complex division by zero"
+
+// Under `--fpe-trap` (DESIGN §2.5).
+val REAL_DIVISION_BY_ZERO = "floating-point division by zero"
+val REAL_INVALID = "floating-point invalid operation"
+val REAL_OVERFLOW = "floating-point overflow"
+
+val ZERO_STEP = "a `for` step of 0"
+
+val ASSERTION_FAILED = "assertion failed"
+val ASSERT_EQ_FAILED = "assert_eq failed"
+val DID_NOT_TRAP = "assert_traps: the function did not trap"
+val NOT_MENTIONED = "assert_traps: expected substring not present in trap"
+
+// `assert(c, text)` failing.
+assertion_message(text: string) -> string = s"$ASSERTION_FAILED: $text"
+
+// `args[k]` past the arguments there are, `count` of them.
+arg_index_message(k: long, count: long) -> string = s"index $k out of bounds 1..$count"
+
+// What a trap nothing catches writes to standard error before the program aborts.
+uncaught_text(message: string) -> string = s"trap: $message\n"
+
+// -- the text of a value ----------------------------------------------------------------------------
+
+// An integer of any width, its value widened to 64 bits by its own signedness; a `uint64` is
+// `uint_text`'s.
+int_text(v: long) -> string = s"$v"
+
+uint_text(v: ulong) -> string = s"$v"
+
+bool_text(v: bool) -> string = if v then "true" else "false"
+
+// `${n}%08x`: an integer of `bits` bits, its value arriving widened to 64 by its own signedness.
+int_spec_text(v: long, bits: int, signed: bool, spec: string) -> string =
+    format_int(if signed then i128(v) else i128(ulong.wrap(v)), bits, spec, 0, 0)
+
+// `${x}%.3f`: a real of any width, widened exactly to `real64`.
+real_spec_text(v: real, spec: string) -> string = format_real(v, spec, 0, 0)
+
+// `${s}%-8s`: any value's text, through the width and precision a string takes.
+str_spec_text(s: string, spec: string) -> string = format_str(s, spec, 0, 0)

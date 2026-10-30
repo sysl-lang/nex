@@ -1,3 +1,5 @@
+module sh.sysl.nex_runtime
+
 // The copies an array crossing to C needs where C cannot address it as it lies (DESIGN §10.3): its
 // elements gathered into a dense block, nex's first axis fastest, and scattered back after the call.
 //

@@ -1,3 +1,5 @@
+module sh.sysl.nex_runtime
+
 // Integer arithmetic too long to emit inline.
 
 // `base ^ exponent` on integers of `bits` bits: each value arrives widened to 64 bits by its own
@@ -6,15 +8,23 @@
 // 0, `1 ^ -n` is 1, `(-1) ^ -n` is 1 or -1 by the exponent's parity, and `0 ^ -n` divides by zero.
 @export("nex_ipow")
 ipow(base: long, exponent: long, bits: int, signed: bool, exp_signed: bool) -> long
+    ipow_checked(base, exponent, bits, signed, exp_signed) match
+        Ok(v) -> return v
+        Err(message) -> note_trap(message)
+
+    raise_trap()
+
+// The same power, or the message of the trap it raises: what the interpreter calls.
+ipow_checked(base: long, exponent: long, bits: int, signed: bool, exp_signed: bool) -> Result[long, string]
     val b0 = if signed then i256(base) else i256(ulong.wrap(base))
     val e0 = if exp_signed then i256(exponent) else i256(ulong.wrap(exponent))
     val lo = if signed then -(i256(1) << (bits - 1)) else i256(0)
     val hi = if signed then (i256(1) << (bits - 1)) - 1 else (i256(1) << bits) - 1
     if e0 < 0
-        if b0 == 0 then trap_with("integer division by zero")
-        if b0 == 1 then return 1
-        if b0 == -1 then return if e0 % 2 == 0 then 1 else -1
-        return 0
+        if b0 == 0 then return Err(INT_DIVISION_BY_ZERO)
+        if b0 == 1 then return Ok(1)
+        if b0 == -1 then return Ok(if e0 % 2 == 0 then 1 else -1)
+        return Ok(0)
 
     var result = i256(1)
     var b = b0
@@ -23,16 +33,12 @@ ipow(base: long, exponent: long, bits: int, signed: bool, exp_signed: bool) -> l
     while e > 0
         if e % 2 == 1
             result *= b
-            if result < lo || result > hi then overflow(bits, signed)
+            if result < lo || result > hi then return Err(overflow_message(bits, signed))
 
         e /= 2
 
         if e > 0
             b *= b
-            if b < lo || b > hi then overflow(bits, signed)
+            if b < lo || b > hi then return Err(overflow_message(bits, signed))
 
-    long.wrap(result)
-
-private overflow(bits: int, signed: bool) -> never
-    note_trap(if signed then s"int$bits overflow" else s"uint$bits overflow")
-    raise_trap()
+    Ok(long.wrap(result))

@@ -1,3 +1,5 @@
+module sh.sysl.nex_runtime
+
 // Traps, and the catching `assert_traps` needs.
 //
 // A nex trap is raised by generated code calling one of the `nex_trap_*` functions here. With nothing
@@ -45,7 +47,7 @@ trap_with(message: string) -> never
 note_trap(message: string)
     if depth == 0 then
         flush_output()
-        put(2, s"trap: $message\n")
+        put(2, uncaught_text(message))
         abort()
 
     last_message = message
@@ -89,7 +91,8 @@ private with_number(text: string, n: long) -> string
 
 @export("nex_trap_complex_div_zero")
 trap_complex_div_zero() -> never
-    trap_with("complex division by zero")
+    note_trap(COMPLEX_DIVISION_BY_ZERO)
+    raise_trap()
 
 // `stop n`: what was printed is written out, and the program ends with status `n`.
 @export("nex_stop")
@@ -140,8 +143,13 @@ private catch_closure(code: *extern(*u8) -> unit, env: *u8) -> bool
 // where one is given (`expected` is null where it is not); otherwise the assertion traps.
 @export("nex_assert_traps")
 assert_traps(code: *extern(*u8) -> unit, env: *u8, expected: *u8)
-    if !catch_closure(code, env) then trap_with("assert_traps: the function did not trap")
-    if !(expected == null || mentions(expected)) then trap_with("assert_traps: expected substring not present in trap")
+    if !catch_closure(code, env)
+        note_trap(DID_NOT_TRAP)
+        raise_trap()
+
+    if !(expected == null || mentions(expected))
+        note_trap(NOT_MENTIONED)
+        raise_trap()
 
 private mentions(expected: *u8) -> bool = last_message.contains(c_text(expected))
 

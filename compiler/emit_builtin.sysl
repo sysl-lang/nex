@@ -6,6 +6,7 @@
 // closes it into a string. So `print(s"$a and $b")` builds no string at all.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{ASSERTION_FAILED, ASSERT_EQ_FAILED, assertion_message, overflow_message}
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
@@ -55,7 +56,7 @@ impl Emitter
             val failed = self.not(ok)
 
             if args.len() == 1
-                self.trap_if(failed, "assertion failed")
+                self.trap_if(failed, ASSERTION_FAILED)
             else
                 val message = self.ex(args[1])
 
@@ -63,7 +64,7 @@ impl Emitter
                 self.external("nex_str_concat", "!llvm.ptr, !llvm.ptr", "!llvm.ptr")
                 self.external("nex_trap_owned", "!llvm.ptr", "")
 
-                val prefix = self.string_ref("assertion failed: ")
+                val prefix = self.string_ref(assertion_message(""))
                 val text = self.def(s"func.call @nex_str_concat($prefix, $message) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr")
 
                 self.op(s"func.call @nex_trap_owned($text) : (!llvm.ptr) -> ()")
@@ -84,7 +85,7 @@ impl Emitter
             val a = self.ex(args[0])
             val b = self.ex(args[1])
 
-            self.trap_if(self.not(self.binary(span, "==", a, b, args[0].ty)), "assert_eq failed")
+            self.trap_if(self.not(self.binary(span, "==", a, b, args[0].ty)), ASSERT_EQ_FAILED)
             return ""
 
         if name == "min" || name == "max"
@@ -189,7 +190,7 @@ impl Emitter
 
             val min = self.int_const(s"${-(i128(1) << (bits - 1))}", bits)
 
-            self.trap_if(self.def(s"arith.cmpi eq, $x, $min : i$bits"), s"int$bits overflow")
+            self.trap_if(self.def(s"arith.cmpi eq, $x, $min : i$bits"), overflow_message(bits, true))
             self.def(s"math.absi $x : i$bits")
         Real(bits) -> self.def(s"math.absf $x : f$bits")
         Complex(bits) -> self.def(s"complex.abs $x : complex<f$bits>")

@@ -17,6 +17,8 @@ package {
 
 dependencies {
   nex { workspace = true }
+  // The words of every trap the emitted checks raise, shared with the runtime and the interpreter.
+  nex_runtime { workspace = true }
 }
 
 // **`os`** to read sources and run the toolchain; **`heap`** for the module text the emitter builds.

@@ -34,6 +34,7 @@
 // `parallel` never changes a result's bits.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.ZERO_STEP
 import sysl.buf.{Buf, buf}
 import sysl.text.str_builder
 import sh.sysl.parsing.Span
@@ -414,7 +415,7 @@ impl Emitter
             Some(s) -> self.ex(s)
             None -> self.int_const("1", bits)
 
-        if c.step.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), "a `for` step of 0")
+        if c.step.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), ZERO_STEP)
 
         val up = if signed then self.def(s"arith.cmpi sgt, $step, $zero : $t") else self.def("arith.constant true")
         val lt = if signed then "slt" else "ult"

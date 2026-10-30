@@ -1,3 +1,5 @@
+module sh.sysl.nex_runtime
+
 // What a caught trap gives back: everything the frames it abandons held (DESIGN §11).
 //
 // A trap returns to its catch by `longjmp` (`trap.sysl`), which skips the ends of the frames between,

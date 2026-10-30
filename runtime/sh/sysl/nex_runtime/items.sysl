@@ -1,3 +1,5 @@
+module sh.sysl.nex_runtime
+
 // Arrays whose elements are not numbers — strings, functions, tuples, structs, enums — and the stored
 // form of every other array. Both are objects of the counted heap (`heap.sysl`).
 //

@@ -4,6 +4,8 @@
 // statement, or one that never yields (`return`, `exit`, `stop`), after which the block has ended.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{COMPLEX_DIVISION_BY_ZERO, INT_DIVISION_BY_ZERO, REAL_DIVISION_BY_ZERO, REAL_INVALID, REAL_OVERFLOW, REMAINDER_BY_ZERO, ZERO_STEP, int_name,
+                                        out_of_range_message, overflow_message}
 import sysl.buf.{Buf, buf}
 import sysl.fmt.hex
 import sh.sysl.parsing.Span
@@ -266,14 +268,13 @@ impl Emitter
 
     int_binary(*self, op: string, a: string, b: string, bits: int, signed: bool) -> string
         val t = s"i$bits"
-        val name = if signed then s"int$bits" else s"uint$bits"
 
         if op == "+" || op == "-" || op == "*"
             val intr = (if signed then "s" else "u") + (if op == "+" then "add" elif op == "-" then "sub" else "mul")
             val r = self.def(s"\"llvm.intr.$intr.with.overflow\"($a, $b) : ($t, $t) -> !llvm.struct<($t, i1)>")
             val v = self.def(s"llvm.extractvalue $r[0] : !llvm.struct<($t, i1)>")
 
-            self.trap_if(self.def(s"llvm.extractvalue $r[1] : !llvm.struct<($t, i1)>"), s"$name overflow")
+            self.trap_if(self.def(s"llvm.extractvalue $r[1] : !llvm.struct<($t, i1)>"), overflow_message(bits, signed))
             return v
 
         if op == "div" || op == "%"
@@ -281,7 +282,7 @@ impl Emitter
 
             val by_zero = self.def(s"arith.cmpi eq, $b, $zero : $t")
 
-            self.trap_if(by_zero, if op == "div" then "integer division by zero" else "`%` by zero")
+            self.trap_if(by_zero, if op == "div" then INT_DIVISION_BY_ZERO else REMAINDER_BY_ZERO)
 
             // Where something may have left the statement the trap above is skipped, and the zero
             // divisor a skipped operand stands in with must not reach the division.
@@ -299,7 +300,7 @@ impl Emitter
             val min = self.int_const(s"${-(i128(1) << (bits - 1))}", bits)
             val overflows = self.def(s"arith.andi ${self.def(s"arith.cmpi eq, $a, $min : $t")}, $by_minus_one : i1")
 
-            self.trap_if(overflows, s"$name overflow")
+            self.trap_if(overflows, overflow_message(bits, signed))
             return self.def(s"arith.divsi $a, ${if self.dirty then self.def(s"arith.select $overflows, $one, $d : $t") else d} : $t")
 
         if op == "^"
@@ -331,7 +332,7 @@ impl Emitter
             if op == "/" && self.fpe_trap
                 val zero = self.real_const(0.0, bits)
 
-                self.trap_if(self.def(s"arith.cmpf oeq, $b, $zero : $t"), "floating-point division by zero")
+                self.trap_if(self.def(s"arith.cmpf oeq, $b, $zero : $t"), REAL_DIVISION_BY_ZERO)
 
             val name = if op == "+" then "addf" elif op == "-" then "subf" elif op == "*" then "mulf" else "divf"
 
@@ -349,7 +350,7 @@ impl Emitter
         val r_nan = self.def(s"arith.cmpf uno, $r, $r : $t")
         val ab_ordered = self.def(s"arith.cmpf ord, $a, $b : $t")
 
-        self.trap_if(self.def(s"arith.andi $r_nan, $ab_ordered : i1"), "floating-point invalid operation")
+        self.trap_if(self.def(s"arith.andi $r_nan, $ab_ordered : i1"), REAL_INVALID)
 
         val r_abs = self.def(s"math.absf $r : $t")
         val a_abs = self.def(s"math.absf $a : $t")
@@ -359,7 +360,7 @@ impl Emitter
         val b_fin = self.def(s"arith.cmpf olt, $b_abs, $inf : $t")
         val fin = self.def(s"arith.andi $a_fin, $b_fin : i1")
 
-        self.trap_if(self.def(s"arith.andi $r_inf, $fin : i1"), "floating-point overflow")
+        self.trap_if(self.def(s"arith.andi $r_inf, $fin : i1"), REAL_OVERFLOW)
         r
 
     complex_binary(*self, op: string, a: string, b: string, bits: int) -> string
@@ -386,7 +387,7 @@ impl Emitter
             val denom = self.def(s"arith.addf ${self.def(s"arith.mulf $br, $br : $f")}, ${self.def(s"arith.mulf $bi, $bi : $f")} : $f")
             val zero = self.real_const(0.0, bits)
 
-            self.trap_if(self.def(s"arith.cmpf oeq, $denom, $zero : $f"), "complex division by zero")
+            self.trap_if(self.def(s"arith.cmpf oeq, $denom, $zero : $f"), COMPLEX_DIVISION_BY_ZERO)
 
             val re = self.def(s"arith.addf ${self.def(s"arith.mulf $ar, $br : $f")}, ${self.def(s"arith.mulf $ai, $bi : $f")} : $f")
             val im = self.def(s"arith.subf ${self.def(s"arith.mulf $ai, $br : $f")}, ${self.def(s"arith.mulf $ar, $bi : $f")} : $f")
@@ -527,7 +528,7 @@ impl Emitter
             val below = self.def(s"arith.cmpi slt, $wide, ${self.int_const(s"$lo", 128)} : i128")
             val above = self.def(s"arith.cmpi sgt, $wide, ${self.int_const(s"$hi", 128)} : i128")
 
-            self.trap_if(self.def(s"arith.ori $below, $above : i1"), s"${int_name(fb, fs)} value out of range for ${int_name(tb, ts)}")
+            self.trap_if(self.def(s"arith.ori $below, $above : i1"), out_of_range_message(int_name(fb, fs), int_name(tb, ts)))
 
         if tb == fb then return v
         if tb < fb then return self.def(s"arith.trunci $v : i$fb to i$tb")
@@ -544,7 +545,7 @@ impl Emitter
         val below_hi = self.def(s"arith.cmpf olt, $x, ${self.real_const(hi, 64)} : f64")
         val ok = self.def(s"arith.andi $above_lo, $below_hi : i1")
 
-        self.trap_if(self.not(ok), s"${show_ty(from)} value out of range for ${show_ty(to)}")
+        self.trap_if(self.not(ok), out_of_range_message(show_ty(from), show_ty(to)))
         self.def(s"arith.${if ts then "fptosi" else "fptoui"} $x : f64 to i$tb")
 
     // An integer `stop` code as the `i32` an exit status is.
@@ -608,7 +609,7 @@ impl Emitter
             Some(s) -> self.ex(s)
             None -> self.int_const("1", bits)
 
-        if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), "a `for` step of 0")
+        if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), ZERO_STEP)
 
         val up = if signed then self.def(s"arith.cmpi sgt, $step, $zero : $t") else self.def("arith.constant true")
         val lt = if signed then "slt" else "ult"
@@ -750,8 +751,6 @@ end Emitter
 private is_fn_ref(e: TExpr) -> bool = *e.kind match
     TFnRef(_) -> true
     _ -> false
-
-private int_name(bits: int, signed: bool) -> string = if signed then s"int$bits" else s"uint$bits"
 
 private int_predicate(op: string, signed: bool) -> string =
     if op == "==" then "eq" elif op == "!=" then "ne"

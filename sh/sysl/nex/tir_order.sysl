@@ -1,0 +1,93 @@
+module sh.sysl.nex
+
+// The order a program's module-level bindings are initialized in, which every engine keeps.
+
+import sysl.buf.{Buf, buf}
+
+// The module-level bindings in an order where each is initialized before any initializer reads it,
+// through the functions it calls too. The elaborator has refused a cycle.
+// The initializers are numbered the plain bindings first, then the destructuring ones.
+init_order(p: TProgram, globals: Buf[TGlobal], tuples: Buf[TGlobalTuple]) -> Buf[usize]
+    var inits: Buf[TExpr] = buf()
+    var binds: Buf[Buf[string]] = buf()
+
+    for g in globals
+        inits.push(g.init)
+
+        var names: Buf[string] = buf()
+
+        names.push(g.name)
+        binds.push(names)
+
+    for g in tuples
+        inits.push(g.init)
+
+        var names: Buf[string] = buf()
+
+        bound_names(g.pat, &names)
+        binds.push(names)
+
+    var out: Buf[usize] = buf()
+    var placed: Buf[bool] = buf()
+
+    for _ in inits
+        placed.push(false)
+
+    for k in 0..<inits.len()
+        place_global(p, inits, binds, k, &placed, &out)
+
+    out
+
+private has_name(names: Buf[string], name: string) -> bool
+    for n in names
+        if n == name then return true
+
+    false
+
+private bound_names(pat: TBind, out: *Buf[string])
+    pat match
+        BGlobal(n) -> out.push(n)
+        BTuple(elems) ->
+            for e in elems
+                bound_names(e, out)
+        _ -> ()
+
+private place_global(p: TProgram, inits: Buf[TExpr], binds: Buf[Buf[string]], k: usize, placed: *Buf[bool], out: *Buf[usize])
+    if placed[k] then return
+
+    placed.set(k, true)
+
+    var names: Buf[string] = buf()
+    var seen: Buf[string] = buf()
+
+    reads(p, inits[k], &names, &seen)
+
+    for n in names
+        for j in 0..<inits.len()
+            if has_name(binds[j], n) then place_global(p, inits, binds, j, placed, out)
+
+    out.push(k)
+
+// The module-level bindings `e` reads, directly or through the functions and lambdas it reaches;
+// `seen` holds the functions already walked.
+private reads(p: TProgram, e: TExpr, names: *Buf[string], seen: *Buf[string])
+    for c in children(e)
+        reads(p, c, names, seen)
+
+    *e.kind match
+        TGlobalRef(n) -> names.push(n)
+        TFnRef(n) ->
+            if !has_name(*seen, n)
+                seen.push(n)
+
+                for d in p.decls
+                    d match
+                        FunDecl(f) -> if f.name == n then reads(p, f.body, names, seen)
+                        _ -> ()
+        TLambdaRef(id) ->
+            val key = s"#$id"
+
+            if !has_name(*seen, key)
+                seen.push(key)
+                reads(p, p.lambdas[id].body, names, seen)
+        _ -> ()

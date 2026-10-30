@@ -1,3 +1,5 @@
+module sh.sysl.nex_runtime
+
 // Array storage the generated code cannot make on its own.
 //
 // A memref descriptor, as MLIR lays it out, is words: the allocation, the aligned base the elements
