@@ -89,7 +89,7 @@ elab_tuple_errors()
     assert_eq(refused("def main() =\n  val n = 1\n  print(n.1)\n"), "error: `.1` takes an element of a tuple, and this is int64 @3:9")
     assert_eq(refused("def main() =\n  val w: (integer, integer) = (1.5, 2)\n"), "error: element 1 of this tuple must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @2:32")
     assert_eq(refused("def main() =\n  val v = ((), 1)\n"), "error: a tuple element holds a value, and this is void @2:12")
-    assert_eq(refused("def main() =\n  val t = 1, 2\n  val u: (real, real) = t\n"), "error: `u` must be (real64, real64), but this is (int64, int64) @3:25")
+    assert_eq(refused("def main() =\n  val t = 1, 2\n  val u: (real, real) = t\n"), "error: `u` must be (real, real), but this is (int64, int64) @3:25")
 
 @test("a destructuring binding takes a tuple apart into locals, skipping `_`")
 elab_destructuring()

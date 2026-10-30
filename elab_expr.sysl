@@ -66,6 +66,17 @@ private some_adoption(class: int, other: Ty) -> Option[Ty] = Some(adoption(class
 promote(v: TExpr, to: Ty) -> TExpr =
     if ty_eq(v.ty, to) || is_wild(v.ty) || has_error(v.ty) || has_error(to) then v else texpr(v.span, to, TPromote(v))
 
+// Each lambda parameter's type as written, `""` where it was left out.
+spellings(params: Buf[LambdaParam]) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for p in params
+        out.push(p.typ match
+            Some(t) -> show_type(t)
+            None -> "")
+
+    out
+
 // Two operands, each elaborated.
 struct Operands
     lhs: TExpr
@@ -97,19 +108,26 @@ impl Elab
     // `e`, which its position requires to be of type `ty`.
     check(*self, e: Expr, ty: Ty, what: string) -> TExpr = self.coerce(self.elab(e, Some(ty)), ty, what)
 
+    // `e` where the written type `t`, which is `ty`, is required: a diagnostic names it as written.
+    check_written(*self, e: Expr, ty: Ty, t: Type, what: string) -> TExpr = self.coerce_named(self.elab(e, Some(ty)), ty, show_type(t), what)
+
     // `v` where a `ty` is required: as it is, widened along the lattice, or refused.
-    coerce(*self, v: TExpr, ty: Ty, what: string) -> TExpr
-        if (is_array(v.ty) || is_array(ty)) && !is_wild(v.ty) && !has_error(ty) then return self.coerce_array(v, ty, what)
+    coerce(*self, v: TExpr, ty: Ty, what: string) -> TExpr = self.coerce_named(v, ty, "", what)
+
+    // `coerce`, where `named` is the required type as the source wrote it, or `""`.
+    coerce_named(*self, v: TExpr, ty: Ty, named: string, what: string) -> TExpr
+        if (is_array(v.ty) || is_array(ty)) && !is_wild(v.ty) && !has_error(ty) then return self.coerce_array(v, ty, named, what)
         if promotes(v.ty, ty) then return promote(v, ty)
 
-        var message = s"${what} must be ${show_ty(ty)}, but this is ${show_ty(v.ty)}"
+        val target = if named.len > 0 then named else show_ty(ty)
+        var message = s"${what} must be ${target}, but this is ${self.shown(v)}"
 
         if is_numeric(v.ty) && is_numeric(ty)
-            message = message + s": that would narrow it; convert it explicitly, `${show_ty(ty)}(...)`"
+            message = message + s": that would narrow it; convert it explicitly, `${target}(...)`"
 
         self.fail(value_span(v), message)
         texpr(v.span, Error, TInvalid)
-    end coerce
+    end coerce_named
 
     // The value a binding with no written type is given: anything but `void`.
     bound_value(*self, init: Expr, name: string) -> TExpr
@@ -317,7 +335,7 @@ impl Elab
                 None -> tys[j])
             modes.push(Read)
 
-        val ty = self.lambda_body(p.lambda, "", p.span, names, ptys, modes, None, p.body)
+        val ty = self.lambda_body(p.lambda, "", p.span, names, ptys, spellings(p.params), modes, None, p.body)
 
         self.fx = current
         self.locals.set(p.local, LocalInfo(self.locals[p.local].name, ty, LVal))
@@ -367,18 +385,23 @@ impl Elab
         self.apply(span, op, o.lhs, o.rhs)
 
     // A pair of operands whose common type is `ty`, or the diagnostic for a pair that has none.
-    common_of(*self, span: Span, op: string, a: Ty, b: Ty) -> Option[Ty]
+    common_of(*self, span: Span, op: string, a: Ty, b: Ty) -> Option[Ty] = self.common_named(span, op, a, show_ty(a), b, show_ty(b))
+
+    // `common_of` for two operands, each named in a diagnostic the way its source spelled its type.
+    common_values(*self, span: Span, op: string, a: TExpr, b: TExpr) -> Option[Ty] = self.common_named(span, op, a.ty, self.shown(a), b.ty, self.shown(b))
+
+    private common_named(*self, span: Span, op: string, a: Ty, an: string, b: Ty, bn: string) -> Option[Ty]
         common(a, b) match
             Some(t) -> Some(t)
             None ->
                 if is_int(a) && is_int(b)
-                    val signed = if is_signed(a) then a else b
+                    val signed = if is_signed(a) then an else bn
 
-                    self.fail(span, s"`${op}` mixes ${show_ty(a)} and ${show_ty(b)}, and neither holds the other's range; convert one: `${show_ty(signed)}(u) ${op} n`")
+                    self.fail(span, s"`${op}` mixes ${an} and ${bn}, and neither holds the other's range; convert one: `${signed}(u) ${op} n`")
                 else
-                    self.fail(span, s"`${op}` cannot combine ${show_ty(a)} and ${show_ty(b)}")
+                    self.fail(span, s"`${op}` cannot combine ${an} and ${bn}")
                 None
-    end common_of
+    end common_named
 
     // An arithmetic or comparison operator on two elaborated operands.
     apply(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
@@ -387,7 +410,7 @@ impl Elab
 
         if is_comparison(op)
             if is_numeric(a.ty) && is_numeric(b.ty)
-                val c = self.common_of(span, op, a.ty, b.ty).unwrap_or(Error)
+                val c = self.common_values(span, op, a, b).unwrap_or(Error)
 
                 if is_ordering(op) && is_complex(c) then self.fail(span, s"`${op}` orders integers and reals; complex numbers have no order")
 
@@ -401,24 +424,24 @@ impl Elab
 
             if !(equality && comparable && ty_eq(a.ty, b.ty))
                 if ty_eq(a.ty, b.ty) && comparable
-                    self.fail(span, s"`${op}` orders integers and reals; ${show_ty(a.ty)} values are only equal or not")
+                    self.fail(span, s"`${op}` orders integers and reals; ${self.shown(a)} values are only equal or not")
                 else
-                    self.fail(span, s"`${op}` cannot compare ${show_ty(a.ty)} with ${show_ty(b.ty)}")
+                    self.fail(span, s"`${op}` cannot compare ${self.shown(a)} with ${self.shown(b)}")
 
             return texpr(span, Bool, TBinary(op, a, b))
 
         if op == "+" && ty_eq(a.ty, Ty.Str) && ty_eq(b.ty, Ty.Str) then return texpr(span, Ty.Str, TBinary(op, a, b))
 
         if !is_numeric(a.ty) || !is_numeric(b.ty)
-            self.fail(span, s"`${op}` needs numbers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+            self.fail(span, s"`${op}` needs numbers; found ${self.shown(a)} and ${self.shown(b)}")
             return texpr(span, Error, TBinary(op, a, b))
 
         if op == "div" || op == "%"
             if !is_int(a.ty) || !is_int(b.ty)
-                self.fail(span, s"`${op}` needs two integers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+                self.fail(span, s"`${op}` needs two integers; found ${self.shown(a)} and ${self.shown(b)}")
                 return texpr(span, Error, TBinary(op, a, b))
 
-        val c = (if op == "/" && is_int(a.ty) && is_int(b.ty) then Some(REAL) else self.common_of(span, op, a.ty, b.ty)).unwrap_or(Error)
+        val c = (if op == "/" && is_int(a.ty) && is_int(b.ty) then Some(REAL) else self.common_values(span, op, a, b)).unwrap_or(Error)
 
         texpr(span, c, TBinary(op, promote(a, c), promote(b, c)))
     end apply
@@ -456,12 +479,12 @@ impl Elab
         if is_error(base.ty) || is_error(exp.ty) then return texpr(span, Error, TBinary("^", base, exp))
 
         if !is_numeric(base.ty) || !is_numeric(exp.ty)
-            self.fail(span, s"`^` needs numbers; found ${show_ty(base.ty)} and ${show_ty(exp.ty)}")
+            self.fail(span, s"`^` needs numbers; found ${self.shown(base)} and ${self.shown(exp)}")
             return texpr(span, Error, TBinary("^", base, exp))
 
         if is_int(exp.ty) then return texpr(span, base.ty, TBinary("^", base, exp))
 
-        val c = self.common_of(span, "^", base.ty, exp.ty).unwrap_or(Error)
+        val c = self.common_values(span, "^", base, exp).unwrap_or(Error)
 
         texpr(span, c, TBinary("^", promote(base, c), promote(exp, c)))
     end power_of
@@ -485,7 +508,7 @@ impl Elab
         if is_array(v.ty) then return self.elementwise_unary(span, op, v)
 
         if !is_numeric(v.ty) && !is_error(v.ty)
-            self.fail(span, s"`-` needs a number; found ${show_ty(v.ty)}")
+            self.fail(span, s"`-` needs a number; found ${self.shown(v)}")
             return texpr(span, Error, TUnary(op, v))
 
         texpr(span, v.ty, TUnary(op, v))
@@ -622,7 +645,7 @@ impl Elab
                 "_"
 
         val bounds = self.operands(lo, hi, None)
-        var ty = self.common_of(iterable.span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
+        var ty = self.common_values(iterable.span, "..", bounds.lhs, bounds.rhs).unwrap_or(Error)
 
         if !is_int(ty) && !is_error(ty)
             self.fail(iterable.span, s"a `for` range counts in integers; this one is ${show_ty(ty)}")
@@ -726,7 +749,13 @@ impl Elab
                 typ match
                     Some(t) ->
                         val ty = self.resolve_type(t)
-                        self.bind_local(d.span, pat.span, name, ty, lkind, self.check(init, ty, s"`${name}`"))
+                        val b = self.bind_local(d.span, pat.span, name, ty, lkind, self.check_written(init, ty, t, s"`${name}`"))
+
+                        *b.kind match
+                            TLet(id, _) -> self.written(id, t)
+                            _ -> ()
+
+                        b
                     None ->
                         *init.kind match
                             Lambda(params, body) ->
@@ -763,6 +792,7 @@ impl Elab
     local_fun(*self, span: Span, name: string, params: Buf[Param], ret: Option[Type], body: Expr) -> TExpr
         var names: Buf[string] = buf()
         var tys: Buf[Ty] = buf()
+        var written: Buf[string] = buf()
         var modes: Buf[Mode] = buf()
 
         for p in params
@@ -770,6 +800,7 @@ impl Elab
 
             names.push(p.name)
             tys.push(self.resolve_type(p.typ))
+            written.push(show_type(p.typ))
             modes.push(p.mode)
 
         val lid = self.reserve_lambda(span)
@@ -779,10 +810,10 @@ impl Elab
                 val r = self.resolve_type(t)
                 val id = self.declare_local(span, name, fn_type(tys, modes, r), LVal)
 
-                self.lambda_body(lid, name, span, names, tys, modes, Some(r), body)
+                self.lambda_body(lid, name, span, names, tys, written, modes, Some(r), body)
                 texpr(span, Void, TLet(id, texpr(span, self.locals[id].ty, TLambdaRef(lid))))
             None ->
-                val ty = self.lambda_body(lid, name, span, names, tys, modes, None, body)
+                val ty = self.lambda_body(lid, name, span, names, tys, written, modes, None, body)
                 val id = self.declare_local(span, name, ty, LVal)
 
                 texpr(span, Void, TLet(id, texpr(span, ty, TLambdaRef(lid))))
@@ -834,13 +865,14 @@ impl Elab
             self.agg.passing = false
             self.agg.passed.push(lid)
 
-        val ty = self.lambda_body(lid, "", span, names, tys, modes, ret, body)
+        val ty = self.lambda_body(lid, "", span, names, tys, spellings(params), modes, ret, body)
 
         texpr(span, ty, TLambdaRef(lid))
     end lambda
 
     // Elaborates a lambda's body into its slot, in a frame of its own, and gives its function type.
-    lambda_body(*self, lid: usize, name: string, span: Span, names: Buf[string], tys: Buf[Ty], modes: Buf[Mode], ret: Option[Ty], body: Expr) -> Ty
+    // `written` holds each parameter's type as written, `""` where it was left out.
+    lambda_body(*self, lid: usize, name: string, span: Span, names: Buf[string], tys: Buf[Ty], written: Buf[string], modes: Buf[Mode], ret: Option[Ty], body: Expr) -> Ty
         self.fx.frames.push(Frame(Some(lid), ret.unwrap_or(Error), ret.is_some(), self.fx.loops.len()))
         self.open()
 
@@ -850,6 +882,8 @@ impl Elab
             if contains_before(names, k) then self.fail(span, s"redeclaration of `${names[k]}`")
 
             val id = self.new_local(names[k], tys[k], LParam(modes[k]))
+
+            self.spelled.set(id, written[k])
 
             self.bind(id)
             ids.push(id)
@@ -921,7 +955,7 @@ impl Elab
         val p = self.place(target)
 
         if is_array(p.ty) then return self.array_assign(span, op, target, p, value)
-        if op == "=" then return texpr(span, Void, TAssign(op, p, self.check(value, p.ty, "the value")))
+        if op == "=" then return texpr(span, Void, TAssign(op, p, self.coerce_named(self.elab(value, Some(p.ty)), p.ty, self.shown(p), "the value")))
 
         // `x op= v` computes `x op v` and stores it back, which must not narrow `x` (DESIGN §2.2).
         val bop = op[0..<op.len - 1]
@@ -930,7 +964,7 @@ impl Elab
         val r = self.apply(span, bop, p, v)
 
         if !is_wild(r.ty) && !is_wild(p.ty) && !ty_eq(r.ty, p.ty)
-            var message = s"`${op}` computes ${show_ty(r.ty)}, which `${show_place(target)}` (${show_ty(p.ty)}) cannot hold without narrowing"
+            var message = s"`${op}` computes ${self.shown(r)}, which `${show_place(target)}` (${self.shown(p)}) cannot hold without narrowing"
 
             if bop == "/" && is_int(p.ty) then message = message + "; `div` divides integers"
 

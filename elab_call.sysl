@@ -104,7 +104,7 @@ impl Elab
 
     // An argument passed to an `inout` parameter: a variable the callee borrows, exactly of the
     // parameter's type, since a borrow cannot convert (DESIGN §8).
-    borrow(*self, arg: Expr, ty: Ty) -> TExpr
+    borrow(*self, arg: Expr, ty: Ty, named: string) -> TExpr
         *arg.kind match
             Name(_) -> ()
             Field(_, _) -> ()
@@ -118,17 +118,18 @@ impl Elab
         val p = self.place(arg)
 
         if !ty_eq(p.ty, ty) && !is_wild(p.ty) && !is_error(ty)
-            self.fail(arg.span, s"an `inout` argument must be exactly ${show_ty(ty)}, since it is borrowed and not converted; this is ${show_ty(p.ty)}")
+            self.fail(arg.span, s"an `inout` argument must be exactly ${if named.len > 0 then named else show_ty(ty)}, since it is borrowed and not converted; this is ${self.shown(p)}")
 
         texpr(arg.span, ty, TBorrow(p))
     end borrow
 
-    // One argument against its parameter's type and mode.
-    argument(*self, arg: Expr, ty: Ty, mode: Mode, name: string) -> TExpr
-        if mode == Inout then return self.borrow(arg, ty)
+    // One argument against its parameter's type and mode; `named` is that type as the parameter
+    // wrote it, or `""`.
+    argument(*self, arg: Expr, ty: Ty, named: string, mode: Mode, name: string) -> TExpr
+        if mode == Inout then return self.borrow(arg, ty, named)
 
         self.pass_lambda(arg)
-        self.check(arg, ty, name)
+        self.coerce_named(self.elab(arg, Some(ty)), ty, named, name)
 
     // A call of a function value, with positional arguments only.
     call_value(*self, span: Span, f: TExpr, args: Buf[Expr]) -> TExpr
@@ -136,7 +137,7 @@ impl Elab
             Fn(sig) -> *sig
             Error -> return self.invalid(span)
             _ ->
-                self.fail(f.span, s"this is ${show_ty(f.ty)} and cannot be called")
+                self.fail(f.span, s"this is ${self.shown(f)} and cannot be called")
                 return self.invalid(span)
 
         if args.len() != sig.params.len()
@@ -150,7 +151,7 @@ impl Elab
                 NamedArg(n, _) ->
                     self.fail(args[k].span, s"a function value has no parameter names, so `${n} = ...` cannot be passed; pass it by position")
                     out.push(self.invalid(args[k].span))
-                _ -> out.push(self.argument(args[k], sig.params[k], sig.modes[k], s"argument ${k + 1}"))
+                _ -> out.push(self.argument(args[k], sig.params[k], "", sig.modes[k], s"argument ${k + 1}"))
 
         texpr(span, sig.ret, TCall(f, out))
     end call_value
@@ -224,7 +225,7 @@ impl Elab
 
         for j in 0..<slots.len()
             slots[j] match
-                Some(a) -> out.push(self.fun_argument(k, a, sig.tys[j], sig.modes[j], s"argument `${sig.names[j]}`"))
+                Some(a) -> out.push(self.fun_argument(k, a, sig.tys[j], self.spelled[sig.params[j]], sig.modes[j], s"argument `${sig.names[j]}`"))
                 None ->
                     sig.defaults[j] match
                         Some(d) -> out.push(d)

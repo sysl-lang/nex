@@ -124,7 +124,7 @@ impl Elab
             if pos.len() != 1 then return self.arity(span, name, "one array")
 
             if !is_int(e)
-                self.fail(pos[0].span, s"`${name}` converts integers; this is ${show_ty(a.ty)}")
+                self.fail(pos[0].span, s"`${name}` converts integers; this is ${self.shown(a)}")
                 return self.invalid(span)
 
             return self.elemental_conversion(span, name, if name == "to_bytes" then Int(8, false) else INTEGER, a)
@@ -209,7 +209,7 @@ impl Elab
 
         if is_array(v.ty) || is_error(v.ty) then return v
 
-        self.fail(e.span, s"`${name}` takes an array; this is ${show_ty(v.ty)}")
+        self.fail(e.span, s"`${name}` takes an array; this is ${self.shown(v)}")
         self.invalid(e.span)
 
     // An axis number of an array of rank `rank`, checked at compile time where it is written as one.
@@ -245,7 +245,7 @@ impl Elab
             v.ty match
                 Ty.Tuple(ts) ->
                     for t in ts
-                        if !is_int(t) then self.fail(dims[0].span, s"a shape is a tuple of integers; this is ${show_ty(v.ty)}")
+                        if !is_int(t) then self.fail(dims[0].span, s"a shape is a tuple of integers; this is ${self.shown(v)}")
                 _ -> out.push(self.coerce(v, INTEGER, "an extent"))
 
             if out.len() == 0 then out.push(v)
@@ -295,7 +295,7 @@ impl Elab
             val v = self.elab(pos[1], wanted)
 
             if is_void(v.ty) then self.fail(pos[1].span, "an array cannot be filled with nothing: this is void")
-            if is_array(v.ty) then self.fail(pos[1].span, s"an array element is not an array; this is ${show_ty(v.ty)}")
+            if is_array(v.ty) then self.fail(pos[1].span, s"an array element is not an array; this is ${self.shown(v)}")
 
             elem = v.ty
             out.push(v)
@@ -353,13 +353,13 @@ impl Elab
 
             for k in 0..<2
                 if rank_of(out[k].ty) != 1 && !is_error(out[k].ty)
-                    self.fail(pos[k].span, s"`dot` takes two vectors (rank 1); this is ${show_ty(out[k].ty)}")
+                    self.fail(pos[k].span, s"`dot` takes two vectors (rank 1); this is ${self.shown(out[k])}")
                     return self.invalid(span)
 
             val ty = elem_of(out[0].ty)
 
             if !is_numeric(ty) && !is_error(ty)
-                self.fail(span, s"`dot` needs numbers; these are ${show_ty(out[0].ty)}")
+                self.fail(span, s"`dot` needs numbers; these are ${self.shown(out[0])}")
                 return self.invalid(span)
 
             if self.shape_meet(span, "`dot`", axes_of(out[0].ty), axes_of(out[1].ty)).is_none() then return self.invalid(span)
@@ -403,7 +403,7 @@ impl Elab
                 need = "numbers"
 
         if need.len > 0
-            self.fail(pos[0].span, s"`${name}` takes an array of ${need}; this is ${show_ty(a.ty)}")
+            self.fail(pos[0].span, s"`${name}` takes an array of ${need}; this is ${self.shown(a)}")
             return self.invalid(span)
 
         var args: Buf[TExpr] = buf()
@@ -458,7 +458,7 @@ impl Elab
             val ret = fn_ret(f.ty)
 
             if !promotes(ret, init.ty)
-                self.fail(pos[2].span, s"the function given to `reduce` returns ${show_ty(ret)}, and the accumulator is ${show_ty(init.ty)}")
+                self.fail(pos[2].span, s"the function given to `reduce` returns ${show_ty(ret)}, and the accumulator is ${self.shown(init)}")
 
             out.push(init)
             out.push(f)
@@ -518,7 +518,7 @@ impl Elab
 
                 // Written straight as the argument, it is borrowed for the call and does not escape.
                 self.agg.passed.push(lid)
-                texpr(e.span, self.lambda_body(lid, "", e.span, names, tys, reads(names.len()), None, body), TLambdaRef(lid))
+                texpr(e.span, self.lambda_body(lid, "", e.span, names, tys, spellings(params), reads(names.len()), None, body), TLambdaRef(lid))
             _ -> self.elab(e, Some(fn_type(ptys, reads(ptys.len()), Error)))
 
         f.ty match
@@ -530,11 +530,11 @@ impl Elab
                         if !promotes(ptys[k], sig.params[k]) || sig.modes[k] == Inout then fits = false
 
                 if !fits
-                    self.fail(e.span, s"${what} is called with (${show_tys_of(ptys)}); this is ${show_ty(f.ty)}")
+                    self.fail(e.span, s"${what} is called with (${show_tys_of(ptys)}); this is ${self.shown(f)}")
                     return self.invalid(e.span)
             Error -> ()
             _ ->
-                self.fail(e.span, s"${what} must be a function; this is ${show_ty(f.ty)}")
+                self.fail(e.span, s"${what} must be a function; this is ${self.shown(f)}")
                 return self.invalid(e.span)
 
         f
@@ -566,11 +566,11 @@ impl Elab
         val e = elem_of(out[0].ty)
 
         if rank_of(out[0].ty) != rank_of(out[1].ty) && !has_error(out[0].ty) && !has_error(out[1].ty)
-            self.fail(span, s"`assert_approx` compares values of one rank; these are ${show_ty(out[0].ty)} and ${show_ty(out[1].ty)}")
+            self.fail(span, s"`assert_approx` compares values of one rank; these are ${self.shown(out[0])} and ${self.shown(out[1])}")
             return self.invalid(span)
 
         if !is_numeric(e) && !is_error(e)
-            self.fail(span, s"`assert_approx` compares numbers; these are ${show_ty(out[0].ty)}")
+            self.fail(span, s"`assert_approx` compares numbers; these are ${self.shown(out[0])}")
             return self.invalid(span)
 
         if is_int(e)

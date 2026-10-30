@@ -104,7 +104,7 @@ impl Elab
                 return TParClause(0, bad, bad, true, None)
 
         val bounds = self.operands(lo, hi, None)
-        var ty = self.common_of(c.range.span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
+        var ty = self.common_values(c.range.span, "..", bounds.lhs, bounds.rhs).unwrap_or(Error)
 
         if !is_int(ty) && !is_error(ty)
             self.fail(c.range.span, s"a `parallel for` range counts in integers; this one is ${show_ty(ty)}")
@@ -194,7 +194,7 @@ impl Elab
             Fn(sig) -> sig.params.len() == 2 && ty_eq(sig.params[0], ty) && ty_eq(sig.params[1], ty) && ty_eq(sig.ret, ty) && sig.modes[0] == Read && sig.modes[1] == Read
             _ -> false
 
-        if !ok then self.fail(span, s"a reduction's operator `${name}` must be a function (${show_ty(ty)}, ${show_ty(ty)}) -> ${show_ty(ty)}, and it is ${show_ty(f.ty)}")
+        if !ok then self.fail(span, s"a reduction's operator `${name}` must be a function (${show_ty(ty)}, ${show_ty(ty)}) -> ${show_ty(ty)}, and it is ${self.shown(f)}")
 
         ok
 

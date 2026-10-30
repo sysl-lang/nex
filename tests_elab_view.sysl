@@ -107,7 +107,7 @@ origin_arguments()
     assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a)\n" + MAIN), "error: `origin` takes an array and the first index of one axis or more, `origin(a, 0)` @2:11")
     assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a, 1.5)\n" + MAIN), "error: a first index must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @2:21")
     assert_eq(refused("def f(a: [integer]) =\n  val w = rebase(a, 1)\n" + MAIN), "error: `rebase` takes one array, `rebase(w)` @2:11")
-    assert_eq(refused("def f(x: real) =\n  val w = rebase(x)\n" + MAIN), "error: `rebase` takes an array; this is real64 @2:18")
+    assert_eq(refused("def f(x: real) =\n  val w = rebase(x)\n" + MAIN), "error: `rebase` takes an array; this is real @2:18")
 
 // -- complex parts --------------------------------------------------------------------------------
 

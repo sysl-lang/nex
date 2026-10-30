@@ -173,8 +173,8 @@ impl Elab
     // widened along the lattice, a static shape taken as a dynamic one, a dynamic shape checked at run
     // time against a static one; a different rank, a narrowing or two static shapes that differ are
     // refused (DESIGN §3.3).
-    coerce_array(*self, v: TExpr, ty: Ty, what: string) -> TExpr
-        val head = s"${what} must be ${show_ty(ty)}, but this is ${show_ty(v.ty)}"
+    coerce_array(*self, v: TExpr, ty: Ty, named: string, what: string) -> TExpr
+        val head = s"${what} must be ${if named.len > 0 then named else show_ty(ty)}, but this is ${self.shown(v)}"
 
         if !is_array(v.ty) || !is_array(ty)
             self.fail(value_span(v), head)
@@ -384,7 +384,7 @@ impl Elab
             None -> None
 
         val bounds = self.operands(l, h, goal)
-        var ty = self.common_of(span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
+        var ty = self.common_values(span, "..", bounds.lhs, bounds.rhs).unwrap_or(Error)
 
         if !is_int(ty) && !is_error(ty)
             self.fail(span, s"a range counts in integers; this one is ${show_ty(ty)} (`linspace` spaces reals)")
@@ -411,7 +411,7 @@ impl Elab
         val axes = base.ty match
             Array(_, axes) -> axes
             _ ->
-                self.fail(base.span, s"this is ${show_ty(base.ty)} and cannot be indexed")
+                self.fail(base.span, s"this is ${self.shown(base)} and cannot be indexed")
                 return self.invalid(span)
 
         if indices.len() > axes.len()
@@ -485,7 +485,7 @@ impl Elab
         if is_error(r.ty) || has_error(r.ty) then return texpr(span, Void, TAssign(op, p, v))
 
         if !ty_eq(elem_of(r.ty), elem)
-            self.fail(span, s"`${op}` computes ${show_ty(r.ty)}, which the target (${show_ty(p.ty)}) cannot hold without narrowing")
+            self.fail(span, s"`${op}` computes ${self.shown(r)}, which the target (${self.shown(p)}) cannot hold without narrowing")
 
         texpr(span, Void, TAssign(op, p, promote(v, with_elem(v.ty, elem))))
     end array_assign
@@ -497,7 +497,7 @@ impl Elab
     // scalar broadcasts.
     elementwise(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
         if is_chain_operand(a) || is_chain_operand(b)
-            self.fail(span, s"a chained comparison compares scalars; this compares ${show_ty(a.ty)} with ${show_ty(b.ty)}")
+            self.fail(span, s"a chained comparison compares scalars; this compares ${self.shown(a)} with ${self.shown(b)}")
             return texpr(span, Error, TBinary(op, a, b))
 
         var axes = if is_array(a.ty) then axes_of(a.ty) else axes_of(b.ty)
@@ -511,7 +511,7 @@ impl Elab
         val eb = elem_of(b.ty)
 
         if !is_relational(op) && (!is_numeric(ea) && !is_wild(ea) || !is_numeric(eb) && !is_wild(eb))
-            self.fail(span, s"element-wise `${op}` needs numbers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+            self.fail(span, s"element-wise `${op}` needs numbers; found ${self.shown(a)} and ${self.shown(b)}")
             return self.invalid(span)
 
         val sa = texpr(a.span, ea, TInvalid)
@@ -538,7 +538,7 @@ impl Elab
         val fits = if op == "not" then ty_eq(e, Bool) else is_numeric(e)
 
         if !fits && !is_error(e)
-            self.fail(span, s"`${op}` needs ${if op == "not" then "bools" else "numbers"}; found ${show_ty(v.ty)}")
+            self.fail(span, s"`${op}` needs ${if op == "not" then "bools" else "numbers"}; found ${self.shown(v)}")
             return self.invalid(span)
 
         texpr(span, v.ty, TArray(TElementwiseUnary(op, v)))
@@ -554,7 +554,7 @@ impl Elab
 
         for v in [a, b]
             if !ty_eq(elem_of(v.ty), Bool) && !is_error(elem_of(v.ty))
-                self.fail(v.span, s"an operand of `${op}` must be bool or [bool], but this is ${show_ty(v.ty)}")
+                self.fail(v.span, s"an operand of `${op}` must be bool or [bool], but this is ${self.shown(v)}")
                 return self.invalid(span)
 
         texpr(span, Ty.Array(Bool, axes), TArray(TElementwise(op, a, b)))
@@ -569,7 +569,7 @@ impl Elab
         if is_error(a.ty) || is_error(b.ty) then return self.invalid(span)
 
         if !is_array(a.ty) || !is_array(b.ty)
-            self.fail(span, s"`@` multiplies matrices and vectors; this is ${show_ty(a.ty)} @ ${show_ty(b.ty)} (scale with `*`)")
+            self.fail(span, s"`@` multiplies matrices and vectors; this is ${self.shown(a)} @ ${self.shown(b)} (scale with `*`)")
             return self.invalid(span)
 
         for v in [a, b]
@@ -581,7 +581,7 @@ impl Elab
         val eb = elem_of(b.ty)
 
         if !is_numeric(ea) || !is_numeric(eb)
-            self.fail(span, s"`@` needs numbers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+            self.fail(span, s"`@` needs numbers; found ${self.shown(a)} and ${self.shown(b)}")
             return self.invalid(span)
 
         val c = self.common_of(span, "@", ea, eb) match
@@ -624,7 +624,7 @@ impl Elab
         if promotes(from, target) then return texpr(span, ty, TPromote(v))
 
         if !is_numeric(from)
-            self.fail(v.span, s"`${name}(...)` converts numbers, and this is ${show_ty(v.ty)}")
+            self.fail(v.span, s"`${name}(...)` converts numbers, and this is ${self.shown(v)}")
             return self.invalid(span)
 
         if is_complex(from)
@@ -638,19 +638,19 @@ impl Elab
 
     // An argument of the `k`th `def`. An array where the parameter is a scalar is applied element by
     // element when the function is `@elemental`, and refused, with the two ways to write it, when not.
-    fun_argument(*self, k: usize, arg: Expr, ty: Ty, mode: Mode, what: string) -> TExpr
-        if mode == Inout || is_array(ty) || is_wild(ty) || has_error(ty) then return self.argument(arg, ty, mode, what)
+    fun_argument(*self, k: usize, arg: Expr, ty: Ty, named: string, mode: Mode, what: string) -> TExpr
+        if mode == Inout || is_array(ty) || is_wild(ty) || has_error(ty) then return self.argument(arg, ty, named, mode, what)
 
         self.pass_lambda(arg)
 
         val v = self.elab(arg, Some(ty))
 
-        if !is_array(v.ty) then return self.coerce(v, ty, what)
+        if !is_array(v.ty) then return self.coerce_named(v, ty, named, what)
 
         if !self.is_elemental(k)
             val name = self.funs[k].name
 
-            self.fail(arg.span, s"`${name}` takes ${show_ty(ty)}, and this is ${show_ty(v.ty)}: mark it `@elemental` to apply it to every element, or write `map(a, ${name})`")
+            self.fail(arg.span, s"`${name}` takes ${if named.len > 0 then named else show_ty(ty)}, and this is ${self.shown(v)}: mark it `@elemental` to apply it to every element, or write `map(a, ${name})`")
             return texpr(v.span, Error, TInvalid)
 
         self.coerce(v, with_elem(v.ty, ty), what)
@@ -707,7 +707,7 @@ impl Elab
             Array(e, _) -> *e
             Error -> Error
             _ ->
-                self.fail(iterable.span, s"a `for` walks a range or an array; this is ${show_ty(a.ty)}")
+                self.fail(iterable.span, s"a `for` walks a range or an array; this is ${self.shown(a)}")
                 Error
 
         val id = self.new_loop(label)

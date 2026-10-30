@@ -50,6 +50,8 @@ nsjail on its own VM.
 
 `bool`, `void` and `string` are as in ref §3.1, `void` being the type the reference calls `unit`. The aliases are the same type, not a distinct one:
 `[real]` and `[real64]` are one type, and a diagnostic names a type the way the source spelled it.
+A type the source never wrote, that of an inferred binding or of an intermediate result, is named
+by its full name: `int64`, `real64`, `complex[real64]`.
 
 **The names are Fortran's `iso_fortran_env` kind names**, so a Fortran programmer reads
 `real64`, `int32` and `complex[real64]` (Fortran's `complex(real64)`) without a glossary. The

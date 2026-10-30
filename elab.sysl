@@ -34,7 +34,7 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
     Ok(e.program())
 
 private elab(p: Program) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views())
 
 // How far a declaration has got.
 enum Progress
@@ -137,6 +137,9 @@ struct Elab
     locals: Buf[LocalInfo]
     // The frame depth each local was bound at, which is what decides whether a lambda captures it.
     depth: Buf[usize]
+    // Each local's type as its declaration wrote it, `integer` or `[real]`, or `""` where it was
+    // inferred: a diagnostic names a value's type the way the source spelled it (DESIGN §2.1).
+    spelled: Buf[string]
     lambdas: Buf[TLambda]
     captures: Buf[Capture]
     loops: Buf[TLoop]
@@ -326,7 +329,10 @@ struct Elab
                     Some(self.check(d, ty, "this default"))
                 None -> None
 
-            sig.params.push(self.new_local(p.name, ty, LParam(p.mode)))
+            val id = self.new_local(p.name, ty, LParam(p.mode))
+
+            self.written(id, p.typ)
+            sig.params.push(id)
             sig.names.push(p.name)
             sig.tys.push(ty)
             sig.modes.push(p.mode)
@@ -445,7 +451,31 @@ struct Elab
     new_local(*self, name: string, ty: Ty, kind: LocalKind) -> usize
         self.locals.push(LocalInfo(name, ty, kind))
         self.depth.push(self.fx.frames.len())
+        self.spelled.push("")
         self.locals.len() - 1
+
+    // Records that local `id` was declared with the written type `t`.
+    written(*self, id: usize, t: Type)
+        self.spelled.set(id, show_type(t))
+
+    // The type of `v` as a diagnostic names it: as written where `v` reads a binding or parameter
+    // declared with a type, and by its DESIGN name otherwise.
+    shown(self, v: TExpr) -> string
+        *v.kind match
+            TLocal(id) -> if self.spelled[id].len > 0 then return self.spelled[id]
+            TGlobalRef(n) ->
+                // A member of a destructuring binding shares its tuple's written type, which is not
+                // the member's own.
+                for g in self.globals
+                    if g.name == n
+                        *g.decl.kind match
+                            Bind(_, pat, Some(t), _) -> *pat.kind match
+                                PatternKind.Name(_) -> return show_type(t)
+                                _ -> ()
+                            _ -> ()
+            _ -> ()
+
+        show_ty(v.ty)
 
     // Puts a local in the innermost block's scope.
     bind(*self, id: usize)

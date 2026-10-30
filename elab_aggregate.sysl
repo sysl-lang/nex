@@ -346,7 +346,7 @@ impl Elab
                 self.invalid(span)
             Error -> self.invalid(span)
             _ ->
-                self.fail(span, s"`.${index}` takes an element of a tuple, and this is ${show_ty(v.ty)}")
+                self.fail(span, s"`.${index}` takes an element of a tuple, and this is ${self.shown(v)}")
                 self.invalid(span)
     end select_element
 
@@ -376,7 +376,7 @@ impl Elab
                     None -> self.fail(span, s"an enum's values are taken apart with `match`; `${n}` has no fields")
             Ty.Tuple(_) -> self.fail(span, s"a tuple's elements are numbered from 1, `t.1`, and have no names")
             Error -> ()
-            _ -> self.fail(span, s"${show_ty(v.ty)} has no fields")
+            _ -> self.fail(span, s"${self.shown(v)} has no fields")
 
         self.invalid(span)
     end select_field
@@ -639,7 +639,7 @@ impl Elab
         val v = self.infer(value)
 
         if !self.fits(value.span, t, v.ty)
-            self.fail(value.span, s"these targets hold ${show_targets(t)}, and this is ${show_ty(v.ty)}; a tuple value is stored as it is, without widening")
+            self.fail(value.span, s"these targets hold ${show_targets(t)}, and this is ${self.shown(v)}; a tuple value is stored as it is, without widening")
 
         v
     end stored
@@ -668,7 +668,7 @@ impl Elab
         val owner = self.enum_of(s.ty)
 
         if owner.is_none() && !is_wild(s.ty) && !self.is_generic_nominal(s.ty)
-            self.fail(scrutinee.span, s"`match` takes an enum value apart, and this is ${show_ty(s.ty)}")
+            self.fail(scrutinee.span, s"`match` takes an enum value apart, and this is ${self.shown(s)}")
 
         val shapes = self.arm_shapes(span, owner, s.ty, cases)
         val statement = want match

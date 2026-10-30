@@ -118,6 +118,31 @@ elab_literal_magnitude_refused()
     assert_eq(refused("def main() = print(0xFFFF_FFFF_FFFF_FFFF)\n"), "error: 18446744073709551615 does not fit in int64 @1:20")
     assert_eq(refused("def f(x8: int8) = x8 + 0xFF\n" + MAIN), "error: 255 does not fit in int8 @1:24")
 
+// -- diagnostics name types as written ---------------------------------------------------------------
+
+@test("a diagnostic names a declared binding's or parameter's type as its declaration wrote it")
+elab_diagnostics_spell_declared_types()
+    assert_eq(refused("def main() =\n  val n: integer = 1\n  val u: uint64 = 2\n  print(n + u)\n"),
+        "error: `+` mixes integer and uint64, and neither holds the other's range; convert one: `integer(u) + n` @4:9")
+    assert_eq(refused("def f(x: real) =\n  val n: integer = x\n" + MAIN), "error: `n` must be integer, but this is real: that would narrow it; convert it explicitly, `integer(...)` @2:20")
+    assert_eq(refused("def g(n: integer) = n\ndef main() = print(g(1.5))\n"), "error: argument `n` must be integer, but this is real64: that would narrow it; convert it explicitly, `integer(...)` @2:22")
+    assert_eq(refused("def main() =\n  var n: integer = 0\n  n = 1.5\n"), "error: the value must be integer, but this is real64: that would narrow it; convert it explicitly, `integer(...)` @3:7")
+    assert_eq(refused("def main() =\n  var n: integer = 0\n  n += 1.5\n"), "error: `+=` computes real64, which `n` (integer) cannot hold without narrowing @3:3")
+    assert_eq(refused("val G: integer = 3\ndef f(s: string) = G + s\n" + MAIN), "error: `+` needs numbers; found integer and string @2:20")
+    assert_eq(refused("def main() =\n  def h(k: integer) = k + \"a\"\n"), "error: `+` needs numbers; found integer and string @2:23")
+    assert_eq(refused("def main() =\n  val h = (z: complex) -> z < 1.0\n"), "error: `<` orders integers and reals; complex numbers have no order @2:27")
+    assert_eq(refused("def f(m: [real; :, :]) =\n  val v: [real] = m\n" + MAIN), "error: `v` must be [real], but this is [real; :, :]: its rank is 2, not 1 @2:19")
+
+@test("a type with no written spelling is named by its DESIGN name, and an alias spelled out stays spelled out")
+elab_diagnostics_canonical_types()
+    assert_eq(refused("def main() =\n  val x = 1.5\n  val n: int64 = x\n"), "error: `n` must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @3:18")
+    assert_eq(refused("def f(x: real64) = x div 2\n" + MAIN), "error: `div` needs two integers; found real64 and real64 @1:20")
+    assert_eq(refused("def main() =\n  val n = 1\n  val u: uint64 = 2\n  print(n + u)\n"),
+        "error: `+` mixes int64 and uint64, and neither holds the other's range; convert one: `int64(u) + n` @4:9")
+    assert_eq(refused("val a, b = 1, 2.5\ndef f(s: string) = b + s\n" + MAIN), "error: `+` needs numbers; found real64 and string @2:20")
+    assert_eq(refused("val (a, b): (integer, real) = 1, 2.5\ndef f(s: string) = b + s\n" + MAIN), "error: `+` needs numbers; found real64 and string @2:20")
+    assert_eq(elaborated("def f(n: integer) = n\n" + MAIN), "(def f ((n#0 int64)) int64 n#0)\n(def main () void ())")
+
 @test("the type of a binary operation follows the lattice")
 elab_promotion()
     assert_eq(elaborated("def f(n: integer, x: real32) = n * x\n" + MAIN),
@@ -146,7 +171,7 @@ elab_division_and_power()
         "(def f ((a#0 int32) (b#1 int64)) void (block (print (/:real64 (promote:real64 a#0) (promote:real64 b#1))) (print (div:int64 (promote:int64 a#0) b#1)) (print (%:int64 b#1 (promote:int64 a#0)))))\n(def main () void ())")
     assert_eq(elaborated("def f(x: real32, k: int8, n: integer) =\n  print(x ^ n)\n  print(k ^ 2)\n  print(x ^ 0.5)\n  print(-x^2)\n" + MAIN),
         "(def f ((x#0 real32) (k#1 int8) (n#2 int64)) void (block (print (^:real32 x#0 n#2)) (print (^:int8 k#1 2)) (print (^:real32 x#0 (adopt:real32 0.5))) (print (-:real32 (^:real32 x#0 2)))))\n(def main () void ())")
-    assert_eq(refused("def f(x: real) = x div 2\n" + MAIN), "error: `div` needs two integers; found real64 and real64 @1:18")
+    assert_eq(refused("def f(x: real) = x div 2\n" + MAIN), "error: `div` needs two integers; found real and real64 @1:18")
 
 @test("comparisons, and, or and not take what DESIGN 2.6 says they take")
 elab_comparison_and_logic()
@@ -203,7 +228,7 @@ elab_inout()
         "(def bump ((x#0 inout int64)) void (+= x#0 1))\n(def main () void (block (var n#1:int64 41) (call bump (inout n#1))))")
     assert_eq(refused("def inner(x: inout integer) = x = x + 100\ndef outer(y: inout integer) = inner(y)\n" + MAIN), "ok")
     assert_eq(refused("def bump(x: inout integer) = x += 1\ndef main() =\n  val v = 1\n  bump(v)\n"), "error: `v` cannot be assigned: it is a `val` @4:8")
-    assert_eq(refused("def bump(x: inout integer) = x += 1\ndef main() =\n  var r = 1.0\n  bump(r)\n"), "error: an `inout` argument must be exactly int64, since it is borrowed and not converted; this is real64 @4:8")
+    assert_eq(refused("def bump(x: inout integer) = x += 1\ndef main() =\n  var r = 1.0\n  bump(r)\n"), "error: an `inout` argument must be exactly integer, since it is borrowed and not converted; this is real64 @4:8")
     assert_eq(refused("def bump(x: inout integer) = x += 1\ndef main() = bump(3)\n"), "error: an `inout` argument is a variable the callee can write to @2:19")
     assert_eq(refused("def f(x: integer) = x = 2\n" + MAIN), "error: `x` cannot be assigned: a parameter is read-only unless it is `inout` @1:21")
 
