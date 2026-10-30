@@ -59,12 +59,12 @@ impl Emitter
 
                 self.op(s"scf.if $failed {")
                 self.external("nex_str_concat", "!llvm.ptr, !llvm.ptr", "!llvm.ptr")
-                self.external("nex_trap", "!llvm.ptr", "")
+                self.external("nex_trap_owned", "!llvm.ptr", "")
 
                 val prefix = self.string_ref("assertion failed: ")
                 val text = self.def(s"func.call @nex_str_concat($prefix, $message) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr")
 
-                self.op(s"func.call @nex_trap($text) : (!llvm.ptr) -> ()")
+                self.op(s"func.call @nex_trap_owned($text) : (!llvm.ptr) -> ()")
                 self.op("}")
 
             return ""

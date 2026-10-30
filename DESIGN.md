@@ -1564,9 +1564,19 @@ with these rules (**PROPOSED** where marked).
   it has built. **A cycle is not reclaimed**: a lambda stored into a `var` it captures itself, local
   `def`s that call one another, and a local `def` that calls itself and is captured by another
   lambda too keep themselves alive for the rest of the run. A local `def` that calls itself and is
-  captured by nothing else makes no cycle. Neither is what the frames a caught trap (`assert_traps`)
-  abandons held. Both are bounded by the program's shape, not by how long it runs, except where the
-  cycle is made inside a loop.
+  captured by nothing else makes no cycle. A cycle is bounded by the program's shape, not by how long
+  it runs, except where it is made inside a loop.
+- **A caught trap gives back everything the frames it abandons held**: their strings, function
+  values, cells, aggregates and arrays, and the storage of every array they computed, as returning
+  would have, on every thread a `parallel` construct runs. What the trapping code already stored
+  outside those frames stays stored (§8.4). So a program that catches a trap any number of times
+  (`assert_traps` in a loop, a parallel loop that traps in every round) holds no more afterwards than
+  before. The cost falls on the path that does not trap only where something is owned: a function
+  holding a counted value registers its slots with the runtime on entry and takes them off on
+  return (two calls and a store per slot), each temporary is also written to a slot of the frame
+  and cleared when released, and each array buffer carries two links on a per-thread list. A
+  function of numbers and arrays alone registers nothing. A trap releases what it abandons before
+  it returns to the catch, while those frames are still on the stack.
 
 ### 11.5 Modules
 

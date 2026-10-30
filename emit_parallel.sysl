@@ -184,12 +184,13 @@ impl Emitter
     elem_at(*self, p: string, k: string, mt: string) -> string =
         self.def(s"llvm.getelementptr $p[$k] : (!llvm.ptr, i64) -> !llvm.ptr, $mt")
 
-    // Storage for `count` (`i64`) values of `t`, which `nex_storage_free` gives back.
+    // Storage for `count` (`i64`) values of `t`, which `nex_storage_free` gives back, or a catch the
+    // region's trap reaches.
     partials(*self, span: Span, t: Ty, count: string) -> string
         val z = self.def("llvm.mlir.zero : !llvm.ptr")
         val bytes = self.def(s"llvm.ptrtoint ${self.elem_at(z, count, self.mem_ty(span, t))} : !llvm.ptr to i64")
 
-        self.call("nex_array_alloc", bytes, "i64", "!llvm.ptr")
+        self.call("nex_storage_alloc", bytes, "i64", "!llvm.ptr")
 
     // -- `parallel for` ---------------------------------------------------------------------------
 

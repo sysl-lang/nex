@@ -1375,6 +1375,9 @@ struct Parser
             return self.statement(false)
         end if
 
+        if self.at("->")
+            return Err(error(self.toks.here(), "a `for` body follows `do`, and a `for` has no value: nex has no array comprehensions; write `map(1..n, k -> e)`"))
+
         self.block_or("'do' or an indented block")
     end loop_body
 

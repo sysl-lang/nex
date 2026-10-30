@@ -1,0 +1,40 @@
+// Traps inside parallel bodies, caught by `assert_traps` many times over: the iterations each thread
+// abandons held strings, closures, arrays and a struct holding an array, and the loop's reduction
+// partials were allocated before it; everything is given back.
+
+struct Grid
+  cells: [real]
+  name: string
+
+def check(g: Grid, k: integer, at: integer): integer =
+  val f = (j: integer) -> s"${g.name}:$j"
+  val s = f(k)
+  val zs = g.cells * real(k)
+  if k == at then print(zs[k + 100])
+  if s == "" then 0 else 1
+
+def sweep(n: integer, at: integer): integer =
+  val name = s"sweep$n"
+  var total = 0
+  parallel for i in 1..n reduce total: +
+    val g = Grid(fill(4, 1.0) + real(i), s"$name-$i")
+    val words = [s"w$i", name]
+    total += check(g, i, at) + size(words) - 2
+  total
+
+def fill_all(n: integer, at: integer): [real] =
+  var y: [real] = zeros(n)
+  parallel for i in 1..n
+    val tmp = fill(3, real(i)) * 2.0
+    val tag = s"t$i"
+    y[i] = 1.0 / real(i - at) + sum(tmp) + real(size([tag]))
+    if i == at then print(tmp[9])
+  y
+
+def main() =
+  for round in 1..30
+    assert_traps(() -> print(sweep(20000, 1 + round * 600)), "out of bounds")
+    assert_traps(() -> print(fill_all(20000, round * 600)), "out of bounds")
+  print(sweep(1000, 0))
+  print(sum(fill_all(4, 0)))
+  print("done")
