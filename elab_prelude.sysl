@@ -38,7 +38,7 @@ private reads(n: usize) -> Buf[Mode]
     out
 
 // An integer written as a number, `3` or `-1`.
-private int_written(e: Expr) -> Option[i64] = *e.kind match
+private int_written(e: Expr) -> Option[i128] = *e.kind match
     IntLit(v) -> Some(v)
     Unary(op, x) -> if op == "-" then (*x.kind match
         IntLit(v) -> Some(-v)
@@ -201,7 +201,7 @@ impl Elab
     // An axis number of an array of rank `rank`, checked at compile time where it is written as one.
     axis(*self, e: Expr, rank: usize, what: string) -> TExpr
         int_written(e) match
-            Some(k) -> if k < 1 || k > i64(rank) then self.fail(e.span, s"there is no axis ${k}: this array has rank ${rank}")
+            Some(k) -> if k < 1 || k > i128(rank) then self.fail(e.span, s"there is no axis ${k}: this array has rank ${rank}")
             None -> ()
 
         self.check(e, INTEGER, what)
@@ -308,7 +308,7 @@ impl Elab
 
         var out: Buf[TExpr] = buf()
         var axes: Buf[Extent] = buf()
-        var seen: Buf[i64] = buf()
+        var seen: Buf[i128] = buf()
         val source = axes_of(a.ty)
 
         out.push(a)
@@ -322,7 +322,7 @@ impl Elab
                         if s == k then self.fail(x.span, s"axis ${k} is given twice")
 
                     seen.push(k)
-                    axes.push(if k >= 1 && k <= i64(r) then source[usize(k - 1)] else Dynamic)
+                    axes.push(if k >= 1 && k <= i128(r) then source[usize(k - 1)] else Dynamic)
                 None -> axes.push(Dynamic)
 
         texpr(span, Ty.Array(elem_of(a.ty), axes), TBuiltin("permute", out))
@@ -408,7 +408,7 @@ impl Elab
 
                 for j in 0..<r
                     written match
-                        Some(n) -> if i64(j + 1) != n then kept.push(axes[j])
+                        Some(n) -> if i128(j + 1) != n then kept.push(axes[j])
                         None -> if j > 0 then kept.push(Dynamic)
 
                 val ty = if r == 1 then per else Ty.Array(per, kept)

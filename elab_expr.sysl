@@ -71,13 +71,11 @@ struct Operands
     lhs: TExpr
     rhs: TExpr
 
-// The bounds of a signed or unsigned integer of `bits`, as the largest magnitudes an `i64` literal
-// can be compared against.
-private fits(v: i64, t: Ty) -> bool = t match
+// Whether an integer literal's value lies in the range of `t`, where `t` is an integer type.
+private fits(v: i128, t: Ty) -> bool = t match
     Int(b, signed) ->
-        if b == 64 then (signed || v >= 0)
-        elif signed then v >= -(1i64 << i64(b - 1)) && v < (1i64 << i64(b - 1))
-        else v >= 0 && v < (1i64 << i64(b))
+        if signed then v >= -(1i128 << i128(b - 1)) && v < (1i128 << i128(b - 1))
+        else v >= 0 && v < (1i128 << i128(b))
     _ -> true
 
 // The largest finite magnitude of each real width, rounded up to where rounding to nearest would
@@ -160,7 +158,7 @@ impl Elab
 
         if divides then max_class(c, REAL_LITERAL) else c
 
-    private int_literal(*self, span: Span, v: i64, want: Option[Ty]) -> TExpr
+    private int_literal(*self, span: Span, v: i128, want: Option[Ty]) -> TExpr
         val ty = literal_type(INT_LITERAL, want)
 
         if !fits(v, ty)

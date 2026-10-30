@@ -844,9 +844,6 @@ struct Parser
 
                 *lit.kind match
                     IntLit(n) ->
-                        // A hexadecimal literal with the top bit set reads as a negative integer.
-                        if n < 0 then return self.fail(want)
-
                         self.bump()
                         Ok(FixedExtent(u64(n)))
                     _ -> self.fail(want)
@@ -1515,33 +1512,30 @@ private digits_value(text: string, base: u64) -> Option[u64]
 end digits_value
 
 // A numeric literal's value: an integer in any of the four bases, or a real where it has a point or
-// an exponent. A hexadecimal, binary or octal literal may use all 64 bits; a decimal one must fit an
-// `integer`.
+// an exponent. An integer's value is its magnitude in any base, up to 64 bits; whether it fits is
+// decided by the type it is adopted into.
 private number(span: Span, text: string, negative: bool) -> Result[Expr, Diagnostic]
     val prefixes = [("0x", 16u64), ("0b", 2u64), ("0o", 8u64)]
+    var base = 10u64
+    var digits = text
 
-    for (prefix, base) in prefixes
+    for (prefix, b) in prefixes
         if text.starts_with(prefix)
-            val v = digits_value(text[2..<text.len], base) match
-                Some(v) -> i64.wrap(v)
-                None -> return Err(error(span, "this literal does not fit in 64 bits"))
+            base = b
+            digits = text[2..<text.len]
 
-            return Ok(ex(span, IntLit(if negative then 0 -% v else v)))
+    if base == 10
+        for c in text.bytes
+            if c == u8('.') || c == u8('e') || c == u8('E')
+                val v = parse_real(text) match
+                    Ok(v) -> v
+                    Err(_) -> return Err(error(span, "malformed real literal"))
 
-    for c in text.bytes
-        if c == u8('.') || c == u8('e') || c == u8('E')
-            val v = parse_real(text) match
-                Ok(v) -> v
-                Err(_) -> return Err(error(span, "malformed real literal"))
+                return Ok(ex(span, RealLit(if negative then -v else v)))
 
-            return Ok(ex(span, RealLit(if negative then -v else v)))
+    val v = digits_value(digits, base) match
+        Some(v) -> i128(v)
+        None -> return Err(error(span, "this literal does not fit in 64 bits"))
 
-    digits_value(text, 10) match
-        Some(v) ->
-            if v > 0x7FFF_FFFF_FFFF_FFFFu64 then return Err(error(span, "this integer does not fit in an integer"))
-
-            val n = i64(v)
-
-            Ok(ex(span, IntLit(if negative then -n else n)))
-        None -> Err(error(span, "this integer does not fit in an integer"))
+    Ok(ex(span, IntLit(if negative then -v else v)))
 end number
