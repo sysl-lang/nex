@@ -251,6 +251,8 @@ impl Emitter
             val eq = self.call("nex_str_eq", s"$a, $b", "!llvm.ptr, !llvm.ptr", "i1")
 
             if op == "==" then eq else self.not(eq)
+        Ty.Tuple(_) -> self.aggregate_compare(span, op, a, b, t)
+        Nominal(_, _) -> self.aggregate_compare(span, op, a, b, t)
         _ -> self.unsupported(span, s"`$op` on ${show_ty(t)}")
 
     not(*self, v: string) -> string

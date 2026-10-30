@@ -26,6 +26,12 @@ private val PRELUDE_CONSTANTS = ["pi", "e", "inf", "nan", "i"]
 
 private val COMPARISONS = ["==", "!=", "<", "<=", ">", ">="]
 
+// The type a tuple or a variant on one side of `==` is elaborated expecting, from the other side.
+private aggregate_context(t: Ty) -> Option[Ty] = t match
+    Ty.Tuple(_) -> Some(t)
+    Nominal(_, _) -> Some(t)
+    _ -> None
+
 private is_comparison(op: string) -> bool
     for c in COMPARISONS
         if c == op then return true
@@ -373,6 +379,18 @@ impl Elab
         if op == "^" then return self.power(span, l, r, want)
         if op == "@" then return self.matmul(span, l, r)
 
+        // A tuple built in place or a bare variant takes its type from the other side of `==`.
+        if op == "==" || op == "!="
+            if self.takes_context(l) && !self.takes_context(r)
+                val b = self.infer(r)
+
+                return self.apply(span, op, self.elab(l, aggregate_context(b.ty)), b)
+
+            if self.takes_context(r) && self.literal_class(l) == NOT_LITERAL
+                val a = self.infer(l)
+
+                return self.apply(span, op, a, self.elab(r, aggregate_context(a.ty)))
+
         val o = self.operands(l, r, want)
 
         self.apply(span, op, o.lhs, o.rhs)
@@ -413,6 +431,8 @@ impl Elab
             val comparable = a.ty match
                 Bool -> true
                 Str -> true
+                Ty.Tuple(_) -> true
+                Nominal(_, _) -> true
                 _ -> false
 
             if !(equality && comparable && ty_eq(a.ty, b.ty))
@@ -420,6 +440,10 @@ impl Elab
                     self.fail(span, s"`${op}` orders integers and reals; ${self.shown(a)} values are only equal or not")
                 else
                     self.fail(span, s"`${op}` cannot compare ${self.shown(a)} with ${self.shown(b)}")
+            else
+                self.function_inside(a.ty) match
+                    Some(f) -> self.fail(span, s"`${op}` cannot compare ${self.shown(a)} values: they hold a function value (${show_ty(f)}), and function values are not compared")
+                    None -> ()
 
             return texpr(span, Bool, TBinary(op, a, b))
 
