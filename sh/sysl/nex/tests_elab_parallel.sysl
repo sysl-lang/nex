@@ -102,6 +102,9 @@ par_writes_through_calls()
         "error: `deep` assigns the module variable `count`, and nothing a parallel body calls may change a module variable @9:5")
     assert_eq(refused("var hits = 0\ndef even(k: integer): bool = if k == 0 then true else odd(k - 1)\ndef odd(k: integer): bool =\n  hits += 1\n  if k == 0 then false else even(k - 1)\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    print(even(i))\n"),
         "error: `even` assigns the module variable `hits`, and nothing a parallel body calls may change a module variable @11:11")
+    // A call under a unit conversion is still a call the body makes.
+    assert_eq(refused("var hits = 0\ndef bump(): real<mm> =\n  hits += 1\n  1.0<mm>\ndef main() =\n  var a: [real<cm>] = [0.0<cm>, 0.0<cm>]\n  parallel for i in 1..2\n    a[i] = bump()\n"),
+        "error: `bump` assigns the module variable `hits`, and nothing a parallel body calls may change a module variable @8:12")
     assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var t = 0.0\n  def bump() = t += 1.0\n  parallel for i in 1..n\n    bump()\n"),
         "error: `bump` assigns `t`, which every iteration shares @8:5")
     assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var t = 0.0\n  parallel for i in 1..n\n    def f(v: real) = t = v\n    f(x[i])\n"),
