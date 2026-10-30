@@ -436,7 +436,7 @@ struct Parser
     end unit_factor
 
     binding(*self, kind: BindKind) -> Result[DeclKind, Diagnostic]
-        val pat = self.pattern_list()?
+        val pat = self.pattern_list("a name to bind")?
         val typ = if self.accept(":") then Some(self.type_expr()?) else None
 
         self.expect("=")?
@@ -669,7 +669,9 @@ struct Parser
 
         if op.len == 0 then return Ok(target)
 
-        if !is_place(target)
+        if is_targets(target)
+            if op != "=" then return Err(error(self.toks.here(), s"`${op}` takes one target; a list of targets takes `=`"))
+        elif !is_place(target)
             return Err(error(target.span, "only a name, a field or an indexed element can be assigned to"))
 
         self.bump()
@@ -685,35 +687,35 @@ struct Parser
 
     // -- patterns and types -----------------------------------------------------------------------
 
-    // The names a `val` or a `for` binds: `x`, `_`, `a, b`, or `(a, b)` -- the parenthesised form is
-    // the one a type annotation needs.
-    pattern_list(*self) -> Result[Pattern, Diagnostic]
+    // What a `val`, a `for` or a `match` arm binds: one pattern, or two or more separated by commas,
+    // which take a tuple apart. `what` names the expected token in a diagnostic.
+    pattern_list(*self, what: string) -> Result[Pattern, Diagnostic]
         val m = self.toks.mark()
-        val parens = self.accept("(")
         var elems: Buf[Pattern] = buf()
 
         loop
-            elems.push(self.name_pattern()?)
+            elems.push(self.pattern(what)?)
 
             if !self.accept(",") then break
-
-        if parens then self.expect(")")?
 
         if elems.len() == 1 then return Ok(elems[0])
 
         Ok(Pattern(self.toks.span_from(m), PatternKind.Tuple(elems)))
-    end pattern_list
 
-    name_pattern(*self) -> Result[Pattern, Diagnostic]
-        val at = self.toks.here()
-        val name = self.ident("a name to bind")?
-
-        Ok(Pattern(at, if name == "_" then Wildcard else PatternKind.Name(name)))
-
-    // A `match` arm's pattern: a name, `_`, or a variant with patterns for its fields.
-    case_pattern(*self) -> Result[Pattern, Diagnostic]
+    // One pattern: a name, `_`, a parenthesised list, or a variant with a pattern for each of its
+    // fields. Parentheses are what a type annotation needs, `val (a, b): (real, real) = …`, and what
+    // a tuple nested in another is written with, `val a, (b, c) = …`. The grammar is the same in
+    // every position; which forms a position accepts is the elaborator's to say.
+    pattern(*self, what: string) -> Result[Pattern, Diagnostic]
         val m = self.toks.mark()
-        val name = self.ident("a pattern")?
+
+        if self.accept("(")
+            val inner = self.pattern_list(what)?
+
+            self.expect(")")?
+            return Ok(Pattern(self.toks.span_from(m), inner.kind))
+
+        val name = self.ident(what)?
 
         if !self.accept("(")
             return Ok(Pattern(self.toks.span_from(m), if name == "_" then Wildcard else PatternKind.Name(name)))
@@ -721,13 +723,13 @@ struct Parser
         var args: Buf[Pattern] = buf()
 
         loop
-            args.push(self.case_pattern()?)
+            args.push(self.pattern(what)?)
 
             if !self.accept(",") then break
 
         self.expect(")")?
         Ok(Pattern(self.toks.span_from(m), PatternKind.Variant(name, args)))
-    end case_pattern
+    end pattern
 
     // A type. `->` is right-associative, and a parenthesised list is the parameters of a function
     // type when an arrow follows it and a tuple type otherwise; one type in parentheses is itself.
@@ -841,9 +843,6 @@ struct Parser
 
                 *lit.kind match
                     IntLit(n) ->
-                        // A hexadecimal literal with the top bit set reads as a negative integer.
-                        if n < 0 then return self.fail(want)
-
                         self.bump()
                         Ok(FixedExtent(u64(n)))
                     _ -> self.fail(want)
@@ -887,7 +886,7 @@ struct Parser
     end expr
 
     match_case(*self) -> Result[MatchCase, Diagnostic]
-        val pat = self.case_pattern()?
+        val pat = self.pattern_list("a pattern")?
 
         self.expect("->")?
         Ok(MatchCase(pat, self.branch()?))
@@ -1383,7 +1382,7 @@ struct Parser
         Some(label)
 
     for_rest(*self, m: usize, label: Option[string]) -> Result[Expr, Diagnostic]
-        val pat = self.pattern_list()?
+        val pat = self.pattern_list("a name to bind")?
 
         self.expect("in")?
 
@@ -1485,6 +1484,15 @@ private is_place(e: Expr) -> bool = *e.kind match
     Index(_, _) -> true
     _ -> false
 
+// Whether an expression is a list of places, `a, b` or `a, (p.x, _)`, that a tuple is stored into.
+private is_targets(e: Expr) -> bool = *e.kind match
+    Tuple(elems) ->
+        for t in elems
+            if !is_place(t) && !is_targets(t) then return false
+
+        true
+    _ -> false
+
 // The value of the digits of `text` in `base`, or `None` where one of them is not a digit of that
 // base or the value does not fit 64 bits.
 private digits_value(text: string, base: u64) -> Option[u64]
@@ -1503,33 +1511,30 @@ private digits_value(text: string, base: u64) -> Option[u64]
 end digits_value
 
 // A numeric literal's value: an integer in any of the four bases, or a real where it has a point or
-// an exponent. A hexadecimal, binary or octal literal may use all 64 bits; a decimal one must fit an
-// `integer`.
+// an exponent. An integer's value is its magnitude in any base, up to 64 bits; whether it fits is
+// decided by the type it is adopted into.
 private number(span: Span, text: string, negative: bool) -> Result[Expr, Diagnostic]
     val prefixes = [("0x", 16u64), ("0b", 2u64), ("0o", 8u64)]
+    var base = 10u64
+    var digits = text
 
-    for (prefix, base) in prefixes
+    for (prefix, b) in prefixes
         if text.starts_with(prefix)
-            val v = digits_value(text[2..<text.len], base) match
-                Some(v) -> i64.wrap(v)
-                None -> return Err(error(span, "this literal does not fit in 64 bits"))
+            base = b
+            digits = text[2..<text.len]
 
-            return Ok(ex(span, IntLit(if negative then 0 -% v else v)))
+    if base == 10
+        for c in text.bytes
+            if c == u8('.') || c == u8('e') || c == u8('E')
+                val v = parse_real(text) match
+                    Ok(v) -> v
+                    Err(_) -> return Err(error(span, "malformed real literal"))
 
-    for c in text.bytes
-        if c == u8('.') || c == u8('e') || c == u8('E')
-            val v = parse_real(text) match
-                Ok(v) -> v
-                Err(_) -> return Err(error(span, "malformed real literal"))
+                return Ok(ex(span, RealLit(if negative then -v else v)))
 
-            return Ok(ex(span, RealLit(if negative then -v else v)))
+    val v = digits_value(digits, base) match
+        Some(v) -> i128(v)
+        None -> return Err(error(span, "this literal does not fit in 64 bits"))
 
-    digits_value(text, 10) match
-        Some(v) ->
-            if v > 0x7FFF_FFFF_FFFF_FFFFu64 then return Err(error(span, "this integer does not fit in an integer"))
-
-            val n = i64(v)
-
-            Ok(ex(span, IntLit(if negative then -n else n)))
-        None -> Err(error(span, "this integer does not fit in an integer"))
+    Ok(ex(span, IntLit(if negative then -v else v)))
 end number

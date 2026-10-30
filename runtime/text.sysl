@@ -1,0 +1,122 @@
+// Strings, sinks and formatting: what a compiled program's `print`, `eprint` and interpolations call.
+//
+// **A nex string is a pointer to NUL-terminated UTF-8.** A literal is a constant the compiler wrote;
+// every other string — an interpolation, a concatenation, a command-line argument — is built here as
+// an object of the counted heap (`heap.sysl`), which the caller owns: each entry that answers a string
+// answers it with a count of 1.
+//
+// **Text goes to a sink.** Sink 1 is standard output and sink 2 standard error; any other is a string
+// being built, which `nex_sink_new` opens and `nex_sink_finish` closes into a string. So `print(s"…")`
+// writes its pieces straight out, and the same interpolation as a value gathers them, through one set
+// of `nex_put_*` entries.
+
+import sysl.buf.{Buf, buf}
+import sysl.fmt.{format_int, format_real, format_str}
+import sysl.text.{StrBuilder, from_utf8_unchecked, str_builder}
+
+@needs(os)
+extern strlen(s: *u8) -> usize
+
+// The text of a C string.
+c_text(p: *u8) -> string = from_utf8_unchecked(p[0..<strlen(p)])
+
+// A string as a nex string: its bytes, copied into a new object of the counted heap, NUL-terminated.
+c_string(s: string) -> *u8
+    val p = new_object(long(s.len + 1), null)
+
+    for k in 0..<s.len
+        p[k] = s.bytes[k]
+
+    p[s.len] = 0
+    p
+
+// The strings being built, by sink number less 3, and the numbers free for reuse.
+private var builders: Buf[StrBuilder] = buf()
+private var free_sinks: Buf[long] = buf()
+
+@export("nex_sink_new")
+sink_new() -> long
+    if free_sinks.len() > 0 then return free_sinks.pop().unwrap()
+
+    builders.push(str_builder())
+    long(builders.len()) + 2
+
+@export("nex_sink_finish")
+sink_finish(sink: long) -> *u8
+    val k = usize(sink - 3)
+    val p = c_string(builders[k].finish())
+
+    builders[k].clear()
+    free_sinks.push(sink)
+    p
+
+// Text written to a sink.
+put(sink: long, s: string)
+    if sink == 1 then prints(s)
+    elif sink == 2 then eprints(s)
+    else builders[usize(sink - 3)].push(s)
+
+@export("nex_put_str")
+put_str(sink: long, s: *u8)
+    put(sink, c_text(s))
+
+@export("nex_put_newline")
+put_newline(sink: long)
+    put(sink, "\n")
+
+@export("nex_put_int")
+put_int(sink: long, v: long)
+    put(sink, s"$v")
+
+@export("nex_put_uint")
+put_uint(sink: long, v: ulong)
+    put(sink, s"$v")
+
+@export("nex_put_bool")
+put_bool(sink: long, v: bool)
+    put(sink, if v then "true" else "false")
+
+// `${n}%08x`: an integer of `bits` bits, its value arriving widened to 64 by its own signedness.
+@export("nex_put_fmt_int")
+put_fmt_int(sink: long, v: long, bits: int, signed: bool, spec: *u8)
+    val n = if signed then i128(v) else i128(ulong.wrap(v))
+
+    put(sink, format_int(n, bits, c_text(spec), 0, 0))
+
+// `${x}%.3f`: a real of any width, widened exactly to `real64`.
+@export("nex_put_fmt_real")
+put_fmt_real(sink: long, v: real, spec: *u8)
+    put(sink, format_real(v, c_text(spec), 0, 0))
+
+// `${s}%-8s`: any value's text, through the width and precision a string takes.
+@export("nex_put_fmt_str")
+put_fmt_str(sink: long, s: *u8, spec: *u8)
+    put(sink, format_str(c_text(s), c_text(spec), 0, 0))
+
+@export("nex_str_concat")
+str_concat(a: *u8, b: *u8) -> *u8 = c_string(c_text(a) + c_text(b))
+
+@export("nex_str_eq")
+str_eq(a: *u8, b: *u8) -> bool = c_text(a) == c_text(b)
+
+// The program's arguments, without its name: `args[1]` is the first.
+private var argv_saved: **u8 = null
+private var argc_saved = 0
+
+@export("nex_set_args")
+set_args(argc: int, argv: **u8)
+    argc_saved = argc
+    argv_saved = argv
+
+@export("nex_arg_count")
+arg_count() -> long = long(argc_saved - 1)
+
+@export("nex_arg")
+arg(k: long) -> *u8
+    if k < 1 || k > long(argc_saved - 1) then out_of_bounds(k)
+
+    c_string(c_text(argv_saved[k]))
+
+private out_of_bounds(k: long) -> never
+    note_trap(s"index $k out of bounds 1..${argc_saved - 1}")
+    raise_trap()

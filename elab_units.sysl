@@ -52,15 +52,16 @@ private member(names: []const string, name: string) -> bool
 
 // The exponent `^` is given where its base carries a unit: an integer or a fraction of two, as
 // written, `x^2`, `x^-1`, `x^(1/2)`.
-private constant_exponent(e: Expr) -> Option[Ratio] = *e.kind match
-    IntLit(n) -> Some(ratio(i256(n), 1))
-    Unary(op, x) ->
+private constant_exponent(e: TExpr) -> Option[Ratio] = *e.kind match
+    TLiteral(IntVal(n), _) -> Some(ratio(i256(n), 1))
+    TPromote(x) -> constant_exponent(x)
+    TUnary(op, x) ->
         if op != "-" then return None
 
         constant_exponent(x) match
             Some(r) -> Some(Ratio(-r.num, r.den))
             None -> None
-    BinOp(op, a, b) ->
+    TBinary(op, a, b) ->
         if op != "/" then return None
 
         val p = constant_exponent(a)
@@ -427,14 +428,14 @@ impl Elab
     end measured_apply
 
     // `x ^ n` where `x` or `n` carries a unit: `n` a constant, so the result's unit is known.
-    measured_power(*self, span: Span, r: Expr, base: TExpr, exp: TExpr) -> TExpr
+    measured_power(*self, span: Span, base: TExpr, exp: TExpr) -> TExpr
         if has_unit(exp.ty)
-            self.fail(r.span, s"an exponent is a plain number, and this one carries the unit ${spell(unit_of(exp.ty))}")
+            self.fail(exp.span, s"an exponent is a plain number, and this one carries the unit ${spell(unit_of(exp.ty))}")
             return texpr(span, Error, TBinary("^", base, exp))
 
         val u = unit_of(base.ty)
 
-        val k = constant_exponent(r) match
+        val k = constant_exponent(exp) match
             Some(k) -> k
             None ->
                 self.fail(span, s"`^` on a value with a unit needs a constant exponent, so that the result's unit is known (`x^2`, `x^(1/2)`); this base is ${show_ty(base.ty)}, so strip the unit to raise it to a computed power: `strip(x)^n`")
@@ -512,10 +513,10 @@ impl Elab
 
     // An argument to a parameter whose type mentions a unit parameter: the first such argument binds
     // the parameter, and the parameter's type with what is bound is the argument's goal (DESIGN §13.5).
-    unit_argument(*self, bound: *UnitBindings, a: Expr, ty: Ty, mode: Mode, what: string) -> TExpr
+    unit_argument(*self, bound: *UnitBindings, a: Expr, ty: Ty, named: string, mode: Mode, what: string) -> TExpr
         val pu = subst_unit(unit_of(ty), bound.names, bound.units)
 
-        if !has_param(pu) || mode == Inout then return self.argument(a, measured(base_of(ty), pu), mode, what)
+        if !has_param(pu) || mode == Inout then return self.argument(a, measured(base_of(ty), pu), named, mode, what)
 
         val v = if self.literal_class(a) != NOT_LITERAL then self.elab(a, Some(base_of(ty))) else self.infer(a)
 

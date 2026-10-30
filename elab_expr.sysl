@@ -37,11 +37,14 @@ private is_ordering(op: string) -> bool = op == "<" || op == "<=" || op == ">" |
 private max_class(a: int, b: int) -> int = if a > b then a else b
 
 // The type a literal of `class` takes beside, or in the place of, a value of type `other`; `None`
-// where it cannot take that type and keeps its own.
-adoption(class: int, other: Ty) -> Option[Ty]
+// where it cannot take that type and keeps its own. Beside an array it takes the element type.
+adoption(class: int, of: Ty) -> Option[Ty]
+    val other = elem_of(of)
+
     // A literal beside a value with a unit takes the number type under it; its own unit, or none,
     // is its own (DESIGN §13.2).
     if has_unit(other) then return adoption(class, base_of(other))
+
     if class == INT_LITERAL && is_numeric(other) then return Some(other)
     if class == REAL_LITERAL && (is_real(other) || is_complex(other)) then return Some(other)
 
@@ -75,13 +78,11 @@ struct Operands
     lhs: TExpr
     rhs: TExpr
 
-// The bounds of a signed or unsigned integer of `bits`, as the largest magnitudes an `i64` literal
-// can be compared against.
-private fits(v: i64, t: Ty) -> bool = t match
+// Whether an integer literal's value lies in the range of `t`, where `t` is an integer type.
+private fits(v: i128, t: Ty) -> bool = t match
     Int(b, signed) ->
-        if b == 64 then (signed || v >= 0)
-        elif signed then v >= -(1i64 << i64(b - 1)) && v < (1i64 << i64(b - 1))
-        else v >= 0 && v < (1i64 << i64(b))
+        if signed then v >= -(1i128 << i128(b - 1)) && v < (1i128 << i128(b - 1))
+        else v >= 0 && v < (1i128 << i128(b))
     _ -> true
 
 // The largest finite magnitude of each real width, rounded up to where rounding to nearest would
@@ -103,20 +104,28 @@ impl Elab
     // `e`, which its position requires to be of type `ty`.
     check(*self, e: Expr, ty: Ty, what: string) -> TExpr = self.coerce(self.elab(e, Some(ty)), ty, what)
 
+    // `e` where the written type `t`, which is `ty`, is required: a diagnostic names it as written.
+    check_written(*self, e: Expr, ty: Ty, t: Type, what: string) -> TExpr = self.coerce_named(self.elab(e, Some(ty)), ty, show_type(t), what)
+
     // `v` where a `ty` is required: as it is, widened along the lattice, or refused.
-    coerce(*self, v: TExpr, ty: Ty, what: string) -> TExpr
+    coerce(*self, v: TExpr, ty: Ty, what: string) -> TExpr = self.coerce_named(v, ty, "", what)
+
+    // `coerce`, where `named` is the required type as the source wrote it, or `""`.
+    coerce_named(*self, v: TExpr, ty: Ty, named: string, what: string) -> TExpr
+        if (is_array(v.ty) || is_array(ty)) && !is_wild(v.ty) && !has_error(ty) then return self.coerce_array(v, ty, named, what)
         if promotes(v.ty, ty) || converts(v.ty, ty) then return promote(v, ty)
 
-        var message = s"${what} must be ${show_ty(ty)}, but this is ${show_ty(v.ty)}"
+        val target = if named.len > 0 then named else show_ty(ty)
+        var message = s"${what} must be ${target}, but this is ${self.shown(v)}"
 
         if has_unit(v.ty) || has_unit(ty)
             if is_numeric(base_of(v.ty)) && is_numeric(base_of(ty)) then message = message + unit_note(v, ty)
         elif is_numeric(v.ty) && is_numeric(ty)
-            message = message + s": that would narrow it; convert it explicitly, `${show_ty(ty)}(...)`"
+            message = message + s": that would narrow it; convert it explicitly, `${target}(...)`"
 
         self.fail(value_span(v), message)
         texpr(v.span, Error, TInvalid)
-    end coerce
+    end coerce_named
 
     // The value a binding with no written type is given: anything but `void`.
     bound_value(*self, init: Expr, name: string) -> TExpr
@@ -166,7 +175,7 @@ impl Elab
 
         if divides then max_class(c, REAL_LITERAL) else c
 
-    private int_literal(*self, span: Span, v: i64, want: Option[Ty]) -> TExpr
+    private int_literal(*self, span: Span, v: i128, want: Option[Ty]) -> TExpr
         val ty = literal_type(INT_LITERAL, want)
 
         if !fits(v, ty)
@@ -225,23 +234,21 @@ impl Elab
             Assign(op, target, value) -> self.assign(span, op, target, value)
             Block(items, result) -> self.block(span, items, result, want)
             Measured(value, unit) -> self.annotate(span, value, unit, want)
-            Range(_, _, _, _) -> self.not_yet(span, "a range as a value (an integer array)")
-            ExprKind.Array(_) -> self.not_yet(span, "an array literal")
-            ExprKind.Tuple(_) -> self.not_yet(span, "a tuple")
-            Index(_, _) -> self.not_yet(span, "indexing")
-            TupleField(_, _) -> self.not_yet(span, "a tuple field")
-            ParallelFor(_, _, _) -> self.not_yet(span, "a `parallel for`")
-            Parallel(_) -> self.not_yet(span, "a `parallel` expression")
-            Match(_, _) -> self.not_yet(span, "a `match`")
+            Range(lo, hi, inclusive, stride) -> self.range_value(span, lo, hi, inclusive, stride, want)
+            ExprKind.Array(elems) -> self.array_literal(span, elems, want)
+            ExprKind.Tuple(elems) -> self.tuple(span, elems, want)
+            Index(target, indices) -> as_view(self.index(span, self.infer(target), indices))
+            TupleField(receiver, index) -> self.tuple_field(span, receiver, index)
+            ParallelFor(clauses, reductions, body) -> self.parallel_for(span, clauses, reductions, body)
+            Parallel(body) -> self.parallel_expr(span, body, want)
+            Match(scrutinee, cases) -> self.match_expr(span, scrutinee, cases, want)
             NamedArg(_, _) ->
                 self.fail(span, "a named argument stands only in a call's argument list")
                 self.invalid(span)
             AxisAll ->
                 self.fail(span, "`:` stands only in an index list")
                 self.invalid(span)
-            End ->
-                self.fail(span, "`end` as an index stands only in an index list")
-                self.invalid(span)
+            End -> self.end_index(span)
     end elab
 
     not_yet(*self, span: Span, what: string) -> TExpr
@@ -265,6 +272,14 @@ impl Elab
                 return texpr(span, ty, TGlobalRef(n))
             Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(n))
             Some(TopExtern(k)) -> return texpr(span, self.extern_type(k), TFnRef(n))
+            None -> ()
+
+        self.find_generic_fun(n) match
+            Some(g) -> return self.generic_value(span, g, want)
+            None -> ()
+
+        self.type_or_variant(span, n, want) match
+            Some(v) -> return v
             None -> ()
 
         if self.is_prelude_constant(n) then return self.constant(span, n, want)
@@ -324,7 +339,7 @@ impl Elab
                 None -> tys[j])
             modes.push(Read)
 
-        val ty = self.lambda_body(p.lambda, "", p.span, names, ptys, modes, None, p.body)
+        val ty = self.lambda_body(p.lambda, "", p.span, names, ptys, self.spellings(p.params), modes, None, p.body)
 
         self.fx = current
         self.locals.set(p.local, LocalInfo(self.locals[p.local].name, ty, LVal))
@@ -359,43 +374,50 @@ impl Elab
 
     binary(*self, span: Span, op: string, l: Expr, r: Expr, want: Option[Ty]) -> TExpr
         if op == "and" || op == "or"
-            val a = self.check(l, Bool, s"an operand of `${op}`")
-            val b = self.check(r, Bool, s"an operand of `${op}`")
+            val x = self.infer(l)
+            val y = self.infer(r)
 
-            return texpr(span, Bool, TLogical(op, a, b))
+            if is_array(x.ty) || is_array(y.ty) then return self.elementwise_logical(span, op, x, y)
+
+            return texpr(span, Bool, TLogical(op, self.coerce(x, Bool, s"an operand of `${op}`"), self.coerce(y, Bool, s"an operand of `${op}`")))
 
         if op == "^" then return self.power(span, l, r, want)
-        if op == "@" then return self.not_yet(span, "the matrix product `@`")
+        if op == "@" then return self.matmul(span, l, r)
 
         val o = self.operands(l, r, want)
 
         self.apply(span, op, o.lhs, o.rhs)
 
     // A pair of operands whose common type is `ty`, or the diagnostic for a pair that has none.
-    common_of(*self, span: Span, op: string, a: Ty, b: Ty) -> Option[Ty]
+    common_of(*self, span: Span, op: string, a: Ty, b: Ty) -> Option[Ty] = self.common_named(span, op, a, show_ty(a), b, show_ty(b))
+
+    // `common_of` for two operands, each named in a diagnostic the way its source spelled its type.
+    common_values(*self, span: Span, op: string, a: TExpr, b: TExpr) -> Option[Ty] = self.common_named(span, op, a.ty, self.shown(a), b.ty, self.shown(b))
+
+    private common_named(*self, span: Span, op: string, a: Ty, an: string, b: Ty, bn: string) -> Option[Ty]
         common(a, b) match
             Some(t) -> Some(t)
             None ->
                 if is_int(a) && is_int(b)
-                    val signed = if is_signed(a) then a else b
+                    val signed = if is_signed(a) then an else bn
 
-                    self.fail(span, s"`${op}` mixes ${show_ty(a)} and ${show_ty(b)}, and neither holds the other's range; convert one: `${show_ty(signed)}(u) ${op} n`")
+                    self.fail(span, s"`${op}` mixes ${an} and ${bn}, and neither holds the other's range; convert one: `${signed}(u) ${op} n`")
                 elif (has_unit(a) || has_unit(b)) && !same_dims(unit_of(a), unit_of(b))
                     self.fail(span, s"`${op}` cannot combine " + unit_clash(unit_of(a), unit_of(b)))
                 else
-                    self.fail(span, s"`${op}` cannot combine ${show_ty(a)} and ${show_ty(b)}")
+                    self.fail(span, s"`${op}` cannot combine ${an} and ${bn}")
                 None
-    end common_of
+    end common_named
 
     // An arithmetic or comparison operator on two elaborated operands.
     apply(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
         if is_error(a.ty) || is_error(b.ty) then return texpr(span, Error, TBinary(op, a, b))
-        if is_array(a.ty) || is_array(b.ty) then return self.not_yet(span, "an element-wise operation on arrays")
+        if is_array(a.ty) || is_array(b.ty) then return self.elementwise(span, op, a, b)
         if has_unit(a.ty) || has_unit(b.ty) then return self.measured_apply(span, op, a, b)
 
         if is_comparison(op)
             if is_numeric(a.ty) && is_numeric(b.ty)
-                val c = self.common_of(span, op, a.ty, b.ty).unwrap_or(Error)
+                val c = self.common_values(span, op, a, b).unwrap_or(Error)
 
                 if is_ordering(op) && is_complex(c) then self.fail(span, s"`${op}` orders integers and reals; complex numbers have no order")
 
@@ -409,24 +431,24 @@ impl Elab
 
             if !(equality && comparable && ty_eq(a.ty, b.ty))
                 if ty_eq(a.ty, b.ty) && comparable
-                    self.fail(span, s"`${op}` orders integers and reals; ${show_ty(a.ty)} values are only equal or not")
+                    self.fail(span, s"`${op}` orders integers and reals; ${self.shown(a)} values are only equal or not")
                 else
-                    self.fail(span, s"`${op}` cannot compare ${show_ty(a.ty)} with ${show_ty(b.ty)}")
+                    self.fail(span, s"`${op}` cannot compare ${self.shown(a)} with ${self.shown(b)}")
 
             return texpr(span, Bool, TBinary(op, a, b))
 
         if op == "+" && ty_eq(a.ty, Ty.Str) && ty_eq(b.ty, Ty.Str) then return texpr(span, Ty.Str, TBinary(op, a, b))
 
         if !is_numeric(a.ty) || !is_numeric(b.ty)
-            self.fail(span, s"`${op}` needs numbers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+            self.fail(span, s"`${op}` needs numbers; found ${self.shown(a)} and ${self.shown(b)}")
             return texpr(span, Error, TBinary(op, a, b))
 
         if op == "div" || op == "%"
             if !is_int(a.ty) || !is_int(b.ty)
-                self.fail(span, s"`${op}` needs two integers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+                self.fail(span, s"`${op}` needs two integers; found ${self.shown(a)} and ${self.shown(b)}")
                 return texpr(span, Error, TBinary(op, a, b))
 
-        val c = (if op == "/" && is_int(a.ty) && is_int(b.ty) then Some(REAL) else self.common_of(span, op, a.ty, b.ty)).unwrap_or(Error)
+        val c = (if op == "/" && is_int(a.ty) && is_int(b.ty) then Some(REAL) else self.common_values(span, op, a, b)).unwrap_or(Error)
 
         texpr(span, c, TBinary(op, promote(a, c), promote(b, c)))
     end apply
@@ -454,22 +476,34 @@ impl Elab
             base = self.infer(l)
             exp = self.infer(r)
 
+        if is_array(base.ty) || is_array(exp.ty) then return self.elementwise(span, "^", base, exp)
+
+        self.power_of(span, base, exp)
+    end power
+
+    // `^` on two elaborated scalar operands.
+    power_of(*self, span: Span, base: TExpr, exp: TExpr) -> TExpr
         if is_error(base.ty) || is_error(exp.ty) then return texpr(span, Error, TBinary("^", base, exp))
-        if has_unit(base.ty) || has_unit(exp.ty) then return self.measured_power(span, r, base, exp)
+        if has_unit(base.ty) || has_unit(exp.ty) then return self.measured_power(span, base, exp)
 
         if !is_numeric(base.ty) || !is_numeric(exp.ty)
-            self.fail(span, s"`^` needs numbers; found ${show_ty(base.ty)} and ${show_ty(exp.ty)}")
+            self.fail(span, s"`^` needs numbers; found ${self.shown(base)} and ${self.shown(exp)}")
             return texpr(span, Error, TBinary("^", base, exp))
 
         if is_int(exp.ty) then return texpr(span, base.ty, TBinary("^", base, exp))
 
-        val c = self.common_of(span, "^", base.ty, exp.ty).unwrap_or(Error)
+        val c = self.common_values(span, "^", base, exp).unwrap_or(Error)
 
         texpr(span, c, TBinary("^", promote(base, c), promote(exp, c)))
-    end power
+    end power_of
 
     unary(*self, span: Span, op: string, x: Expr, want: Option[Ty]) -> TExpr
-        if op == "not" then return texpr(span, Bool, TUnary(op, self.check(x, Bool, "the operand of `not`")))
+        if op == "not"
+            val v = self.infer(x)
+
+            if is_array(v.ty) then return self.elementwise_unary(span, op, v)
+
+            return texpr(span, Bool, TUnary(op, self.coerce(v, Bool, "the operand of `not`")))
 
         // A minus written on a number is part of the literal, so `-128` fits an `int8`.
         *x.kind match
@@ -479,8 +513,10 @@ impl Elab
 
         val v = self.elab(x, want)
 
+        if is_array(v.ty) then return self.elementwise_unary(span, op, v)
+
         if !is_numeric(base_of(v.ty)) && !is_error(v.ty)
-            self.fail(span, s"`-` needs a number; found ${show_ty(v.ty)}")
+            self.fail(span, s"`-` needs a number; found ${self.shown(v)}")
             return texpr(span, Error, TUnary(op, v))
 
         texpr(span, v.ty, TUnary(op, v))
@@ -578,6 +614,10 @@ impl Elab
                 Some(t) -> return t
                 None -> ()
 
+        array_common(a, b) match
+            Some(t) -> return t
+            None -> ()
+
         if statement then return Void
 
         self.fail(span, s"the branches of this `if` differ: ${show_ty(a)} and ${show_ty(b)}")
@@ -601,17 +641,19 @@ impl Elab
 
     // `for v in lo..hi [by step]`: a counted loop over integers (DESIGN §11.1).
     for_loop(*self, span: Span, label: Option[string], pat: Pattern, iterable: Expr, body: Expr) -> TExpr
+        val (lo, hi, inclusive, stride) = *iterable.kind match
+            Range(Some(lo), Some(hi), inclusive, stride) -> (lo, hi, inclusive, stride)
+            _ -> return self.for_each(span, label, pat, iterable, body)
+
         val name = *pat.kind match
             Name(n) -> n
             Wildcard -> "_"
-            _ -> return self.not_yet(pat.span, "a destructuring loop variable")
-
-        val (lo, hi, inclusive, stride) = *iterable.kind match
-            Range(Some(lo), Some(hi), inclusive, stride) -> (lo, hi, inclusive, stride)
-            _ -> return self.not_yet(iterable.span, "a `for` over an array")
+            _ ->
+                self.fail(pat.span, "a counted `for` names one integer; there is no tuple to take apart")
+                "_"
 
         val bounds = self.operands(lo, hi, None)
-        var ty = self.common_of(iterable.span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
+        var ty = self.common_values(iterable.span, "..", bounds.lhs, bounds.rhs).unwrap_or(Error)
 
         if !is_int(ty) && !is_error(ty)
             self.fail(iterable.span, s"a `for` range counts in integers; this one is ${show_ty(ty)}")
@@ -665,7 +707,7 @@ impl Elab
         val frame = self.fx.frames[top]
 
         val v = value match
-            Some(x) -> Some(if frame.ret_known then self.check(x, frame.ret, "the result") else self.infer(x))
+            Some(x) -> Some(self.escaping(if frame.ret_known then self.check(x, frame.ret, "the result") else self.infer(x), "returned"))
             None ->
                 if frame.ret_known && !is_void(frame.ret) && !is_wild(frame.ret)
                     self.fail(span, s"this function returns ${show_ty(frame.ret)}; `return` needs a value")
@@ -710,19 +752,18 @@ impl Elab
                 val name = *pat.kind match
                     Name(n) -> n
                     Wildcard -> return self.infer(init)
-                    _ ->
-                        // Its names are still bound, untyped, so their uses are not reported too.
-                        for n in pattern_names(pat)
-                            self.declare_local(pat.span, n, Error, lkind)
-
-                        return self.not_yet(pat.span, "a destructuring binding")
+                    _ -> return self.destructure_local(d.span, kind, pat, typ, init)
 
                 typ match
                     Some(t) ->
                         val ty = self.resolve_type(t)
-                        val v = self.check(init, ty, s"`${name}`")
+                        val b = self.bind_local(d.span, pat.span, name, ty, lkind, self.check_written(init, ty, t, s"`${name}`"))
 
-                        texpr(d.span, Void, TLet(self.declare_local(pat.span, name, ty, lkind), v))
+                        *b.kind match
+                            TLet(id, _) -> self.written(id, t)
+                            _ -> ()
+
+                        b
                     None ->
                         *init.kind match
                             Lambda(params, body) ->
@@ -731,7 +772,7 @@ impl Elab
 
                         val v = self.bound_value(init, name)
 
-                        texpr(d.span, Void, TLet(self.declare_local(pat.span, name, v.ty, lkind), v))
+                        self.bind_local(d.span, pat.span, name, v.ty, lkind, v)
             Fun(name, tparams, params, ret, body) ->
                 if tparams.len() > 0 then return self.not_yet(d.span, "a generic local function")
 
@@ -759,6 +800,7 @@ impl Elab
     local_fun(*self, span: Span, name: string, params: Buf[Param], ret: Option[Type], body: Expr) -> TExpr
         var names: Buf[string] = buf()
         var tys: Buf[Ty] = buf()
+        var written: Buf[string] = buf()
         var modes: Buf[Mode] = buf()
 
         for p in params
@@ -766,6 +808,7 @@ impl Elab
 
             names.push(p.name)
             tys.push(self.resolve_type(p.typ))
+            written.push(self.spelling_of(p.typ))
             modes.push(p.mode)
 
         val lid = self.reserve_lambda(span)
@@ -775,10 +818,10 @@ impl Elab
                 val r = self.resolve_type(t)
                 val id = self.declare_local(span, name, fn_type(tys, modes, r), LVal)
 
-                self.lambda_body(lid, name, span, names, tys, modes, Some(r), body)
+                self.lambda_body(lid, name, span, names, tys, written, modes, Some(r), body)
                 texpr(span, Void, TLet(id, texpr(span, self.locals[id].ty, TLambdaRef(lid))))
             None ->
-                val ty = self.lambda_body(lid, name, span, names, tys, modes, None, body)
+                val ty = self.lambda_body(lid, name, span, names, tys, written, modes, None, body)
                 val id = self.declare_local(span, name, ty, LVal)
 
                 texpr(span, Void, TLet(id, texpr(span, ty, TLambdaRef(lid))))
@@ -787,7 +830,7 @@ impl Elab
     // -- lambdas ----------------------------------------------------------------------------------
 
     reserve_lambda(*self, span: Span) -> usize
-        self.lambdas.push(TLambda("", buf(), Error, buf(), texpr(span, Error, TInvalid)))
+        self.lambdas.push(TLambda("", buf(), Error, buf(), texpr(span, Error, TInvalid), true, buf()))
         self.lambdas.len() - 1
 
     // `(x, y) -> body`: its parameter types as written, or from the function type its position
@@ -807,10 +850,15 @@ impl Elab
 
             names.push(p.name)
 
+            // A type still holding a generic parameter is not known yet (`elab_generic.sysl`).
+            val known = expected match
+                Some(sig) -> if has_param(sig.params[k]) then None else Some(sig.params[k])
+                None -> None
+
             val ty = p.typ match
                 Some(t) -> self.resolve_type(t)
-                None -> expected match
-                    Some(sig) -> sig.params[k]
+                None -> known match
+                    Some(t) -> t
                     None ->
                         self.fail(span, s"the type of `${p.name}` is not known here; write it: `(${p.name}: real) -> ...`")
                         Error
@@ -821,17 +869,34 @@ impl Elab
                 None -> Read)
 
         expected match
-            Some(sig) -> ret = Some(sig.ret)
+            Some(sig) -> if !has_param(sig.ret) then ret = Some(sig.ret)
             None -> ()
 
         val lid = self.reserve_lambda(span)
-        val ty = self.lambda_body(lid, "", span, names, tys, modes, ret, body)
+
+        if self.agg.passing
+            self.agg.passing = false
+            self.agg.passed.push(lid)
+
+        val ty = self.lambda_body(lid, "", span, names, tys, self.spellings(params), modes, ret, body)
 
         texpr(span, ty, TLambdaRef(lid))
     end lambda
 
     // Elaborates a lambda's body into its slot, in a frame of its own, and gives its function type.
-    lambda_body(*self, lid: usize, name: string, span: Span, names: Buf[string], tys: Buf[Ty], modes: Buf[Mode], ret: Option[Ty], body: Expr) -> Ty
+    // Each lambda parameter's type as written, `""` where it was left out.
+    spellings(self, params: Buf[LambdaParam]) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for p in params
+            out.push(p.typ match
+                Some(t) -> self.spelling_of(t)
+                None -> "")
+
+        out
+
+    // `written` holds each parameter's type as written, `""` where it was left out.
+    lambda_body(*self, lid: usize, name: string, span: Span, names: Buf[string], tys: Buf[Ty], written: Buf[string], modes: Buf[Mode], ret: Option[Ty], body: Expr) -> Ty
         self.fx.frames.push(Frame(Some(lid), ret.unwrap_or(Error), ret.is_some(), self.fx.loops.len()))
         self.open()
 
@@ -842,6 +907,8 @@ impl Elab
 
             val id = self.new_local(names[k], tys[k], LParam(modes[k]))
 
+            self.spelled.set(id, written[k])
+
             self.bind(id)
             ids.push(id)
 
@@ -849,7 +916,7 @@ impl Elab
         val frame = self.fx.frames.pop().unwrap()
 
         self.close()
-        self.lambdas.set(lid, TLambda(name, ids, frame.ret, buf(), b))
+        self.lambdas.set(lid, TLambda(name, ids, frame.ret, buf(), b, self.check_captures(lid, span), buf()))
         fn_type(tys, modes, frame.ret)
     end lambda_body
 
@@ -861,7 +928,12 @@ impl Elab
 
         val n = *target.kind match
             Name(n) -> n
-            _ -> return self.not_yet(span, "assignment to an element or a field")
+            Field(receiver, name) -> return self.select_field(span, self.place(receiver), name)
+            TupleField(receiver, index) -> return self.select_element(span, self.place(receiver), index)
+            Index(t, indices) -> return self.index(span, self.place(t), indices)
+            _ ->
+                self.fail(span, "only a variable, an element or a field can be assigned")
+                return self.invalid(span)
 
         self.lookup_local(n) match
             Some(id) ->
@@ -872,7 +944,10 @@ impl Elab
                     LParam(m) -> m == Inout
                     _ -> false
 
-                if !writable then self.fail(span, s"`${n}` cannot be assigned: ${what_local(self.locals[id].kind)}")
+                if !writable && self.is_view_local(id)
+                    self.fail(span, s"`${n}` is a view, and nothing writes through a view; assign to the window of the array it was taken from")
+                elif !writable
+                    self.fail(span, s"`${n}` cannot be assigned: ${what_local(self.locals[id].kind)}")
 
                 return texpr(span, self.locals[id].ty, TLocal(id))
             None -> ()
@@ -896,9 +971,18 @@ impl Elab
     end place
 
     assign(*self, span: Span, op: string, target: Expr, value: Expr) -> TExpr
+        self.reduction_named(target) match
+            Some(k) -> return self.contribution(span, op, k, value)
+            None -> ()
+
+        *target.kind match
+            ExprKind.Tuple(_) -> return self.assign_tuple(span, target, value)
+            _ -> ()
+
         val p = self.place(target)
 
-        if op == "=" then return texpr(span, Void, TAssign(op, p, self.check(value, p.ty, "the value")))
+        if is_array(p.ty) then return self.array_assign(span, op, target, p, value)
+        if op == "=" then return texpr(span, Void, TAssign(op, p, self.coerce_named(self.elab(value, Some(p.ty)), p.ty, self.shown(p), "the value")))
 
         // `x op= v` computes `x op v` and stores it back, which must not narrow `x` (DESIGN §2.2).
         val bop = op[0..<op.len - 1]
@@ -907,7 +991,7 @@ impl Elab
         val r = self.apply(span, bop, p, v)
 
         if !is_wild(r.ty) && !is_wild(p.ty) && !ty_eq(r.ty, p.ty)
-            var message = s"`${op}` computes ${show_ty(r.ty)}, which `${show_place(target)}` (${show_ty(p.ty)}) cannot hold without narrowing"
+            var message = s"`${op}` computes ${self.shown(r)}, which `${show_place(target)}` (${self.shown(p)}) cannot hold without narrowing"
 
             if bop == "/" && is_int(p.ty) then message = message + "; `div` divides integers"
 
@@ -971,7 +1055,7 @@ pattern_names(p: Pattern) -> Buf[string]
 end pattern_names
 
 // Where the value of `v` is written: a block's is its last line's.
-private value_span(v: TExpr) -> Span = *v.kind match
+value_span(v: TExpr) -> Span = *v.kind match
     TBlock(_, result) -> value_span(result)
     _ -> v.span
 
@@ -993,9 +1077,12 @@ private what_local(kind: LocalKind) -> string = kind match
     LVar -> "it is a `var`"
     LParam(_) -> "a parameter is read-only unless it is `inout`"
     LLoop -> "a loop variable is read-only"
+    LOrigin -> "an `origin` view is read-only; write the array it was taken from"
 
 private show_place(e: Expr) -> string = *e.kind match
     Name(n) -> n
+    Field(r, name) -> show_place(r) + "." + name
+    TupleField(r, index) -> show_place(r) + s".${index}"
     _ -> "the target"
 
 copy_fx(fx: Fx) -> Fx
@@ -1008,4 +1095,8 @@ copy_fx(fx: Fx) -> Fx
     marks.extend(fx.marks.view())
     loops.extend(fx.loops.view())
     frames.extend(fx.frames.view())
-    Fx(scope, marks, loops, frames, fx.in_const)
+
+    var reds: Buf[RedVar] = buf()
+
+    reds.extend(fx.reds.view())
+    Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance)

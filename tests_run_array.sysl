@@ -1,0 +1,88 @@
+@tests
+
+// Arrays compiled and run: the corpus categories PLAN.md's M6 counts, and what the emitted MLIR must
+// become on its way down — three element-wise operators fused into one loop, and an `inout` array
+// passed by its buffer with no copy. The rank-N programs are in `testdata/v2/` (`tests_run.sysl`).
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{read_text, write_text}
+import sysl.process.capture
+import sysl.text.{from_utf8, join, split}
+
+private val M6_CATEGORIES = ["arrays", "auto-clone (§8.3)", "[byte] buffer"]
+
+// The programs of those categories whose `.out` DESIGN.md does not give, each for the reason beside
+// it; the user decides them.
+private val DISAGREEING = [
+    // `var b = a` of a `val` used again is a clone (DESIGN §8.4), so `a[1]` stays 10; the `.out`,
+    // the reference's, prints 999.
+    "299-val-source-bound-to-var-does-not-need-cloning-val-is-immutab",
+    // Awaiting the user's decision on `==` for byte buffers: DESIGN §7.1 makes `==` element-wise.
+    "423-round-trip-via-to-integers-and-to-bytes",
+    "425-structural-equality-on-length-and-bytes"]
+
+private val STAGES = from_utf8(embed("experiments/mlir/pipeline.txt")).unwrap().trim()
+
+@test("every program of PLAN.md's M6 corpus categories prints its .out, but for those DESIGN.md disagrees with")
+run_m6_corpus()
+    val r = corpus_run(M6_CATEGORIES[..])
+    var names: Buf[string] = buf()
+
+    for f in r.failed
+        names.push(split(f, ":")[0])
+
+    assert_eq(join(r.waiting.view(), "\n"), "")
+    assert_eq(join(names.view(), "\n"), join(DISAGREEING[..], "\n"))
+    assert_eq(r.passed, 112)
+
+// `m` lowered by the pipeline's passes up to and including the first whose text starts `last`.
+private lowered_until(b: Bench, m: string, last: string) -> string
+    var passes: Buf[string] = buf()
+
+    for p in split(STAGES, ",")
+        passes.push(p)
+        if p.starts_with(last) then break
+
+    val input = s"${b.work}/stage.mlir"
+
+    write_text(input, m).unwrap()
+
+    val out = capture(s"${b.tc.llvm_bin}/mlir-opt", [input, s"--pass-pipeline=${join(passes.view(), ",")})"], stderr = true).unwrap()
+
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    out.text
+
+private occurrences(text: string, what: string) -> usize = split(text, what).len - 1
+
+@test("313-02's whole-array expression, three linalg.generic operations as emitted, is one loop after fusion")
+fused_point_distance()
+    val b = bench()
+    val m = emitted(read_text("testdata/corpus/313-02-arrays-element-wise-fusion-point-distance.nex").unwrap()).unwrap()
+    val fused = lowered_until(b, m, "func.func(linalg-fuse-elementwise-ops)")
+
+    finish(b)
+    assert_eq(occurrences(m, "linalg.generic"), 3)
+    assert_eq(occurrences(fused, "linalg.generic"), 1)
+
+@test("an inout array is passed as its buffer and written in place: no copy, and the callee returns nothing")
+inout_array_no_copy()
+    val b = bench()
+    val m = emitted("def zero_first(v: inout [integer]) =\n  v[1] = 0\n  v[2] = v[3] + 1\n\ndef main() =\n  var a = fill(3, 7)\n  zero_first(a)\n  zero_first(a)\n  print(a)\n").unwrap()
+    val buffers = lowered_until(b, m, "convert-bufferization-to-memref")
+
+    finish(b)
+    // As emitted the callee hands its array back; bufferized, that result is gone.
+    assert(m.contains("@\"n.zero_first\"(%a0: tensor<?xi64>) -> tensor<?xi64>"), m)
+    assert_eq(occurrences(buffers, "memref.copy"), 0)
+    assert(buffers.contains("func.func private @n.zero_first(%arg0: memref<?xi64, strided<[?], offset: ?>>) {"), buffers)
+    assert_eq(occurrences(buffers, "call @n.zero_first(%cast) : (memref<?xi64, strided<[?], offset: ?>>) -> ()"), 2)
+
+@test("two static shapes that differ are a compile error wherever both are known")
+static_shape_errors()
+    assert_eq(emitted("def main() =\n  val a: [real; 2, 3] = zeros((2, 3)) * 1.0\n  val b: [real; 3, 2] = zeros((3, 2)) * 1.0\n  print(a + b)\n").err().unwrap_or(""),
+              "error: `+` combines arrays of one shape; axis 1 is 2 in one and 3 in the other @4:9")
+    assert_eq(emitted("def f(m: [real; 2, 2]) = m[1, 1]\ndef main() =\n  val a: [real; 3, 3] = zeros((3, 3)) * 1.0\n  print(f(a))\n").err().unwrap_or(""),
+              "error: argument `m` must be [real; 2, 2], but this is [real; 3, 3]: axis 1 is 3 here, and 2 is required @4:11")
+    assert_eq(emitted("def main() =\n  val a: [real; 2, 3] = zeros((2, 3)) * 1.0\n  val b: [real; 2, 2] = zeros((2, 2)) * 1.0\n  print(a @ b)\n").err().unwrap_or(""),
+              "error: `@` needs the inner extents to agree; they are 3 and 2 @4:9")
+    assert_eq(emitted("def main() =\n  val a = [[1, 2]]\n  print(extent(a, 3))\n").err().unwrap_or(""), "error: there is no axis 3: this array has rank 2 @3:19")

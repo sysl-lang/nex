@@ -1,0 +1,71 @@
+// The counted heap: every string built at run time, every cell a lambda captures and every lambda's
+// environment is one object here, freed when the last reference to it is released.
+//
+// An object is a header of two words — its count and the function that releases what it holds — and
+// then its payload. A reference is the payload's address, so a string is still a pointer to its
+// NUL-terminated bytes and every C function that reads one takes it as it is. A count below zero marks
+// an object that is never freed: a string literal, which the compiler writes as a constant with the
+// same header.
+//
+// Generated code retains a reference where it keeps one (a store into a local, a field, a cell, a
+// returned value) and releases it where that keeping ends; a null reference is accepted and ignored
+// by both, since a slot nothing was stored into yet holds zero.
+
+import sysl.raw.ptr_cast
+
+@needs(os)
+extern calloc(n: usize, size: usize) -> *u8
+
+@needs(os)
+extern free(p: *u8)
+
+struct Header
+    count: long
+    // What the payload holds released, before the object is freed; null where it holds no references.
+    drop: *extern(*u8) -> unit
+
+private val HEADER: usize = 16
+
+private header(p: *u8) -> *Header = ptr_cast(usize(p) - HEADER)
+
+// A new object of `size` payload bytes, all zero, with a count of 1.
+@export("nex_new")
+new_object(size: long, drop: *extern(*u8) -> unit) -> *u8
+    val base = calloc(usize(size) + HEADER, 1)
+    val h: *Header = ptr_cast(base)
+
+    h.count = 1
+    h.drop = drop
+    &base[HEADER]
+
+@export("nex_retain")
+retain(p: *u8)
+    if p == null then return
+
+    val h = header(p)
+
+    if h.count >= 0 then h.count += 1
+
+@export("nex_release")
+release(p: *u8)
+    if p == null then return
+
+    val h = header(p)
+
+    if h.count < 0 then return
+
+    h.count -= 1
+
+    if h.count > 0 then return
+    if h.drop != null then h.drop(p)
+
+    free(ptr_cast(h))
+
+// A lambda's environment: the number of cells it holds, then their addresses.
+@export("nex_env_drop")
+env_drop(p: *u8)
+    val words: *long = ptr_cast(p)
+    val cells: **u8 = ptr_cast(p)
+
+    for k in 1..<usize(words[0]) + 1
+        release(cells[k])

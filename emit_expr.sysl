@@ -1,0 +1,724 @@
+// Emission of expressions and statements: each typed node to the operations that compute it.
+//
+// `ex` answers the SSA value an expression computes, or `""` for one that has none — a `void`
+// statement, or one that never yields (`return`, `exit`, `stop`), after which the block has ended.
+
+import sysl.buf.{Buf, buf}
+import sysl.fmt.hex
+import sh.sysl.parsing.Span
+
+impl Emitter
+    ex(*self, e: TExpr) -> string
+        val v = self.ex_kind(e)
+
+        // What follows in the statement runs only where nothing has left it.
+        if self.ctl != "" && !self.dirty && may_leave(e) then self.dirty = true
+        v
+
+    ex_kind(*self, e: TExpr) -> string = *e.kind match
+        TLiteral(v, _) -> self.literal(e.span, v, e.ty)
+        TConstant(name, _) -> self.constant(e.span, name, e.ty)
+        TLocal(id) ->
+            if self.args_local == Some(id)
+                self.later(e.span, "`args` other than `args[k]`, `length(args)` and `for a in args`")
+                return ""
+
+            if self.in_ssa(id) then return self.read_array(e.span, id)
+
+            self.load(e.span, self.local_ptr(e.span, id), e.ty)
+        TGlobalRef(_) -> self.load(e.span, self.place_ptr(e), e.ty)
+        TFnRef(name) -> self.fn_value(e.span, name)
+        TPromote(v) -> if is_arr(e.ty) then self.promoted(e, v) else self.convert(e.span, self.ex(v), v.ty, e.ty, false)
+        TConvert(v, traps) -> self.convert(e.span, self.ex(v), v.ty, e.ty, traps)
+        TMakeComplex(re, im) ->
+            val r = self.ex(re)
+            val i = self.ex(im)
+
+            self.def(s"complex.create $r, $i : ${self.ty(e.span, e.ty)}")
+        TRescale(_, _) -> self.unsupported(e.span, "a value with a unit of measure")
+        TUnitAs(_) -> self.unsupported(e.span, "a value with a unit of measure")
+        TComplexPart(v, imag) -> self.def(s"complex.${if imag then "im" else "re"} ${self.ex(v)} : ${self.ty(e.span, v.ty)}")
+        TBinary(op, l, r) ->
+            val a = self.ex(l)
+            val b = self.ex(r)
+
+            if op == "^" && !ty_eq(l.ty, r.ty) then self.power_int_exponent(e.span, a, l.ty, b, r.ty)
+            else self.binary(e.span, op, a, b, l.ty)
+        TLogical(op, l, r) -> self.logical(op, l, r)
+        TUnary(op, v) -> self.unary(e.span, op, self.ex(v), v.ty)
+        TChain(operands, links) -> self.chain(operands, links)
+        TChainOperand(k) -> self.chains[self.chains.len() - 1][k]
+        TCall(callee, args) -> self.call_value(e.span, callee, args, e.ty)
+        TBuiltin(name, args) -> self.builtin(e.span, name, args, e.ty)
+        TBorrow(place) -> self.place_ptr(place)
+        TLambdaRef(id) -> self.own(self.lambda_value(e.span, id), e.ty)
+        TInterp(parts, _) ->
+            val sink = self.call("nex_sink_new", "", "", "i64")
+
+            self.interp_into(sink, parts)
+            self.own(self.call("nex_sink_finish", sink, "i64", "!llvm.ptr"), Ty.Str)
+        TIf(c, a, b) -> self.if_expr(e, c, a, b)
+        TWhile(id, c, body) -> self.while_loop(id, c, body)
+        TFor(id, v, lo, hi, inclusive, step, body) -> self.for_loop(e.span, id, v, lo, hi, inclusive, step, body)
+        TBlock(items, result) -> self.block_from(items, 0, result, e.ty)
+        TLet(id, init) ->
+            if self.in_ssa(id)
+                self.arr.set(id, self.ex(init))
+                return ""
+
+            // Bound first, so a local `def` that calls itself captures its own cell.
+            self.bind_local(e.span, id)
+
+            val v = self.ex(init)
+
+            self.keep(e.span, self.local_ptr(e.span, id), v, self.prog.locals[id].ty)
+            ""
+        TAssign(op, target, value) ->
+            *target.kind match
+                TArray(a) ->
+                    *a match
+                        TIndex(base, subs) ->
+                            self.assign_index(e.span, op, base, subs, value)
+                            return ""
+                        _ -> ()
+                _ -> ()
+
+            if is_arr(target.ty)
+                self.assign_array(e.span, op, target, value)
+                return ""
+
+            val v = self.ex(value)
+            val p = self.place_ptr(target)
+
+            if op == "="
+                self.keep(e.span, p, v, target.ty)
+            else
+                val old = self.load(e.span, p, target.ty)
+                val bop = op[0..<op.len - 1]
+                val r = if bop == "^" && !ty_eq(target.ty, value.ty) then self.power_int_exponent(e.span, old, target.ty, v, value.ty)
+                        else self.binary(e.span, bop, old, v, target.ty)
+
+                self.keep(e.span, p, r, target.ty)
+
+            ""
+        TReturn(v) ->
+            v match
+                Some(x) ->
+                    val r = self.ex(x)
+
+                    if is_arr(self.ret) then self.arr.set(self.ret_id(), r)
+                    elif self.ret_slot != "" && r != "" then self.keep(x.span, self.ret_slot, r, self.ret)
+                None -> ()
+
+            self.leave(1)
+            ""
+        TExit(id) ->
+            self.leave(2 * id + 2)
+            ""
+        TCycle(id) ->
+            self.leave(2 * id + 3)
+            ""
+        TStop(code) ->
+            val c = code match
+                Some(x) -> self.int_to_i32(self.ex(x), x.ty)
+                None -> self.def("arith.constant 0 : i32")
+
+            self.call("nex_stop", c, "i32", "")
+            ""
+        TArray(op) -> self.array(e, *op)
+        TParallel(_) ->
+            self.later(e.span, "a parallel construct")
+            ""
+        TTuple(elems) -> self.aggregate(e.span, e.ty, elems)
+        TTupleField(v, k) -> self.field_of(v, k, e.ty)
+        TNew(args) -> self.aggregate(e.span, e.ty, args)
+        TField(v, _, k) -> self.field_of(v, k, e.ty)
+        TVariant(_, tag, args) -> self.variant(e.span, e.ty, tag, args)
+        TMatch(s, arms) -> self.match_expr(e, s, arms)
+        TDestructure(_, pat, init) ->
+            self.destructure(e.span, pat, self.ex(init), init.ty)
+            ""
+        TAssignTuple(target, value) ->
+            self.assign_tuple(e.span, target, value)
+            ""
+        TInvalid -> self.unsupported(e.span, "an invalid expression")
+    end ex_kind
+
+    unsupported(*self, span: Span, what: string) -> string
+        self.later(span, what)
+        ""
+
+    // `p.x` or `t.1`: field `k` of the aggregate `v` computes.
+    field_of(*self, v: TExpr, k: usize, t: Ty) -> string
+        val a = self.ex(v)
+
+        if a == "" then "" else self.field(a, self.ty(v.span, v.ty), k, t)
+
+    // A body's statements from `k` on, then its result: the statements after one that may `exit`,
+    // `cycle` or `return` run only where it did not.
+    block_from(*self, items: Buf[TExpr], start: usize, result: TExpr, t: Ty) -> string
+        var k = start
+        // Each statement starts as the block did: one before it that may have left guards it.
+        val entry = self.dirty
+
+        while k < items.len()
+            val item = items[k]
+
+            // A statement's temporaries are released where it ends.
+            self.dirty = entry
+            self.region(item)
+            k += 1
+
+            if self.ctl != "" && may_leave(item)
+                // The rest runs only where the control word is 0, its value yielded out, a zero where
+                // it did not run. Inside, nothing has left yet.
+                val ok = self.flowing()
+
+                self.dirty = false
+
+                val m = self.mark()
+                var f = self.fork()
+                val v = self.block_from(items, k, result, t)
+
+                // The branch keeps its value past the temporaries it releases.
+                if v != "" then self.retain(v, t)
+                self.release_from(m)
+                f = self.fork_else(f, v, t)
+
+                val r = self.join(f, ok, "", t)
+
+                return if r == "" then "" else self.own(r, t)
+
+        self.dirty = entry
+        self.ex(result)
+
+    // A region's value, or a zero where it never yields one.
+    yield_value(*self, v: string, t: Ty)
+        val ty = self.ty(Span(0, 0), t)
+
+        self.op(s"scf.yield ${if v == "" then self.zero_of(Span(0, 0), t) else v} : $ty")
+
+    // -- constants --------------------------------------------------------------------------------
+
+    int_const(*self, v: string, bits: int) -> string = self.def(s"arith.constant $v : i$bits")
+
+    // A real constant rounded to `bits`, written by its bit pattern so no digits are lost.
+    real_const(*self, x: real, bits: int) -> string
+        val pattern = if bits == 64 then hex(x.bits(), 16, true) elif bits == 32 then hex(f32(x).bits(), 8, true) else hex(f16(x).bits(), 4, true)
+
+        self.def(s"arith.constant 0x$pattern : f$bits")
+
+    nan_const(*self, bits: int) -> string =
+        self.def(s"arith.constant ${if bits == 64 then "0x7FF8000000000000" elif bits == 32 then "0x7FC00000" else "0x7E00"} : f$bits")
+
+    complex_const(*self, re: string, im: string, bits: int) -> string = self.def(s"complex.create $re, $im : complex<f$bits>")
+
+    literal(*self, span: Span, v: Lit, t: Ty) -> string = v match
+        IntVal(n) -> t match
+            Int(b, _) -> self.int_const(s"$n", b)
+            Real(b) -> self.real_const(real(n), b)
+            Complex(b) -> self.complex_const(self.real_const(real(n), b), self.real_const(0.0, b), b)
+            _ -> self.unsupported(span, s"an integer literal of type ${show_ty(t)}")
+        RealVal(x) -> t match
+            Real(b) -> self.real_const(x, b)
+            Complex(b) -> self.complex_const(self.real_const(x, b), self.real_const(0.0, b), b)
+            _ -> self.unsupported(span, s"a real literal of type ${show_ty(t)}")
+        BoolVal(b) -> self.def(s"arith.constant ${if b then "true" else "false"}")
+        StrVal(text) -> self.string_ref(text)
+        VoidVal -> ""
+
+    constant(*self, span: Span, name: string, t: Ty) -> string
+        val bits = bits_of(t)
+
+        if name == "i" then return self.complex_const(self.real_const(0.0, bits), self.real_const(1.0, bits), bits)
+
+        val v = if name == "nan" then self.nan_const(bits)
+                else self.real_const(if name == "pi" then 3.141592653589793 elif name == "e" then 2.718281828459045 else 1.0 / 0.0, bits)
+
+        if is_complex(t) then self.complex_const(v, self.real_const(0.0, bits), bits) else v
+
+    // -- operators --------------------------------------------------------------------------------
+
+    // `a op b` on two operands of type `t`.
+    binary(*self, span: Span, op: string, a: string, b: string, t: Ty) -> string = t match
+        Int(bits, signed) -> self.int_binary(op, a, b, bits, signed)
+        Real(bits) -> self.real_binary(span, op, a, b, bits)
+        Complex(bits) -> self.complex_binary(op, a, b, bits)
+        Bool ->
+            if op == "==" then self.def(s"arith.cmpi eq, $a, $b : i1")
+            else self.def(s"arith.cmpi ne, $a, $b : i1")
+        Str ->
+            if op == "+" then return self.own(self.call("nex_str_concat", s"$a, $b", "!llvm.ptr, !llvm.ptr", "!llvm.ptr"), Ty.Str)
+
+            val eq = self.call("nex_str_eq", s"$a, $b", "!llvm.ptr, !llvm.ptr", "i1")
+
+            if op == "==" then eq else self.not(eq)
+        _ -> self.unsupported(span, s"`$op` on ${show_ty(t)}")
+
+    not(*self, v: string) -> string
+        val t = self.def("arith.constant true")
+
+        self.def(s"arith.xori $v, $t : i1")
+
+    int_binary(*self, op: string, a: string, b: string, bits: int, signed: bool) -> string
+        val t = s"i$bits"
+        val name = if signed then s"int$bits" else s"uint$bits"
+
+        if op == "+" || op == "-" || op == "*"
+            val intr = (if signed then "s" else "u") + (if op == "+" then "add" elif op == "-" then "sub" else "mul")
+            val r = self.def(s"\"llvm.intr.$intr.with.overflow\"($a, $b) : ($t, $t) -> !llvm.struct<($t, i1)>")
+            val v = self.def(s"llvm.extractvalue $r[0] : !llvm.struct<($t, i1)>")
+
+            self.trap_if(self.def(s"llvm.extractvalue $r[1] : !llvm.struct<($t, i1)>"), s"$name overflow")
+            return v
+
+        if op == "div" || op == "%"
+            val zero = self.int_const("0", bits)
+
+            val by_zero = self.def(s"arith.cmpi eq, $b, $zero : $t")
+
+            self.trap_if(by_zero, if op == "div" then "integer division by zero" else "`%` by zero")
+
+            // Where something may have left the statement the trap above is skipped, and the zero
+            // divisor a skipped operand stands in with must not reach the division.
+            val one = self.int_const("1", bits)
+            val d = if self.dirty then self.def(s"arith.select $by_zero, $one, $b : $t") else b
+
+            if !signed then return self.def(s"arith.${if op == "div" then "divui" else "remui"} $a, $d : $t")
+
+            val minus_one = self.int_const("-1", bits)
+            val by_minus_one = self.def(s"arith.cmpi eq, $d, $minus_one : $t")
+
+            // `min % -1` is 0, which LLVM's `srem` leaves undefined, and so is `x % 1`: divide by 1.
+            if op == "%" then return self.def(s"arith.remsi $a, ${self.def(s"arith.select $by_minus_one, $one, $d : $t")} : $t")
+
+            val min = self.int_const(s"${-(i128(1) << (bits - 1))}", bits)
+            val overflows = self.def(s"arith.andi ${self.def(s"arith.cmpi eq, $a, $min : $t")}, $by_minus_one : i1")
+
+            self.trap_if(overflows, s"$name overflow")
+            return self.def(s"arith.divsi $a, ${if self.dirty then self.def(s"arith.select $overflows, $one, $d : $t") else d} : $t")
+
+        if op == "^"
+            val r = self.call("nex_ipow", s"${self.widen64(a, bits, signed)}, ${self.widen64(b, bits, signed)}, ${self.def(s"arith.constant $bits : i32")}, ${self.def(s"arith.constant ${signed}")}, ${self.def(s"arith.constant ${signed}")}",
+                              "i64, i64, i32, i1, i1", "i64")
+
+            return if bits == 64 then r else self.def(s"arith.trunci $r : i64 to $t")
+
+        self.def(s"arith.cmpi ${int_predicate(op, signed)}, $a, $b : $t")
+    end int_binary
+
+    // An integer of `bits` bits widened to 64 by its signedness.
+    widen64(*self, v: string, bits: int, signed: bool) -> string =
+        if bits == 64 then v else self.def(s"arith.${if signed then "extsi" else "extui"} $v : i$bits to i64")
+
+    real_binary(*self, span: Span, op: string, a: string, b: string, bits: int) -> string
+        val t = s"f$bits"
+
+        if op == "^"
+            if bits == 16
+                val x = self.def(s"arith.extf $a : f16 to f32")
+                val y = self.def(s"arith.extf $b : f16 to f32")
+
+                return self.def(s"arith.truncf ${self.def(s"math.powf $x, $y : f32")} : f32 to f16")
+
+            return self.fpe_check(self.def(s"math.powf $a, $b : $t"), a, b, bits)
+
+        if op == "+" || op == "-" || op == "*" || op == "/"
+            if op == "/" && self.fpe_trap
+                val zero = self.real_const(0.0, bits)
+
+                self.trap_if(self.def(s"arith.cmpf oeq, $b, $zero : $t"), "floating-point division by zero")
+
+            val name = if op == "+" then "addf" elif op == "-" then "subf" elif op == "*" then "mulf" else "divf"
+
+            return self.fpe_check(self.def(s"arith.$name $a, $b : $t"), a, b, bits)
+
+        self.def(s"arith.cmpf ${real_predicate(op)}, $a, $b : $t")
+
+    // Under `--fpe-trap`, a NaN made from operands that were not, and an infinity made from finite
+    // ones, trap as gfortran's `invalid` and `overflow` do.
+    fpe_check(*self, r: string, a: string, b: string, bits: int) -> string
+        if !self.fpe_trap then return r
+
+        val t = s"f$bits"
+        val inf = self.real_const(1.0 / 0.0, bits)
+        val r_nan = self.def(s"arith.cmpf uno, $r, $r : $t")
+        val ab_ordered = self.def(s"arith.cmpf ord, $a, $b : $t")
+
+        self.trap_if(self.def(s"arith.andi $r_nan, $ab_ordered : i1"), "floating-point invalid operation")
+
+        val r_abs = self.def(s"math.absf $r : $t")
+        val a_abs = self.def(s"math.absf $a : $t")
+        val b_abs = self.def(s"math.absf $b : $t")
+        val r_inf = self.def(s"arith.cmpf oeq, $r_abs, $inf : $t")
+        val a_fin = self.def(s"arith.cmpf olt, $a_abs, $inf : $t")
+        val b_fin = self.def(s"arith.cmpf olt, $b_abs, $inf : $t")
+        val fin = self.def(s"arith.andi $a_fin, $b_fin : i1")
+
+        self.trap_if(self.def(s"arith.andi $r_inf, $fin : i1"), "floating-point overflow")
+        r
+
+    complex_binary(*self, op: string, a: string, b: string, bits: int) -> string
+        val c = s"complex<f$bits>"
+        val f = s"f$bits"
+
+        if op == "+" then return self.def(s"complex.add $a, $b : $c")
+        if op == "-" then return self.def(s"complex.sub $a, $b : $c")
+        if op == "^" then return self.def(s"complex.pow $a, $b : $c")
+
+        val ar = self.def(s"complex.re $a : $c")
+        val ai = self.def(s"complex.im $a : $c")
+        val br = self.def(s"complex.re $b : $c")
+        val bi = self.def(s"complex.im $b : $c")
+
+        if op == "*"
+            // (ac - bd) + (ad + bc)i, as nex writes the product rather than the dialect's lowering.
+            val re = self.def(s"arith.subf ${self.def(s"arith.mulf $ar, $br : $f")}, ${self.def(s"arith.mulf $ai, $bi : $f")} : $f")
+            val im = self.def(s"arith.addf ${self.def(s"arith.mulf $ar, $bi : $f")}, ${self.def(s"arith.mulf $ai, $br : $f")} : $f")
+
+            return self.def(s"complex.create $re, $im : $c")
+
+        if op == "/"
+            val denom = self.def(s"arith.addf ${self.def(s"arith.mulf $br, $br : $f")}, ${self.def(s"arith.mulf $bi, $bi : $f")} : $f")
+            val zero = self.real_const(0.0, bits)
+
+            self.trap_if(self.def(s"arith.cmpf oeq, $denom, $zero : $f"), "complex division by zero")
+
+            val re = self.def(s"arith.addf ${self.def(s"arith.mulf $ar, $br : $f")}, ${self.def(s"arith.mulf $ai, $bi : $f")} : $f")
+            val im = self.def(s"arith.subf ${self.def(s"arith.mulf $ai, $br : $f")}, ${self.def(s"arith.mulf $ar, $bi : $f")} : $f")
+
+            return self.def(s"complex.create ${self.def(s"arith.divf $re, $denom : $f")}, ${self.def(s"arith.divf $im, $denom : $f")} : $c")
+
+        // `==` and `!=`: both parts.
+        if op == "=="
+            return self.def(s"arith.andi ${self.def(s"arith.cmpf oeq, $ar, $br : $f")}, ${self.def(s"arith.cmpf oeq, $ai, $bi : $f")} : i1")
+
+        self.def(s"arith.ori ${self.def(s"arith.cmpf une, $ar, $br : $f")}, ${self.def(s"arith.cmpf une, $ai, $bi : $f")} : i1")
+    end complex_binary
+
+    // `base ^ n` with an integer `n` of its own type, the base keeping its type (DESIGN §2.2).
+    power_int_exponent(*self, span: Span, a: string, at: Ty, n: string, nt: Ty) -> string = at match
+        Int(bits, signed) ->
+            val nbits = bits_of(nt)
+            val nsigned = is_signed(nt)
+            val r = self.call("nex_ipow", s"${self.widen64(a, bits, signed)}, ${self.widen64(n, nbits, nsigned)}, ${self.def(s"arith.constant $bits : i32")}, ${self.def(s"arith.constant $signed")}, ${self.def(s"arith.constant $nsigned")}",
+                              "i64, i64, i32, i1, i1", "i64")
+
+            if bits == 64 then r else self.def(s"arith.trunci $r : i64 to i$bits")
+        Real(bits) -> self.real_binary(span, "^", a, self.convert(span, n, nt, at, false), bits)
+        Complex(_) -> self.def(s"complex.pow $a, ${self.convert(span, n, nt, at, false)} : ${self.ty(span, at)}")
+        _ -> self.unsupported(span, s"`^` on ${show_ty(at)}")
+
+    unary(*self, span: Span, op: string, v: string, t: Ty) -> string
+        if op == "not" then return self.not(v)
+
+        t match
+            Int(bits, _) -> self.binary(span, "-", self.int_const("0", bits), v, t)
+            Real(bits) -> self.def(s"arith.negf $v : f$bits")
+            Complex(bits) -> self.def(s"complex.neg $v : complex<f$bits>")
+            _ -> self.unsupported(span, s"`$op` on ${show_ty(t)}")
+
+    // `a and b`, `a or b`: the right evaluated only where the left does not decide.
+    logical(*self, op: string, l: TExpr, r: TExpr) -> string
+        val a = self.ex(l)
+        val v = self.fresh()
+
+        self.op(s"$v = scf.if $a -> (i1) {")
+
+        if op == "and" then self.yield_value(self.region(r), Bool)
+        else self.op(s"scf.yield $a : i1")
+
+        self.op("} else {")
+
+        if op == "and" then self.op(s"scf.yield $a : i1")
+        else self.yield_value(self.region(r), Bool)
+
+        self.op("}")
+        v
+
+    // `a < b <= c`: each operand once, left to right, the rest skipped at the first false link.
+    chain(*self, operands: Buf[TExpr], links: Buf[Link]) -> string
+        var values: Buf[string] = buf()
+
+        values.push(self.ex(operands[0]))
+        self.chains.push(values)
+
+        val r = self.chain_from(operands, links, 0)
+
+        self.chains.pop()
+        r
+
+    // Link `k` of the chain and the links after it, which run only where it holds.
+    chain_from(*self, operands: Buf[TExpr], links: Buf[Link], k: usize) -> string
+        var values = self.chains[self.chains.len() - 1]
+
+        values.push(self.ex(operands[k + 1]))
+
+        val link = links[k]
+        val c = self.binary(link.lhs.span, link.op, self.ex(link.lhs), self.ex(link.rhs), link.lhs.ty)
+
+        if k + 1 == links.len() then return c
+
+        val v = self.fresh()
+
+        self.op(s"$v = scf.if $c -> (i1) {")
+
+        val m = self.mark()
+        val rest = self.chain_from(operands, links, k + 1)
+
+        self.release_from(m)
+        self.yield_value(rest, Bool)
+        self.op("} else {")
+        self.op(s"scf.yield $c : i1")
+        self.op("}")
+        v
+
+    // -- conversions ------------------------------------------------------------------------------
+
+    // `v` of type `from` as a `to`: a widening, or a conversion that traps where `traps` says the
+    // value can be out of the target's range (DESIGN §2.4).
+    convert(*self, span: Span, v: string, from: Ty, to: Ty, traps: bool) -> string
+        if ty_eq(from, to) then return v
+
+        from match
+            Int(fb, fs) -> to match
+                Int(tb, ts) -> return self.int_to_int(v, fb, fs, tb, ts, traps)
+                Real(tb) -> return self.def(s"arith.${if fs then "sitofp" else "uitofp"} $v : i$fb to f$tb")
+                Complex(tb) -> return self.complex_const(self.convert(span, v, from, Real(tb), false), self.real_const(0.0, tb), tb)
+                _ -> ()
+            Real(fb) -> to match
+                Real(tb) ->
+                    if tb > fb then return self.def(s"arith.extf $v : f$fb to f$tb")
+
+                    val r = self.def(s"arith.truncf $v : f$fb to f$tb")
+
+                    // A finite value rounded to an infinity is an overflow.
+                    if self.fpe_trap then self.fpe_check(self.def(s"arith.extf $r : f$tb to f$fb"), v, v, fb)
+
+                    return r
+                Int(tb, ts) -> return self.real_to_int(v, fb, tb, ts, from, to)
+                Complex(tb) -> return self.complex_const(self.convert(span, v, from, Real(tb), false), self.real_const(0.0, tb), tb)
+                _ -> ()
+            Complex(fb) -> to match
+                Complex(tb) ->
+                    val c = s"complex<f$fb>"
+                    val re = self.convert(span, self.def(s"complex.re $v : $c"), Real(fb), Real(tb), false)
+                    val im = self.convert(span, self.def(s"complex.im $v : $c"), Real(fb), Real(tb), false)
+
+                    return self.complex_const(re, im, tb)
+                _ -> ()
+            _ -> ()
+
+        self.unsupported(span, s"a conversion from ${show_ty(from)} to ${show_ty(to)}")
+    end convert
+
+    int_to_int(*self, v: string, fb: int, fs: bool, tb: int, ts: bool, traps: bool) -> string
+        if traps
+            val wide = self.def(s"arith.${if fs then "extsi" else "extui"} $v : i$fb to i128")
+            val lo = if ts then -(i128(1) << (tb - 1)) else i128(0)
+            val hi = if ts then (i128(1) << (tb - 1)) - 1 else (i128(1) << tb) - 1
+            val below = self.def(s"arith.cmpi slt, $wide, ${self.int_const(s"$lo", 128)} : i128")
+            val above = self.def(s"arith.cmpi sgt, $wide, ${self.int_const(s"$hi", 128)} : i128")
+
+            self.trap_if(self.def(s"arith.ori $below, $above : i1"), s"${int_name(fb, fs)} value out of range for ${int_name(tb, ts)}")
+
+        if tb == fb then return v
+        if tb < fb then return self.def(s"arith.trunci $v : i$fb to i$tb")
+
+        self.def(s"arith.${if fs then "extsi" else "extui"} $v : i$fb to i$tb")
+
+    // A real to an integer, truncated toward zero; NaN, an infinity and a value out of range trap.
+    real_to_int(*self, v: string, fb: int, tb: int, ts: bool, from: Ty, to: Ty) -> string
+        val x = if fb == 64 then v else self.def(s"arith.extf $v : f$fb to f64")
+        // The open interval of reals that truncate into range, its ends exact in `real64`.
+        val lo = if !ts then -1.0 elif tb == 64 then -9223372036854775808.0 else -real(i128(1) << (tb - 1)) - 1.0
+        val hi = if ts then real(i128(1) << (tb - 1)) else real(i128(1) << tb)
+        val above_lo = self.def(s"arith.cmpf ${if ts && tb == 64 then "oge" else "ogt"}, $x, ${self.real_const(lo, 64)} : f64")
+        val below_hi = self.def(s"arith.cmpf olt, $x, ${self.real_const(hi, 64)} : f64")
+        val ok = self.def(s"arith.andi $above_lo, $below_hi : i1")
+
+        self.trap_if(self.not(ok), s"${show_ty(from)} value out of range for ${show_ty(to)}")
+        self.def(s"arith.${if ts then "fptosi" else "fptoui"} $x : f64 to i$tb")
+
+    // An integer `stop` code as the `i32` an exit status is.
+    int_to_i32(*self, v: string, t: Ty) -> string = t match
+        Int(b, s) -> self.int_to_int(v, b, s, 32, true, false)
+        _ -> self.def("arith.constant 0 : i32")
+
+    // -- control flow -----------------------------------------------------------------------------
+
+    if_expr(*self, e: TExpr, c: TExpr, a: TExpr, b: Option[TExpr]) -> string
+        val cond = self.ex(c)
+        // Each branch starts as the `if` did: a `return` in one does not run in the other.
+        val entry = self.dirty
+        var f = self.fork()
+
+        f = self.fork_else(f, self.region_value(a, e.ty), e.ty)
+        self.dirty = entry
+
+        val v = b match
+            Some(x) -> self.region_value(x, e.ty)
+            None -> ""
+        val r = self.join(f, cond, v, e.ty)
+
+        if r == "" then "" else self.own(r, e.ty)
+
+    // The condition of a loop's next pass: `go`, and no `exit`, `cycle` or `return` under way.
+    loop_condition(*self, l: Loop, go: string)
+        val c = if self.ctl == "" then go else self.def(s"arith.andi $go, ${self.flowing()} : i1")
+
+        self.loop_test(l, c)
+
+    // The end of a pass of loop `id`: its `cycle` is done with.
+    end_pass(*self, id: usize)
+        if self.ctl != "" then self.clear_ctl(2 * id + 3)
+
+    // After loop `id`: its `exit` is done with.
+    after_loop(*self, id: usize)
+        if self.ctl != "" then self.clear_ctl(2 * id + 2)
+
+    while_loop(*self, id: usize, c: TExpr, body: TExpr) -> string
+        val l = self.loop_open()
+
+        self.loop_condition(l, self.region(c))
+        self.region(body)
+        self.end_pass(id)
+        self.loop_close(l)
+        self.after_loop(id)
+        ""
+
+    // `for v in lo..hi by step`: the trip is worked out before the first pass, as Fortran's `DO` does,
+    // so the counter never steps past `hi` and cannot overflow at the end of its type's range.
+    for_loop(*self, span: Span, id: usize, var_id: usize, lo_e: TExpr, hi_e: TExpr, inclusive: bool, step_e: Option[TExpr], body: TExpr) -> string
+        val vt = self.prog.locals[var_id].ty
+        val bits = bits_of(vt)
+        val signed = is_signed(vt)
+        val t = s"i$bits"
+        val lo = self.ex(lo_e)
+        val hi = self.ex(hi_e)
+        val zero = self.int_const("0", bits)
+        val step = step_e match
+            Some(s) -> self.ex(s)
+            None -> self.int_const("1", bits)
+
+        if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), "a `for` step of 0")
+
+        val up = if signed then self.def(s"arith.cmpi sgt, $step, $zero : $t") else self.def("arith.constant true")
+        val lt = if signed then "slt" else "ult"
+        val le = if signed then "sle" else "ule"
+        val empty_up = self.def(s"arith.cmpi ${if inclusive then lt else le}, $hi, $lo : $t")
+        val empty_down = self.def(s"arith.cmpi ${if inclusive then lt else le}, $lo, $hi : $t")
+        val empty = self.def(s"arith.select $up, $empty_up, $empty_down : i1")
+        val span_up = self.def(s"arith.subi $hi, $lo : $t")
+        val span_down = self.def(s"arith.subi $lo, $hi : $t")
+        var distance = self.def(s"arith.select $up, $span_up, $span_down : $t")
+
+        if !inclusive then distance = self.def(s"arith.subi $distance, ${self.int_const("1", bits)} : $t")
+
+        val magnitude = self.def(s"arith.select $up, $step, ${self.def(s"arith.subi $zero, $step : $t")} : $t")
+        val passes = self.def(s"arith.divui $distance, $magnitude : $t")
+        val last = self.def(s"arith.addi $lo, ${self.def(s"arith.muli $passes, $step : $t")} : $t")
+        val counter = self.alloca(t)
+        val done = self.alloca("i1")
+
+        self.op(s"llvm.store $lo, $counter : $t, !llvm.ptr")
+        self.op(s"llvm.store $empty, $done : i1, !llvm.ptr")
+        val l = self.loop_open()
+
+        self.loop_condition(l, self.not(self.def(s"llvm.load $done : !llvm.ptr -> i1")))
+
+        val k = self.def(s"llvm.load $counter : !llvm.ptr -> $t")
+
+        self.bind_local(span, var_id)
+        self.store(span, self.local_ptr(span, var_id), k, vt)
+        self.region(body)
+        self.end_pass(id)
+
+        // The pass that reached `last` is the final one; the counter never steps past it.
+        val hit = self.def(s"arith.cmpi eq, $k, $last : $t")
+        val stepped = self.def(s"arith.addi $k, $step : $t")
+
+        self.op(s"llvm.store $hit, $done : i1, !llvm.ptr")
+        self.op(s"llvm.store ${self.def(s"arith.select $hit, $k, $stepped : $t")}, $counter : $t, !llvm.ptr")
+        self.loop_close(l)
+        self.after_loop(id)
+        ""
+    end for_loop
+
+    // -- calls ------------------------------------------------------------------------------------
+
+    call_value(*self, span: Span, callee: TExpr, args: Buf[TExpr], ret: Ty) -> string
+        var vals = ""
+        var tys = ""
+        // The `inout` array arguments, which the call hands back.
+        var back: Buf[TExpr] = buf()
+
+        for a in args
+            var v = ""
+            var t = ""
+
+            *a.kind match
+                TBorrow(place) ->
+                    if is_arr(place.ty)
+                        v = self.place_value(place)
+                        t = self.ty(a.span, place.ty)
+                        back.push(place)
+                    else
+                        v = self.place_ptr(place)
+                        t = "!llvm.ptr"
+                _ ->
+                    v = self.ex(a)
+                    t = self.ty(a.span, a.ty)
+
+                    // Through a function value an array crosses as a buffer.
+                    if is_arr(a.ty) && !is_fn_ref(callee)
+                        v = self.crossing(a.span, v, a.ty)
+                        t = self.boundary_ty(a.span, a.ty)
+
+            if vals != ""
+                vals += ", "
+                tys += ", "
+
+            vals += v
+            tys += t
+
+        val r = self.ty(span, ret)
+
+        if back.len() > 0
+            *callee.kind match
+                TFnRef(name) -> return self.call_handing_back(span, s"@\"n.$name\"($vals) : ($tys)", ret, back)
+                _ -> return self.unsupported(span, "an `inout` array passed through a function value")
+
+        *callee.kind match
+            TFnRef(name) -> self.own(self.effect(s"func.call @\"n.$name\"($vals) : ($tys) -> ${result_text(r)}", r), ret)
+            _ ->
+                val c = self.ex(callee)
+                val code = self.def(s"llvm.extractvalue $c[0] : $CLOSURE")
+                val env = self.def(s"llvm.extractvalue $c[1] : $CLOSURE")
+                val all = if tys == "" then "!llvm.ptr" else s"!llvm.ptr, $tys"
+                val rb = if is_arr(ret) then self.memref_ty(span, ret) else r
+                val fty = s"($all) -> ${result_text(rb)}"
+                val f = self.def(s"builtin.unrealized_conversion_cast $code : !llvm.ptr to $fty")
+                val with_env = if vals == "" then env else s"$env, $vals"
+                val v = self.effect(s"func.call_indirect $f($with_env) : $fty", rb)
+
+                if is_arr(ret) then self.def(s"bufferization.to_tensor $v restrict : $rb to $r") else self.own(v, ret)
+    end call_value
+end Emitter
+
+private is_fn_ref(e: TExpr) -> bool = *e.kind match
+    TFnRef(_) -> true
+    _ -> false
+
+private int_name(bits: int, signed: bool) -> string = if signed then s"int$bits" else s"uint$bits"
+
+private int_predicate(op: string, signed: bool) -> string =
+    if op == "==" then "eq" elif op == "!=" then "ne"
+    elif op == "<" then (if signed then "slt" else "ult")
+    elif op == "<=" then (if signed then "sle" else "ule")
+    elif op == ">" then (if signed then "sgt" else "ugt")
+    else (if signed then "sge" else "uge")
+
+private real_predicate(op: string) -> string =
+    if op == "==" then "oeq" elif op == "!=" then "une" elif op == "<" then "olt" elif op == "<=" then "ole"
+    elif op == ">" then "ogt" else "oge"

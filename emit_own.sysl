@@ -1,0 +1,336 @@
+// Ownership of the counted values: strings built at run time, function values (through their
+// environments) and the aggregates that hold either.
+//
+// **Every place owns what it holds.** A local's slot, a captured local's cell, a module-level binding
+// and the slot a `return` stores into each hold one count on their value: a store retains the new
+// value and releases the old one (`keep`), and a function releases what its own locals hold where it
+// returns. A slot starts as zero, which retain and release ignore, so a binding never reached costs
+// nothing to release.
+//
+// **An expression's value is borrowed unless the expression made it.** Reading a place answers its
+// value without a count; a call, a concatenation, an interpolation and a lambda answer a new one, which
+// the statement owns as a temporary (`own`) and releases where it ends. A parameter is borrowed from
+// the caller for the call, and a function's result is owned by its caller. A struct, tuple or variant
+// built from parts holds no count of its own; storing it retains each part.
+//
+// **A region keeps its value past its temporaries**: the branch of an `if` or a `match` retains what
+// it yields and releases what it made, since an SSA value defined inside a region cannot be released
+// outside it; the value it yields is the enclosing statement's temporary.
+//
+// Two things are not reclaimed: a cycle through captured cells (a lambda stored into a `var` that it
+// captures itself; a local `def` that calls itself does so through its own environment and holds no
+// cycle), and what the frames a caught trap abandons held.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+struct Temp
+    v: string
+    t: Ty
+
+impl Emitter
+    // Whether a value of `t` holds a count on something.
+    managed(*self, t: Ty) -> bool = t match
+        Str -> true
+        Fn(_) -> true
+        Tuple(es) -> self.any_managed(es)
+        Nominal(name, _) ->
+            self.struct_of(name) match
+                Some(s) -> return self.any_managed_fields(s.fields)
+                None -> ()
+
+            self.enum_of(name) match
+                Some(e) ->
+                    for v in e.variants
+                        if self.any_managed_fields(v.fields) then return true
+
+                    false
+                None -> false
+        _ -> false
+
+    any_managed(*self, ts: Buf[Ty]) -> bool
+        for t in ts
+            if self.managed(t) then return true
+
+        false
+
+    any_managed_fields(*self, fields: Buf[FieldInfo]) -> bool
+        for f in fields
+            if self.managed(f.ty) then return true
+
+        false
+
+    // A new value the statement being emitted owns, released where the statement ends.
+    own(*self, v: string, t: Ty) -> string
+        if v != "" && self.managed(t) then self.temps.push(Temp(v, t))
+        v
+
+    mark(*self) -> usize = self.temps.len()
+
+    // The temporaries made since `m`, released.
+    release_from(*self, m: usize)
+        while self.temps.len() > m
+            val t = self.temps.pop().unwrap()
+
+            self.release(t.v, t.t)
+
+    // Everything the function still holds: its temporaries and its own locals.
+    release_all(*self)
+        self.release_from(0)
+
+        for id in self.owned
+            if self.boxed[id] then self.release_ref(self.def(s"llvm.load ${self.slot[id]} : !llvm.ptr -> !llvm.ptr"))
+            else self.release(self.load(Span(0, 0), self.slot[id], self.prog.locals[id].ty), self.prog.locals[id].ty)
+
+    // An expression evaluated as a region's own: its temporaries released before the region ends.
+    region(*self, e: TExpr) -> string
+        val m = self.mark()
+        val v = self.ex(e)
+
+        self.release_from(m)
+        v
+
+    // The same for a region that yields a value of `t`, which is retained for the region's user.
+    region_value(*self, e: TExpr, t: Ty) -> string
+        val m = self.mark()
+        val v = self.ex(e)
+
+        if v != "" then self.retain(v, t)
+        self.release_from(m)
+        v
+
+    // `v` stored into the place at `ptr`, which owns it: the new value retained before the old one is
+    // released, so a place stored into itself keeps its value.
+    keep(*self, span: Span, ptr: string, v: string, t: Ty)
+        if !self.managed(t)
+            self.store(span, ptr, v, t)
+            return
+
+        if self.dirty
+            self.op(s"scf.if ${self.flowing()} {")
+            self.dirty = false
+            self.keep(span, ptr, v, t)
+            self.dirty = true
+            self.op("}")
+            return
+
+        self.retain(v, t)
+
+        val old = self.load(span, ptr, t)
+
+        self.store(span, ptr, v, t)
+        self.release(old, t)
+
+    // -- counting ---------------------------------------------------------------------------------
+
+    retain(*self, v: string, t: Ty)
+        self.count(v, t, true)
+
+    release(*self, v: string, t: Ty)
+        self.count(v, t, false)
+
+    // One count on `v` taken (`up`) or given back.
+    count(*self, v: string, t: Ty, up: bool)
+        t match
+            Str -> self.count_ref(v, up)
+            Fn(_) -> self.count_ref(self.def(s"llvm.extractvalue $v[1] : $CLOSURE"), up)
+            _ ->
+                if self.managed(t)
+                    val k = self.helper_index(t)
+
+                    self.op(s"func.call @\"${if up then "dup" else "drop"}.$k\"($v) : (${self.ty(Span(0, 0), t)}) -> ()")
+
+    count_ref(*self, p: string, up: bool)
+        val name = if up then "nex_retain" else "nex_release"
+
+        self.external(name, "!llvm.ptr", "")
+        self.op(s"func.call @$name($p) : (!llvm.ptr) -> ()")
+
+    retain_ref(*self, p: string)
+        self.count_ref(p, true)
+
+    release_ref(*self, p: string)
+        self.count_ref(p, false)
+
+    // Each part of an aggregate counted, or `v` itself.
+    count_parts(*self, v: string, t: Ty, up: bool)
+        val span = Span(0, 0)
+
+        t match
+            Tuple(es) ->
+                val m = self.ty(span, t)
+
+                for k in 0..<es.len()
+                    if self.managed(es[k]) then self.count(self.field(v, m, k, es[k]), es[k], up)
+            Nominal(name, _) ->
+                val m = self.ty(span, t)
+
+                self.struct_of(name) match
+                    Some(s) ->
+                        for k in 0..<s.fields.len()
+                            if self.managed(s.fields[k].ty) then self.count(self.field(v, m, k, s.fields[k].ty), s.fields[k].ty, up)
+                        return
+                    None -> ()
+
+                val e = self.enum_of(name).unwrap()
+
+                self.op(s"scf.index_switch ${self.tag_index(v, m)}")
+
+                for tag in 0..<e.variants.len()
+                    val fields = e.variants[tag].fields
+
+                    if !self.any_managed_fields(fields) then continue
+
+                    self.op(s"case $tag {")
+
+                    val p = self.payload(v, t, fields)
+                    val pt = self.payload_ty(span, fields)
+
+                    for k in 0..<fields.len()
+                        if self.managed(fields[k].ty) then self.count(self.field(p, pt, k, fields[k].ty), fields[k].ty, up)
+
+                    self.op("scf.yield")
+                    self.op("}")
+
+                self.op("default {")
+                self.op("scf.yield")
+                self.op("}")
+            _ -> self.count(v, t, up)
+    end count_parts
+
+    // -- the counted heap -------------------------------------------------------------------------
+
+    // A new object of the counted heap, `drop` the address of what releases its payload (`""` for
+    // none).
+    new_object(*self, size: usize, drop: string) -> string
+        self.external("nex_new", "i64, !llvm.ptr", "!llvm.ptr")
+
+        val n = self.def(s"arith.constant $size : i64")
+        val d = if drop == "" then self.def("llvm.mlir.zero : !llvm.ptr") else drop
+
+        self.def(s"func.call @nex_new($n, $d) : (i64, !llvm.ptr) -> !llvm.ptr")
+
+    // An entry-block slot of MLIR type `ty` holding zero until something is stored in it.
+    zeroed_alloca(*self, ty: string) -> string
+        val p = self.alloca(ty)
+        val z = self.fresh()
+
+        self.entry.push(s"    $z = llvm.mlir.zero : $ty\n    llvm.store $z, $p : $ty, !llvm.ptr\n")
+        p
+
+    // The number of the helpers for `t`: `dup.N` and `drop.N` count an aggregate's parts, and
+    // `cell.N` releases what a cell holding a `t` holds.
+    helper_index(*self, t: Ty) -> usize
+        val name = show_ty(t)
+
+        for k in 0..<self.helpers.len()
+            if show_ty(self.helpers[k]) == name then return k
+
+        self.helpers.push(t)
+        self.helpers.len() - 1
+
+    // The address of helper `kind` for `t`.
+    helper_ref(*self, kind: string, t: Ty) -> string
+        val fty = "(!llvm.ptr) -> ()"
+        val c = self.def(s"func.constant @\"$kind.${self.helper_index(t)}\" : $fty")
+
+        self.def(s"builtin.unrealized_conversion_cast $c : $fty to !llvm.ptr")
+
+    // Every helper the module asked for; one may ask for more.
+    helper_bodies(*self)
+        val span = Span(0, 0)
+        val none = texpr(span, Void, TLiteral(VoidVal, false))
+        var k = 0
+
+        while k < self.helpers.len()
+            val t = self.helpers[k]
+            val m = self.ty(span, t)
+
+            self.begin(Void, none)
+            self.count_parts("%v", t, true)
+            self.op("func.return")
+            self.end(s"  func.func private @\"dup.$k\"(%v: $m)")
+            self.begin(Void, none)
+            self.count_parts("%v", t, false)
+            self.op("func.return")
+            self.end(s"  func.func private @\"drop.$k\"(%v: $m)")
+            self.begin(Void, none)
+            self.release(self.load(span, "%p", t), t)
+            self.op("func.return")
+            self.end(s"  func.func private @\"cell.$k\"(%p: !llvm.ptr)")
+            k += 1
+
+    // The captures lambda `id` keeps in its environment, in order: the cells it counts, then the
+    // `inout` places it borrows. A local `def` calling itself is not among them.
+    env_order(*self, id: usize) -> Buf[usize]
+        val l = self.prog.lambdas[id]
+        var out: Buf[usize] = buf()
+
+        for c in l.captures
+            if self.self_local[id] != Some(c) && !is_inout(self.prog.locals[c].kind) then out.push(c)
+
+        for c in l.captures
+            if is_inout(self.prog.locals[c].kind) then out.push(c)
+
+        out
+
+    // The address of module-level binding `name`, its storage declared.
+    global_storage(*self, span: Span, name: string, t: Ty) -> string
+        val m = self.mem_ty(span, t)
+
+        self.declare(s"g.$name", s"llvm.mlir.global internal @\"g.$name\"() {addr_space = 0 : i32} : $m {\n    %z = llvm.mlir.zero : $m\n    llvm.return %z : $m\n  }")
+        self.def(s"llvm.mlir.addressof @\"g.$name\" : !llvm.ptr")
+end Emitter
+
+// By lambda: the local `def` bound to it that it captures, where no other lambda captures that local.
+self_locals(p: TProgram) -> Buf[Option[usize]]
+    var out: Buf[Option[usize]] = buf()
+    var ids: Buf[usize] = buf()
+    var lids: Buf[usize] = buf()
+
+    for _ in p.lambdas
+        out.push(None)
+
+    for d in p.decls
+        d match
+            FunDecl(f) -> lambda_lets(f.body, &ids, &lids)
+            GlobalDecl(g) -> lambda_lets(g.init, &ids, &lids)
+            TupleGlobalDecl(g) -> lambda_lets(g.init, &ids, &lids)
+            _ -> ()
+
+    for l in p.lambdas
+        lambda_lets(l.body, &ids, &lids)
+
+    for k in 0..<ids.len()
+        val id = ids[k]
+        var alone = captures(p.lambdas[lids[k]], id)
+
+        for j in 0..<p.lambdas.len()
+            if j != lids[k] && captures(p.lambdas[j], id) then alone = false
+
+        // A `var` may be given another function, which the body must then see.
+        p.locals[id].kind match
+            LVal -> if alone then out.set(lids[k], Some(id))
+            _ -> ()
+
+    out
+
+private captures(l: TLambda, id: usize) -> bool
+    for c in l.captures
+        if c == id then return true
+
+    false
+
+// Each `val` in `e` bound to a lambda: the local, and the lambda.
+private lambda_lets(e: TExpr, ids: *Buf[usize], lids: *Buf[usize])
+    *e.kind match
+        TLet(id, init) ->
+            *init.kind match
+                TLambdaRef(lid) ->
+                    ids.push(id)
+                    lids.push(lid)
+                _ -> ()
+        _ -> ()
+
+    for c in children(e)
+        lambda_lets(c, ids, lids)

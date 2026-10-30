@@ -26,7 +26,7 @@ private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "
 
 // The prelude's array functions (DESIGN §4.2, §4.3, §7.4), which come with arrays, and the
 // assertions over arrays and lambdas.
-private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "assert_approx", "assert_traps"]
+private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "flatten", "transpose", "shape", "rows", "cols", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "to_integers", "to_bytes", "assert_approx", "assert_traps"]
 
 private among(name: string, set: []const string) -> bool
     for s in set
@@ -50,6 +50,10 @@ impl Elab
                             None -> return self.call_value(span, self.local_ref(callee.span, id, None), args)
                     None -> ()
 
+                self.find_generic_fun(n) match
+                    Some(g) -> return self.generic_call(span, callee.span, n, g, args)
+                    None -> ()
+
                 self.find_top(n) match
                     Some(TopFun(k)) -> return self.call_fun(span, callee.span, k, args)
                     Some(TopValue(_)) -> return self.call_value(span, self.name(callee.span, n, None), args)
@@ -62,12 +66,16 @@ impl Elab
                     self.fail(callee.span, "`to` names the unit it converts to: `to<mm>(x)`")
                     return self.invalid(span)
 
+                self.construct(span, callee.span, n, args, want) match
+                    Some(v) -> return v
+                    None -> ()
+
                 scalar_named(n) match
                     Some(t) -> return self.conversion(span, n, t, args)
                     None -> ()
 
                 if is_builtin(n) then return self.builtin(span, n, args, want)
-                if is_array_builtin(n) then return self.not_yet(span, s"the array function `${n}`")
+                if is_array_builtin(n) then return self.array_builtin(span, n, args, want)
 
                 self.unknown_name(callee.span, n)
                 self.invalid(span)
@@ -99,36 +107,29 @@ impl Elab
             _ -> self.call_value(span, self.infer(callee), args)
     end call
 
-    // `x.f(args)` is `f(x, args)`.
+    // `x.f(args)` calls the field `f` where `x` is a struct with a field of that name, and is
+    // `f(x, args)` otherwise.
     method_call(*self, span: Span, receiver: Expr, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        if self.has_field(receiver, name) then return self.call_value(span, self.field(receiver.span, receiver, name), args)
+
         var all: Buf[Expr] = buf()
 
         all.push(receiver)
         all.extend(args.view())
         self.call(span, Expr(span, ExprKind.Name(name)), all, want)
 
-    // `z.re` and `z.im`; the fields of structs and tuples come with them.
-    field(*self, span: Span, receiver: Expr, name: string) -> TExpr
-        val v = self.infer(receiver)
-
-        base_of(v.ty) match
-            Complex(b) ->
-                // The parts of a `complex<V>` are each a `real<V>`.
-                if name == "re" || name == "im" then return texpr(span, measured(Real(b), unit_of(v.ty)), TComplexPart(v, name == "im"))
-
-                self.fail(span, s"a complex number has the fields `re` and `im`, not `${name}`")
-                self.invalid(span)
-            Error -> self.invalid(span)
-            _ -> self.not_yet(span, "a field")
-    end field
+    // `z.re` and `z.im`, or a struct's field.
+    field(*self, span: Span, receiver: Expr, name: string) -> TExpr = self.select_field(span, self.infer(receiver), name)
 
     // An argument passed to an `inout` parameter: a variable the callee borrows, exactly of the
     // parameter's type, since a borrow cannot convert (DESIGN §8).
-    borrow(*self, arg: Expr, ty: Ty) -> TExpr
+    borrow(*self, arg: Expr, ty: Ty, named: string) -> TExpr
         *arg.kind match
             Name(_) -> ()
-            Index(_, _) -> return self.not_yet(arg.span, "an element or a slice passed `inout`")
-            Field(_, _) -> return self.not_yet(arg.span, "a field passed `inout`")
+            Field(_, _) -> ()
+            TupleField(_, _) -> ()
+            // An element, or a slice borrowed as the window it names and written in place.
+            Index(_, _) -> ()
             _ ->
                 self.fail(arg.span, "an `inout` argument is a variable the callee can write to")
                 return self.invalid(arg.span)
@@ -136,14 +137,18 @@ impl Elab
         val p = self.place(arg)
 
         if !ty_eq(p.ty, ty) && !is_wild(p.ty) && !is_error(ty)
-            self.fail(arg.span, s"an `inout` argument must be exactly ${show_ty(ty)}, since it is borrowed and not converted; this is ${show_ty(p.ty)}")
+            self.fail(arg.span, s"an `inout` argument must be exactly ${if named.len > 0 then named else show_ty(ty)}, since it is borrowed and not converted; this is ${self.shown(p)}")
 
         texpr(arg.span, ty, TBorrow(p))
     end borrow
 
-    // One argument against its parameter's type and mode.
-    argument(*self, arg: Expr, ty: Ty, mode: Mode, name: string) -> TExpr =
-        if mode == Inout then self.borrow(arg, ty) else self.check(arg, ty, name)
+    // One argument against its parameter's type and mode; `named` is that type as the parameter
+    // wrote it, or `""`.
+    argument(*self, arg: Expr, ty: Ty, named: string, mode: Mode, name: string) -> TExpr
+        if mode == Inout then return self.borrow(arg, ty, named)
+
+        self.pass_lambda(arg)
+        self.coerce_named(self.elab(arg, Some(ty)), ty, named, name)
 
     // A call of a function value, with positional arguments only.
     call_value(*self, span: Span, f: TExpr, args: Buf[Expr]) -> TExpr
@@ -151,7 +156,7 @@ impl Elab
             Fn(sig) -> *sig
             Error -> return self.invalid(span)
             _ ->
-                self.fail(f.span, s"this is ${show_ty(f.ty)} and cannot be called")
+                self.fail(f.span, s"this is ${self.shown(f)} and cannot be called")
                 return self.invalid(span)
 
         if args.len() != sig.params.len()
@@ -165,7 +170,7 @@ impl Elab
                 NamedArg(n, _) ->
                     self.fail(args[k].span, s"a function value has no parameter names, so `${n} = ...` cannot be passed; pass it by position")
                     out.push(self.invalid(args[k].span))
-                _ -> out.push(self.argument(args[k], sig.params[k], sig.modes[k], s"argument ${k + 1}"))
+                _ -> out.push(self.argument(args[k], sig.params[k], "", sig.modes[k], s"argument ${k + 1}"))
 
         texpr(span, sig.ret, TCall(f, out))
     end call_value
@@ -243,8 +248,9 @@ impl Elab
             slots[j] match
                 Some(a) ->
                     val what = s"argument `${sig.names[j]}`"
+                    val named = self.spelled[sig.params[j]]
 
-                    out.push(if generic then self.unit_argument(&bound, a, sig.tys[j], sig.modes[j], what) else self.argument(a, sig.tys[j], sig.modes[j], what))
+                    out.push(if generic then self.unit_argument(&bound, a, sig.tys[j], named, sig.modes[j], what) else self.fun_argument(k, a, sig.tys[j], named, sig.modes[j], what))
                 None ->
                     sig.defaults[j] match
                         Some(d) -> out.push(d)
@@ -257,6 +263,8 @@ impl Elab
             Fn(s) -> subst_ty(s.ret, bound)
             _ -> Error
 
+        if self.is_elemental(k) && any_array(out) then return self.elemental_call(span, texpr(at, ty, TFnRef(name)), out, ret)
+
         texpr(span, ret, TCall(texpr(at, ty, TFnRef(name)), out))
     end call_fun
 
@@ -268,12 +276,7 @@ impl Elab
             self.fail(span, s"`${name}` is a type, not a conversion; only the numeric types convert")
             return self.invalid(span)
 
-        if is_complex(target) && args.len() == 2
-            val part = Real(bits_of(target))
-            val re = self.check(args[0], part, "the real part")
-            val im = self.check(args[1], part, "the imaginary part")
-
-            return texpr(span, target, TMakeComplex(re, im))
+        if is_complex(target) && args.len() == 2 then return self.make_complex(span, target, args[0], args[1])
 
         if args.len() != 1
             self.fail(span, s"`${name}(...)` converts one value")
@@ -284,6 +287,7 @@ impl Elab
         val from = v.ty
 
         if is_error(from) then return self.invalid(span)
+        if is_array(from) then return self.elemental_conversion(span, name, target, v)
         if has_unit(from) then return self.measured_conversion(span, name, target, v)
         if ty_eq(from, target) then return v
         if promotes(from, target) then return texpr(span, target, TPromote(v))
@@ -292,11 +296,11 @@ impl Elab
             self.fail(args[0].span, s"`${name}(...)` converts a number, and this is ${show_ty(from)}")
             return self.invalid(span)
 
-        if is_complex(from)
+        if is_complex(from) && !is_complex(target)
             self.fail(args[0].span, s"a complex number does not convert to ${show_ty(target)}: take `.re` (or `abs`, `arg`) first")
             return self.invalid(span)
 
-        // A narrower integer, a change of signedness, or a real to an integer can be out of range.
+        // A narrower complex rounds each part, as a narrower real does, and never traps. A narrower integer, a change of signedness, or a real to an integer can be out of range.
         texpr(span, target, TConvert(v, is_int(target)))
     end conversion
 
@@ -315,8 +319,8 @@ impl Elab
                 val v = self.infer(a)
 
                 shared = shared match
-                    Some(t) -> self.common_of(span, what, t, v.ty)
-                    None -> Some(v.ty)
+                    Some(t) -> self.common_of(span, what, t, elem_of(v.ty))
+                    None -> Some(elem_of(v.ty))
                 vals.push(Some(v))
 
         var out: Buf[TExpr] = buf()
@@ -331,18 +335,21 @@ impl Elab
                         Some(t) -> Some(adoption(class, t).unwrap_or(default_of(class)))
                         None -> None))
 
-        var ty = out[0].ty
+        // An array argument meets the others by its element type, and is widened element by element.
+        var ty = elem_of(out[0].ty)
 
         for k in 1..<out.len()
-            ty = common(ty, out[k].ty) match
+            val ety = elem_of(out[k].ty)
+
+            ty = common(ty, ety) match
                 Some(t) -> t
                 None ->
                     // A literal of no unit beside one that has a unit, which the pass above did not meet.
-                    if (has_unit(ty) || has_unit(out[k].ty)) && !is_error(ty) && self.diags.len() == reported then self.unit_mismatch(span, what, out[0], out[k])
+                    if (has_unit(ty) || has_unit(ety)) && !is_error(ty) && self.diags.len() == reported then self.unit_mismatch(span, what, out[0], out[k])
                     Error
 
         for k in 0..<out.len()
-            out.set(k, promote(out[k], ty))
+            out.set(k, promote(out[k], with_elem(out[k].ty, ty)))
 
         out
     end unified
@@ -379,21 +386,26 @@ impl Elab
             if args.len() < 2 then return self.arity(span, name, "two or more values")
 
             val out = self.unified(span, name, args)
+            val ty = elem_of(out[0].ty)
 
-            if !is_ordered(base_of(out[0].ty)) && !is_error(out[0].ty) then self.fail(span, s"`${name}` compares integers and reals; these are ${show_ty(out[0].ty)}")
+            if !is_ordered(base_of(ty)) && !is_error(ty) then self.fail(span, s"`${name}` compares integers and reals; these are ${show_ty(ty)}")
+            if any_array(out) then return self.elemental(span, name, out, ty)
 
-            return texpr(span, out[0].ty, TBuiltin(name, out))
+            return texpr(span, ty, TBuiltin(name, out))
 
         if name == "atan2" || name == "hypot"
             if args.len() != 2 then return self.arity(span, name, "two values")
 
             var out = self.unified(span, name, args)
-            val ty = if is_int(out[0].ty) then REAL else out[0].ty
+            val ety = elem_of(out[0].ty)
+            val ty = if is_int(ety) then REAL else ety
 
             if !is_real(base_of(ty)) && !is_error(ty) then self.fail(span, s"`${name}` takes reals; these are ${show_ty(ty)}")
 
             for k in 0..<out.len()
-                out.set(k, promote(out[k], ty))
+                out.set(k, promote(out[k], with_elem(out[k].ty, ty)))
+
+            if any_array(out) then return self.elemental(span, name, out, ty)
 
             // `atan2` gives an angle, dimensionless whatever its arguments' one unit (DESIGN §13.4).
             return texpr(span, if name == "atan2" then base_of(ty) else ty, TBuiltin(name, out))
@@ -407,6 +419,13 @@ impl Elab
 
         if is_error(v.ty) then return texpr(span, Error, TBuiltin(name, out))
         if has_unit(v.ty) then return self.measured_builtin(span, name, v)
+
+        if is_array(v.ty)
+            val r = self.scalar_result(span, name, elem_of(v.ty))
+
+            if is_real(r) && is_int(elem_of(v.ty)) then out.set(0, promote(v, with_elem(v.ty, REAL)))
+
+            return self.elemental(span, name, out, r)
 
         val result = self.scalar_result(span, name, v.ty)
 

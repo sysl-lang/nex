@@ -30,18 +30,45 @@ private var catch_env: [JMP_BUF_WORDS]u64 = [0; JMP_BUF_WORDS]
 private var depth = 0
 private var last_message = ""
 
-private trap(message: string) -> never
+trap_with(message: string) -> never
+    note_trap(message)
+    raise_trap()
+
+// A trap's message, kept for the catch; with nothing catching, written out, and the program ends.
+// A message built from values is noted here, in a call that returns, so that no frame holds it across
+// the `longjmp` of `raise_trap`.
+note_trap(message: string)
     if depth == 0 then
         flush()
         eprints(s"trap: $message\n")
         abort()
 
     last_message = message
+
+raise_trap() -> never
     longjmp(&catch_env[0], 1)
+
+// The one entry generated code traps through, with the message the compiler wrote for the check
+// that failed.
+@export("nex_trap")
+trap(message: *u8) -> never
+    note_trap(c_text(message))
+    raise_trap()
 
 @export("nex_trap_complex_div_zero")
 trap_complex_div_zero() -> never
-    trap("complex division by zero")
+    trap_with("complex division by zero")
+
+// `stop n`: what was printed is written out, and the program ends with status `n`.
+@export("nex_stop")
+stop(code: int) -> never
+    flush()
+    exit(code)
+
+// The end of `main`: what was printed is written out.
+@export("nex_finish")
+finish()
+    flush()
 
 // Run `body`, answering true if it trapped and false if it returned. What it printed before the trap
 // stays printed; the trap's message is not written, and `nex_last_trap_message` answers it.
@@ -58,6 +85,29 @@ catch_trap(body: *extern() -> unit) -> bool
     depth -= 1
     catch_env = saved
     trapped
+
+// The same for a nex function value of no parameters: its code, called with its environment.
+private catch_closure(code: *extern(*u8) -> unit, env: *u8) -> bool
+    val saved = catch_env
+
+    depth += 1
+
+    val trapped = setjmp(&catch_env[0]) != 0
+
+    if !trapped then code(env)
+
+    depth -= 1
+    catch_env = saved
+    trapped
+
+// `assert_traps(f)` and `assert_traps(f, text)`: `f` must trap, with a message containing `text`
+// where one is given (`expected` is null where it is not); otherwise the assertion traps.
+@export("nex_assert_traps")
+assert_traps(code: *extern(*u8) -> unit, env: *u8, expected: *u8)
+    if !catch_closure(code, env) then trap_with("assert_traps: the function did not trap")
+    if !(expected == null || mentions(expected)) then trap_with("assert_traps: expected substring not present in trap")
+
+private mentions(expected: *u8) -> bool = last_message.contains(c_text(expected))
 
 // The message of the last trap a catch caught, written to standard output on a line of its own.
 @export("nex_print_last_trap")

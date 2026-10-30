@@ -1,0 +1,256 @@
+@tests
+
+// Structs, tuples, enums and `match`, and what a lambda may capture: the typed IR the elaborator
+// builds for them and the diagnostics it gives.
+
+private val MAIN = "def main() = ()\n"
+
+private val POINT = "struct Point\n  x: real\n  y: real\n"
+
+private val SHAPE = "enum Shape =\n  Circle(r: real)\n  Rect(w: real, h: real)\n  Empty\n"
+
+// -- structs ----------------------------------------------------------------------------------------
+
+@test("a struct is built from its fields in order or by name, each checked against its field")
+elab_struct_construction()
+    assert_eq(elaborated(POINT + "def main() =\n  val n = 2\n  val p = Point(1, n)\n  val q = Point(y = 2.5, x = 1.0)\n  print(p.x + q.y)\n"),
+        "(struct Point (x real64) (y real64))\n(def main () void (block (val n#0:int64 2) (val p#1:Point (new:Point (adopt:real64 1) (promote:real64 n#0))) (val q#2:Point (new:Point 1.0 2.5)) (print (+:real64 (.x:real64 p#1) (.y:real64 q#2)))))")
+    assert_eq(refused(POINT + "def main() =\n  val q = Point(1.0)\n"), "error: `Point` needs its field `y` @5:11")
+    assert_eq(refused(POINT + "def main() =\n  val r = Point(1.0, 2.0, 3.0)\n"), "error: `Point` has 2 fields @5:27")
+    assert_eq(refused(POINT + "def main() =\n  val s = Point(x = 1.0, z = 2.0, y = 1.0)\n"), "error: `Point` has no field `z` @5:26")
+    assert_eq(refused(POINT + "def main() =\n  val s = Point(x = 1.0, x = 2.0, y = 1.0)\n"), "error: `x` is given twice @5:26")
+    assert_eq(refused(POINT + "def main() =\n  val u = Point(x = 1.0, 2.0)\n"), "error: a positional argument cannot follow a named one @5:26\nerror: `Point` needs its field `y` @5:11")
+    assert_eq(refused(POINT + "def main() =\n  val w = Point(true, 2.0)\n"), "error: the field `x` must be real64, but this is bool @5:17")
+    assert_eq(refused(POINT + "def main() = print(Point)\n"), "error: `Point` is a struct; build one with `Point(...)` @4:20")
+
+@test("a struct may name one declared after it, and a field write reaches through nested fields")
+elab_struct_nested_fields()
+    assert_eq(elaborated("def main() =\n  var o = Outer(Inner(1), 2)\n  o.i.v += 1\n  o.k = 3\nstruct Outer\n  i: Inner\n  k: integer\nstruct Inner\n  v: integer\n"),
+        "(struct Outer (i Inner) (k int64))\n(struct Inner (v int64))\n(def main () void (block (var o#0:Outer (new:Outer (new:Inner 1) 2)) (+= (.v:int64 (.i:Inner o#0)) 1) (= (.k:int64 o#0) 3)))")
+
+@test("a field is written only through a var or an inout parameter, and passed inout like one")
+elab_struct_field_places()
+    assert_eq(elaborated("struct P\n  x: real\ndef bump(v: inout real) = v += 1.0\ndef set(p: inout P) = p.x = 2.0\ndef main() =\n  var p = P(1.0)\n  bump(p.x)\n  set(p)\n"),
+        "(struct P (x real64))\n(def bump ((v#0 inout real64)) void (+= v#0 1.0))\n(def set ((p#1 inout P)) void (= (.x:real64 p#1) 2.0))\n(def main () void (block (var p#2:P (new:P 1.0)) (call bump (inout (.x:real64 p#2))) (call set (inout p#2))))")
+    assert_eq(elaborated("def bump(v: inout real) = v += 1.0\ndef main() =\n  var t = 1.0, 2\n  bump(t.1)\n  var z = 1.0 + 2.0i\n  z.re = 3.0\n"),
+        "(def bump ((v#0 inout real64)) void (+= v#0 1.0))\n(def main () void (block (var t#1:(real64, int64) (tuple:(real64, int64) 1.0 2)) (call bump (inout (.1:real64 t#1))) (var z#2:complex[real64] (+:complex[real64] (adopt:complex[real64] 1.0) (*:complex[real64] (adopt:complex[real64] 2.0) i))) (= (.re:real64 z#2) 3.0)))")
+    assert_eq(refused("def main() =\n  val z = 1.0 + 2.0i\n  z.im = 3.0\n"), "error: `z` cannot be assigned: it is a `val` @3:3")
+    assert_eq(refused("struct P\n  x: real\ndef f(p: P) = p.x = 2.0\n" + MAIN), "error: `p` cannot be assigned: a parameter is read-only unless it is `inout` @3:15")
+    assert_eq(refused("struct P\n  x: real\ndef main() =\n  val p = P(1.0)\n  p.x = 3.0\n"), "error: `p` cannot be assigned: it is a `val` @5:3")
+    assert_eq(refused("struct P\n  x: real\ndef bump(v: inout real) = v += 1.0\ndef main() =\n  val p = P(1.0)\n  bump(p.x)\n"), "error: `p` cannot be assigned: it is a `val` @6:8")
+    assert_eq(refused("struct P\n  x: real\ndef main() = P(2.0).x = 1.0\n"), "error: only a variable, an element or a field can be assigned @3:14")
+    assert_eq(refused("struct P\n  x: integer\ndef main() =\n  var p = P(1)\n  p.x /= 2\n"), "error: `/=` computes real64, which `p.x` (int64) cannot hold without narrowing; `div` divides integers @5:3")
+
+@test("a field is looked up by name, and what has no such field is explained")
+elab_struct_field_errors()
+    assert_eq(refused(POINT + "def main() =\n  val p = Point(1.0, 2.0)\n  print(p.yy)\n"), "error: `Point` has no field `yy`; did you mean `y`? @6:9")
+    assert_eq(refused("def main() =\n  val n = 3\n  print(n.x)\n"), "error: int64 has no fields @3:9")
+    assert_eq(refused("def main() =\n  val t = 1, 2\n  print(t.x)\n"), "error: a tuple's elements are numbered from 1, `t.1`, and have no names @3:9")
+    assert_eq(refused(SHAPE + "def main() = print(Empty.r)\n"), "error: an enum's values are taken apart with `match`; `Shape` has no fields @5:20")
+
+@test("x.f(args) calls a struct's function field, and is f(x, args) otherwise")
+elab_struct_function_field()
+    assert_eq(elaborated("struct Op\n  f: (real) -> real\ndef main() =\n  val op = Op(x -> x * 2.0)\n  print(op.f(3.0))\n"),
+        "(struct Op (f (real64) -> real64))\n(def main () void (block (val op#1:Op (new:Op (lambda 0))) (print (call:real64 (.f:(real64) -> real64 op#1) 3.0))))\n(lambda 0 _ ((x#0 real64)) real64 (captures) (*:real64 x#0 2.0))")
+    assert_eq(elaborated(POINT + "def norm(p: Point) = p.x\ndef main() = print(Point(1.0, 2.0).norm())\n"),
+        "(struct Point (x real64) (y real64))\n(def norm ((p#0 Point)) real64 (.x:real64 p#0))\n(def main () void (print (call:real64 norm (new:Point 1.0 2.0))))")
+
+@test("a struct's fields are each declared once, hold a value, and never hold the struct itself")
+elab_struct_declaration_errors()
+    assert_eq(refused("struct P\n  x: real\n  x: integer\n" + MAIN), "error: `x` is declared twice in `P` @1:1")
+    assert_eq(refused("struct P\n  v: void\n" + MAIN), "error: the field `v` holds no value: it is void @2:6")
+    assert_eq(refused("struct N\n  next: N\n" + MAIN), "error: `N` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1")
+    assert_eq(refused("struct A\n  b: (integer, B)\nstruct B\n  a: A\n" + MAIN),
+        "error: `A` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1\nerror: `B` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @3:1")
+    assert_eq(refused("enum L =\n  Cons(head: real, tail: L)\n  Nil\n" + MAIN), "error: `L` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1")
+    assert_eq(refused("struct T\n  kids: [T]\n" + MAIN), "ok")
+    assert_eq(refused("struct P\n  x: real\ndef P() = 1\n" + MAIN), "error: redeclaration of `P` @3:1")
+
+// -- tuples -----------------------------------------------------------------------------------------
+
+@test("a tuple is built with or without parentheses, and its elements count from 1")
+elab_tuples()
+    assert_eq(elaborated("def main() =\n  val t: (real, real) = 1, 2\n  val n = 3\n  val u: (real, integer) = (n, 4)\n  print(t.1 + t.2 + u.1)\n"),
+        "(def main () void (block (val t#0:(real64, real64) (tuple:(real64, real64) (adopt:real64 1) (adopt:real64 2))) (val n#1:int64 3) (val u#2:(real64, int64) (tuple:(real64, int64) (promote:real64 n#1) 4)) (print (+:real64 (+:real64 (.1:real64 t#0) (.2:real64 t#0)) (.1:real64 u#2)))))")
+    assert_eq(elaborated("def split(x: integer) =\n  val y = x * 2\n  y, -y\ndef main() = print(split(3))\n"),
+        "(def split ((x#0 int64)) (int64, int64) (block:(int64, int64) (val y#1:int64 (*:int64 x#0 2)) (tuple:(int64, int64) y#1 (-:int64 y#1))))\n(def main () void (print (call:(int64, int64) split 3)))")
+    assert_eq(elaborated("def main() =\n  var t = 1.0, 2\n  t.2 = 5\n  t = 3.0, 4\n"),
+        "(def main () void (block (var t#0:(real64, int64) (tuple:(real64, int64) 1.0 2)) (= (.2:int64 t#0) 5) (= t#0 (tuple:(real64, int64) 3.0 4))))")
+
+@test("a tuple element is numbered from 1 up to its length, and a tuple value does not widen whole")
+elab_tuple_errors()
+    assert_eq(refused("def main() =\n  val t = 1, 2\n  print(t.0)\n"), "error: a tuple's elements count from 1: `t.1` is the first @3:9")
+    assert_eq(refused("def main() =\n  val t = 1, 2\n  print(t.3)\n"), "error: this tuple has 2 elements, so there is no `.3` @3:9")
+    assert_eq(refused("def main() =\n  val n = 1\n  print(n.1)\n"), "error: `.1` takes an element of a tuple, and this is int64 @3:9")
+    assert_eq(refused("def main() =\n  val w: (integer, integer) = (1.5, 2)\n"), "error: element 1 of this tuple must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @2:32")
+    assert_eq(refused("def main() =\n  val v = ((), 1)\n"), "error: a tuple element holds a value, and this is void @2:12")
+    assert_eq(refused("def main() =\n  val t = 1, 2\n  val u: (real, real) = t\n"), "error: `u` must be (real, real), but this is (int64, int64) @3:25")
+
+@test("a destructuring binding takes a tuple apart into locals, skipping `_`")
+elab_destructuring()
+    assert_eq(elaborated("def main() =\n  val a, _, c = 1, (2.5, \"x\"), true\n  var p, q = 1, 2\n  p += q\n  val (m, n): (real, integer) = 1, 2\n"),
+        "(def main () void (block (val (a#0:int64 _ c#1:bool) (tuple:(int64, (real64, string), bool) 1 (tuple:(real64, string) 2.5 \"x\") true)) (var (p#2:int64 q#3:int64) (tuple:(int64, int64) 1 2)) (+= p#2 q#3) (val (m#4:real64 n#5:int64) (tuple:(real64, int64) (adopt:real64 1) 2)) ()))")
+    assert_eq(elaborated("def main() =\n  val pair = (10, 20)\n  val x, y = pair\n  print(x - y)\n"),
+        "(def main () void (block (val pair#0:(int64, int64) (tuple:(int64, int64) 10 20)) (val (x#1:int64 y#2:int64) pair#0) (print (-:int64 x#1 y#2))))")
+
+@test("a destructuring pattern matches its tuple's length, and binds each name once")
+elab_destructuring_errors()
+    assert_eq(refused("def main() =\n  val a, b = 1, 2, 3\n"), "error: this pattern takes 2 elements apart, and the value has 3: (int64, int64, int64) @2:7")
+    assert_eq(refused("def main() =\n  val c, d = 5\n"), "error: a destructuring pattern takes a tuple apart, and this is int64 @2:7")
+    assert_eq(refused("def main() =\n  val e, e = 1, 2\n"), "error: redeclaration of `e` @2:10")
+    assert_eq(refused("def main() =\n  val h, k = print(1)\n"), "error: this binding would hold nothing: this is void @2:14")
+    assert_eq(refused("def main() =\n  val m, n = 1, 2\n  m = 3\n"), "error: `m` cannot be assigned: it is a `val` @3:3")
+
+@test("a destructuring pattern nests, inside a body and at the top level")
+elab_nested_destructuring()
+    assert_eq(elaborated("def main() =\n  val a, (b, c) = 1, (2.5, true)\n  var (d, (_, e)), f = (1, (2, 3)), 4\n  print(a + d + e + f)\n"),
+        "(def main () void (block (val (a#0:int64 (b#1:real64 c#2:bool)) (tuple:(int64, (real64, bool)) 1 (tuple:(real64, bool) 2.5 true))) (var ((d#3:int64 (_ e#4:int64)) f#5:int64) (tuple:((int64, (int64, int64)), int64) (tuple:(int64, (int64, int64)) 1 (tuple:(int64, int64) 2 3)) 4)) (print (+:int64 (+:int64 (+:int64 a#0 d#3) e#4) f#5))))")
+    assert_eq(elaborated("val g, (h, k) = 1, (2, 3.5)\ndef main() = print(g + h + k)\n"),
+        "(val (g (h k)) (int64, (int64, real64)) (tuple:(int64, (int64, real64)) 1 (tuple:(int64, real64) 2 3.5)))\n(def main () void (print (+:real64 (promote:real64 (+:int64 g h)) k)))")
+    assert_eq(refused("def main() =\n  val a, (b, c) = 1, 2\n"), "error: a destructuring pattern takes a tuple apart, and this is int64 @2:10")
+    assert_eq(refused("def main() =\n  val a, (b, c) = 1, (2, 3, 4)\n"), "error: this pattern takes 2 elements apart, and the value has 3: (int64, int64, int64) @2:10")
+    assert_eq(refused("def main() =\n  val a, (b, a) = 1, (2, 3)\n"), "error: redeclaration of `a` @2:14")
+
+@test("a binding names no variant, which only `match` may test for")
+elab_variant_binding()
+    val one = "enum Wrap =\n  Wrapped(v: real)\n"
+
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  val Circle(r) = s\n" + MAIN), "error: a binding cannot test which variant a value is; take `Circle` apart with `match` @6:7")
+    assert_eq(refused(one + "def f(w: Wrap) =\n  val Wrapped(v) = w\n" + MAIN), "error: a binding cannot test which variant a value is; take `Wrapped` apart with `match` @4:7")
+    assert_eq(refused(SHAPE + "val Circle(r) = Circle(1.0)\n" + MAIN), "error: a binding cannot test which variant a value is; take `Circle` apart with `match` @5:5")
+    assert_eq(refused(one + "def f(w: Wrap) =\n  w match\n    Wrapped(v) -> v\n" + MAIN), "ok")
+
+@test("a match arm's pattern is no tuple, at the top or inside a variant")
+elab_match_tuple_arms()
+    val pair = "enum Pair =\n  Two(p: (real, real))\n"
+
+    val arm = "a `match` arm's pattern is a variant, a name or `_`; a tuple is taken apart by `val a, b = …`"
+
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    (a, b) -> 1\n    _ -> 2\n" + MAIN), s"error: ${arm} @7:5")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    a, _ -> 1\n" + MAIN), s"error: ${arm} @7:5")
+    assert_eq(refused(pair + "def f(t: Pair) =\n  t match\n    Two((x, y)) -> 1.0\n" + MAIN), "error: a variant's field is matched by a name or `_`; take it apart inside the arm @5:9")
+    assert_eq(elaborated(pair + "def f(t: Pair) =\n  t match\n    Two(q) ->\n      val x, y = q\n      x + y\n" + MAIN),
+        "(enum Pair (Two (p (real64, real64))))\n(def f ((t#0 Pair)) real64 (match:real64 t#0 ((Two q#1) (block:real64 (val (x#2:real64 y#3:real64) q#1) (+:real64 x#2 y#3)))))\n(def main () void ())")
+    assert_eq(refused("def main() =\n  val t = 1, 2\n  t match\n    (a, b) -> a\n"), s"error: `match` takes an enum value apart, and this is (int64, int64) @3:3\nerror: ${arm} @4:5")
+
+@test("a tuple assignment evaluates its right side whole, then stores each element left to right")
+elab_tuple_assignment()
+    assert_eq(elaborated("def main() =\n  var a = 1\n  var b = 2\n  a, b = b, a\n  print(a - b)\n"),
+        "(def main () void (block (var a#0:int64 1) (var b#1:int64 2) (= (a#0 b#1) (tuple:(int64, int64) b#1 a#0)) (print (-:int64 a#0 b#1))))")
+    assert_eq(elaborated("def main() =\n  var x = 1.0\n  var n = 2\n  x, n = n, 3\n  x, (n, _) = 1, (4, \"s\")\n"),
+        "(def main () void (block (var x#0:real64 1.0) (var n#1:int64 2) (= (x#0 n#1) (tuple:(real64, int64) (promote:real64 n#1) 3)) (= (x#0 (n#1 _)) (tuple:(real64, (int64, string)) (adopt:real64 1) (tuple:(int64, string) 4 \"s\")))))")
+    assert_eq(elaborated("var g = 0\ndef main() =\n  var a = 0\n  val t = 1, 2\n  a, g = t\n  _, a = t\n"),
+        "(var g int64 0)\n(def main () void (block (var a#0:int64 0) (val t#1:(int64, int64) (tuple:(int64, int64) 1 2)) (= (a#0 g) t#1) (= (_ a#0) t#1)))")
+    assert_eq(elaborated(POINT + "def main() =\n  var p = Point(1, 2)\n  p.x, p.y = p.y, p.x\n"),
+        "(struct Point (x real64) (y real64))\n(def main () void (block (var p#0:Point (new:Point (adopt:real64 1) (adopt:real64 2))) (= ((.x:real64 p#0) (.y:real64 p#0)) (tuple:(real64, real64) (.y:real64 p#0) (.x:real64 p#0)))))")
+    assert_eq(elaborated("def swap(a: inout real, b: inout real) = a, b = b, a\n" + MAIN),
+        "(def swap ((a#0 inout real64) (b#1 inout real64)) void (= (a#0 b#1) (tuple:(real64, real64) b#1 a#0)))\n(def main () void ())")
+    assert_eq(elaborated("def main() =\n  var a = 0\n  var b = 0\n  val f = () ->\n    a, b = b, a\n  f()\n"),
+        "(def main () void (block (var a#0:int64 0) (var b#1:int64 0) (val f#2:() -> void (lambda 0)) (call f#2)))\n(lambda 0 _ () void (captures a#0 b#1) (= (a#0 b#1) (tuple:(int64, int64) b#1 a#0)))")
+
+@test("a tuple assignment stores into places, each once, of the types the tuple holds")
+elab_tuple_assignment_errors()
+    val twice = "this place is already a target of this assignment; the first store to it would be lost"
+
+    assert_eq(refused("def main() =\n  val a = 1\n  var b = 2\n  a, b = 3, 4\n"), "error: `a` cannot be assigned: it is a `val` @4:3")
+    assert_eq(refused("def main() =\n  var a = 1\n  a, a = 1, 2\n"), s"error: ${twice} @3:6")
+    assert_eq(refused(POINT + "def main() =\n  var p = Point(1, 2)\n  p.x, (p.x, _) = 1, (2, 3)\n"), s"error: ${twice} @6:9")
+    assert_eq(refused("def main() =\n  var x = 0.0\n  var y = 0.0\n  val t = 1, 2\n  x, y = t\n"), "error: these targets hold (real64, real64), and this is (int64, int64); a tuple value is stored as it is, without widening @5:10")
+    assert_eq(refused("def main() =\n  var x = 0.0\n  var y = 0.0\n  val t = 1, 2\n  x, (y, _) = (t.1, t)\n"), "error: these targets hold (real64, _), and this is (int64, int64); a tuple value is stored as it is, without widening @5:21")
+    assert_eq(refused("def main() =\n  var n = 0\n  var m = 0\n  n, m = 1.5, 2\n"), "error: the value must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @4:10")
+    assert_eq(refused("def main() =\n  var a = 0\n  var b = 0\n  a, b = 1, 2, 3\n"), "error: this pattern takes 2 elements apart, and the value has 3: (int64, int64, int64) @4:10")
+    assert_eq(refused("def main() =\n  var a = 0\n  var b = 0\n  a, b = 5\n"), "error: a destructuring pattern takes a tuple apart, and this is int64 @4:10")
+    assert_eq(refused("def main() =\n  var a = 0\n  a, _ = 1, print(1)\n"), "error: this element would hold nothing: this is void @3:13")
+    assert_eq(refused("def main() =\n  var a = 0\n  a, c = 1, 2\n"), "error: unknown name `c`; did you mean `a`? @3:6")
+    assert_eq(refused("def f() = 1\ndef main() =\n  var a = 0\n  a, f = 1, 2\n"), "error: `f` is a function and cannot be assigned @4:6")
+    assert_eq(refused("def main() =\n  var a = 0\n  var b = 0\n  if true then a, b = 1, 2\n"), "error: only a name, a field or an indexed element can be assigned to @4:3")
+
+@test("a module-level destructuring binding elaborates its initializer once for all its names")
+elab_module_destructuring()
+    assert_eq(elaborated("val a, b = 1, 2\nval (c, d): (real, real) = a, b\ndef main() = print(c + d)\n"),
+        "(val (a b) (int64, int64) (tuple:(int64, int64) 1 2))\n(val (c d) (real64, real64) (tuple:(real64, real64) (promote:real64 a) (promote:real64 b)))\n(def main () void (print (+:real64 c d)))")
+    assert_eq(refused("val _, _ = 1, 2\n" + MAIN), "error: a module-level binding binds a name; the top level holds only declarations @1:1")
+    assert_eq(refused("val x, y = y, 1\n" + MAIN), "error: `y` is used in its own initializer @1:12")
+    assert_eq(refused("const k, m = v, 1\nvar v = 1\n" + MAIN), "error: a `const` cannot read the `var` `v` @1:14")
+    assert_eq(refused("val a, b = 1, 2\ndef b() = 1\n" + MAIN), "error: redeclaration of `b` @2:1")
+
+// -- enums and match --------------------------------------------------------------------------------
+
+@test("a variant is a value, or a constructor of its fields by position or by name")
+elab_variants()
+    assert_eq(elaborated(SHAPE + "def main() =\n  val a = Rect(h = 2, w = 1)\n  val c: Shape = Circle(1)\n  print(if true then a else Empty)\n"),
+        "(enum Shape (Circle (r real64)) (Rect (w real64) (h real64)) Empty)\n(def main () void (block (val a#0:Shape (variant:Shape Rect (adopt:real64 1) (adopt:real64 2))) (val c#1:Shape (variant:Shape Circle (adopt:real64 1))) (print (if:Shape true a#0 (variant:Shape Empty)))))")
+    assert_eq(refused(SHAPE + "def main() = print(Empty())\n"), "error: `Empty` carries no fields; write it without parentheses @5:20")
+    assert_eq(refused(SHAPE + "def main() = print(Circle)\n"), "error: `Circle` carries 1 field; build it with `Circle(...)` @5:20")
+    assert_eq(refused(SHAPE + "def main() = print(Shape)\n"), "error: `Shape` is an enum; its values are its variants @5:20")
+    assert_eq(refused(SHAPE + "def main() = print(Circle(1.0, 2.0))\n"), "error: `Circle` has 1 field @5:32")
+    assert_eq(refused(SHAPE + "def main() = print(Circle(true))\n"), "error: the field `r` must be real64, but this is bool @5:27")
+
+@test("a variant's name is declared at the top level, once")
+elab_variant_names()
+    assert_eq(refused(SHAPE + "enum Other =\n  Empty\n" + MAIN), "error: redeclaration of `Empty` @5:1")
+    assert_eq(refused(SHAPE + "def Rect() = 1\n" + MAIN), "error: redeclaration of `Rect` @5:1")
+    assert_eq(refused(SHAPE + "def main() =\n  val Empty = 1\n  print(Empty + 1)\n"), "ok")
+
+@test("a match binds a variant's fields, and its arms meet in one type, a literal arm adopting it")
+elab_match()
+    assert_eq(elaborated(SHAPE + "def area(s: Shape): real32 =\n  s match\n    Circle(r) -> real32(3.14 * r * r)\n    Rect(w, _) -> real32(w)\n    Empty -> 0.5\n" + MAIN),
+        "(enum Shape (Circle (r real64)) (Rect (w real64) (h real64)) Empty)\n(def area ((s#0 Shape)) real32 (match:real32 s#0 ((Circle r#1) (convert:real32 (*:real64 (*:real64 3.14 r#1) r#1))) ((Rect w#2 _) (convert:real32 w#2)) (Empty (adopt:real32 0.5))))\n(def main () void ())")
+    assert_eq(elaborated(SHAPE + "def main() =\n  Empty match\n    Circle(_) -> print(1)\n    other -> print(other)\n"),
+        "(enum Shape (Circle (r real64)) (Rect (w real64) (h real64)) Empty)\n(def main () void (match (variant:Shape Empty) ((Circle _) (print 1)) (other#0 (print other#0))))")
+    assert_eq(elaborated(SHAPE + "def f(s: Shape) =\n  s match\n    Circle(r) -> r\n    _ -> 1\n" + MAIN),
+        "(enum Shape (Circle (r real64)) (Rect (w real64) (h real64)) Empty)\n(def f ((s#0 Shape)) real64 (match:real64 s#0 ((Circle r#1) r#1) (_ (adopt:real64 1))))\n(def main () void ())")
+
+@test("a match covers every variant once, and no arm follows one that matches everything")
+elab_match_coverage()
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Circle(r) -> r\n    Empty -> 0.0\n" + MAIN), "error: this `match` does not cover `Rect`; give each its arm, or end with `_ ->` @6:3")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Empty -> 0.0\n" + MAIN), "error: this `match` does not cover `Circle` and `Rect`; give each its arm, or end with `_ ->` @6:3")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Circle(r) -> r\n    Circle(_) -> 2.0\n    _ -> 3.0\n" + MAIN), "error: `Circle` is matched twice; the second arm is never reached @8:5")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    _ -> 1\n    Empty -> 2\n" + MAIN), "error: this arm is never reached: an arm before it matches every value @8:5")
+
+@test("a match arm names a variant of the scrutinee's enum with as many fields as it has")
+elab_match_patterns()
+    val color = "enum Color =\n  Red\n  Green\n"
+
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Circel(r) -> r\n    _ -> 1.0\n" + MAIN), "error: `Shape` has no variant `Circel`; did you mean `Circle`? @7:5")
+    assert_eq(refused(SHAPE + color + "def f(s: Shape) =\n  s match\n    Red -> 1.0\n    _ -> 2.0\n" + MAIN), "error: `Red` is a variant of `Color`, and this value is Shape @10:5")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Rect(w) -> w\n    _ -> 2.0\n" + MAIN), "error: `Rect` carries 2 fields, and this pattern names 1 @7:5")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Circle -> 1.0\n    _ -> 2.0\n" + MAIN), "error: `Circle` carries 1 field; match it as `Circle(_)` @7:5")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Circle(Circle(x)) -> 1.0\n    _ -> 2.0\n" + MAIN), "error: a variant's field is matched by a name or `_`; take it apart inside the arm @7:12")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Rect(r, r) -> 1.0\n    _ -> 2.0\n" + MAIN), "error: redeclaration of `r` @7:5")
+
+@test("a match takes an enum apart, and its arms must agree")
+elab_match_errors()
+    assert_eq(refused("def main() =\n  val n = 1\n  n match\n    _ -> ()\n"), "error: `match` takes an enum value apart, and this is int64 @3:3")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Circle(r) -> r\n    Rect(_, _) -> \"rect\"\n    Empty -> 0.0\n" + MAIN), "error: the arms of this `match` differ: real64 and string @6:3")
+    assert_eq(refused(SHAPE + "def f(s: Shape) =\n  s match\n    Circle(r) -> print(r)\n    _ -> 1\n  0\n" + MAIN), "ok")
+
+// -- captures ---------------------------------------------------------------------------------------
+
+@test("an inout parameter is captured only by a lambda written straight as an argument")
+elab_inout_capture()
+    assert_eq(elaborated("def twice(f: () -> void) =\n  f()\n  f()\ndef show(n: inout integer) = twice(() -> print(n))\ndef main() =\n  var k = 0\n  show(k)\n"),
+        "(def twice ((f#0 () -> void)) void (block (call f#0) (call f#0)))\n(def show ((n#1 inout int64)) void (call twice (lambda 0)))\n(def main () void (block (var k#2:int64 0) (call show (inout k#2))))\n(lambda 0 _ () void (captures n#1) passed (print n#1))")
+
+    val message = "this lambda captures the `inout` parameter `n` and may outlive the call that lent it; pass the lambda straight as an argument, or copy `n` into a `val`"
+
+    assert_eq(refused("def f(n: inout integer): () -> integer =\n  () -> n\n" + MAIN), s"error: ${message} @2:3")
+    assert_eq(refused("def f(n: inout integer) =\n  val g = () -> n + 1\n  print(g())\n" + MAIN), s"error: ${message} @2:11")
+    assert_eq(refused("def f(n: inout integer) =\n  def g() = n\n  print(g())\n" + MAIN), s"error: ${message} @2:3")
+    assert_eq(refused("def call(f: () -> void) = f()\ndef f(n: inout integer) = call(() -> print((() -> n)()))\n" + MAIN), s"error: ${message} @2:45")
+    assert_eq(refused("def f(n: inout integer): () -> integer =\n  val m = n\n  () -> m\n" + MAIN), "ok")
+
+@test("a var array is captured by one lambda; a val array, or a scalar var, by any number")
+elab_var_array_capture()
+    assert_eq(refused("def f(xs: [real]) =\n  var b = xs\n  val c = xs\n  var k = 1\n  val i = () -> b\n  val j = () -> c\n  val l = () -> c\n  val m = () -> k\n  val n = () -> k\n" + MAIN), "ok")
+
+    val message = "`a` is a `var` array another lambda has captured; a captured `var` array moves into its lambda, so only one may capture it"
+
+    assert_eq(refused("def f(xs: [real]) =\n  var a = xs\n  val g = () -> a\n  val h = () -> a\n" + MAIN), s"error: ${message} @4:11")
+    assert_eq(refused("def f(xs: [real]) =\n  var a = xs\n  val g = () -> a\n  val h = () -> () -> a\n" + MAIN), s"error: ${message} @4:11")
+    assert_eq(refused("def f(xs: [real]) =\n  var a = xs\n  val g = () -> () -> a\n" + MAIN), "ok")
+
+@test("a lambda returned from a function keeps the var it captured")
+elab_escaping_closure()
+    assert_eq(elaborated("def make_counter(): () -> integer =\n  var n = 0\n  () ->\n    n = n + 1\n    n\n" + MAIN),
+        "(def make_counter () () -> int64 (block:() -> int64 (var n#0:int64 0) (lambda 0)))\n(def main () void ())\n(lambda 0 _ () int64 (captures n#0) (block:int64 (= n#0 (+:int64 n#0 1)) n#0))")

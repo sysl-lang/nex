@@ -1,0 +1,86 @@
+// The typed IR of arrays: the nodes a `TArray` holds (DESIGN §3–§7).
+//
+// **Each node says what it does to every element and nothing is left to the type to imply.** An
+// element-wise operator's array operands are already of the element type it computes in, a scalar
+// operand of that type and broadcast; a dynamic shape taken where a static one is required is a
+// `TShapeCheck`, which traps `shape mismatch`; a scalar stored into a slice is a `TBroadcast`. A
+// static shape passed where a dynamic one is wanted, or an array widened element by element, is the
+// ordinary `TPromote` whose type is the wider array type.
+//
+// **An index list is complete.** It holds one subscript per axis of its target, the trailing axes
+// a partial list leaves whole written out as `TSubAll`, and an `end` inside it is a `TEnd` naming
+// the axis it stands for. A slice is typed as an ordinary array, as a view is (DESIGN §6.1).
+
+import sysl.buf.Buf
+
+// One subscript of an index list.
+enum TSub
+    // An integer: the axis collapses.
+    TSubAt(index: TExpr)
+    // `:`, the whole axis.
+    TSubAll
+    // `lo..hi` or `lo..<hi`, either bound possibly left open, with its stride.
+    TSubWindow(lo: Option[TExpr], hi: Option[TExpr], inclusive: bool, stride: Option[TExpr])
+
+enum TArr
+    // `[a, b, c]`: the items along axis 1. For rank 1 each is an element already of the node's
+    // element type; for rank R ≥ 2 each is an array of rank R − 1 (a nested literal or any array).
+    TArrayLit(items: Buf[TExpr])
+    // `lo..hi` or `lo..<hi` as a value: the rank-1 array of the integers it counts.
+    TRangeValue(lo: TExpr, hi: TExpr, inclusive: bool, step: Option[TExpr])
+    // `a[s1, ..., sR]`: an element, read or written, where every axis collapses; or a slice as a
+    // place, written in place or borrowed by an `inout` parameter (DESIGN §5.3, §8.2). On an `origin`
+    // view the subscripts count from its first indices.
+    TIndex(target: TExpr, subs: Buf[TSub])
+    // A slice read as a value: a view of `target`'s storage with its own offset, extents and strides,
+    // a negative stride walking its axis downward. Nothing is allocated or copied (DESIGN §6.1).
+    TView(target: TExpr, subs: Buf[TSub])
+    // `origin(a, f1, ..., fk)`: `source` seen with axis j starting at `firsts[j]`, the axes after the
+    // last first index starting at 1. It lives only in the function that took it (DESIGN §6.4).
+    TOrigin(source: TExpr, firsts: Buf[TExpr])
+    // A dense, owned, 1-based copy of `value`, made for the reason `why` says (DESIGN §6.2, §6.4).
+    TCopy(value: TExpr, why: CopyWhy)
+    // An array local handed to a `var`, bound or assigned: moved where the source is never used
+    // again, cloned where it is, as `d` records once the whole body is seen (DESIGN §8.4).
+    TTransfer(value: TExpr, d: &Transfer)
+    // `end` in an index list: the last index of axis `axis` (from 1) of the innermost index list's
+    // target, its extent, or on an `origin` view its first index plus its extent less one.
+    TEnd(axis: usize)
+    // A binary operator applied element by element, to two arrays of one shape or an array and a
+    // scalar, both already of the element type the operator computes in.
+    TElementwise(op: string, lhs: TExpr, rhs: TExpr)
+    // `-a`, element by element.
+    TElementwiseUnary(op: string, operand: TExpr)
+    // `a @ b` on ranks 1 and 2, both operands already of the element type of the product.
+    TMatMul(lhs: TExpr, rhs: TExpr)
+    // An elemental prelude function, `sqrt(a)`, `max(a, 0.0)`, applied element by element; the
+    // arguments are arrays of one shape or broadcast scalars, already of its argument type.
+    TElemental(name: string, args: Buf[TExpr])
+    // A conversion applied element by element; `traps` as for `TConvert`.
+    TElementalConvert(value: TExpr, traps: bool)
+    // An `@elemental` function applied element by element.
+    TElementalCall(callee: TExpr, args: Buf[TExpr])
+    // A scalar, already of the element type, filling every element of the slice it is stored into.
+    TBroadcast(value: TExpr)
+    // An array whose shape is checked, at run time, against the static shape of the node's type.
+    TShapeCheck(value: TExpr)
+    // `sum`, `maxloc`, `norm2`, ...: over the whole array, or along the axis `dim` names.
+    TReduction(name: string, args: Buf[TExpr], dim: Option[TExpr])
+    // `for x in a`: every element in storage order, column-major for rank ≥ 2 (DESIGN §4.3).
+    TForEach(loop_id: usize, var_id: usize, array: TExpr, body: TExpr)
+end TArr
+
+// Why a `TCopy` copies.
+enum CopyWhy
+    // A view bound or assigned to a `var`, which owns its elements (DESIGN §6.2 rule 2).
+    IntoVar
+    // A view returned, stored in a struct, tuple or enum payload, or bound at module level (rule 3).
+    Escape
+    // `rebase(w)`: an `origin` view's elements as an ordinary 1-based array (DESIGN §6.4).
+    Rebase
+
+// Whether a `TTransfer` clones: true where the source is used after it, is used again by a later
+// pass round a loop, is captured by a lambda, or is not the body's own to give away (a parameter,
+// a loop variable, a binding taken out of a tuple or a `match`).
+struct Transfer
+    clones: bool

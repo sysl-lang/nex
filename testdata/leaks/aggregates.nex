@@ -1,0 +1,103 @@
+struct Particle
+  name: string
+  pos: (real, real)
+  z: complex
+  alive: bool
+end Particle
+
+enum Event =
+  Moved(p: Particle, by: real)
+  Renamed(old: string, new: string)
+  Quiet
+
+struct Op
+  f: (integer) -> integer
+  label: string
+end Op
+
+def spawn(n: integer): Particle = Particle(s"p$n", (1.0 * n, 2.0), 1 + 2i, n > 0)
+
+def step(p: Particle): Particle =
+  var q = p
+  q.pos.1 = q.pos.1 + 10.0
+  q.name = q.name + "'"
+  q
+
+def nudge(p: inout Particle) =
+  p.pos.2 += 1.0
+  p.name = "nudged"
+
+def first_loud(es: Event, limit: integer): string =
+  for k in 1..limit
+    es match
+      Moved(p, by) -> if by > k then return s"${p.name} at $k"
+      Renamed(o, n) -> return o + "->" + n
+      Quiet -> cycle
+  "none"
+
+val origin, label = (0.0, "origin" + "!")
+
+def main() =
+  val a = spawn(3)
+  print(a)
+  val b = step(a)
+  print(b.name)
+  print(b.pos)
+  var c = b
+  nudge(c)
+  print(c)
+  print(b.name)
+  print(first_loud(Moved(a, 2.5), 5))
+  print(first_loud(Renamed("x", "y"), 5))
+  print(first_loud(Quiet, 5))
+  print(s"event: ${Renamed("u" + "v", "w")}")
+  val k = 5
+  val op = Op((x: integer) -> x * k, "times")
+  print(op.f(4))
+  print(op.label)
+  var s, t = "left" + "", "right" + ""
+  s, t = t, s
+  print(s"$s $t")
+  print(s"$origin $label")
+  val e: Event = Quiet
+  val shown = e match
+    Quiet -> "q"
+    other -> "o"
+  print(shown)
+  val nested = ((1, "a"), (2.5, (true, "b" + "c")))
+  val (x1, (y1, (z1, w1))) = nested
+  print(nested)
+  print(s"$x1 $y1 $z1 $w1")
+  print(Pair(Pair("in" + "ner", 2), Quiet))
+  closures()
+
+struct Pair[A, B]
+  fst: A
+  snd: B
+end Pair
+
+def greeter(name: string): (string) -> string = (g: string) -> g + ", " + name
+
+def pair_of_counters(): (() -> integer, () -> integer) =
+  var n = 0
+  val bump = () ->
+    n = n + 1
+    n
+  bump, () -> n
+
+def closures() =
+  val hi = greeter("ada" + "")
+  print(hi("hello"))
+  val (bump, read) = pair_of_counters()
+  bump()
+  bump()
+  print(read())
+  var p = Particle("held", (0.0, 0.0), 0 + 0i, true)
+  val show = () -> p.name + "/" + s"${p.pos.1}"
+  p.name = "moved"
+  p.pos.1 = 4.0
+  print(show())
+  val ops = Op((x: integer) ->
+    def tri(k: integer): integer = if k == 0 then 0 else k + tri(k - 1)
+    tri(x), "triangle")
+  print(ops.f(10))

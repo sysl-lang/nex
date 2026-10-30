@@ -1,0 +1,79 @@
+@tests
+
+// Programs with structs, tuples, enums, closures and generic instances, compiled and run: the corpus
+// categories PLAN.md's M4 and M5 count, and the programs of `testdata/leaks/`, which reach the
+// ownership of strings, closures and the aggregates holding them in the places it can go wrong — a
+// value moved between places, a region's value kept past its temporaries, an early `return` out of a
+// `match`, a cell outliving its frame. Those are run three ways: plainly, under Guard Malloc (a
+// released object read again faults), and under `leaks --atExit`, which must find nothing.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{exists, read_text}
+import sysl.process.{Var, capture}
+import sysl.testing.skip
+import sysl.text.{join, split}
+
+private val M4_M5_CATEGORIES = ["structs", "tuple destructuring", "paren-less tuple construction", "sum types (enums)", "closure escape (§4.11)",
+    "user generics", "user generic enums", "user generic structs"]
+
+// The programs of those categories that need an array of structs, which the emitter does not
+// compile yet.
+private val WAITING_ON_ARRAYS = ["210-field-write-through-an-array-element-receiver-mutates-the-sl"]
+
+private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates"]
+
+@test("every program of PLAN.md's M4 and M5 corpus categories prints its .out, but for those waiting on arrays")
+run_m4_m5_corpus()
+    val r = corpus_run(M4_M5_CATEGORIES[..])
+
+    assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
+    assert_eq(join(r.waiting.view(), "\n"), join(WAITING_ON_ARRAYS[..], "\n"))
+    assert_eq(r.passed, 73)
+
+@test("the ownership programs print their .out, read nothing freed under Guard Malloc, and leak nothing")
+run_leak_programs()
+    if !exists("/usr/bin/leaks") then skip("no leaks tool")
+
+    val b = bench()
+    var reports: Buf[string] = buf()
+
+    for name in LEAK_PROGRAMS
+        val expected = read_text(s"testdata/leaks/$name.out").unwrap()
+        val exe = s"${b.work}/$name"
+
+        compiled(b, read_text(s"testdata/leaks/$name.nex").unwrap(), exe)
+
+        val plain = capture(exe, [], stderr = true).unwrap()
+        val guarded = capture(exe, [], env = [Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
+        val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], stderr = true).unwrap()
+
+        assert_eq(plain.text, expected)
+        assert(guarded.status.ok(), s"$name under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
+        assert_eq(guarded.text, expected)
+        reports.push(s"$name: ${leaks_line(leaks.text)}")
+
+    finish(b)
+    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.")
+
+@test("a struct holding an array waits on arrays, and says so")
+run_struct_with_array_waits()
+    val e = emitted("struct Grid\n  cells: [real]\n\ndef main() =\n  val g = Grid([1.0, 2.0])\n  print(g.cells[1])\n").err().unwrap_or("")
+
+    assert_eq(e, "error: an array inside a struct, tuple or enum (Grid) is not compiled yet @5:3")
+
+// `text` compiled into `exe`.
+private compiled(b: Bench, text: string, exe: string)
+    val m = emitted(text) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+
+    lower_module(m, exe, b.work, b.tc) match
+        Ok(_) -> ()
+        Err(e) -> fail_with(e)
+
+// The line of a `leaks` report that counts what leaked.
+private leaks_line(report: string) -> string
+    for line in split(report, "\n")
+        if line.contains(" leaks for ") then return split(line, ": ")[1]
+
+    report

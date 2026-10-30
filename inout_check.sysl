@@ -1,0 +1,607 @@
+// The exclusivity check of DESIGN §8.3: for the duration of a call, an `inout` argument is the only
+// access to the place it borrows. It is a pass over the finished typed IR, so a call can be judged
+// by its callee's effect summary (`effects.sysl`).
+//
+// **Every argument that holds storage while the call runs is a path**: the variable it is in, then
+// the fields and index lists that lead from the variable down to it. An `inout` argument holds its
+// place; a read-mode argument holds one where it is a place or a view of one and its type is not a
+// scalar, since such an argument is borrowed and not copied (ref §8.4). A `val` sharing a `var`
+// array, or an `origin` view of one, stands for the place it shares. Two paths on one variable are
+// **disjoint** when, at the first step where they part, they name different fields, or their index
+// lists are disjoint on one axis; anything else overlaps.
+//
+// **Two subscripts on one axis are disjoint when the last index of one and the first of the other
+// are one base plus two constants, the first constant the smaller**: `a[1..4]` and `a[5..8]` (no
+// base), `a[1..e]` and `a[e+1..n]`, `a[..<e]` and `a[e..]`, `a[e]` and `a[e+1]`. A base is the same
+// expression on both sides only where it is built from literals, variables, `end`, arithmetic and
+// the shape functions, and mentions no variable another argument of the call can write.
+//
+// The call is then judged against its four rules: two `inout` arguments that overlap (rule 1), an
+// `inout` argument and a borrowed read-mode argument that overlap, or a function passed beside it
+// that reaches it (rule 2), and a callee that reaches a borrowed module-level `var` by name, or a
+// lambda that captures the borrowed local (rule 3). Rule 4, the escaping capture, is judged where
+// the lambda is made (`elab_aggregate.sysl`).
+
+import sysl.buf.{Buf, buf}
+import sysl.text.join
+
+// One step from a variable down to a place inside it.
+private enum Step
+    // A struct's field or a tuple's element, by position.
+    SField(k: usize)
+    SIndex(subs: Buf[TSub])
+    // Storage the checker cannot place more closely: an `origin` view counts from its own first
+    // indices, so a subscript of it says nothing about its source's.
+    SAny
+
+private struct Path
+    // A `TLocal` or a `TGlobalRef`.
+    root: TExpr
+    steps: Buf[Step]
+    // The source text of the place each step is taken from, for the split-form suggestion.
+    bases: Buf[string]
+
+// One end of a subscript on its axis: `base` plus `off`, or the constant `off` alone.
+private struct Bound
+    base: Option[TExpr]
+    off: i64
+
+// The first and last index a subscript can reach on its axis, each where the checker can tell.
+private struct Reach
+    first: Option[Bound]
+    last: Option[Bound]
+
+// Whether two paths overlap, and where they meet at an index list, the text of the array it is
+// taken from and its rank.
+private enum Verdict
+    Disjoint
+    Overlap
+    OverlapAt(base: string, rank: usize)
+
+// What a call's arguments write while they are evaluated: the module-level `var`s and the locals a
+// split point may not mention.
+private struct Writes
+    globals: Buf[string]
+    locals: Buf[usize]
+
+// The `val` locals and module-level `val`s that share an array: what each stands for.
+private struct Aliases
+    locals: Buf[Option[TExpr]]
+    names: Buf[string]
+    inits: Buf[TExpr]
+
+private strip(e: TExpr) -> TExpr = *e.kind match
+    TPromote(v) -> strip(v)
+    _ -> e
+
+private const_int(e: TExpr) -> Option[i64] = *strip(e).kind match
+    TLiteral(v, _) -> v match
+        // A literal beyond `int64`, a `uint64` constant, is no subscript the checker compares.
+        IntVal(x) -> if x >= -0x8000_0000_0000_0000 && x <= 0x7FFF_FFFF_FFFF_FFFF then Some(i64(x)) else None
+        _ -> None
+    TUnary(op, x) -> if op == "-" then const_int(x).map(v -> -v) else None
+    _ -> None
+
+// Whether a type is held by reference when passed read-mode: an array, or an aggregate that may
+// hold one.
+private by_reference(t: Ty) -> bool = t match
+    Array(_, _) -> true
+    Tuple(_) -> true
+    Nominal(_, _) -> true
+    Param(_, _) -> true
+    Measured(b, _) -> by_reference(*b)
+    _ -> false
+
+private elem_of(t: Ty) -> Option[Ty] = t match
+    Array(e, _) -> Some(*e)
+    _ -> None
+
+// -- the source text of a place, for the diagnostics ----------------------------------------------
+
+private expr_text(p: TProgram, e: TExpr) -> string = *e.kind match
+    TLiteral(v, _) -> v match
+        IntVal(x) -> s"${x}"
+        _ -> "…"
+    TLocal(id) -> p.locals[id].name
+    TGlobalRef(n) -> n
+    TPromote(v) -> expr_text(p, v)
+    TConvert(v, _) -> expr_text(p, v)
+    TBinary(op, l, r) -> s"${expr_text(p, l)}${op}${expr_text(p, r)}"
+    TUnary(op, x) -> s"${op}${expr_text(p, x)}"
+    TBuiltin(name, args) ->
+        var parts: Buf[string] = buf()
+
+        for a in args
+            parts.push(expr_text(p, a))
+
+        s"${name}(${join(parts.view(), ", ")})"
+    TBorrow(v) -> expr_text(p, v)
+    TField(v, name, _) -> s"${expr_text(p, v)}.${name}"
+    TTupleField(v, k) -> s"${expr_text(p, v)}.${k + 1}"
+    TArray(op) -> *op match
+        TEnd(_) -> "end"
+        TIndex(t, subs) -> s"${expr_text(p, t)}[${subs_text(p, subs)}]"
+        TView(t, subs) -> s"${expr_text(p, t)}[${subs_text(p, subs)}]"
+        TShapeCheck(v) -> expr_text(p, v)
+        TOrigin(source, _) -> s"origin(${expr_text(p, source)}, …)"
+        _ -> "…"
+    _ -> "…"
+end expr_text
+
+private subs_text(p: TProgram, subs: Buf[TSub]) -> string
+    var parts: Buf[string] = buf()
+
+    for s in subs
+        parts.push(s match
+            TSubAt(x) -> expr_text(p, x)
+            TSubAll -> ":"
+            TSubWindow(lo, hi, inclusive, stride) ->
+                val a = lo.map(x -> expr_text(p, x)).unwrap_or("")
+                val b = hi.map(x -> expr_text(p, x)).unwrap_or("")
+                val by = stride.map(x -> s" by ${expr_text(p, x)}").unwrap_or("")
+
+                s"${a}${if inclusive then ".." else "..<"}${b}${by}")
+
+    join(parts.view(), ", ")
+
+// -- paths --------------------------------------------------------------------------------------------
+
+private alias_of(al: Aliases, e: TExpr) -> Option[TExpr] = *e.kind match
+    TLocal(id) -> al.locals[id]
+    TGlobalRef(n) ->
+        for k in 0..<al.names.len()
+            if al.names[k] == n then return Some(al.inits[k])
+
+        None
+    _ -> None
+
+private extended(p: TProgram, al: Aliases, base: TExpr, step: Step) -> Option[Path] = path_of(p, al, base) match
+    Some(x) ->
+        var steps = x.steps
+        var bases = x.bases
+
+        steps.push(step)
+        bases.push(expr_text(p, base))
+        Some(Path(x.root, steps, bases))
+    None -> None
+
+// The storage `e` holds while a call runs, where it is a place or a view of one; `None` for a value
+// computed before the call starts.
+private path_of(p: TProgram, al: Aliases, e: TExpr) -> Option[Path]
+    alias_of(al, e) match
+        Some(init) -> return path_of(p, al, init)
+        None -> ()
+
+    *e.kind match
+        TLocal(_) -> Some(Path(e, buf(), buf()))
+        TGlobalRef(_) -> Some(Path(e, buf(), buf()))
+        TBorrow(v) -> path_of(p, al, v)
+        TField(v, _, k) -> extended(p, al, v, SField(k))
+        TTupleField(v, k) -> extended(p, al, v, SField(k))
+        // A static shape widened to a dynamic one is the same storage; a wider element type is a
+        // new array.
+        TPromote(v) -> (elem_of(e.ty), elem_of(v.ty)) match
+            (Some(a), Some(b)) -> if ty_eq(a, b) then path_of(p, al, v) else None
+            _ -> None
+        TArray(op) -> *op match
+            TIndex(t, subs) -> extended(p, al, t, SIndex(subs))
+            TView(t, subs) -> extended(p, al, t, SIndex(subs))
+            TOrigin(source, _) -> extended(p, al, source, SAny)
+            TShapeCheck(v) -> path_of(p, al, v)
+            _ -> None
+        _ -> None
+end path_of
+
+// -- comparing subscripts ---------------------------------------------------------------------------
+
+// Whether `x` and `y` are the same expression, of a shape whose value two evaluations in one
+// argument list cannot tell apart.
+private same_expr(x: TExpr, y: TExpr) -> bool
+    val a = strip(x)
+    val b = strip(y)
+
+    *a.kind match
+        TLiteral(u, _) -> *b.kind match
+            TLiteral(v, _) -> (u, v) match
+                (IntVal(m), IntVal(n)) -> m == n
+                _ -> false
+            _ -> false
+        TLocal(m) -> *b.kind match
+            TLocal(n) -> m == n
+            _ -> false
+        TGlobalRef(m) -> *b.kind match
+            TGlobalRef(n) -> m == n
+            _ -> false
+        TConvert(u, _) -> *b.kind match
+            TConvert(v, _) -> ty_eq(a.ty, b.ty) && same_expr(u, v)
+            _ -> false
+        TBinary(op, l, r) -> *b.kind match
+            TBinary(op2, l2, r2) -> op == op2 && same_expr(l, l2) && same_expr(r, r2)
+            _ -> false
+        TUnary(op, u) -> *b.kind match
+            TUnary(op2, v) -> op == op2 && same_expr(u, v)
+            _ -> false
+        TField(u, _, k) -> *b.kind match
+            TField(v, _, k2) -> k == k2 && same_expr(u, v)
+            _ -> false
+        TTupleField(u, k) -> *b.kind match
+            TTupleField(v, k2) -> k == k2 && same_expr(u, v)
+            _ -> false
+        TBuiltin(name, us) -> *b.kind match
+            TBuiltin(name2, vs) -> (name == "length" || name == "size" || name == "rank") && name == name2 && same_all(us, vs)
+            _ -> false
+        TArray(op) -> *op match
+            TEnd(i) -> *b.kind match
+                TArray(op2) -> *op2 match
+                    TEnd(j) -> i == j
+                    _ -> false
+                _ -> false
+            _ -> false
+        _ -> false
+end same_expr
+
+private same_all(xs: Buf[TExpr], ys: Buf[TExpr]) -> bool
+    if xs.len() != ys.len() then return false
+
+    for k in 0..<xs.len()
+        if !same_expr(xs[k], ys[k]) then return false
+
+    true
+
+private same_subs(xs: Buf[TSub], ys: Buf[TSub]) -> bool
+    if xs.len() != ys.len() then return false
+
+    for k in 0..<xs.len()
+        val same = (xs[k], ys[k]) match
+            (TSubAt(a), TSubAt(b)) -> same_expr(a, b)
+            (TSubAll, TSubAll) -> true
+            (TSubWindow(l1, h1, i1, s1), TSubWindow(l2, h2, i2, s2)) ->
+                i1 == i2 && same_opt(l1, l2) && same_opt(h1, h2) && same_opt(s1, s2)
+            _ -> false
+
+        if !same then return false
+
+    true
+
+private same_opt(x: Option[TExpr], y: Option[TExpr]) -> bool = (x, y) match
+    (Some(a), Some(b)) -> same_expr(a, b)
+    (None, None) -> true
+    _ -> false
+
+// Whether `e` reads a variable the call's arguments write.
+private mentions(e: TExpr, w: Writes) -> bool
+    val hit = *e.kind match
+        TLocal(id) ->
+            for x in w.locals
+                if x == id then return true
+
+            false
+        TGlobalRef(n) -> contains(w.globals, n)
+        _ -> false
+
+    if hit then return true
+
+    for c in children(e)
+        if mentions(c, w) then return true
+
+    false
+
+// `e` as a base and a constant, where it is one the checker can compare.
+private bound(e: TExpr, w: Writes) -> Option[Bound]
+    const_int(e) match
+        Some(c) -> return Some(Bound(None, c))
+        None -> ()
+
+    if mentions(e, w) then return None
+
+    val x = strip(e)
+
+    *x.kind match
+        TBinary(op, l, r) ->
+            if op == "+" || op == "-"
+                const_int(r) match
+                    Some(c) -> return Some(Bound(Some(l), if op == "+" then c else -c))
+                    None -> ()
+
+                if op == "+"
+                    const_int(l) match
+                        Some(c) -> return Some(Bound(Some(r), c))
+                        None -> ()
+        _ -> ()
+
+    Some(Bound(Some(x), 0))
+end bound
+
+private shifted(b: Option[Bound], by: i64) -> Option[Bound] = b.map(x -> Bound(x.base, x.off + by))
+
+// The reach of a subscript on its axis. A window with a stride other than a positive constant is
+// placed nowhere.
+private reach(s: TSub, w: Writes) -> Reach = s match
+    TSubAt(x) ->
+        val b = bound(x, w)
+
+        Reach(b, b)
+    TSubAll -> Reach(Some(Bound(None, 1)), None)
+    TSubWindow(lo, hi, inclusive, stride) ->
+        val upward = stride match
+            Some(x) -> const_int(x).map(c -> c > 0).unwrap_or(false)
+            None -> true
+
+        if !upward then return Reach(None, None)
+
+        val first = lo match
+            Some(x) -> bound(x, w)
+            None -> Some(Bound(None, 1))
+        val last = hi match
+            Some(x) -> shifted(bound(x, w), if inclusive then 0 else -1)
+            None -> None
+
+        Reach(first, last)
+
+// Whether one ends before the other begins.
+private before(a: Option[Bound], b: Option[Bound]) -> bool = (a, b) match
+    (Some(x), Some(y)) ->
+        val same = (x.base, y.base) match
+            (Some(u), Some(v)) -> same_expr(u, v)
+            (None, None) -> true
+            _ -> false
+
+        same && x.off < y.off
+    _ -> false
+
+private apart(x: TSub, y: TSub, w: Writes) -> bool
+    val a = reach(x, w)
+    val b = reach(y, w)
+
+    before(a.last, b.first) || before(b.last, a.first)
+
+private disjoint_subs(xs: Buf[TSub], ys: Buf[TSub], w: Writes) -> bool
+    if xs.len() != ys.len() then return false
+
+    for k in 0..<xs.len()
+        if apart(xs[k], ys[k], w) then return true
+
+    false
+
+private same_root(a: TExpr, b: TExpr) -> bool = *a.kind match
+    TLocal(x) -> *b.kind match
+        TLocal(y) -> x == y
+        _ -> false
+    TGlobalRef(x) -> *b.kind match
+        TGlobalRef(y) -> x == y
+        _ -> false
+    _ -> false
+
+private compare(a: Path, b: Path, w: Writes) -> Verdict
+    if !same_root(a.root, b.root) then return Disjoint
+
+    val n = if a.steps.len() < b.steps.len() then a.steps.len() else b.steps.len()
+
+    for k in 0..<n
+        (a.steps[k], b.steps[k]) match
+            (SField(x), SField(y)) -> if x != y then return Disjoint
+            (SIndex(xs), SIndex(ys)) ->
+                if disjoint_subs(xs, ys, w) then return Disjoint
+
+                if !same_subs(xs, ys) then return OverlapAt(a.bases[k], xs.len())
+            _ -> return Overlap
+
+    Overlap
+end compare
+
+// The split form a diagnostic suggests on an array of `rank` axes taken from `base`.
+private split_hint(base: string, rank: usize) -> string
+    if rank <= 1 then return s"borrow `${base}[1..e]` and `${base}[e+1..]` at one split point `e`"
+
+    var lead = ""
+
+    for _ in 1..<rank
+        lead = lead + ":, "
+
+    s"borrow `${base}[${lead}..e]` and `${base}[${lead}e+1..]` at one split point `e`"
+
+// -- the summaries of what a call reaches -------------------------------------------------------------
+
+// The summary of the function a callee or a function-valued argument runs, where it can be seen.
+private reached(fx: Effects, e: TExpr) -> Option[Summary] = *e.kind match
+    TFnRef(n) -> fx.of_fun(n)
+    TLambdaRef(l) -> Some(fx.of_lambda(l))
+    TLocal(id) -> fx.held(id).map(n -> fx.nodes[n])
+    _ -> None
+
+private touches(s: Summary, root: TExpr) -> bool = *root.kind match
+    TGlobalRef(n) -> contains(s.reads, n) || contains(s.writes, n)
+    TLocal(id) ->
+        for x in s.cap_reads
+            if x == id then return true
+
+        for x in s.cap_writes
+            if x == id then return true
+
+        false
+    _ -> false
+
+private root_name(p: TProgram, root: TExpr) -> string = *root.kind match
+    TLocal(id) -> p.locals[id].name
+    TGlobalRef(n) -> n
+    _ -> "?"
+
+// What evaluating `e` can write: its assignments and borrows, and what every function it calls or
+// passes writes.
+private writes_of(fx: Effects, e: TExpr, w: *Writes)
+    *e.kind match
+        TFnRef(_) -> add_writes(reached(fx, e), w)
+        TLambdaRef(_) -> add_writes(reached(fx, e), w)
+        TCall(callee, _) -> add_writes(reached(fx, callee), w)
+        TAssign(_, target, _) -> add_root(root_of(target), w)
+        TBorrow(place) -> add_root(root_of(place), w)
+        _ -> ()
+
+    for c in children(e)
+        writes_of(fx, c, w)
+
+private add_writes(s: Option[Summary], w: *Writes)
+    s match
+        Some(x) ->
+            w.globals.extend(x.writes.view())
+            w.locals.extend(x.cap_writes.view())
+        None -> ()
+
+private add_root(root: TExpr, w: *Writes)
+    *root.kind match
+        TGlobalRef(n) -> w.globals.push(n)
+        TLocal(id) -> w.locals.push(id)
+        _ -> ()
+
+private is_borrow(e: TExpr) -> bool = *e.kind match
+    TBorrow(_) -> true
+    _ -> false
+
+private is_fn_ty(t: Ty) -> bool = t match
+    Fn(_) -> true
+    _ -> false
+
+// The `val`s that share an array: a local `val` or `origin` view whose initializer is a place or a
+// view of one, and a module-level `val` likewise.
+private collect_aliases(p: TProgram, e: TExpr, al: *Aliases)
+    *e.kind match
+        TLet(id, init) ->
+            val shares = p.locals[id].kind match
+                LVal -> is_array(p.locals[id].ty)
+                LOrigin -> true
+                _ -> false
+
+            if shares && path_of(p, *al, init).is_some() then al.locals.set(id, Some(init))
+        _ -> ()
+
+    for c in children(e)
+        collect_aliases(p, c, al)
+
+impl Elab
+    // Every call of the program, judged against the rules of DESIGN §8.3.
+    check_inout(*self, p: TProgram, fx: Effects)
+        var al = Aliases(buf(), buf(), buf())
+
+        for _ in p.locals
+            al.locals.push(None)
+
+        var bodies: Buf[TExpr] = buf()
+
+        for d in p.decls
+            d match
+                FunDecl(f) ->
+                    for x in f.defaults
+                        x match
+                            Some(v) -> bodies.push(v)
+                            None -> ()
+
+                    bodies.push(f.body)
+                GlobalDecl(g) ->
+                    bodies.push(g.init)
+
+                    if g.kind == Val && is_array(g.ty) && path_of(p, al, g.init).is_some()
+                        al.names.push(g.name)
+                        al.inits.push(g.init)
+                TupleGlobalDecl(g) -> bodies.push(g.init)
+                _ -> ()
+
+        for l in p.lambdas
+            bodies.push(l.body)
+
+        for b in bodies
+            collect_aliases(p, b, &al)
+
+        for b in bodies
+            self.find_calls(p, fx, al, b)
+
+    private find_calls(*self, p: TProgram, fx: Effects, al: Aliases, e: TExpr)
+        *e.kind match
+            TCall(callee, args) -> self.check_call(p, fx, al, Some(callee), args)
+            TBuiltin(_, args) -> self.check_call(p, fx, al, None, args)
+            TArray(op) -> *op match
+                TElementalCall(callee, args) -> self.check_call(p, fx, al, Some(callee), args)
+                _ -> ()
+            _ -> ()
+
+        for c in children(e)
+            self.find_calls(p, fx, al, c)
+
+    private check_call(*self, p: TProgram, fx: Effects, al: Aliases, callee: Option[TExpr], args: Buf[TExpr])
+        var any = false
+
+        for a in args
+            if is_borrow(a) then any = true
+
+        if !any then return
+
+        var w = Writes(buf(), buf())
+
+        for a in args
+            writes_of(fx, a, &w)
+
+        for i in 0..<args.len()
+            if !is_borrow(args[i]) then continue
+
+            val mine = path_of(p, al, args[i]) match
+                Some(x) -> x
+                None -> continue
+
+            val a = expr_text(p, args[i])
+
+            callee match
+                Some(f) -> self.by_another_route(p, fx, f, mine.root, a, args[i])
+                None -> ()
+
+            for j in 0..<args.len()
+                if j == i then continue
+
+                if is_borrow(args[j])
+                    // Each pair once, reported at the later argument (rule 1).
+                    if j < i then continue
+
+                    path_of(p, al, args[j]) match
+                        Some(other) ->
+                            val b = expr_text(p, args[j])
+
+                            compare(mine, other, w) match
+                                Disjoint -> ()
+                                Overlap -> self.fail(args[j].span, s"`${a}` and `${b}` are both passed `inout` and overlap; an `inout` argument must be the only access to its place while the call runs")
+                                OverlapAt(base, rank) -> self.fail(args[j].span, s"`${a}` and `${b}` may overlap; ${split_hint(base, rank)}")
+                        None -> ()
+                elif is_fn_ty(args[j].ty)
+                    reached(fx, args[j]) match
+                        Some(s) ->
+                            if touches(s, mine.root)
+                                self.fail(args[j].span, s"the function passed here reaches `${root_name(p, mine.root)}`, which `${a}` borrows `inout` for the call; an `inout` argument must be the only access to its place while the call runs")
+                        None -> ()
+                elif by_reference(args[j].ty)
+                    path_of(p, al, args[j]) match
+                        Some(other) ->
+                            val b = expr_text(p, args[j])
+
+                            compare(mine, other, w) match
+                                Disjoint -> ()
+                                Overlap -> self.fail(args[j].span, s"`${b}` is read while the call runs, and overlaps `${a}`, which the call borrows `inout`; an `inout` argument must be the only access to its place")
+                                OverlapAt(base, rank) -> self.fail(args[j].span, s"`${b}` is read while the call runs and may overlap `${a}`, which the call borrows `inout`; ${split_hint(base, rank)}")
+                        None -> ()
+    end check_call
+
+    // Rule 3: a callee that reaches the borrowed variable by a route of its own.
+    private by_another_route(*self, p: TProgram, fx: Effects, f: TExpr, root: TExpr, a: string, arg: TExpr)
+        val s = reached(fx, f) match
+            Some(x) -> x
+            None -> return
+
+        if !touches(s, root) then return
+
+        val n = root_name(p, root)
+
+        *root.kind match
+            TGlobalRef(_) ->
+                val who = *f.kind match
+                    TFnRef(name) -> s"`${name}`"
+                    _ -> "a function"
+
+                self.fail(arg.span, s"`${a}` is passed `inout` to ${who}, which also reads or writes the module variable `${n}` by name while the call runs; an `inout` argument must be the only access to its place")
+            _ -> self.fail(arg.span, s"`${a}` is passed `inout` to a lambda that captures `${n}` itself; an `inout` argument must be the only access to its place while the call runs")
+end Elab

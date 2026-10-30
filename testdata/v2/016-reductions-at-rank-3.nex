@@ -1,0 +1,37 @@
+// Reductions over a whole array and along one axis (DESIGN §7.4), and the reproducible pairwise
+// tree of §9.2.1: blocks of 4096 elements summed in order, the block sums combined pairwise.
+
+def main() =
+  val t = [[[1, 2], [3, 4]],
+           [[5, 6], [7, 8]]]
+  print(sum(t))
+  print(product(t))
+  print(minval(t))
+  print(maxval(t))
+  print(count(t > 4))
+  print(any(t > 7))
+  print(all(t > 0))
+  print(sum(t, dim = 1))
+  print(sum(t, dim = 2))
+  print(sum(t, dim = 3))
+  print(maxval(t, dim = 3))
+
+  val r = [[[1.0, 2.0], [3.0, 4.0]],
+           [[5.0, 6.0], [7.0, 8.0]]]
+  print(sum(r, dim = 2))
+  print(norm2([3.0, 4.0]))
+  print(dot([1, 2, 3], [4, 5, 6]))
+  print(minloc([3, 1, 2, 1]))
+  print(maxloc([3, 1, 5, 5]))
+
+  // 25 blocks: the tree's sum is not the left-to-right one, and is closer to 10000.
+  val tenths = fill(100000, 0.1)
+  print(sum(tenths))
+  print(reduce(tenths, 0.0, (acc, x) -> acc + x))
+  print(sum(1..100000))
+
+  // The identities: an empty sum is 0, an empty minval the largest value.
+  val none = 1..0
+  print(sum(none))
+  print(minval(none))
+  print(maxval(fill(0, 1.0)))

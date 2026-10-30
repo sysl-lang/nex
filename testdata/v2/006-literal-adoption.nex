@@ -1,0 +1,22 @@
+def main() =
+  val x8: int8 = 127
+  assert_traps(() -> print(x8 + 1), "int8 overflow")
+  print("x8 + 1 traps at int8")
+  val x32: real32 = 0.1
+  print(x32 * 2.0)
+  print(2pi * x32)
+  val n = 3
+  print(n + 0.5)
+  val u: uint32 = 4294967294
+  print(u + 1)
+  assert_traps(() -> print(u + 2), "uint32 overflow")
+  print("u + 2 traps at uint32")
+  val c = true
+  print(if c then x32 else 1)
+  print(max(x32, 1))
+  val n32: int32 = 5
+  print(0 < n32 < 7.5)
+  val z: complex[real32] = 1 + 2i
+  print(z * 2)
+  val h: real16 = 0.5
+  print(h + 0.1)

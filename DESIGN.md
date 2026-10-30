@@ -50,6 +50,8 @@ nsjail on its own VM.
 
 `bool`, `void` and `string` are as in ref §3.1, `void` being the type the reference calls `unit`. The aliases are the same type, not a distinct one:
 `[real]` and `[real64]` are one type, and a diagnostic names a type the way the source spelled it.
+A type the source never wrote, that of an inferred binding or of an intermediate result, is named
+by its full name: `int64`, `real64`, `complex[real64]`.
 
 **The names are Fortran's `iso_fortran_env` kind names**, so a Fortran programmer reads
 `real64`, `int32` and `complex[real64]` (Fortran's `complex(real64)`) without a glossary. The
@@ -137,7 +139,9 @@ such as `1.0f32` would read as juxtaposition (`1.0 * f32`, ref §4.4).
 
 - **With an expected type** (an annotated binding, a parameter, a typed element or field): the
   literal is that type. An integer literal outside the target's range is a compile error
-  (`val b: int8 = 300`, `val u: uint8 = -1`). A real literal is rounded to the nearest value of the target width;
+  (`val b: int8 = 300`, `val u: uint8 = -1`). An integer literal's value is its magnitude in every
+  base, never a bit pattern: `0xFF` is 255, so `val y: int8 = 0xFF` is refused, and
+  `0xFFFF_FFFF_FFFF_FFFF` initializes a `uint64` and no signed type. A literal is at most 64 bits. A real literal is rounded to the nearest value of the target width;
   one that rounds to infinity is a compile error (`val h: real16 = 70000.0`). An integer literal
   may initialize a real or complex (`val x: real32 = 1`), as ref §3.2 allows.
 - **As an operand of a binary operator whose other operand has a type:** an integer literal adopts
@@ -164,7 +168,8 @@ beside a `real32`), and with no context `pi`, `e`, `inf`, `nan` are `real64` and
 
 Every numeric type name is also its conversion function, on a scalar and element-wise on an array:
 `real32(x)`, `int16(n)`, `uint8(k)`, `complex[real32](z)`, `complex[real32](re, im)`,
-`real64(a)`.
+`real64(a)`. In the two-argument form each part converts as `real32(re)` would, and either part may
+be an array, the other then an array of the same shape or a scalar that broadcasts.
 
 | From → to | Behaviour |
 |---|---|
@@ -184,16 +189,37 @@ Every numeric type name is also its conversion function, on a scalar and element
   unsigned result below zero is an overflow. The emitted form is
   `llvm.intr.sadd.with.overflow` and its siblings, then a branch to the trap (`precision.mlir` runs
   `127 + 1` and `100 + 27` at `i8`).
+- `div` and `%` truncate toward zero, as Fortran's integer `/` and `MOD` do: `-7 div 2` is `-3` and
+  `-7 % 2` is `-1`. A zero divisor traps, and so does the one quotient out of range, the signed
+  minimum `div -1`; the minimum `% -1` is `0`.
+- **An integer power keeps the base's type and traps on overflow**, at every width. A negative
+  exponent divides, as Fortran's `**` does: `2 ^ -1` is `0`, `1 ^ -n` is `1`, `(-1) ^ -n` is `1` or
+  `-1` by the parity of `n`, and `0 ^ -n` traps as a division by zero.
+- **A trap's message names what failed**: `int8 overflow` (the type whose range was left, `uint8
+  overflow` for going below zero too), `integer division by zero`, `` `%` by zero ``, `complex division by
+  zero`, `int64 value out of range for uint32` and `real64 value out of range for int32` (a
+  conversion, NaN and infinities included), `` a `for` step of 0 ``, `assertion failed` or `assertion
+  failed: <message>`. A trap nothing catches writes `trap: <message>` to standard error after
+  everything printed before it, and the program ends abnormally (a non-zero status).
 - Real arithmetic is IEEE at its own width: `real32` operations are `f32` operations, never computed
-  in `f64` and rounded (`precision.mlir`: `0.1 * 3` in `real32` prints `0.30000001192092896`).
+  in `f64` and rounded (`precision.mlir`: `0.1 * 3` in `real32`, widened to `real64` to print, is
+  `0.30000001192092896`).
 - **Real arithmetic does not trap by default.** `1.0 / 0.0` is `inf`, `0.0 / 0.0` is `nan`, and an
   overflow is `±inf`, as IEEE specifies. `nex build --fpe-trap` (and `nex run --fpe-trap`) traps on
   real division by zero, invalid operations and overflow instead, like gfortran's
   `-ffpe-trap=zero,invalid,overflow`. Integer division by zero and integer overflow trap always.
+  Under the flag a real `/` by zero traps `floating-point division by zero`; a NaN computed from
+  operands that are not NaN traps `floating-point invalid operation` (`sqrt(-1.0)`, `0.0 / 0.0`); and
+  an infinity computed from finite operands traps `floating-point overflow`, a narrowing
+  `real32(1.0e300)` included. These are checks in the generated code, so they behave the same on
+  every machine, whether or not its floating-point unit can trap.
 - Printing (ref §10.6) prints a `real32` or `real16` as the shortest decimal that reads back to the
   same value **at that width**, in the reference's spelling (`0.3` for the `real32` nearest 0.3, not
-  `0.30000001192092896`) (**PROPOSED**; needs runtime entries per width). A complex prints as its two
-  parts do.
+  `0.30000001192092896`) (**PROPOSED**). The spelling is the one the `real64` nearest that decimal
+  gets, so a whole number is shortened too: the `real16` 65504 prints `65500.0` and the `real32`
+  nearest 1e15 prints `1.0E15`. A complex prints as its two parts do.
+- `round` rounds half away from zero, as Fortran's `ANINT` does: `round(2.5)` is `3.0` and
+  `round(-2.5)` is `-3.0`.
 - **The prelude's real functions** (`sqrt`, `exp`, `sin`, `floor`, …, ref §10.2) compute at the
   width of a real argument, and widen an integer argument to `real64` first (`sqrt(n32)` is a
   `real64`). `sqrt`, `exp`, `log`, `sin`, `cos` and `tan` also take a complex and give one. `abs` and
@@ -221,6 +247,38 @@ The closed constraint set of ref §6.10 widens to the sized types:
 
 Unifying one type parameter against several numeric actuals widens along §2.2, as ref §6.10 widens
 through the old tower.
+
+Generic functions, structs and enums (ref §3.6, §3.8, §6.10) stand, with these rules (**PROPOSED**).
+
+- **A generic is checked at each instance it is used at**, as a Fortran parameterized module
+  procedure or a C++ template is, not once against its constraints: `def twice[T: Numeric](x: T) =
+  x + x` is checked as `twice[int64]` where `twice(21)` is written, and a mistake in its body is
+  reported at the body, naming the instance, `bad[string]`. A generic that is never used is
+  never elaborated. The constraint is checked at every use: `min2("a", "b")` with `T: Ord` is a
+  compile error.
+- **The type arguments are inferred, never written at a call.** The arguments that are not literals
+  fix them first; a literal fixes a parameter only where nothing else does and otherwise adopts it
+  (`add(x32, 2)` is `add[real32]`); a lambda argument comes last, its parameter types filled in from
+  what is known, and its result fixes the parameters there (`apply1(5, x -> x * 2.5)` is
+  `apply1[int64, real64]`). A parameter nothing fixes is a compile error.
+- **An expected type gives a generic struct's or enum's arguments**, before its fields are looked
+  at, and an argument that disagrees with them is converted or refused against its field:
+  `val n: Opt[integer] = None`, `val r: Result[integer, string] = Ok(7)`. A type names all of a
+  generic's arguments (`Pair[integer, string]`); `Pair` alone or `Pair[integer]` is a compile error.
+- **A type argument holds a value**: `void` and `never` are not type arguments.
+- **A name holds at most one generic `def` and one concrete `def`.** The concrete one is called
+  wherever it takes the arguments, each as it is or widened, a literal adopting its parameter's
+  type; the generic one otherwise. The arguments to such a name are passed by position.
+- **A generic function as a value** takes its instance from the function type its position
+  expects: `call(id)` with `call(f: (integer) -> integer)` passes `id[int64]`. With no function type
+  expected it is a compile error.
+- **A `Rank` parameter is the whole shape of an array**, `[T; R]`, never one axis among others, and
+  only a function takes one; a struct's or an enum's parameters are types.
+- **An instance that needs a larger instance of the same generic is a compile error**: `f[T]`
+  calling `f[Box[T]]`, or `struct Grow[T]` with a field of `[Grow[Box[T]]]`, would never finish.
+- **An instance is named by its generic and its arguments**: `id[int64]`, `Pair[int64, string]`,
+  `total[real64, 2]` (a rank argument is its number). The typed IR holds only instances, each a
+  separate declaration, and two instances of one generic are unrelated types.
 
 ---
 
@@ -298,6 +356,11 @@ a static one its number. This keeps every `linalg` op, fusion and bufferization 
   (**PROPOSED**).
 - Rank is always static. Two operands of different rank in an element-wise operation are a compile
   error; there is no rank broadcasting.
+- A slice's kept axes are dynamic, except an axis taken whole with `:`, which keeps its static
+  extent: `m[:, 1]` of a `[real; 3, :]` is `[real; 3]`, `a[1..2]` is `[real; :]`.
+- Two arrays that stand for one value, as the branches of an `if` do, meet in one type: the same
+  rank, the common element type of §2.2, and a static extent only on an axis where both have the
+  same one.
 
 ### 3.4 Rank-generic and element-generic code
 
@@ -344,6 +407,12 @@ Every list at one depth must have the same length. A literal whose nesting is vi
 expression rather than a bracket list has a run-time length, and a mismatch there traps as in the
 reference. The source order is row-major, as you read it; storage is column-major regardless.
 
+The element type is the one the position expects (`val a: [real32] = [1, 2]`), or else the common
+type (§2.2) of the elements, a literal element adopting the others' type as an operand does:
+`[x32, 1]` is `[real32]`, `[n, 2.5]` is `[real64]`. Elements of non-numeric types must all be one
+type. An empty literal `[]` takes its type from its position, and with none is a compile error, as
+is an empty row inside a matrix literal.
+
 ### 4.2 Constructors
 
 `zeros`, `ones` and `fill` take an `integer` (rank 1) or an R-tuple of integers (rank R):
@@ -375,6 +444,23 @@ type lands"): `val z: [real32; :, :] = zeros((4, 4))`.
 | `transpose(m)` | rank 2 only |
 | `permute(a, (p1, …, pk))` | axes reordered: result axis `n` is source axis `p_n` (**PROPOSED**) |
 | `sum(a, dim = k)` | sum over axis `k`: rank R−1 (at rank 2, `k` is 1 or 2); every reduction takes `dim =` (§7.4) |
+| `diag(v)`, `diag(m)` | the square matrix with the vector `v` on its diagonal; the diagonal of the matrix `m` |
+| `linspace(lo, hi, n)` | `n` reals evenly from `lo` to `hi` inclusive, `[real; :]` |
+| `to_integers(b)`, `to_bytes(a)` | `int64(b)` and `uint8(a)`, element by element (§2.4); `to_bytes` traps outside `0..255` |
+
+An axis number written as a literal (`extent(m, 3)`, `dim = 0`) that is not an axis of the array is
+a compile error; a computed one traps.
+
+**The higher-order functions** take the function last and give its parameters the element type, so
+a lambda need not write them (`map(xs, x -> x * 2)`). They walk the elements in storage order:
+
+| Function | Result |
+|---|---|
+| `map(a, f)` | the shape of `a`, each element `f` of the source's; `f` returns a scalar |
+| `filter(a, p)` | `[T; :]` of the elements for which `p` is true |
+| `flatMap(a, f)` | `[U; :]`, the vectors `f` returns, concatenated |
+| `reduce(a, init, f)` | `f(…f(f(init, a₁), a₂)…)`; a literal `init` adopts the element type |
+| `enumerate(a)`, `zip(a, b)` | `[(integer, T); :]`, `[(T, U); :]` |
 
 `transpose`, `permute`, `reshape` of a dense array and `flatten` of a dense array return views (§6):
 no data moves (**PROPOSED** as a performance guarantee; the result is a value either way, so which it
@@ -535,7 +621,9 @@ an owned array is never observable, only its cost: **a view is a value**, fixed 
    being **returned** from the function, **stored** in a struct, tuple or enum payload, **captured**
    by an escaping closure, or bound at **module level**, is copied to a dense owned array at that
    point. Passing a view as an argument is not an escape (the callee borrows it, ref §8.4), and
-   neither is binding it to a local `val`.
+   neither is binding it to a local `val`. The copy is made where the value is known to be a view
+   (a slice, `reverse`, a local `val` bound to one, a branch giving one); a parameter is not known
+   to be one, so a function that returns its parameter copies nothing.
 4. **The source does not change under it.** If the source is a `var` and is written while a view of
    it is still live, the view keeps the values it had when it was taken: the compiler copies the view
    before the write. A view whose last use comes before the write costs nothing
@@ -586,7 +674,13 @@ for k in -r..r do acc += w[k] * x[i - k]
   parameter starts at 1 and no function ever asks what its array's bounds are.
 - `rebase(w)` is an ordinary 1-based copy of an offset view's elements (`rebase(w)[1]` is `w[-r]`),
   and is what crosses a function boundary. A function that wants the offset takes it as an ordinary
-  argument and calls `origin` itself.
+  argument and calls `origin` itself. `rebase` of an ordinary array is a dense copy of it.
+- **Only a `val` holds an offset view, and only indexing reads its offsets.** Binding one to a `var`,
+  assigning it, or giving it as the value of an `if`, a `match` or a block is a compile error naming
+  `origin`, as escaping is. Read as a value — by an operator, `sum`, `print`, `for x in w` — it is
+  its elements, and the result is 1-based like every other value. A slice of an offset view
+  (`w[-1..1]`) is an ordinary 1-based view, as a Fortran section is. `origin(w, …)` of an offset
+  view replaces its first indices.
 
 ---
 
@@ -598,6 +692,11 @@ ref §4.5 holds for every rank: `A op B` needs equal rank (a compile error other
 shape (a compile error when both are static, else a trap), and is element-wise, with element types
 mixed per §2.2. **Broadcasting is scalar-only**: `A op s` and `s op A` for a scalar `s`, any rank.
 Element-wise expressions fuse to one loop nest per expression for every rank (`views.mlir`, rank 3).
+
+Comparisons are element-wise too: `a == b` and `a < 5` are `[bool]`, and whether two arrays are equal
+is `all(a == b)`. `not`, `and` and `or` apply element by element to `[bool]` operands (a `bool`
+broadcasts), evaluating both sides. A chained comparison (`0 < a < 1`) compares scalars only; on
+arrays it is `0 < a and a < 1`.
 
 ### 7.2 `@`
 
@@ -639,8 +738,10 @@ as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps ever
 
 **A user function opts in with `@elemental`**: `@elemental def f(x: real) = …`. Its body obeys the
 parallel-body rules of §9.4 — no `inout` parameters, no writes to module variables, no I/O except
-`print` — so the compiler may evaluate it in any order and fuse it. An unmarked scalar function
-applied to an array is a compile error that suggests `@elemental` or `map`.
+`print` and `eprint`, no `parallel`, directly or through anything it calls — so the compiler may evaluate it in any order and fuse it. Its parameters are scalars and
+it returns a value. Called with an array for any parameter, it applies element by element, its
+other arguments broadcasting as an operator's do. An unmarked scalar function applied to an array is
+a compile error that suggests `@elemental` or `map`.
 
 ### 7.4 Reductions
 
@@ -648,12 +749,16 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
 `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`, `dot`.
 
 - `minloc(a)` and `maxloc(a)` return the index of the extreme element, a tuple of indices for rank
-  ≥ 2; ties go to the first in storage order.
+  ≥ 2; ties go to the first in storage order. A `nan` is never the extreme unless every element is
+  one, when the location is the first; an empty array's location is `0`.
 - **Every reduction takes a named `dim =` argument**, reducing along that axis to rank R − 1:
   `sum(m, dim = 2)`, `maxval(a, dim = 1)`, `maxloc(a, dim = 1)`.
 - `min` and `max` are elemental (§7.3), never reductions: `max(a, 0.0)` clamps, and the extremes of
   one array are `minval` / `maxval`.
-- `norm2` is the Euclidean norm, the Frobenius norm of a matrix. There is no `norm`.
+- `norm2` is the Euclidean norm, the Frobenius norm of a matrix, and is real: an integer array is
+  widened to `real64`, a complex one gives its part type. There is no `norm`.
+- `any`, `all` and `count` take `[bool]`; `count` is an `integer`. `dot` takes two vectors and no
+  `dim =`.
 - `dot(x, y)` conjugates `x` when complex, as Fortran's `dot_product` and BLAS's `zdotc` do. `@`
   never conjugates.
 - The `minval` / `maxval` of an empty integer array are the type's largest / smallest values (the
@@ -720,6 +825,18 @@ the checker rejects:
    Every other pair of places on one root is a compile error, and the message suggests the split
    form: *"`a[1..k]` and `a[j..n]` may overlap; borrow `a[1..e]` and `a[e+1..]` at one split point
    `e`"*. No run-time disjointness check is made.
+
+   The three forms are one rule: on one axis, two subscripts are disjoint when the last index one
+   reaches and the first the other reaches are **the same base plus two constants, the first
+   constant the smaller** — no base for constant windows (`a[1..4]`, `a[5..end]`), `e` for a split
+   (`..e` / `e+1..`, `..<e` / `e..`, also `a[e]` / `a[e+1]` and `a[..e-1]` / `a[e..]`). An index is a
+   window of one element; an open start is 1 and an open end is unknown; a window whose stride is
+   not a positive constant reaches nowhere the checker can name. The base is the same only when it
+   is written alike on both sides from literals, variables, `end`, arithmetic and `length`/`size`/
+   `rank`, and mentions no variable another argument of the call can write (`f(a[..e], g(), a[e+1..])`
+   with `g` changing `e` is refused). Past a step where two places agree exactly (the same field, the
+   same index list written alike), the comparison goes on to the next step: `swap(a[k].x, a[k].y)`
+   is accepted.
 2. **An `inout` argument plus any other argument that reads an overlapping place of the same root
    while the call runs**: `f(a, a)` with the first parameter `inout`, or `f(a, a[1..3])`, since a
    read-mode array argument is borrowed, not copied (ref §8.4). An `inout` window and a read-mode
@@ -730,10 +847,20 @@ the checker rejects:
    parameter is legal. Any other pair is a compile error. An argument that is fully evaluated to a
    scalar before the call starts does not conflict: `scale(a, a[1])` and `resize(a, length(a))` are
    legal. Arguments are evaluated left to right, and the exclusive access begins after the last one.
+   A read-mode argument is borrowed when it is a place or a view of one and its type is an array, a
+   tuple or a struct; any other argument is a value computed before the call (`a + 1`, `sum(a)`, a
+   widened `[real32]` passed as `[real64]`). A `val` bound to a `var` array, or an `origin` view of
+   one, is the place it shares: `val v = a[1..5]` then `axpy(2.0, v, a[5..8])` is refused. A
+   function passed beside an `inout` argument — a lambda, a local `def` or a top-level function —
+   that reads or writes the borrowed variable, directly or through what it calls, is a conflict
+   too: `app(n, () -> n + 1)` with the first parameter `inout`.
 3. **Access by another route inside the callee.** Passing a module-level `var` as `inout` to a
    function that reads or writes that `var` by name, directly or through anything it calls, is
    rejected. The checker computes for each function the module-level `var`s it reads and writes,
-   transitively; the same summary serves §9 (**PROPOSED** mechanism).
+   transitively; the same summary serves §9. A local passed `inout` to a local `def` or lambda that
+   captures it is rejected the same way. A call through a function value the checker cannot follow
+   (a parameter of function type) is judged by what the call itself is given: the function values
+   passed beside the `inout` argument, under rule 2.
 4. **Escaping captures.** An `inout` parameter may be captured by a non-escaping lambda (one passed
    straight as an argument, such as `assert_traps(() -> f(v), "…")`) but never by an escaping one.
 
@@ -743,6 +870,14 @@ A trap inside the callee leaves the writes it made before the trap in place; not
 The uniqueness rule (ref §8.2) loses its `mut` case: a `var` array is moved only by `return` and by
 assignment to another `var` (and the auto-clone pass makes the latter a copy when the source is used
 again, ref §8.3). An `inout` call is not a move and needs no clone.
+
+**Where the auto-clone pass clones.** An array local bound or assigned to a `var` (`var b = a`,
+`b = a`) is **moved** when the source is a `val` or `var` bound in the same function that nothing
+uses afterwards: no later read or write, no loop around the transfer that the source was bound
+outside of, and no lambda capturing it. Otherwise it is **cloned**, and always when the source is
+a parameter (the caller keeps it, `inout` or not), a module-level binding, a loop variable or a
+name bound by destructuring or a `match`. A view bound or assigned to a `var` is copied (§6.2 rule
+2). A `val` bound to a `var` array shares it, as a view of a `var` does (§6.2 rule 4).
 
 **Lowering.** An `inout` array is a tensor argument whose updated value is returned and bound back
 to the caller's variable. Every nex function except `main` is emitted `private`; with
@@ -770,8 +905,9 @@ parallel for i in 1..rows(c), j in 1..cols(c)          // a 2-D iteration space
 ```
 
 The header is `parallel for` *index* `in` *range* (`,` *index* `in` *range*)*, over integer ranges
-only (not over an array's elements). The iterations may run in any order and at the same time; the
-loop ends when all of them have.
+only (not over an array's elements), each with an optional `by` step. The iteration space is a box:
+no range may use another clause's index. The iterations may run in any order and at the same time;
+the loop ends when all of them have.
 
 ### 9.2 Reductions
 
@@ -787,8 +923,12 @@ print(total, peak)
 ```
 
 **The operators** are the built-in `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc`, and any
-**user-defined function** of type `(T, T) -> T`. The reduction variable is an outer `var` of a type
-the operator applies to. Each iteration contributes through exactly one of `v op= e`, `v = v op e`,
+**user-defined function** of type `(T, T) -> T`. The reduction variable is an outer `var` (local
+or module-level) of a type the operator applies to: a number for `+` and `*`, an integer or a real
+for `min` and `max`, a `bool` for `and` and `or`, a (value, index) pair for `minloc` and `maxloc`,
+and `T` for a user function. A built-in operator reduces a scalar, not an array; an array is
+reduced element by element by a loop over its indices, or with a user operator. A variable is named
+in one `reduce` clause only. Each iteration contributes through exactly one of `v op= e`, `v = v op e`,
 `v = op(v, e)` (for `min`, `max` and a user function), `v = v and e`, `v = v or e`, or the location
 forms below, where `e` does not mention `v`; `v` is not read anywhere else in the body. The `var`'s
 value before the loop is the starting value, and after the loop it holds the combination of the
@@ -822,7 +962,8 @@ function `reduce` keeps its name.
   val (largest, where) = worst
   ```
 
-  Ties go to the lowest index, as in Fortran, whatever the thread count.
+  Ties go to the lowest index, as in Fortran, whatever the thread count. The three-argument
+  `maxloc(v, x, i)` exists only as this contribution; anywhere else it is a compile error.
 
 #### 9.2.1 Reproducible reductions
 
@@ -831,7 +972,9 @@ fixed-size blocks (4096 iterations; the size is a compile-time constant, not a t
 block is reduced sequentially from the operator's identity (`0` for `+`, `1` for `*`, `+inf` for
 a real `min` and the type's largest value for an integer `min`, `-inf` / the type's smallest value
 for `max`, …; for a user operator, the variable's starting value), the block partials are combined in
-a **fixed pairwise tree** over the block numbers, and the tree's result is combined once with the
+a **fixed pairwise tree** over the block numbers — in rounds, each combining partials 1 and 2, 3 and
+4, and so on, an odd last one carried into the next round as it is, until one is left — and the
+tree's result is combined once with the
 variable's starting value. Threads only decide who computes
 which block, never the order of combination, so `OMP_NUM_THREADS=1` and `OMP_NUM_THREADS=64` give
 identical bits.
@@ -876,19 +1019,27 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
 
 1. **No write to shared state.** Assignment is allowed only to (a) bindings declared inside the
    body, (b) declared reduction variables, in the forms of §9.2, and (c) elements or slices of an
-   outer `var` array (or `inout` parameter) **owned by the iteration**: in every such write, some
-   axis's subscript is exactly one of the loop's index variables, distinct loop variables on
+   outer `var` array (or `inout` parameter) **owned by the iteration**: in every such write, each
+   of the loop's index variables is exactly the subscript of one axis, distinct variables on
    distinct axes, so two iterations can never write the same element (`y[i]`, `m[:, j]`,
    `c[i, j]`, `t[i, :, k]`). `y[i + 1]`, `y[2 * i]` and `y[idx[i]]` are rejected (**PROPOSED**: the
-   rule recognizes only the plain index variable).
+   rule recognizes only the plain index variable), and so is `c[i, :]` under the header
+   `i in …, j in …`, since iterations with one `i` and different `j` share that row. Every write to
+   one array in a body uses the same subscripts: `c[i, j]` and `c[j, i]` together are rejected.
+   Passing a place `inout` is a write to it.
 2. **No read of what another iteration writes.** An array written under rule 1(c) may be read in the
    body only at the iteration's own subscript (`y[i]` when writing `y[i]`); `y[i - 1]` is rejected.
    Every other outer binding is read-only for the duration of the loop, and reading it is free:
    value semantics means no other code can change it meanwhile.
 3. **No effects through calls.** A function called in the body may receive `inout` only places that
    rule 1 allows the body to write (`normalize(m[:, j])`), and may not itself write a module-level
-   `var` (the transitive summary of §8.3). `extern` functions not marked `@pure` (§10) are rejected
-   in a parallel body.
+   `var` (the transitive summary of §8.3), nor read one the body writes element by element, nor —
+   for a local function — assign a local of the enclosing function or read a reduction variable.
+   `extern` functions not marked `@pure` (§10) are rejected in a parallel body. **The checker must
+   see what is called**: a function by its name, a lambda, or a `val` bound to one. Calling a
+   function value it cannot see into — a parameter of function type, a `var`, a field — is a
+   compile error in a parallel body, and so is calling a function that itself calls one. A
+   function or lambda passed as a value (to `map`, say) counts as called by whatever receives it.
    **I/O:** `print` and writing to stderr are allowed, and each call is **atomic** — its whole line
    is written under a lock, so lines never interleave mid-line — but the **order of lines across
    iterations is unspecified**. This is the one deliberately non-reproducible thing in a parallel
@@ -900,7 +1051,9 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
    `parallel for j in 1..n, i in 1..m`.
 6. **`cycle` is allowed, `exit` is not.** `cycle` ends the current iteration; `exit` (and an
    `exit`/`cycle` naming a loop outside the body) is a compile error, since the iterations have no
-   order to leave.
+   order to leave. `return` is a compile error for the same reason, and so is `stop`; a failed
+   `assert` traps instead, and a trap ends the loop as described below. A loop inside the body may
+   be left by `exit` as any loop may.
 
 A body the checker cannot prove is a compile error naming the offending write or read, never a
 silent fallback to a sequential loop. The wording of the checker's messages is the
@@ -1211,12 +1364,17 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
 - **`exit`** leaves the innermost loop; **`cycle`** goes to its next iteration (Fortran's names).
 - **A loop may be named**: `outer: for j in 1..n`, and `exit outer` / `cycle outer` act on that
   loop, as Fortran's named `DO` constructs do.
-- **`stop`** ends the program with exit status 0; **`stop n`** with status `n`.
+- **`stop`** ends the program with exit status 0; **`stop n`** with status `n`. What was printed
+  before it is written out first.
 - **A `for` header takes a step**: `for k in n..1 by -1`, `for k in 1..n by 2`, read in the direction
   of travel exactly as a subscript's `by` (§5.4). A stepped range is a value (`val odd = 1..n by 2`).
 - **A `for` over a range counts in integers**, as Fortran's `DO` does: the loop variable has the
   common type of the two bounds (`for k in 1..n` with `n: int32` counts in `int32`), the step must
   promote to it, and a range of reals is a compile error. The loop variable is read-only.
+- **The bounds and the step are evaluated once, before the first pass**, and the number of passes
+  is fixed then, as Fortran's `DO` fixes its iteration count: changing a variable the header read
+  changes nothing, and the loop variable never steps past the last value it takes, so
+  `for k in 120..127` with `k: int8` runs eight times without overflowing. A step of 0 traps.
 - In a `parallel for` body, `cycle` ends that iteration and is allowed; `exit` is a compile error
   (§9.4).
 
@@ -1224,8 +1382,8 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
 
 - **The entry point** is `def main()` or `def main(args: [string])`, returning `void`; any other
   signature of `main` is a compile error, and so is a program without one. `args` holds only the user's arguments, without the program name, 1-based:
-  `args[1]` is the first. The exit status is 0 when `main` returns, `n` after `stop n`, and non-zero
-  after an uncaught trap.
+  `args[1]` is the first, and an index outside `1..length(args)` traps. The exit status is 0 when
+  `main` returns, `n` after `stop n`, and non-zero after an uncaught trap.
 - **The top level of a file holds only declarations** (`import`, `const`, module-level `val` and
   `var`, `def`, `struct`, `enum`, `extern`); there are no top-level statements.
 - **`print`** writes to standard output, **`eprint`** to standard error.
@@ -1253,6 +1411,70 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
   type its first use expects, and keeps it: a later call with another type is checked against it.
   One whose types nothing fixes is a compile error. A `def` inside a body is a named lambda; it may
   call itself where it declares its result type.
+
+### 11.4 Structs, tuples, enums and `match`
+
+The reference's structs, tuples, sum types and `match` (ref §3.4–§3.7, §4.16, §4.17, §7.5) stand,
+with these rules (**PROPOSED** where marked).
+
+- **A constructor takes its fields by position or by name**, as a call takes its arguments, a
+  Fortran structure constructor's keyword components: `Point(y = 2.0, x = 1.0)`,
+  `Rect(h = 2, w = 1)`. Every field is given; a field has no default. **PROPOSED.**
+- **A variant's fields may be of any type**, not only the scalars the reference allows; §3.1 and
+  §6.2 already store arrays and views in enum payloads. **PROPOSED.**
+- **A struct or an enum cannot contain itself** by value, directly or through other structs, enums
+  or tuples (`struct Node` with a field `next: Node`, `enum List` with `Cons(head: real, tail:
+  List)`); it may hold itself through an array (`kids: [Node]`), which is a handle. **PROPOSED.**
+- **Struct, enum and variant names share the top level** with functions and module-level bindings,
+  and each is declared once: a variant `Empty` in two enums is a redeclaration. A local binding of
+  the same name shadows a variant.
+- **A tuple built in place converts element by element** to the tuple its position expects:
+  `val t: (real, real) = 1, n` adopts `1` and widens `n`. A tuple value as a whole does not widen:
+  `val u: (real, real) = t` with `t: (int64, int64)` is a compile error. **PROPOSED.**
+- **A destructuring pattern nests**: `val a, (b, c) = 1, (2.5, true)`, and `for` takes the same
+  patterns. Parentheses group a tuple inside another, and are what a type annotation needs.
+- **A binding takes apart only tuples.** A variant pattern in a `val` or `var` (`val Converged(x) =
+  s`) is a compile error, even where the enum has a single variant: a binding cannot fail, and `match`
+  is how a variant is taken apart.
+- **A tuple assignment stores a tuple into a list of places**: `a, b = b, a`, `p.x, (v[1], _) =
+  f()`. The right side is evaluated whole first, then each element is stored into its target left to
+  right, so `a, b = b, a` swaps. A target is anything a plain assignment may store into, or `_`. A
+  right side written as a tuple converts element by element to the targets' types, as a tuple built
+  in place does; a tuple value is stored as it is, without widening. A place written twice in one
+  list (`a, a = 1, 2`) is a compile error, and a list of targets takes only `=`, never `+=`.
+- **A module-level destructuring binding** (`val a, b = 10, 20`) evaluates its initializer once and
+  binds each name as a module-level binding; one that binds no name (`val _, _ = …`) is a compile
+  error, since the top level holds no statements.
+- **A field is a place**: `p.x = v`, `o.i.v += 1`, `t.2 = 5` and `z.re = 1.0` write through a
+  `var` or an `inout` parameter, and `p.x` or `t.1` may be passed `inout`. **PROPOSED** for `z.re`
+  and `z.im`, as Fortran's `z%re`.
+- **`x.f(args)` calls the field `f`** where `x` names a struct value with a function-typed field of
+  that name, and is `f(x, args)` otherwise.
+- **A `match` arm is a variant pattern, a name or `_`.** A variant with fields is matched with all of
+  them, `Circle(r)`, `Rect(w, _)`; writing `Circle` alone for a variant with fields is a compile
+  error. A field's sub-pattern is a name or `_`. A tuple pattern, as an arm or as a field's
+  sub-pattern, is a compile error: a tuple is taken apart by a destructuring binding, inside the arm
+  where it is a field. Every variant is covered once, by its arm or by a
+  catch-all; an arm that repeats a variant or follows a catch-all is a compile error. The arms meet
+  in one type as an `if`'s branches do, a literal arm adopting the others' type (§2.3).
+- **What a lambda captures** (ref §4.11, §8.3 rule 4): a lambda **escapes** unless it is written
+  straight as an argument; a `val`-bound lambda and a local `def` escape. An escaping lambda may not
+  capture an `inout` parameter (**PROPOSED** for a local `def`, which Fortran's internal procedures
+  would allow; nex's may be returned). A `var` array moves into the one lambda that captures it, and
+  a second lambda capturing it is a compile error; a scalar `var` or a `val` may be captured by any
+  number.
+- **`print` spells an aggregate as the reference does**: a tuple `(1, a)`, a struct
+  `Point { x=1.0, y=2.0 }`, a variant `Converged(3.14)` or `Diverged`, each field as `print` spells
+  it alone (a string without quotes). A generic struct prints by its own name, without its type
+  arguments: `Pair { fst=1, snd=b }`.
+- **Strings, function values and the cells a lambda captures are reference counted**, and freed
+  when the last reference goes, so a program's memory is bounded by what it holds rather than by what
+  it has built. **A cycle is not reclaimed**: a lambda stored into a `var` it captures itself, local
+  `def`s that call one another, and a local `def` that calls itself and is captured by another
+  lambda too keep themselves alive for the rest of the run. A local `def` that calls itself and is
+  captured by nothing else makes no cycle. Neither is what the frames a caught trap (`assert_traps`)
+  abandons held. Both are bounded by the program's shape, not by how long it runs, except where the
+  cycle is made inside a loop.
 
 ---
 
@@ -1468,7 +1690,7 @@ is in `K` until the affine units of §15 arrive.
 |---|---|---|---|
 | Sized numeric types and their aliases | §3.1, §11.2 | §2.1 | `iso_fortran_env` names: `int8…64`, `uint8…64`, `real16…64`, `complex[real16…64]`; `integer`, `real`, `complex` become aliases of the 64-bit kinds |
 | Unsigned integers | — | §2.1, §2.2 | `uint8…64`, trapping; same-width signed/unsigned mixing needs a conversion |
-| `byte` and `[byte]` | §3.3.1 | §3.1 | gone: bytes are `[uint8]`, an ordinary array (`read_bytes`/`write_bytes` take and give `[uint8]`) |
+| `byte` and `[byte]` | §3.3.1 | §3.1 | gone: bytes are `[uint8]`, an ordinary array (`read_bytes`/`write_bytes` take and give `[uint8]`); `==` on them is element-wise like any array's (§7.1), so whole-buffer equality is `all(a == b)` |
 | Promotion | §3.2, §4.4 | §2.2 | a lattice across widths; integer meets real gives the real's width; a typed scalar promotes an array |
 | Index base | §4.14 (0-based) | §3.2, §5.1 | **1-based**, as Fortran; axis numbers (`extent(a, k)`, `dim =`) are 1-based too |
 | Range syntax | §4.14 (`..` half-open, `..=` inclusive) | §5.1 | `a..b` is **inclusive** (Fortran `a:b`); `a..<b` is half-open; `..=` is gone |
@@ -1476,6 +1698,7 @@ is in `K` until the affine units of §15 arrive.
 | Literal typing | §2.4 | §2.3 | literals and `pi`/`e`/`inf`/`nan`/`i` take their context's width |
 | Conversions | §10.7 | §2.4 | a conversion function per type name |
 | Generic constraints | §6.10 | §2.6 | widened to sized types; `Integral`, `Rank` added |
+| Checking a generic | §6.10 (once, against its constraints) | §2.6 | at each instance; one name holds one generic `def` beside at most one concrete one |
 | Array types | §3.3, §3.10, §11.2 | §3 | `[T; axes]`, any rank, static extents; `[T]` is sugar; `[[T]]` is gone |
 | Rank-generic code | §6.10 | §3.4 | `R: Rank` parameters |
 | Literals of rank ≥ 3; jagged literals | §4.13 | §4.1 | nesting to any depth; a visibly jagged literal is a compile error |
@@ -1506,6 +1729,11 @@ is in `K` until the affine units of §15 arrive.
 | Reductions | §10 | §7.4 | Fortran names: `minval`, `maxval`, `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`; `dim =` in place of the reference's `sum_axis`; `dot` conjugates |
 | Array elements | §3.3 | §3.1 | any element type but an array; structs and tuples of scalars stored inline |
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
+| Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; variant fields of any type; no type contains itself by value |
+| Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
+| Field places, `x.f(args)` | §4.16 | §11.4 | fields, tuple elements and `z.re`/`z.im` are assignable and passable `inout`; a function field is called |
+| `match` | §7.5 | §11.4 | a fielded variant is matched with its fields; coverage, repeats and unreachable arms are compile errors |
+| Escaping lambdas | §4.11 | §8.3, §11.4 | only a lambda written as an argument does not escape; an escaping one may not capture `inout` |
 | Units of measure | — | §13 | `unit` declarations (base, derived, scaled by an exact factor); `9.81<m/s^2>`, `real<m>`, `[real<Pa>; :, :]`; same-dimension scales convert to the left operand's unit, other dimensions are a compile error; `to<u>`, `strip`; erased before code generation |
 | Unit generics | §6.10 | §2.6, §13.5 | `U: Unit` parameters (`real<U^2>`) |
 | Prelude units | — | §13.9 | SI base, derived and scaled, imperial and US customary; `usgal` / `ukgal`, no `gal` |

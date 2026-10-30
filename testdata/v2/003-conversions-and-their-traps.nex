@@ -1,0 +1,40 @@
+def main() =
+  val big: int64 = 40000
+  print(int32(big))
+  assert_traps(() -> print(int16(big)), "out of range")
+  print("int16(40000) traps")
+  val neg: int32 = -1
+  assert_traps(() -> print(uint32(neg)), "out of range")
+  print("uint32(-1) traps")
+  val u: uint8 = 200
+  print(int16(u))
+  assert_traps(() -> print(int8(u)), "out of range")
+  print("int8(uint8 200) traps")
+  val w: uint64 = 9223372036854775807
+  val w1 = w + 1
+  print(w1)
+  assert_traps(() -> print(int64(w1)), "out of range")
+  print("int64(2^63) traps")
+  val r = -2.7
+  print(int32(r))
+  val e18 = 1.0e18
+  print(int64(e18))
+  val q = nan
+  assert_traps(() -> print(int64(q)), "out of range")
+  print("int64(nan) traps")
+  val infinite = inf
+  assert_traps(() -> print(int32(infinite)), "out of range")
+  print("int32(inf) traps")
+  val m = 3.0e9
+  assert_traps(() -> print(int32(m)), "out of range")
+  print("int32(3.0e9) traps")
+  val half = -0.5
+  print(uint8(half))
+  val minus_one = -1.0
+  assert_traps(() -> print(uint8(minus_one)), "out of range")
+  print("uint8(-1.0) traps")
+  val hv = 70000.0
+  print(real16(hv))
+  print(real32(0.1))
+  val zc: complex = 0.1 + 0.2i
+  print(complex[real32](zc))

@@ -23,12 +23,17 @@
 // removing a unit a `TUnitAs` that changes no number. Printing a value with a unit is already an
 // interpolation that spells the unit as text. So emission erases every type with `erase` and reads the
 // `TRescale` factors, and nothing else about units reaches it.
+//
+// **A struct or an enum is declared once, in `TProgram.decls`, and named by its type everywhere
+// else**: a field and a variant carry their position in that declaration beside their name, so a
+// later phase lays them out without looking a name up.
 
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
 enum Lit
-    IntVal(v: i64)
+    // Wide enough for every value of `int64` and of `uint64`.
+    IntVal(v: i128)
     RealVal(v: real)
     BoolVal(v: bool)
     StrVal(v: string)
@@ -106,13 +111,66 @@ enum TKind
     // `target = value` or a compound `target += value`, whose `op` is the operator (`=` for a plain
     // store); `value` is already in the target's type.
     TAssign(op: string, target: TExpr, value: TExpr)
+    // `a, b = b, a`: `value`, a tuple, is evaluated whole, and then each of its elements is stored
+    // into its target, left to right.
+    TAssignTuple(target: TTarget, value: TExpr)
     TReturn(value: Option[TExpr])
     TExit(loop_id: usize)
     TCycle(loop_id: usize)
     TStop(code: Option[TExpr])
+    // `(a, b)` or `a, b`: each element already of its element type.
+    TTuple(elems: Buf[TExpr])
+    // `t.1`: the element at position `k` from 0, which the language writes counting from 1.
+    TTupleField(value: TExpr, k: usize)
+    // `Point(x, y)`: a struct built from a value for each field, in declaration order, each already
+    // of its field's type.
+    TNew(args: Buf[TExpr])
+    // `p.x`: the field `name`, at position `k` from 0 in its struct's declaration.
+    TField(value: TExpr, name: string, k: usize)
+    // `Converged(x)` or `Diverged`: the variant `name` of the node's enum type, `tag` its position
+    // from 0 in the declaration, with a value for each of its fields.
+    TVariant(name: string, tag: usize, args: Buf[TExpr])
+    // `s match ...`: the arms in the order written, the first that matches taken.
+    TMatch(scrutinee: TExpr, arms: Buf[TArm])
+    // `val a, (b, _) = t` inside a body: the tuple taken apart into the locals `pat` names.
+    TDestructure(kind: BindKind, pat: TBind, init: TExpr)
+    // An array node: `tir_array.sysl`.
+    TArray(op: &TArr)
+    // A parallel node: `tir_parallel.sysl`.
+    TParallel(op: &TPar)
     // What could not be elaborated, after its diagnostic.
     TInvalid
 end TKind
+
+// What a `match` arm matches. Every arm of a `match` the elaborator accepts is reachable, and
+// together they cover every variant.
+enum TPat
+    // The variant `name` with its `tag`, and the local each of its fields is bound to (`None` for
+    // `_`).
+    PVariant(name: string, tag: usize, fields: Buf[Option[usize]])
+    // Any value: `_`, or a name bound to the whole value.
+    PAny(bind: Option[usize])
+
+struct TArm
+    pat: TPat
+    body: TExpr
+
+// The left of a destructuring binding: what each element of the tuple is bound to.
+enum TBind
+    BLocal(id: usize)
+    // A module-level binding, by name.
+    BGlobal(name: string)
+    // `_`: the element is computed and dropped.
+    BSkip
+    BTuple(elems: Buf[TBind])
+
+// The left of a tuple assignment: where each element of the tuple is stored.
+enum TTarget
+    // A local, a module-level `var`, a field or an element, as a plain assignment's target is.
+    TPlace(place: TExpr)
+    // `_`: the element is computed and dropped.
+    TDrop
+    TTargets(elems: Buf[TTarget])
 
 // How a local came to be.
 enum LocalKind
@@ -122,6 +180,9 @@ enum LocalKind
     LParam(mode: Mode)
     // A loop variable, read-only.
     LLoop
+    // A `val` holding an `origin` view: read-only, and indexed from the first indices its
+    // initializer's `TOrigin` gives (DESIGN §6.4).
+    LOrigin
 
 struct LocalInfo
     name: string
@@ -136,6 +197,12 @@ struct TLambda
     // The locals of enclosing functions the body reads or writes, in the order first used.
     captures: Buf[usize]
     body: TExpr
+    // Whether the lambda may outlive the call it was made in: false only for one written straight
+    // as an argument, which the callee borrows for the call (DESIGN §8.3).
+    escapes: bool
+    // The captured views a lambda that escapes copies to dense arrays when it is made (DESIGN §6.2
+    // rule 3).
+    copies: Buf[usize]
 
 // A loop, by the label it was given (`""` for none).
 struct TLoop
@@ -165,13 +232,46 @@ struct TExtern
     modes: Buf[Mode]
     ret: Ty
 
+// `val a, b = 1, 2` at module level: one initializer, its tuple taken apart into the module-level
+// bindings `pat` names.
+struct TGlobalTuple
+    span: Span
+    kind: BindKind
+    pat: TBind
+    ty: Ty
+    init: TExpr
+
+// A field of a struct or of an enum's variant, its type resolved.
+struct FieldInfo
+    name: string
+    ty: Ty
+
+struct TStruct
+    span: Span
+    name: string
+    fields: Buf[FieldInfo]
+
+struct VariantInfo
+    name: string
+    fields: Buf[FieldInfo]
+
+// An enum and its variants, a variant's tag being its position here.
+struct TEnum
+    span: Span
+    name: string
+    variants: Buf[VariantInfo]
+
 enum TDecl
+    StructDecl(s: TStruct)
+    EnumDecl(e: TEnum)
     GlobalDecl(g: TGlobal)
+    TupleGlobalDecl(g: TGlobalTuple)
     FunDecl(f: TFun)
     ExternDecl(x: TExtern)
 
 struct TProgram
-    // In the order the source declares them.
+    // The structs and enums, then the other declarations, each in the order the source declares
+    // them.
     decls: Buf[TDecl]
     locals: Buf[LocalInfo]
     lambdas: Buf[TLambda]

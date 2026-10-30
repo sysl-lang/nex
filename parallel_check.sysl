@@ -1,0 +1,489 @@
+// The checker of DESIGN §9.4: what a parallel body may do, proved over the typed IR once every
+// function is elaborated, so a call can be judged by the callee's effect summary (`effects.sysl`).
+//
+// **A parallel body** is the body of a `parallel for`, or the function given to `parallel map`; a
+// lambda written inside one is part of it. The checker first collects what the body binds, the
+// loops it holds and every place it writes. Each write to a variable from outside the body must
+// be an element **owned by the iteration** — every index of the header the whole subscript of an
+// axis of its own — and every write to one array must use the same subscripts. Then it walks the
+// body: an owned array is read only at the iteration's own element, a reduction variable is not
+// read at all, every call is to a function whose summary changes no module variable and does no
+// I/O but `print` and `eprint`, and nothing leaves the iteration but `cycle`.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// An outer array the body writes element by element, and which index of the header is the whole
+// subscript of each axis.
+private struct Owned
+    root: TExpr
+    axes: Buf[Option[usize]]
+
+private struct Body
+    // The `parallel for`'s loop, which a `cycle` may name; `None` for the function of a `map`.
+    loop_id: Option[usize]
+    indices: Buf[usize]
+    // The reduction variables, as places.
+    reds: Buf[TExpr]
+    // The locals bound inside the body, the indices among them.
+    bound: Buf[usize]
+    loops: Buf[usize]
+    lambdas: Buf[usize]
+    // Every place the body assigns or passes `inout`.
+    places: Buf[TExpr]
+    owned: Buf[Owned]
+
+private new_body(loop_id: Option[usize], indices: Buf[usize], reds: Buf[TExpr]) -> Body
+    var bound: Buf[usize] = buf()
+
+    bound.extend(indices.view())
+    Body(loop_id, indices, reds, bound, buf(), buf(), buf(), buf())
+
+private has(xs: Buf[usize], x: usize) -> bool
+    for y in xs
+        if y == x then return true
+
+    false
+
+// Whether two variables, each a `TLocal` or a `TGlobalRef`, are one.
+private same_var(a: TExpr, b: TExpr) -> bool = *a.kind match
+    TLocal(x) -> *b.kind match
+        TLocal(y) -> x == y
+        _ -> false
+    TGlobalRef(x) -> *b.kind match
+        TGlobalRef(y) -> x == y
+        _ -> false
+    _ -> false
+
+private is_var(e: TExpr) -> bool = *e.kind match
+    TLocal(_) -> true
+    TGlobalRef(_) -> true
+    _ -> false
+
+private var_name(p: TProgram, e: TExpr) -> string = *e.kind match
+    TLocal(id) -> p.locals[id].name
+    TGlobalRef(n) -> n
+    _ -> "?"
+
+private among_vars(xs: Buf[TExpr], v: TExpr) -> bool
+    for x in xs
+        if same_var(x, v) then return true
+
+    false
+
+private owned_of(b: Body, v: TExpr) -> Option[Owned]
+    for o in b.owned
+        if same_var(o.root, v) then return Some(o)
+
+    None
+
+private strip_promote(e: TExpr) -> TExpr = *e.kind match
+    TPromote(v) -> strip_promote(v)
+    _ -> e
+
+// The header index a subscript is, where it is exactly one.
+private index_at(b: Body, s: TSub) -> Option[usize] = s match
+    TSubAt(x) -> *strip_promote(x).kind match
+        TLocal(id) -> if has(b.indices, id) then Some(id) else None
+        _ -> None
+    _ -> None
+
+private same_axes(a: Buf[Option[usize]], b: Buf[Option[usize]]) -> bool
+    if a.len() != b.len() then return false
+
+    for k in 0..<a.len()
+        val same = a[k] match
+            Some(x) -> b[k] match
+                Some(y) -> x == y
+                None -> false
+            None -> b[k].is_none()
+
+        if !same then return false
+
+    true
+
+private nested_message() -> string =
+    "a `parallel` cannot run inside a parallel body; cover both axes with one header: `parallel for j in 1..n, i in 1..m`"
+
+// The expressions directly inside a parallel node, for `children`.
+parallel_children(op: TPar, out: *Buf[TExpr])
+    op match
+        TParFor(_, clauses, reductions, body) ->
+            for c in clauses
+                out.push(c.lo)
+                out.push(c.hi)
+
+                c.step match
+                    Some(s) -> out.push(s)
+                    None -> ()
+
+            for r in reductions
+                out.push(r.target)
+
+                r.op match
+                    RUser(f) -> out.push(f)
+                    RBuiltin(_) -> ()
+
+            out.push(body)
+        TContribute(target, value, index) ->
+            out.push(target)
+            out.push(value)
+
+            index match
+                Some(i) -> out.push(i)
+                None -> ()
+        TParExpr(value) -> out.push(value)
+end parallel_children
+
+impl Elab
+    // Every parallel construct of the program, each body checked once.
+    check_parallel(*self, p: TProgram, fx: Effects)
+        for d in p.decls
+            d match
+                FunDecl(f) -> self.find_parallel(p, fx, f.body)
+                GlobalDecl(g) -> self.find_parallel(p, fx, g.init)
+                TupleGlobalDecl(g) -> self.find_parallel(p, fx, g.init)
+                _ -> ()
+
+        for l in p.lambdas
+            self.find_parallel(p, fx, l.body)
+
+    private find_parallel(*self, p: TProgram, fx: Effects, e: TExpr)
+        *e.kind match
+            TParallel(op) -> *op match
+                TParFor(id, clauses, reductions, body) ->
+                    var indices: Buf[usize] = buf()
+                    var reds: Buf[TExpr] = buf()
+
+                    for c in clauses
+                        indices.push(c.var_id)
+
+                    for r in reductions
+                        reds.push(r.target)
+
+                    var b = new_body(Some(id), indices, reds)
+
+                    // A user-defined operator is called inside the body (DESIGN §9.2).
+                    for r in reductions
+                        r.op match
+                            RUser(f) -> self.called(p, fx, f, &b)
+                            RBuiltin(_) -> ()
+
+                    self.check_body(p, fx, body, &b)
+                    return
+                TParExpr(v) ->
+                    *v.kind match
+                        TBuiltin(name, args) ->
+                            if name == "map" && args.len() == 2
+                                var b = new_body(None, buf(), buf())
+
+                                *args[1].kind match
+                                    TLambdaRef(_) -> self.check_body(p, fx, args[1], &b)
+                                    _ -> self.called(p, fx, args[1], &b)
+                        _ -> ()
+                _ -> ()
+            _ -> ()
+
+        for c in children(e)
+            self.find_parallel(p, fx, c)
+    end find_parallel
+
+    private check_body(*self, p: TProgram, fx: Effects, body: TExpr, b: *Body)
+        collect(p, body, b)
+        self.own_writes(p, b)
+        self.walk(p, fx, body, b)
+
+    // Every write to a variable from outside the body: an element the iteration owns (rule 1).
+    private own_writes(*self, p: TProgram, b: *Body)
+        for w in b.places
+            val root = root_of(w)
+
+            *root.kind match
+                TLocal(id) -> if has(b.bound, id) then continue
+                TGlobalRef(_) -> ()
+                _ -> continue
+
+            val n = var_name(p, root)
+
+            if among_vars(b.reds, root)
+                self.fail(w.span, s"`${n}` is a reduction variable: an iteration changes it only by its contribution")
+                continue
+
+            val subs = *w.kind match
+                TArray(op) -> *op match
+                    TIndex(target, subs) -> if is_var(target) then Some(subs) else None
+                    _ -> None
+                _ -> None
+
+            val axes = subs match
+                Some(ss) ->
+                    var axes: Buf[Option[usize]] = buf()
+
+                    for s in ss
+                        axes.push(index_at(*b, s))
+
+                    axes
+                None ->
+                    self.fail(w.span, s"a parallel body cannot assign `${n}`, which every iteration shares: declare it inside the body, or name it in a `reduce` clause")
+                    continue
+
+            if !self.owns(p, *b, w.span, n, axes) then continue
+
+            owned_of(*b, root) match
+                Some(o) ->
+                    if !same_axes(o.axes, axes) then self.fail(w.span, s"`${n}` is written at two different subscripts in this body, so two iterations could write one element")
+                None -> b.owned.push(Owned(root, axes))
+    end own_writes
+
+    // Whether a write's subscripts make its element the iteration's own: each index of the header
+    // the whole subscript of exactly one axis.
+    private owns(*self, p: TProgram, b: Body, span: Span, n: string, axes: Buf[Option[usize]]) -> bool
+        var ok = b.indices.len() > 0
+
+        for i in b.indices
+            var count = 0
+
+            for a in axes
+                a match
+                    Some(x) -> if x == i then count += 1
+                    None -> ()
+
+            if count != 1 then ok = false
+
+        if ok then return true
+
+        if b.indices.len() == 0
+            self.fail(span, s"a parallel body cannot assign `${n}`, which every element's call shares")
+        elif b.indices.len() == 1
+            val i = p.locals[b.indices[0]].name
+
+            self.fail(span, s"this write to `${n}` is not owned by the iteration: one subscript must be the index `${i}` itself, so that no two iterations write one element")
+        else
+            var names = ""
+
+            for k in 0..<b.indices.len()
+                names = names + (if k > 0 then ", " else "") + s"`${p.locals[b.indices[k]].name}`"
+
+            self.fail(span, s"this write to `${n}` is not owned by the iteration: each of the indices ${names} must be the whole subscript of an axis of its own")
+
+        false
+    end owns
+
+    // Rules 2, 3, 5 and 6 over the body, the places it writes already judged.
+    private walk(*self, p: TProgram, fx: Effects, e: TExpr, b: *Body)
+        *e.kind match
+            TLocal(_) -> self.read_var(p, e, *b)
+            TGlobalRef(_) -> self.read_var(p, e, *b)
+            TFnRef(n) ->
+                fx.of_fun(n) match
+                    Some(s) -> self.callee_ok(p, s"`${n}`", s, e.span, *b)
+                    None -> ()
+            TLambdaRef(l) ->
+                self.walk(p, fx, p.lambdas[l].body, b)
+                return
+            TAssign(_, target, value) ->
+                self.walk_place(p, fx, target, b)
+                self.walk(p, fx, value, b)
+                return
+            TBorrow(place) ->
+                self.walk_place(p, fx, place, b)
+                return
+            TAssignTuple(target, value) ->
+                var places: Buf[TExpr] = buf()
+
+                target_places(target, &places)
+
+                for place in places
+                    self.walk_place(p, fx, place, b)
+
+                self.walk(p, fx, value, b)
+                return
+            TArray(op) -> *op match
+                TIndex(target, subs) ->
+                    owned_of(*b, target) match
+                        Some(o) ->
+                            self.read_owned(p, e.span, o, *b, subs)
+                            self.walk_subs(p, fx, subs, b)
+                            return
+                        None -> ()
+                _ -> ()
+            TCall(callee, args) ->
+                *callee.kind match
+                    TFnRef(_) -> self.walk(p, fx, callee, b)
+                    TLambdaRef(_) -> self.walk(p, fx, callee, b)
+                    _ -> self.called(p, fx, callee, b)
+
+                for a in args
+                    self.walk(p, fx, a, b)
+
+                return
+            TBuiltin(name, args) ->
+                if name == "read_bytes" || name == "write_bytes" then self.fail(e.span, s"a parallel body does no I/O but `print` and `eprint`, and `${name}` is I/O")
+
+                for a in args
+                    *a.kind match
+                        TLocal(_) -> if is_fn_ty(a.ty) then self.called(p, fx, a, b)
+                        _ -> ()
+            TParallel(op) -> *op match
+                TContribute(_, value, index) ->
+                    self.walk(p, fx, value, b)
+
+                    index match
+                        Some(i) -> self.walk(p, fx, i, b)
+                        None -> ()
+
+                    return
+                _ ->
+                    self.fail(e.span, nested_message())
+                    return
+            TExit(l) -> if !has(b.loops, l) then self.fail(e.span, "`exit` cannot leave a parallel loop, whose iterations have no order to leave in; `cycle` ends one iteration")
+            TCycle(l) ->
+                val own = b.loop_id match
+                    Some(id) -> id == l
+                    None -> false
+
+                if !own && !has(b.loops, l) then self.fail(e.span, "`cycle` cannot reach a loop outside the parallel body")
+            TReturn(_) -> self.fail(e.span, "`return` cannot leave a parallel body, whose iterations have no order to leave in")
+            TStop(_) -> self.fail(e.span, "`stop` cannot end the program from a parallel body; a failed `assert` traps, and a trap ends the loop")
+            _ -> ()
+
+        for c in children(e)
+            self.walk(p, fx, c, b)
+    end walk
+
+    // A place written: its subscripts and anything inside it are read, its variable is not.
+    private walk_place(*self, p: TProgram, fx: Effects, place: TExpr, b: *Body)
+        *place.kind match
+            TLocal(_) -> ()
+            TGlobalRef(_) -> ()
+            TField(v, _, _) -> self.walk_place(p, fx, v, b)
+            TTupleField(v, _) -> self.walk_place(p, fx, v, b)
+            TArray(op) -> *op match
+                TIndex(target, subs) ->
+                    self.walk_place(p, fx, target, b)
+                    self.walk_subs(p, fx, subs, b)
+                _ -> self.walk(p, fx, place, b)
+            _ -> self.walk(p, fx, place, b)
+
+    private walk_subs(*self, p: TProgram, fx: Effects, subs: Buf[TSub], b: *Body)
+        for s in subs
+            s match
+                TSubAt(x) -> self.walk(p, fx, x, b)
+                TSubAll -> ()
+                TSubWindow(lo, hi, _, stride) ->
+                    for x in [lo, hi, stride]
+                        x match
+                            Some(v) -> self.walk(p, fx, v, b)
+                            None -> ()
+
+    // A variable read whole: never a reduction variable, nor an array the body owns elements of.
+    private read_var(*self, p: TProgram, v: TExpr, b: Body)
+        if among_vars(b.reds, v)
+            self.fail(v.span, s"the reduction variable `${var_name(p, v)}` is read here; inside its loop an iteration only contributes to it")
+        elif owned_of(b, v).is_some()
+            self.fail(v.span, s"`${var_name(p, v)}` is written by every iteration at its own element, so the body reads it only there")
+
+    // An owned array read: only at the iteration's own subscripts (rule 2).
+    private read_owned(*self, p: TProgram, span: Span, o: Owned, b: Body, subs: Buf[TSub])
+        var ok = subs.len() == o.axes.len()
+
+        if ok
+            for k in 0..<subs.len()
+                o.axes[k] match
+                    Some(i) -> index_at(b, subs[k]) match
+                        Some(j) -> if j != i then ok = false
+                        None -> ok = false
+                    None -> ()
+
+        if !ok then self.fail(span, s"`${var_name(p, o.root)}` is written by every iteration at its own element, so the body reads it only there, not at another iteration's")
+
+    // A call of a function value: one the body can see into, or refused.
+    private called(*self, p: TProgram, fx: Effects, f: TExpr, b: *Body)
+        *f.kind match
+            TFnRef(_) -> self.walk(p, fx, f, b)
+            TLambdaRef(_) -> self.walk(p, fx, f, b)
+            TLocal(id) ->
+                self.read_var(p, f, *b)
+
+                fx.held(id) match
+                    Some(n) ->
+                        val inside = fx.lambda_of_local(id) match
+                            Some(l) -> has(b.lambdas, l)
+                            None -> false
+
+                        if !inside then self.callee_ok(p, s"`${p.locals[id].name}`", fx.nodes[n], f.span, *b)
+                    None -> self.fail(f.span, s"a parallel body calls only functions the checker can see into, and `${p.locals[id].name}` is a function value; call a function by its name")
+            _ ->
+                self.fail(f.span, "a parallel body calls only functions the checker can see into, and this is a function value; call a function by its name")
+                self.walk(p, fx, f, b)
+    end called
+
+    // A function called from the body, judged by its summary (rule 3, and rule 5 through calls).
+    private callee_ok(*self, p: TProgram, label: string, s: Summary, span: Span, b: Body)
+        val why = callee_problem(p, s, b)
+
+        if why.len > 0 then self.fail(span, s"${label} ${why}")
+end Elab
+
+// What a function called from the body does that the body may not; `""` where it does nothing.
+private callee_problem(p: TProgram, s: Summary, b: Body) -> string
+    if s.writes.len() > 0 then return s"assigns the module variable `${s.writes[0]}`, and nothing a parallel body calls may change a module variable"
+    if s.io.len > 0 then return s"does I/O with `${s.io}`, and a parallel body does no I/O but `print` and `eprint`"
+    if s.parallel then return "runs a `parallel` construct, and a parallel body cannot start another"
+    if s.opaque.len > 0 then return s"calls ${s.opaque}, which the checker cannot see into, so a parallel body cannot call it"
+
+    for id in s.cap_writes
+        if !has(b.bound, id) then return s"assigns `${p.locals[id].name}`, which every iteration shares"
+
+    for v in b.reds
+        if reaches(s, v) then return s"reads the reduction variable `${var_name(p, v)}`"
+
+    for o in b.owned
+        if reaches(s, o.root) then return s"reads `${var_name(p, o.root)}`, which this body writes element by element"
+
+    ""
+end callee_problem
+
+private reaches(s: Summary, v: TExpr) -> bool = *v.kind match
+    TLocal(id) -> has(s.cap_reads, id)
+    TGlobalRef(n) -> contains(s.reads, n)
+    _ -> false
+
+private is_fn_ty(t: Ty) -> bool = t match
+    Fn(_) -> true
+    _ -> false
+
+// What the body binds, the loops it holds, the lambdas written in it and the places it writes. A
+// nested parallel construct is not looked into: it is refused whole.
+private collect(p: TProgram, e: TExpr, b: *Body)
+    *e.kind match
+        TLet(id, _) -> b.bound.push(id)
+        TFor(l, id, _, _, _, _, _) ->
+            b.bound.push(id)
+            b.loops.push(l)
+        TWhile(l, _, _) -> b.loops.push(l)
+        TArray(op) -> *op match
+            TForEach(l, id, _, _) ->
+                b.bound.push(id)
+                b.loops.push(l)
+            _ -> ()
+        TMatch(_, arms) ->
+            for a in arms
+                pattern_locals(a.pat, &b.bound)
+        TDestructure(_, pat, _) -> bound_locals(pat, &b.bound)
+        TAssign(_, target, _) -> b.places.push(target)
+        TAssignTuple(target, _) -> target_places(target, &b.places)
+        TBorrow(place) -> b.places.push(place)
+        TLambdaRef(l) ->
+            if !has(b.lambdas, l)
+                b.lambdas.push(l)
+                b.bound.extend(p.lambdas[l].params.view())
+                collect(p, p.lambdas[l].body, b)
+        TParallel(op) -> *op match
+            TContribute(_, _, _) -> ()
+            _ -> return
+        _ -> ()
+
+    for c in children(e)
+        collect(p, c, b)
+end collect

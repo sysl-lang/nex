@@ -69,7 +69,7 @@ impl Elab
                 _ -> ()
 
             if x.modes[j] == Inout
-                out.push(self.borrow(a, ty))
+                out.push(self.borrow(a, ty, ""))
                 continue
 
             val v = self.elab(a, Some(ty))

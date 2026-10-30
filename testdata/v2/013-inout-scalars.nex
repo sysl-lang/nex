@@ -1,0 +1,33 @@
+var total = 0
+
+def bump(x: inout integer, by: integer) = x += by
+
+def swap(a: inout real32, b: inout real32) =
+  val t = a
+  a = b
+  b = t
+
+def twice(z: inout complex) = z = z * 2
+
+def apply(f: (integer -> void), k: integer) = f(k)
+
+def bump_twice(x: inout integer) =
+  bump(x, 1)
+  apply(k -> bump(x, k), 10)
+
+def main() =
+  var n = 1
+  bump(n, 41)
+  print(n)
+  var p: real32 = 0.5
+  var q: real32 = 0.25
+  swap(p, q)
+  print(s"$p $q")
+  bump(total, 5)
+  bump(total, 6)
+  print(total)
+  var c: complex = 1 + 1i
+  twice(c)
+  print(c)
+  bump_twice(n)
+  print(n)

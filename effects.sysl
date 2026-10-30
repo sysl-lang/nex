@@ -1,0 +1,346 @@
+// The effect summary of every function and lambda (DESIGN §8.3, §9.4): the module-level `var`s it
+// reads and writes, the I/O it does, whether it starts a `parallel` construct, and for a lambda the
+// locals of the functions around it that it reads and writes. **Each summary is transitive**: it
+// holds what the function does directly and through everything it calls, recursion included, by
+// iterating to a fixed point over the call graph.
+//
+// **A call is followed where the callee can be seen**: a top-level function, a lambda, or a `val`
+// local bound to one of them. A function or lambda that is merely mentioned (passed to `map`,
+// stored) counts as called, since whoever receives it may call it. A call of any other function
+// value, a parameter of function type above all, cannot be followed, and the summary says so in
+// `opaque` rather than guessing.
+//
+// The parallel-safety checker (`parallel_check.sysl`) and the `@elemental` check read it; it is a
+// pass over the finished typed IR and knows nothing of either.
+
+import sysl.buf.{Buf, buf}
+
+struct Summary
+    // The module-level `var`s assigned or passed `inout`, directly or through a call.
+    writes: Buf[string]
+    // The module-level `var`s read, directly or through a call.
+    reads: Buf[string]
+    // The first prelude function that does I/O other than `print` and `eprint`; `""` for none.
+    io: string
+    // Whether a `parallel for` or a `parallel` expression runs inside.
+    parallel: bool
+    // A call that cannot be followed, as a diagnostic names it (`` `f` ``); `""` where every call
+    // can be.
+    opaque: string
+    // For a lambda: the locals of enclosing functions it assigns, and those it reads.
+    cap_writes: Buf[usize]
+    cap_reads: Buf[usize]
+
+private empty_summary() -> Summary = Summary(buf(), buf(), "", false, "", buf(), buf())
+
+struct Effects
+    // The top-level functions, by name: function `k` is node `k`, and lambda `l` is node
+    // `funs.len() + l`.
+    funs: Buf[string]
+    nodes: Buf[Summary]
+    // The `val` locals bound to a function or a lambda, and the node each holds.
+    held_local: Buf[usize]
+    held_node: Buf[usize]
+
+impl Effects
+    of_fun(self, name: string) -> Option[Summary]
+        for k in 0..<self.funs.len()
+            if self.funs[k] == name then return Some(self.nodes[k])
+
+        None
+
+    of_lambda(self, l: usize) -> Summary = self.nodes[self.funs.len() + l]
+
+    // The node a call of the local `id` runs, where it is bound to a function or a lambda.
+    held(self, id: usize) -> Option[usize]
+        for k in 0..<self.held_local.len()
+            if self.held_local[k] == id then return Some(self.held_node[k])
+
+        None
+
+    // The lambda the local `id` is bound to, where it is bound to one.
+    lambda_of_local(self, id: usize) -> Option[usize] = self.held(id) match
+        Some(n) -> if n >= self.funs.len() then Some(n - self.funs.len()) else None
+        None -> None
+end Effects
+
+// The effect summary of every function and lambda of `p`.
+summarize(p: TProgram) -> Effects
+    var vars: Buf[string] = buf()
+    var funs: Buf[string] = buf()
+    var bodies: Buf[TExpr] = buf()
+
+    for d in p.decls
+        d match
+            GlobalDecl(g) -> if g.kind == Var then vars.push(g.name)
+            TupleGlobalDecl(g) -> if g.kind == Var then bound_globals(g.pat, &vars)
+            FunDecl(f) ->
+                funs.push(f.name)
+
+                var items: Buf[TExpr] = buf()
+
+                for d in f.defaults
+                    d match
+                        Some(x) -> items.push(x)
+                        None -> ()
+
+                bodies.push(texpr(f.span, f.ret, TBlock(items, f.body)))
+            _ -> ()
+
+    var fx = Effects(funs, buf(), buf(), buf())
+
+    // The locals bound to a function: a local `def`, or a `val` whose value is a function's name.
+    for b in bodies
+        holders(p, funs, b, &fx.held_local, &fx.held_node)
+
+    for l in p.lambdas
+        holders(p, funs, l.body, &fx.held_local, &fx.held_node)
+
+    var scans: Buf[Scan] = buf()
+
+    for b in bodies
+        var sc = Scan(empty_summary(), buf(), buf(), false)
+
+        scan(p, fx, vars, b, &sc)
+        scans.push(sc)
+
+    for l in p.lambdas
+        var sc = Scan(empty_summary(), buf(), buf(), true)
+
+        sc.own.extend(l.params.view())
+        scan(p, fx, vars, l.body, &sc)
+        scans.push(sc)
+
+    // What a node calls, it does: merge along every edge until nothing changes.
+    var changed = true
+
+    while changed
+        changed = false
+
+        for n in 0..<scans.len()
+            var sc = scans[n]
+
+            for m in scans[n].edges
+                if merge(&sc, scans[m].s) then changed = true
+
+            scans.set(n, sc)
+
+    for sc in scans
+        fx.nodes.push(sc.s)
+
+    fx
+end summarize
+
+// What one node does directly, and the nodes it calls.
+private struct Scan
+    s: Summary
+    edges: Buf[usize]
+    // The locals the node binds itself.
+    own: Buf[usize]
+    // Whether the node is a lambda, which can reach the locals of the functions around it.
+    lambda: bool
+
+private has_id(xs: Buf[usize], x: usize) -> bool
+    for y in xs
+        if y == x then return true
+
+    false
+
+private add_name(xs: *Buf[string], n: string)
+    if !contains(*xs, n) then xs.push(n)
+
+private add_id(xs: *Buf[usize], x: usize)
+    if !has_id(*xs, x) then xs.push(x)
+
+// Fold the summary of a callee into `sc`; whether anything was added. A captured local the caller
+// binds itself is its own business, not a capture of the caller's.
+private merge(sc: *Scan, c: Summary) -> bool
+    val before = sc.s.writes.len() + sc.s.reads.len() + sc.s.cap_writes.len() + sc.s.cap_reads.len()
+    var changed = false
+
+    for w in c.writes
+        add_name(&sc.s.writes, w)
+
+    for r in c.reads
+        add_name(&sc.s.reads, r)
+
+    if sc.s.io.len == 0 && c.io.len > 0
+        sc.s.io = c.io
+        changed = true
+
+    if !sc.s.parallel && c.parallel
+        sc.s.parallel = true
+        changed = true
+
+    if sc.s.opaque.len == 0 && c.opaque.len > 0
+        sc.s.opaque = c.opaque
+        changed = true
+
+    if sc.lambda
+        for id in c.cap_writes
+            if !has_id(sc.own, id) then add_id(&sc.s.cap_writes, id)
+
+        for id in c.cap_reads
+            if !has_id(sc.own, id) then add_id(&sc.s.cap_reads, id)
+
+    changed || sc.s.writes.len() + sc.s.reads.len() + sc.s.cap_writes.len() + sc.s.cap_reads.len() != before
+end merge
+
+// The module-level bindings a destructuring pattern names.
+private bound_globals(b: TBind, out: *Buf[string])
+    b match
+        BGlobal(n) -> out.push(n)
+        BTuple(elems) ->
+            for e in elems
+                bound_globals(e, out)
+        _ -> ()
+
+// Every `val` local in `e` bound to a function or a lambda, with the node it holds.
+private holders(p: TProgram, funs: Buf[string], e: TExpr, locals: *Buf[usize], nodes: *Buf[usize])
+    *e.kind match
+        TLet(id, init) ->
+            val is_val = p.locals[id].kind match
+                LVal -> true
+                _ -> false
+
+            if is_val
+                *init.kind match
+                    TLambdaRef(l) ->
+                        locals.push(id)
+                        nodes.push(funs.len() + l)
+                    TFnRef(n) ->
+                        for k in 0..<funs.len()
+                            if funs[k] == n
+                                locals.push(id)
+                                nodes.push(k)
+                    _ -> ()
+        _ -> ()
+
+    for c in children(e)
+        holders(p, funs, c, locals, nodes)
+end holders
+
+// The node a function's name is.
+private fun_node(fx: Effects, n: string) -> Option[usize]
+    for k in 0..<fx.funs.len()
+        if fx.funs[k] == n then return Some(k)
+
+    None
+
+// What `e` does directly, into `sc`. A lambda's body is its own node, reached by an edge.
+private scan(p: TProgram, fx: Effects, vars: Buf[string], e: TExpr, sc: *Scan)
+    *e.kind match
+        TGlobalRef(n) -> if contains(vars, n) then add_name(&sc.s.reads, n)
+        TLocal(id) -> if sc.lambda && !has_id(sc.own, id) then add_id(&sc.s.cap_reads, id)
+        TFnRef(n) ->
+            fun_node(fx, n) match
+                Some(k) -> add_id(&sc.edges, k)
+                None -> ()
+        TLambdaRef(l) -> add_id(&sc.edges, fx.funs.len() + l)
+        TAssign(_, target, _) -> written(fx, vars, target, sc)
+        TBorrow(place) -> written(fx, vars, place, sc)
+        TAssignTuple(target, _) ->
+            var places: Buf[TExpr] = buf()
+
+            target_places(target, &places)
+
+            for place in places
+                written(fx, vars, place, sc)
+        TDestructure(_, pat, _) ->
+            var names: Buf[string] = buf()
+
+            bound_globals(pat, &names)
+
+            for n in names
+                if contains(vars, n) then add_name(&sc.s.writes, n)
+
+            bound_locals(pat, &sc.own)
+        TLet(id, _) -> sc.own.push(id)
+        TFor(_, id, _, _, _, _, _) -> sc.own.push(id)
+        TMatch(_, arms) ->
+            for a in arms
+                pattern_locals(a.pat, &sc.own)
+        TCall(callee, _) ->
+            *callee.kind match
+                TFnRef(_) -> ()
+                TLambdaRef(_) -> ()
+                TLocal(id) -> called_local(p, fx, id, sc)
+                _ -> if sc.s.opaque.len == 0 then sc.s.opaque = "a function value"
+        TBuiltin(name, args) ->
+            if (name == "read_bytes" || name == "write_bytes") && sc.s.io.len == 0 then sc.s.io = name
+
+            for a in args
+                *a.kind match
+                    TLocal(id) -> if is_fn(a.ty) then called_local(p, fx, id, sc)
+                    _ -> ()
+        TArray(op) -> *op match
+            TForEach(_, id, _, _) -> sc.own.push(id)
+            _ -> ()
+        TParallel(op) -> *op match
+            TParFor(_, clauses, _, _) ->
+                sc.s.parallel = true
+
+                for c in clauses
+                    sc.own.push(c.var_id)
+            TParExpr(_) -> sc.s.parallel = true
+            _ -> ()
+        _ -> ()
+
+    for c in children(e)
+        scan(p, fx, vars, c, sc)
+end scan
+
+private is_fn(t: Ty) -> bool = t match
+    Fn(_) -> true
+    _ -> false
+
+// A call of the local `id`: an edge to what it is bound to, or a call the summary cannot follow.
+private called_local(p: TProgram, fx: Effects, id: usize, sc: *Scan)
+    fx.held(id) match
+        Some(n) -> add_id(&sc.edges, n)
+        None -> if sc.s.opaque.len == 0 then sc.s.opaque = s"`${p.locals[id].name}`"
+
+// A place assigned or passed `inout`: a module-level `var` it is in is written, and so is a captured
+// local.
+private written(fx: Effects, vars: Buf[string], place: TExpr, sc: *Scan)
+    *root_of(place).kind match
+        TGlobalRef(n) -> if contains(vars, n) then add_name(&sc.s.writes, n)
+        TLocal(id) -> if sc.lambda && !has_id(sc.own, id) then add_id(&sc.s.cap_writes, id)
+        _ -> ()
+
+// The variable a place is in: the place with every field, tuple element and index stripped.
+root_of(place: TExpr) -> TExpr = *place.kind match
+    TField(v, _, _) -> root_of(v)
+    TTupleField(v, _) -> root_of(v)
+    TArray(op) -> *op match
+        TIndex(target, _) -> root_of(target)
+        _ -> place
+    _ -> place
+
+// The places a tuple assignment stores into.
+target_places(t: TTarget, out: *Buf[TExpr])
+    t match
+        TPlace(place) -> out.push(place)
+        TDrop -> ()
+        TTargets(elems) ->
+            for e in elems
+                target_places(e, out)
+
+bound_locals(b: TBind, out: *Buf[usize])
+    b match
+        BLocal(id) -> out.push(id)
+        BTuple(elems) ->
+            for e in elems
+                bound_locals(e, out)
+        _ -> ()
+
+pattern_locals(pat: TPat, out: *Buf[usize])
+    pat match
+        PVariant(_, _, fields) ->
+            for f in fields
+                f match
+                    Some(id) -> out.push(id)
+                    None -> ()
+        PAny(bind) -> bind match
+            Some(id) -> out.push(id)
+            None -> ()

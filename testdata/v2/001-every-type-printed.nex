@@ -1,0 +1,47 @@
+def main() =
+  val a: int8 = -128
+  val b: int16 = 32767
+  val c: int32 = -2147483648
+  val d: int64 = 9223372036854775807
+  val e: uint8 = 255
+  val f: uint16 = 65535
+  val g: uint32 = 4294967295
+  val h: uint64 = 9223372036854775807
+  val p: real16 = 0.1
+  val q: real32 = 0.1
+  val r: real64 = 0.1
+  val s: complex[real16] = 1.5 - 2i
+  val t: complex[real32] = 0.1 + 0.2i
+  val u: complex[real64] = 0.1 + 0.2i
+  val n: integer = 42
+  val x: real = 2.5
+  val z: complex = 3 + 4i
+  print(a)
+  print(b)
+  print(c)
+  print(d)
+  print(e)
+  print(f)
+  print(g)
+  print(h * 2 + 1)
+  print(p)
+  print(q)
+  print(r)
+  print(s)
+  print(t)
+  print(u)
+  print(n)
+  print(x)
+  print(z)
+  print(true)
+  print("text")
+  val hmax: real16 = 65504.0
+  val htiny: real16 = 6.0e-8
+  val fmax: real32 = 3.4028235e38
+  val ftiny: real32 = 1.0e-45
+  val dmax: real64 = 1.7976931348623157e308
+  print(hmax)
+  print(htiny)
+  print(fmax)
+  print(ftiny)
+  print(dmax)

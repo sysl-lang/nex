@@ -1,0 +1,1012 @@
+// The aggregates: structs, enums and tuples, the `match` that takes an enum apart, the destructuring
+// binding that takes a tuple apart, and the rules on what a lambda may capture.
+//
+// **A struct or an enum is a nominal type**, `Nominal(name, args)`, whose fields are looked up here
+// by its name. An instance of a generic one is a struct or an enum of its own, named for its
+// arguments, `Box[int64]` (`elab_generic.sysl`); `args` holds the arguments only of an application
+// inside a generic's own signature, `Box[T]`. Their names, and the names
+// of the variants, are declared at the top level beside the functions and module-level bindings, so a
+// variant is a value wherever its name is not shadowed: `Red`, `Converged(2.5)`. The field types are
+// resolved once every name is collected, so a struct may name one declared after it.
+//
+// **A tuple is structural**: `(int64, string)` is the type of every pair of those. One built in place
+// converts element by element to the tuple its position expects; a tuple value as a whole does not
+// widen (DESIGN §11.4).
+//
+// **A `match` covers its enum.** Every variant has its arm or a catch-all stands for it, no arm is
+// reached only after another has matched everything, and the arms meet in one type as the branches
+// of an `if` do.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.join
+import sh.sysl.parsing.{Span, nearest_name}
+
+// A struct as written, and its fields once their types are resolved. A generic one keeps none: its
+// instances are structs of their own.
+struct StructSrc
+    decl: Decl
+    name: string
+    generic: bool
+    src: Buf[Field]
+    fields: Buf[FieldInfo]
+
+struct EnumSrc
+    decl: Decl
+    name: string
+    generic: bool
+    src: Buf[Variant]
+    variants: Buf[VariantInfo]
+
+// A variant's name, the enum it belongs to and its tag.
+struct VariantRef
+    name: string
+    owner: usize
+    tag: usize
+
+// A module-level destructuring binding: one initializer for several names, each of which is a
+// module-level binding in `Elab.globals`; `out` once it is elaborated.
+struct GlobalGroup
+    decl: Decl
+    kind: BindKind
+    pat: Pattern
+    typ: Option[Type]
+    init: Expr
+    members: Buf[usize]
+    out: Option[TGlobalTuple]
+
+// What a `match` arm's pattern matches, before its body is elaborated: the variant's tag, or none
+// for an arm that matches anything, and the names it binds with their types (`_` binds none).
+struct ArmShape
+    tag: Option[usize]
+    variant: string
+    binds: Buf[string]
+    tys: Buf[Ty]
+    // False where the pattern was refused, so the coverage of the `match` is not judged.
+    valid: bool
+
+struct Aggregates
+    structs: Buf[StructSrc]
+    enums: Buf[EnumSrc]
+    variants: Buf[VariantRef]
+    groups: Buf[GlobalGroup]
+    // The lambdas written straight as an argument, which the callee borrows for the call only.
+    passed: Buf[usize]
+    // Set while the argument about to be elaborated is a lambda written straight.
+    passing: bool
+    // The lambda each captured `var` array has moved into.
+    owners: Buf[Capture]
+
+empty_aggregates() -> Aggregates = Aggregates(buf(), buf(), buf(), buf(), buf(), false, buf())
+
+impl Elab
+    // -- declarations -----------------------------------------------------------------------------
+
+    collect_struct(*self, d: Decl, name: string, tparams: Buf[TypeParam], fields: Buf[Field])
+        if !self.declare(d.span, name) then return
+        if tparams.len() > 0 then self.collect_generic_agg(d, name, tparams, false)
+
+        self.agg.structs.push(StructSrc(d, name, tparams.len() > 0, fields, buf()))
+
+    // An enum, and each of its variants as a top-level name.
+    collect_enum(*self, d: Decl, name: string, tparams: Buf[TypeParam], variants: Buf[Variant])
+        if !self.declare(d.span, name) then return
+        if tparams.len() > 0 then self.collect_generic_agg(d, name, tparams, true)
+
+        val owner = self.agg.enums.len()
+
+        self.agg.enums.push(EnumSrc(d, name, tparams.len() > 0, variants, buf()))
+
+        for j in 0..<variants.len()
+            if self.declare(d.span, variants[j].name) then self.agg.variants.push(VariantRef(variants[j].name, owner, j))
+
+    // `val a, b = ...` at module level: each name a module-level binding, all elaborated together.
+    collect_group(*self, d: Decl, kind: BindKind, pat: Pattern, typ: Option[Type], init: Expr)
+        if pattern_names(pat).len() == 0
+            self.fail(d.span, "a module-level binding binds a name; the top level holds only declarations")
+            return
+
+        var members: Buf[usize] = buf()
+
+        for n in pattern_names(pat)
+            if self.declare(d.span, n)
+                members.push(self.globals.len())
+                self.tops.push(Top(n, TopValue(self.globals.len())))
+                self.globals.push(GlobalSrc(d, n, kind, typ, init))
+                self.gstate.push(Waiting)
+                self.gty.push(Error)
+
+        self.agg.groups.push(GlobalGroup(d, kind, pat, typ, init, members, None))
+    end collect_group
+
+    // Whether a struct, an enum or a variant is declared with this name.
+    is_aggregate_name(self, name: string) -> bool =
+        self.find_struct(name).is_some() || self.find_enum(name).is_some() || self.find_variant(name).is_some()
+
+    find_struct(self, name: string) -> Option[usize]
+        for k in 0..<self.agg.structs.len()
+            if self.agg.structs[k].name == name then return Some(k)
+
+        None
+
+    find_enum(self, name: string) -> Option[usize]
+        for k in 0..<self.agg.enums.len()
+            if self.agg.enums[k].name == name then return Some(k)
+
+        None
+
+    find_variant(self, name: string) -> Option[VariantRef]
+        for v in self.agg.variants
+            if v.name == name then return Some(v)
+
+        None
+
+    // The field types of every struct and every variant, once every name is collected; then the
+    // structs and enums that would contain themselves.
+    resolve_aggregates(*self)
+        for k in 0..<self.agg.structs.len()
+            val s = self.agg.structs[k]
+
+            if !s.generic then self.agg.structs.set(k, StructSrc(s.decl, s.name, false, s.src, self.resolve_fields(s.decl.span, s.name, s.src)))
+
+        for k in 0..<self.agg.enums.len()
+            val e = self.agg.enums[k]
+
+            if e.generic then continue
+
+            var variants: Buf[VariantInfo] = buf()
+
+            for v in e.src
+                variants.push(VariantInfo(v.name, self.resolve_fields(e.decl.span, v.name, v.fields)))
+
+            self.agg.enums.set(k, EnumSrc(e.decl, e.name, false, e.src, variants))
+
+        for s in self.agg.structs
+            if !s.generic then self.check_contains_self(s.decl.span, s.name)
+
+        for e in self.agg.enums
+            if !e.generic then self.check_contains_self(e.decl.span, e.name)
+    end resolve_aggregates
+
+    resolve_fields(*self, span: Span, owner: string, src: Buf[Field]) -> Buf[FieldInfo]
+        var out: Buf[FieldInfo] = buf()
+
+        for f in src
+            for o in out
+                if o.name == f.name then self.fail(span, s"`${f.name}` is declared twice in `${owner}`")
+
+            val ty = self.resolve_type(f.typ)
+
+            if is_void(ty) then self.fail(f.typ.span, s"the field `${f.name}` holds no value: it is void")
+
+            out.push(FieldInfo(f.name, ty))
+
+        out
+
+    // A struct or an enum holds its fields by value, so one that reaches itself through its fields,
+    // its variants' fields or a tuple among them would have no size.
+    check_contains_self(*self, span: Span, name: string)
+        var seen: Buf[string] = buf()
+
+        for t in self.member_types(name)
+            if self.reaches(name, t, &seen)
+                self.fail(span, s"`${name}` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array")
+                return
+
+    private reaches(self, root: string, ty: Ty, seen: *Buf[string]) -> bool
+        ty match
+            Nominal(n, _) ->
+                if n == root then return true
+                if contains(*seen, n) then return false
+
+                seen.push(n)
+
+                for t in self.member_types(n)
+                    if self.reaches(root, t, seen) then return true
+
+                false
+            Ty.Tuple(ts) ->
+                for t in ts
+                    if self.reaches(root, t, seen) then return true
+
+                false
+            _ -> false
+    end reaches
+
+    // The types a struct's fields, or an enum's variants' fields, hold.
+    private member_types(self, name: string) -> Buf[Ty]
+        var out: Buf[Ty] = buf()
+
+        self.find_struct(name) match
+            Some(k) ->
+                for f in self.agg.structs[k].fields
+                    out.push(f.ty)
+            None -> ()
+
+        self.find_enum(name) match
+            Some(k) ->
+                for v in self.agg.enums[k].variants
+                    for f in v.fields
+                        out.push(f.ty)
+            None -> ()
+
+        out
+    end member_types
+
+    // The type a struct's or an enum's name denotes; `Error` for a generic one, which `resolve_type`
+    // reports before it gets here.
+    nominal_named(self, name: string) -> Option[Ty]
+        self.find_struct(name) match
+            Some(k) -> return Some(if self.agg.structs[k].generic then Error else Nominal(name, buf()))
+            None -> ()
+
+        self.find_enum(name) match
+            Some(k) -> Some(if self.agg.enums[k].generic then Error else Nominal(name, buf()))
+            None -> None
+
+    // The structs and enums, in the order the source declares them.
+    type_decls(self) -> Buf[TDecl]
+        var out: Buf[TDecl] = buf()
+
+        for d in self.prog.decls
+            *d.kind match
+                Struct(name, _, _) ->
+                    self.find_struct(name) match
+                        Some(k) ->
+                            val s = self.agg.structs[k]
+
+                            if !s.generic && s.decl.span.start == d.span.start then out.push(StructDecl(TStruct(d.span, name, s.fields)))
+                        None -> ()
+                Enum(name, _, _) ->
+                    self.find_enum(name) match
+                        Some(k) ->
+                            val e = self.agg.enums[k]
+
+                            if !e.generic && e.decl.span.start == d.span.start then out.push(EnumDecl(TEnum(d.span, name, e.variants)))
+                        None -> ()
+                _ -> ()
+
+        out
+    end type_decls
+
+    // -- module-level destructuring ---------------------------------------------------------------
+
+    // The group the `k`th module-level binding belongs to, where it came from a destructuring one.
+    group_of(self, k: usize) -> Option[usize]
+        for g in 0..<self.agg.groups.len()
+            for m in self.agg.groups[g].members
+                if m == k then return Some(g)
+
+        None
+
+    // Elaborates a group's initializer once and gives each of its names its element's type.
+    ensure_group(*self, g: usize)
+        val grp = self.agg.groups[g]
+
+        for k in grp.members
+            self.gstate.set(k, Working)
+
+        val saved = self.fx
+
+        self.fx = empty_fx()
+        self.fx.in_const = grp.kind == Const
+
+        val v = self.destructured_value(grp.typ, grp.init)
+        val b = self.bind_pattern(grp.pat, v.ty, LVal, grp.members)
+
+        self.fx = saved
+
+        for k in grp.members
+            self.gstate.set(k, Finished)
+
+        self.agg.groups.set(g, GlobalGroup(grp.decl, grp.kind, grp.pat, grp.typ, grp.init, grp.members, Some(TGlobalTuple(grp.decl.span, grp.kind, b, v.ty, v))))
+    end ensure_group
+
+    // The declaration of a group, at its first name.
+    group_decl(self, k: usize) -> Option[TGlobalTuple]
+        for g in self.agg.groups
+            if g.members.len() > 0 && g.members[0] == k then return g.out
+
+        None
+
+    // -- tuples -----------------------------------------------------------------------------------
+
+    // `(a, b)` or `a, b`. Where the position expects a tuple of as many elements, each element is
+    // checked against its own, so a literal adopts it and a narrower value widens.
+    tuple(*self, span: Span, elems: Buf[Expr], want: Option[Ty]) -> TExpr
+        val expected = want match
+            Some(Ty.Tuple(ts)) -> if ts.len() == elems.len() then Some(ts) else None
+            _ -> None
+
+        var out: Buf[TExpr] = buf()
+        var tys: Buf[Ty] = buf()
+
+        for k in 0..<elems.len()
+            val v = expected match
+                Some(ts) -> self.check(elems[k], ts[k], s"element ${k + 1} of this tuple")
+                None -> self.infer(elems[k])
+
+            if is_void(v.ty) then self.fail(elems[k].span, "a tuple element holds a value, and this is void")
+
+            out.push(self.escaping(v, "stored in a tuple"))
+            tys.push(v.ty)
+
+        texpr(span, Ty.Tuple(tys), TTuple(out))
+    end tuple
+
+    tuple_field(*self, span: Span, receiver: Expr, index: usize) -> TExpr = self.select_element(span, self.infer(receiver), index)
+
+    // `t.k`, counting from 1.
+    select_element(*self, span: Span, v: TExpr, index: usize) -> TExpr
+        v.ty match
+            Ty.Tuple(elems) ->
+                if index == 0
+                    self.fail(span, "a tuple's elements count from 1: `t.1` is the first")
+                elif index > elems.len()
+                    self.fail(span, s"this tuple has ${elems.len()} elements, so there is no `.${index}`")
+                else
+                    return texpr(span, elems[index - 1], TTupleField(v, index - 1))
+
+                self.invalid(span)
+            Error -> self.invalid(span)
+            _ ->
+                self.fail(span, s"`.${index}` takes an element of a tuple, and this is ${self.shown(v)}")
+                self.invalid(span)
+    end select_element
+
+    // -- structs ----------------------------------------------------------------------------------
+
+    // `p.x` on a struct, or `z.re` and `z.im` on a complex number.
+    select_field(*self, span: Span, v: TExpr, name: string) -> TExpr
+        base_of(v.ty) match
+            Complex(b) ->
+                // The parts of a `complex<V>` are each a `real<V>`.
+                if name == "re" || name == "im" then return texpr(span, measured(Real(b), unit_of(v.ty)), TComplexPart(v, name == "im"))
+
+                self.fail(span, s"a complex number has the fields `re` and `im`, not `${name}`")
+            Nominal(n, _) ->
+                self.find_struct(n) match
+                    Some(k) ->
+                        val fields = self.agg.structs[k].fields
+                        var names: Buf[string] = buf()
+
+                        for j in 0..<fields.len()
+                            if fields[j].name == name then return texpr(span, fields[j].ty, TField(v, name, j))
+
+                            names.push(fields[j].name)
+
+                        nearest_name(name, names) match
+                            Some(near) -> self.fail(span, s"`${n}` has no field `${name}`; did you mean `${near}`?")
+                            None -> self.fail(span, s"`${n}` has no field `${name}`")
+                    None -> self.fail(span, s"an enum's values are taken apart with `match`; `${n}` has no fields")
+            Ty.Tuple(_) -> self.fail(span, s"a tuple's elements are numbered from 1, `t.1`, and have no names")
+            Error -> ()
+            _ -> self.fail(span, s"${self.shown(v)} has no fields")
+
+        self.invalid(span)
+    end select_field
+
+    // Whether `receiver` names a struct value with a field `name`, so that `receiver.name(args)` calls
+    // that field.
+    has_field(*self, receiver: Expr, name: string) -> bool
+        val n = *receiver.kind match
+            ExprKind.Name(n) -> n
+            _ -> return false
+
+        val ty = self.lookup_local(n) match
+            Some(id) -> self.locals[id].ty
+            None -> self.find_top(n) match
+                Some(TopValue(k)) -> if self.gstate[k] == Working then return false else self.global_type(k, receiver.span)
+                _ -> return false
+
+        val s = ty match
+            Nominal(sn, _) -> self.find_struct(sn)
+            _ -> None
+
+        s match
+            Some(k) ->
+                for f in self.agg.structs[k].fields
+                    if f.name == name then return true
+
+                false
+            None -> false
+    end has_field
+
+    // `Point(x, y)` or `Converged(x)`: a struct or a variant built, where `n` names one.
+    construct(*self, span: Span, at: Span, n: string, args: Buf[Expr], want: Option[Ty]) -> Option[TExpr]
+        self.find_struct(n) match
+            Some(k) ->
+                val s = self.agg.structs[k]
+
+                if s.generic then return Some(self.generic_construct(span, at, n, args, want))
+
+                return Some(texpr(span, Nominal(n, buf()), TNew(self.field_args(span, n, s.fields, args))))
+            None -> ()
+
+        val v = self.find_variant(n) match
+            Some(v) -> v
+            None -> return None
+
+        val e = self.agg.enums[v.owner]
+
+        if e.generic then return Some(self.generic_construct(span, at, n, args, want))
+
+        val fields = e.variants[v.tag].fields
+
+        if fields.len() == 0
+            self.fail(at, s"`${n}` carries no fields; write it without parentheses")
+            return Some(self.invalid(span))
+
+        Some(texpr(span, Nominal(e.name, buf()), TVariant(n, v.tag, self.field_args(span, n, fields, args))))
+    end construct
+
+    // A constructor's arguments, by position or by field name, each checked against its field.
+    private field_args(*self, span: Span, what: string, fields: Buf[FieldInfo], args: Buf[Expr]) -> Buf[TExpr]
+        var slots: Buf[Option[Expr]] = buf()
+        var named = false
+        var next: usize = 0
+
+        for _ in fields
+            slots.push(None)
+
+        for a in args
+            *a.kind match
+                NamedArg(n, value) ->
+                    named = true
+
+                    var found = false
+
+                    for j in 0..<fields.len()
+                        if fields[j].name == n
+                            found = true
+
+                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots.set(j, Some(value))
+
+                    if !found then self.fail(a.span, s"`${what}` has no field `${n}`")
+                _ ->
+                    if named
+                        self.fail(a.span, "a positional argument cannot follow a named one")
+                    elif next >= slots.len()
+                        self.fail(a.span, s"`${what}` has ${fields_text(fields.len())}")
+                    else
+                        slots.set(next, Some(a))
+
+                    next += 1
+
+        var out: Buf[TExpr] = buf()
+
+        for j in 0..<slots.len()
+            slots[j] match
+                Some(a) -> out.push(self.escaping(self.check(a, fields[j].ty, s"the field `${fields[j].name}`"), s"stored in `${what}`"))
+                None ->
+                    self.fail(span, s"`${what}` needs its field `${fields[j].name}`")
+                    out.push(self.invalid(span))
+
+        out
+    end field_args
+
+    // A bare variant as a value; a struct's, an enum's or a fielded variant's name where a value is
+    // expected is refused.
+    type_or_variant(*self, span: Span, n: string, want: Option[Ty]) -> Option[TExpr]
+        self.find_variant(n) match
+            Some(v) ->
+                val e = self.agg.enums[v.owner]
+
+                if e.generic then return Some(self.generic_bare_variant(span, v, want))
+
+                val count = e.variants[v.tag].fields.len()
+
+                if count > 0
+                    self.fail(span, s"`${n}` carries ${fields_text(count)}; build it with `${n}(...)`")
+                    return Some(self.invalid(span))
+
+                return Some(texpr(span, Nominal(e.name, buf()), TVariant(n, v.tag, buf())))
+            None -> ()
+
+        if self.find_struct(n).is_some()
+            self.fail(span, s"`${n}` is a struct; build one with `${n}(...)`")
+            return Some(self.invalid(span))
+
+        if self.find_enum(n).is_some()
+            self.fail(span, s"`${n}` is an enum; its values are its variants")
+            return Some(self.invalid(span))
+
+        None
+    end type_or_variant
+
+    // -- destructuring ----------------------------------------------------------------------------
+
+    // `val a, (b, _) = t` inside a body.
+    destructure_local(*self, span: Span, kind: BindKind, pat: Pattern, typ: Option[Type], init: Expr) -> TExpr
+        val v = self.destructured_value(typ, init)
+        val b = self.bind_pattern(pat, v.ty, if kind == Var then LVar else LVal, buf())
+
+        texpr(span, Void, TDestructure(kind, b, v))
+
+    private destructured_value(*self, typ: Option[Type], init: Expr) -> TExpr
+        typ match
+            Some(t) -> return self.check(init, self.resolve_type(t), "this binding")
+            None -> ()
+
+        val v = self.infer(init)
+
+        if is_void(v.ty)
+            self.fail(init.span, "this binding would hold nothing: this is void")
+            return self.invalid(init.span)
+
+        v
+
+    // Binds what `pat` names to the parts of a value of type `ty`: locals of `kind`, or, where
+    // `members` is not empty, the module-level bindings of a group.
+    bind_pattern(*self, pat: Pattern, ty: Ty, kind: LocalKind, members: Buf[usize]) -> TBind
+        *pat.kind match
+            PatternKind.Name(n) ->
+                if members.len() == 0 then return BLocal(self.declare_local(pat.span, n, ty, kind))
+
+                for k in members
+                    if self.globals[k].name == n then self.gty.set(k, ty)
+
+                BGlobal(n)
+            Wildcard -> BSkip
+            PatternKind.Tuple(elems) ->
+                val tys = self.element_types(pat.span, elems.len(), ty)
+                var out: Buf[TBind] = buf()
+
+                for k in 0..<elems.len()
+                    out.push(self.bind_pattern(elems[k], tys[k], kind, members))
+
+                BTuple(out)
+            PatternKind.Variant(n, args) ->
+                self.fail(pat.span, s"a binding cannot test which variant a value is; take `${n}` apart with `match`")
+
+                var out: Buf[TBind] = buf()
+
+                for a in args
+                    out.push(self.bind_pattern(a, Error, kind, members))
+
+                BTuple(out)
+    end bind_pattern
+
+    // The types of the `n` elements a tuple pattern takes from a value of type `ty`, or `Error` for
+    // each where `ty` is no such tuple.
+    private element_types(*self, span: Span, n: usize, ty: Ty) -> Buf[Ty]
+        ty match
+            Ty.Tuple(ts) ->
+                if ts.len() == n then return ts
+
+                self.fail(span, s"this pattern takes ${n} elements apart, and the value has ${ts.len()}: ${show_ty(ty)}")
+            _ -> if !is_wild(ty) then self.fail(span, s"a destructuring pattern takes a tuple apart, and this is ${show_ty(ty)}")
+
+        var out: Buf[Ty] = buf()
+
+        for _ in 0..<n
+            out.push(Error)
+
+        out
+
+    // -- tuple assignment -------------------------------------------------------------------------
+
+    // `a, b = b, a`: the right side is evaluated whole before anything is stored, and then each
+    // element is stored into its target, left to right (DESIGN §11.4).
+    assign_tuple(*self, span: Span, target: Expr, value: Expr) -> TExpr
+        val t = self.targets(target)
+
+        // A place written twice in one list is refused, since the first store would be lost.
+        val places = target_places(target)
+
+        for k in 1..<places.len()
+            for j in 0..<k
+                if show_expr(places[j]) == show_expr(places[k])
+                    self.fail(places[k].span, "this place is already a target of this assignment; the first store to it would be lost")
+                    break
+
+        texpr(span, Void, TAssignTuple(t, self.stored(t, value)))
+
+    private targets(*self, e: Expr) -> TTarget
+        *e.kind match
+            ExprKind.Tuple(elems) ->
+                var out: Buf[TTarget] = buf()
+
+                for x in elems
+                    out.push(self.targets(x))
+
+                TTargets(out)
+            Name(n) -> if n == "_" then TDrop else TPlace(self.place(e))
+            _ -> TPlace(self.place(e))
+
+    // The right side of a tuple assignment, in the types of its targets. Written as a tuple, it
+    // converts element by element as a tuple built in place does; a tuple value is stored as it is.
+    private stored(*self, t: TTarget, value: Expr) -> TExpr
+        t match
+            TPlace(p) -> return self.check(value, p.ty, "the value")
+            TDrop ->
+                val v = self.infer(value)
+
+                if is_void(v.ty) then self.fail(value.span, "this element would hold nothing: this is void")
+
+                return v
+            TTargets(ts) ->
+                *value.kind match
+                    ExprKind.Tuple(elems) ->
+                        if elems.len() == ts.len()
+                            var out: Buf[TExpr] = buf()
+                            var tys: Buf[Ty] = buf()
+
+                            for k in 0..<elems.len()
+                                val v = self.stored(ts[k], elems[k])
+
+                                out.push(v)
+                                tys.push(v.ty)
+
+                            return texpr(value.span, Ty.Tuple(tys), TTuple(out))
+                    _ -> ()
+
+        val v = self.infer(value)
+
+        if !self.fits(value.span, t, v.ty)
+            self.fail(value.span, s"these targets hold ${show_targets(t)}, and this is ${self.shown(v)}; a tuple value is stored as it is, without widening")
+
+        v
+    end stored
+
+    // Whether a tuple value of type `ty` can be stored into the targets `t` without converting it.
+    // A value of the wrong shape is reported here, an element of the wrong type by the caller.
+    private fits(*self, span: Span, t: TTarget, ty: Ty) -> bool
+        if is_wild(ty) then return true
+
+        t match
+            TPlace(p) -> is_wild(p.ty) || ty_eq(p.ty, ty)
+            TDrop -> true
+            TTargets(ts) ->
+                val tys = self.element_types(span, ts.len(), ty)
+                var ok = true
+
+                for k in 0..<ts.len()
+                    if !self.fits(span, ts[k], tys[k]) then ok = false
+
+                ok
+
+    // -- match ------------------------------------------------------------------------------------
+
+    match_expr(*self, span: Span, scrutinee: Expr, cases: Buf[MatchCase], want: Option[Ty]) -> TExpr
+        val s = self.infer(scrutinee)
+        val owner = self.enum_of(s.ty)
+
+        if owner.is_none() && !is_wild(s.ty) && !self.is_generic_nominal(s.ty)
+            self.fail(scrutinee.span, s"`match` takes an enum value apart, and this is ${self.shown(s)}")
+
+        val shapes = self.arm_shapes(span, owner, s.ty, cases)
+        val statement = want match
+            Some(Void) -> true
+            _ -> false
+
+        // The arms that are not literals first; a literal arm then adopts their type, as a literal
+        // branch of an `if` does (DESIGN §2.3).
+        var bodies: Buf[Option[TArm]] = buf()
+        var ty = Never
+        var lclass = NOT_LITERAL
+
+        for c in cases
+            bodies.push(None)
+
+            val class = self.literal_class(c.body)
+
+            if class > lclass then lclass = class
+
+        for k in 0..<cases.len()
+            if self.literal_class(cases[k].body) != NOT_LITERAL then continue
+
+            val arm = self.arm(shapes[k], cases[k], want)
+
+            ty = self.arm_join(span, ty, arm.body.ty, statement)
+            bodies.set(k, Some(arm))
+
+        val lwant = if is_wild(ty) then want else Some(ty)
+        val adopted = lwant match
+            Some(t) -> adoption(lclass, t).unwrap_or(default_of(lclass))
+            None -> default_of(lclass)
+
+        for k in 0..<cases.len()
+            if bodies[k].is_some() then continue
+
+            val arm = self.arm(shapes[k], cases[k], Some(adopted))
+
+            ty = self.arm_join(span, ty, arm.body.ty, statement)
+            bodies.set(k, Some(arm))
+
+        var arms: Buf[TArm] = buf()
+
+        for b in bodies
+            val arm = b.unwrap()
+
+            arms.push(if is_void(ty) || is_wild(ty) then arm else TArm(arm.pat, promote(arm.body, ty)))
+
+        texpr(span, ty, TMatch(s, arms))
+    end match_expr
+
+    private enum_of(self, ty: Ty) -> Option[usize] = ty match
+        Nominal(n, _) -> self.find_enum(n) match
+            Some(k) -> if self.agg.enums[k].generic then None else Some(k)
+            None -> None
+        _ -> None
+
+    private is_generic_nominal(self, ty: Ty) -> bool = ty match
+        Nominal(n, _) ->
+            val s = self.find_struct(n)
+            val e = self.find_enum(n)
+
+            (s.is_some() && self.agg.structs[s.unwrap()].generic) || (e.is_some() && self.agg.enums[e.unwrap()].generic)
+        _ -> false
+
+    // What each arm matches, with the arms that repeat a variant or follow a catch-all refused and
+    // the variants no arm covers reported.
+    private arm_shapes(*self, span: Span, owner: Option[usize], sty: Ty, cases: Buf[MatchCase]) -> Buf[ArmShape]
+        var out: Buf[ArmShape] = buf()
+        var covered: Buf[bool] = buf()
+        var all = false
+        var judged = owner.is_some()
+
+        owner match
+            Some(e) ->
+                for _ in self.agg.enums[e].variants
+                    covered.push(false)
+            None -> ()
+
+        for c in cases
+            if all then self.fail(c.pat.span, "this arm is never reached: an arm before it matches every value")
+
+            val shape = self.arm_shape(owner, sty, c.pat)
+
+            if shape.valid
+                shape.tag match
+                    Some(j) ->
+                        if covered[j] then self.fail(c.pat.span, s"`${shape.variant}` is matched twice; the second arm is never reached")
+
+                        covered.set(j, true)
+                    None -> all = true
+            else
+                judged = false
+
+            out.push(shape)
+
+        if judged && !all
+            val variants = self.agg.enums[owner.unwrap()].variants
+            var missing: Buf[string] = buf()
+
+            for j in 0..<variants.len()
+                if !covered[j] then missing.push("`" + variants[j].name + "`")
+
+            if missing.len() > 0 then self.fail(span, s"this `match` does not cover ${join_names(missing)}; give each its arm, or end with `_ ->`")
+
+        out
+    end arm_shapes
+
+    private arm_shape(*self, owner: Option[usize], sty: Ty, pat: Pattern) -> ArmShape
+        *pat.kind match
+            Wildcard -> any_arm("_", sty)
+            PatternKind.Name(n) ->
+                owner match
+                    Some(e) ->
+                        self.variant_of(e, n) match
+                            Some(j) ->
+                                val count = self.agg.enums[e].variants[j].fields.len()
+
+                                if count == 0 then return ArmShape(Some(j), n, buf(), buf(), true)
+
+                                self.fail(pat.span, s"`${n}` carries ${fields_text(count)}; match it as `${n}(${blanks(count)})`")
+                                return ArmShape(Some(j), n, buf(), buf(), false)
+                            None -> ()
+                    None -> ()
+
+                if self.find_variant(n).is_some()
+                    self.wrong_variant(pat.span, owner, sty, n)
+                    return ArmShape(None, n, buf(), buf(), false)
+
+                any_arm(n, sty)
+            PatternKind.Variant(n, args) ->
+                var binds: Buf[string] = buf()
+                var tys: Buf[Ty] = buf()
+
+                for a in args
+                    binds.push(*a.kind match
+                        PatternKind.Name(x) -> x
+                        Wildcard -> "_"
+                        _ ->
+                            self.fail(a.span, "a variant's field is matched by a name or `_`; take it apart inside the arm")
+                            "_")
+                    tys.push(Error)
+
+                val e = owner match
+                    Some(e) -> e
+                    None -> return ArmShape(None, n, binds, tys, false)
+
+                val j = self.variant_of(e, n) match
+                    Some(j) -> j
+                    None ->
+                        self.wrong_variant(pat.span, owner, sty, n)
+                        return ArmShape(None, n, binds, tys, false)
+
+                val fields = self.agg.enums[e].variants[j].fields
+
+                if fields.len() != args.len()
+                    self.fail(pat.span, s"`${n}` carries ${fields_text(fields.len())}, and this pattern names ${args.len()}")
+                    return ArmShape(Some(j), n, binds, tys, false)
+
+                var ftys: Buf[Ty] = buf()
+
+                for f in fields
+                    ftys.push(f.ty)
+
+                ArmShape(Some(j), n, binds, ftys, true)
+            PatternKind.Tuple(_) ->
+                self.fail(pat.span, "a `match` arm's pattern is a variant, a name or `_`; a tuple is taken apart by `val a, b = …`")
+
+                var tys: Buf[Ty] = buf()
+                val names = pattern_names(pat)
+
+                for _ in names
+                    tys.push(Error)
+
+                ArmShape(None, "", names, tys, false)
+    end arm_shape
+
+    private variant_of(self, e: usize, n: string) -> Option[usize]
+        val variants = self.agg.enums[e].variants
+
+        for j in 0..<variants.len()
+            if variants[j].name == n then return Some(j)
+
+        None
+
+    // A pattern naming a variant the scrutinee's enum does not have.
+    private wrong_variant(*self, span: Span, owner: Option[usize], sty: Ty, n: string)
+        val e = owner match
+            Some(e) -> e
+            None -> return
+
+        self.find_variant(n) match
+            Some(v) -> self.fail(span, s"`${n}` is a variant of `${self.agg.enums[v.owner].name}`, and this value is ${show_ty(sty)}")
+            None ->
+                var names: Buf[string] = buf()
+
+                for v in self.agg.enums[e].variants
+                    names.push(v.name)
+
+                nearest_name(n, names) match
+                    Some(near) -> self.fail(span, s"`${self.agg.enums[e].name}` has no variant `${n}`; did you mean `${near}`?")
+                    None -> self.fail(span, s"`${self.agg.enums[e].name}` has no variant `${n}`")
+
+    // An arm's body, in a scope of its own holding the names its pattern binds.
+    private arm(*self, shape: ArmShape, c: MatchCase, want: Option[Ty]) -> TArm
+        self.open()
+
+        var ids: Buf[Option[usize]] = buf()
+
+        for k in 0..<shape.binds.len()
+            ids.push(if shape.binds[k] == "_" then None else Some(self.declare_local(c.pat.span, shape.binds[k], shape.tys[k], LVal)))
+
+        val b = self.elab(c.body, want)
+
+        self.close()
+
+        val pat = shape.tag match
+            Some(j) -> PVariant(shape.variant, j, ids)
+            None -> PAny(if ids.len() == 1 then ids[0] else None)
+
+        TArm(pat, b)
+    end arm
+
+    // The type the arms so far meet in, `acc`, with one more arm of type `t`: their common type, or
+    // `void` in a statement, where the value is not used.
+    private arm_join(*self, span: Span, acc: Ty, t: Ty, statement: bool) -> Ty
+        if is_wild(acc) then return t
+        if is_wild(t) || ty_eq(acc, t) then return acc
+
+        if is_numeric(acc) && is_numeric(t)
+            common(acc, t) match
+                Some(c) -> return c
+                None -> ()
+
+        if statement then return Void
+
+        self.fail(span, s"the arms of this `match` differ: ${show_ty(acc)} and ${show_ty(t)}")
+        Error
+
+    // -- captures ---------------------------------------------------------------------------------
+
+    // Notes that the argument about to be elaborated is a lambda written straight, which the callee
+    // borrows for the call and which does not escape it.
+    pass_lambda(*self, arg: Expr)
+        *arg.kind match
+            Lambda(_, _) -> self.agg.passing = true
+            _ -> ()
+
+    // The rules on what the finished lambda `lid` captures, giving whether it escapes: an `inout`
+    // parameter only by a lambda that does not (DESIGN §8.3), and a `var` array by one lambda only,
+    // into which it moves (ref §4.11).
+    check_captures(*self, lid: usize, span: Span) -> bool
+        var escapes = true
+
+        for l in self.agg.passed
+            if l == lid then escapes = false
+
+        // The lambda's own frame, now closed: a local bound in the frame around it has this depth.
+        val frame = self.fx.frames.len()
+
+        for c in self.captures
+            if c.lambda != lid then continue
+
+            val info = self.locals[c.local]
+
+            info.kind match
+                LParam(m) ->
+                    if m == Inout && escapes then self.fail(span, s"this lambda captures the `inout` parameter `${info.name}` and may outlive the call that lent it; pass the lambda straight as an argument, or copy `${info.name}` into a `val`")
+                LVar -> if is_array(info.ty) && self.depth[c.local] == frame then self.claim(lid, c.local, span)
+                LOrigin -> if escapes then self.fail(span, origin_leaves(s"captured by this lambda, which may outlive the call", info.name))
+                _ -> ()
+
+        escapes
+    end check_captures
+
+    private claim(*self, lid: usize, local: usize, span: Span)
+        for o in self.agg.owners
+            if o.local == local && o.lambda != lid
+                self.fail(span, s"`${self.locals[local].name}` is a `var` array another lambda has captured; a captured `var` array moves into its lambda, so only one may capture it")
+                return
+
+        self.agg.owners.push(Capture(lid, local))
+end Elab
+
+private any_arm(name: string, sty: Ty) -> ArmShape
+    var binds: Buf[string] = buf()
+    var tys: Buf[Ty] = buf()
+
+    binds.push(name)
+    tys.push(sty)
+    ArmShape(None, "", binds, tys, true)
+
+// `no fields`, `1 field`, `3 fields`.
+private fields_text(n: usize) -> string =
+    if n == 0 then "no fields" elif n == 1 then "1 field" else s"${n} fields"
+
+// `_, _` for a pattern of `n` fields.
+private blanks(n: usize) -> string
+    var out = "_"
+
+    for _ in 1..<n
+        out = out + ", _"
+
+    out
+
+// `` `a` ``, `` `a` and `b` ``, `` `a`, `b` and `c` ``.
+private join_names(names: Buf[string]) -> string
+    var out = names[0]
+
+    for k in 1..<names.len()
+        out = out + (if k == names.len() - 1 then " and " else ", ") + names[k]
+
+    out
+
+// `(real64, (int64, _))`: the types a list of targets holds.
+private show_targets(t: TTarget) -> string = t match
+    TPlace(p) -> show_ty(p.ty)
+    TDrop -> "_"
+    TTargets(elems) ->
+        var out: Buf[string] = buf()
+
+        for x in elems
+            out.push(show_targets(x))
+
+        "(" + join(out.view(), ", ") + ")"
+
+// The places a list of targets stores into, left to right, without the `_`s.
+private target_places(e: Expr) -> Buf[Expr]
+    var out: Buf[Expr] = buf()
+
+    *e.kind match
+        ExprKind.Tuple(elems) ->
+            for x in elems
+                out.extend(target_places(x).view())
+        Name(n) -> if n != "_" then out.push(e)
+        _ -> out.push(e)
+
+    out

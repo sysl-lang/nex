@@ -145,6 +145,22 @@ source ──parse──▶ AST ──elaborate──▶ typed IR ──emit─�
    `parallel` construct (no flag), and a BLAS when it calls one; a program calling Fortran links
    `libgfortran`.
 
+   **The counted heap** (`runtime/heap.sysl`) holds every string built at run time, every cell a
+   lambda captures and every lambda's environment: an object is a two-word header (a count and the
+   function that releases what its payload holds) before its payload, and **a handle is the payload's
+   address**, so a string is still a `char *` every C function reads as it is. A literal is a constant
+   with the same header and a negative count, never freed. The emitter keeps the counts
+   (`emit_own.sysl`): every place — a local's slot, a cell, a module-level binding, a field — owns
+   one count on its value; a store retains the new value and releases the old; a value an expression
+   makes (a call, a concatenation, an interpolation, a lambda) is its statement's temporary, released
+   where the statement ends; a parameter is borrowed for the call and a result owned by the caller.
+   A struct, tuple or enum is an LLVM struct value, never a heap object (no type contains itself), so
+   counting one counts its parts. The tables of handles an array of strings, closures or enums with
+   payloads stores (below) are arrays of these addresses as `i64`; a runtime table indexed by number
+   would buy nothing but a load per use. Counts are not atomic yet: a `parallel` body that copies a
+   string needs atomic ones. The leak check (`tests_run_aggregate.sysl`) runs the
+   `testdata/leaks/` programs under `leaks --atExit` and under Guard Malloc.
+
 `tests_toolchain.sysl` holds the pipeline to account: hand-written proofs in `experiments/mlir/` go
 through it from sysl and must print their expected output, and the library calls the driver is
 built from are each pinned there. Without `mlir-opt` those tests skip.
@@ -156,8 +172,9 @@ The design's proofs (`views.mlir`, `view-then-write.mlir`, `parallel.mlir`, `bla
 `tests_toolchain.sysl` take them on in the milestone that first needs them. **Sequential:**
 
 ```
-func.func(linalg-fuse-elementwise-ops), canonicalize, cse,
-one-shot-bufferize{bufferize-function-boundaries}, drop-equivalent-buffer-results,
+canonicalize, cse, func.func(linalg-fuse-elementwise-ops), canonicalize, cse,
+one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops},
+drop-equivalent-buffer-results,
 buffer-deallocation-pipeline, convert-bufferization-to-memref,
 convert-linalg-to-loops, convert-scf-to-cf, convert-complex-to-standard,
 expand-strided-metadata, lower-affine, finalize-memref-to-llvm, convert-math-to-llvm,
@@ -165,7 +182,14 @@ convert-complex-to-llvm, convert-arith-to-llvm, convert-func-to-llvm, convert-cf
 reconcile-unrealized-casts
 ```
 
-Three passes are new, each forced by a proof that fails without it:
+Three passes and two settings are new, each forced by a program that fails without it:
+
+- `canonicalize, cse` before fusion — the emitter checks the shapes of element-wise operands and
+  sizes each result from an operand's extents, and those `tensor.dim` uses of an intermediate
+  result stop `linalg-fuse-elementwise-ops`, which fuses only a producer with one use. Folded
+  first, they go, and 313-02's three operators are one loop (`tests_run_array.sysl`).
+- `allow-return-allocs-from-loops` — a loop that rebinds an array local to a new value
+  (`a = a * 2` in a `for`, a growing `flatMap` result) carries a fresh buffer round the loop.
 
 - `drop-equivalent-buffer-results` — a private function that writes an argument in place and returns
   it returns nothing instead, which is the `inout` calling convention; without it
@@ -214,7 +238,8 @@ before `convert-func-to-llvm`, `convert-openmp-to-llvm`; the program links `libo
   memref's axis-0 stride), handed to `cblas_dgemm` with no copy (`blas.mlir`, Accelerate).
 - **There are no pointer element types.** `memref<4x!llvm.ptr>` is an invalid memref element type,
   and a `tensor` of `!llvm.ptr` cannot be bufferized. An array of strings, closures, enums with
-  payloads or structs holding them is an array of `i64` handles into runtime tables. An array of
+  payloads or structs holding them is an array of `i64` handles, the addresses of objects of the
+  counted heap (above), each element owning a count. An array of
   structs or tuples of scalars is stored inline (DESIGN §3.1), as a memref of a packed element type
   or as a byte buffer with computed field offsets, so `p[k].x` is one load.
 - **Integer division traps.** Integer division by zero traps in nex, so every integer division is

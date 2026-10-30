@@ -1,0 +1,113 @@
+// The driver: a nex source file to a native program, through the toolchain PLAN.md's architecture
+// names. The source is parsed, elaborated and emitted as MLIR text; `mlir-opt` lowers it to the LLVM
+// dialect with the pass list in `experiments/mlir/pipeline.txt`, `mlir-translate` writes LLVM IR, and
+// `clang -O2` compiles that and links it against the runtime archive (`runtime/`, built by
+// `sysl build-c`).
+//
+// LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm`; the runtime at `NEX_RUNTIME`, else
+// `libnex_rt.a` beside the `nex` executable.
+
+import sysl.buf.{Buf, buf}
+import sysl.env.get_or
+import sysl.fs.{exists, make_temp_dir, read_bytes, remove_dir_all, write_text}
+import sysl.process.{Stdio, capture}
+import sysl.text.{from_utf8, split}
+import sh.sysl.parsing.{Diagnostic, Source, full_report, source}
+
+private val PIPELINE = from_utf8(embed("experiments/mlir/pipeline.txt")).unwrap().trim()
+
+// Where the tools are, and the runtime every program links.
+struct Toolchain
+    llvm_bin: string
+    runtime: string
+
+// The toolchain from the environment, the runtime beside `exe` where `NEX_RUNTIME` does not name it.
+find_toolchain(exe: string) -> Result[Toolchain, string]
+    val bin = s"${get_or("NEX_LLVM_HOME", "/opt/homebrew/opt/llvm")}/bin"
+
+    if !exists(s"$bin/mlir-opt") then return Err(s"nex: no mlir-opt in $bin; set NEX_LLVM_HOME to an LLVM with MLIR")
+
+    val runtime = get_or("NEX_RUNTIME", s"${dir_of(exe)}/libnex_rt.a")
+
+    if !exists(runtime) then return Err(s"nex: no runtime archive at $runtime; set NEX_RUNTIME, or build it with `sysl build-c runtime -o $runtime`")
+
+    Ok(Toolchain(bin, runtime))
+
+private dir_of(file: string) -> string
+    val parts = split(file, "/")
+
+    if parts.len <= 1 then return "."
+
+    var out = ""
+
+    for k in 0..<parts.len - 1
+        if k > 0 then out += "/"
+        out += parts[k]
+
+    if out == "" then "/" else out
+
+// The MLIR module for the program in `file`, or its diagnostics, rendered.
+mlir_of(file: string, fpe_trap: bool) -> Result[string, string]
+    val bytes = read_bytes(file) match
+        Ok(b) -> b
+        Err(e) -> return Err(s"nex: cannot read ${file}: ${e}")
+
+    val doc = source(file, bytes)
+    val src = program_text(doc) match
+        Ok(s) -> s
+        Err(d) -> return Err(d.render(doc))
+
+    val p = parse_program(src) match
+        Ok(p) -> p
+        Err(d) -> return Err(d.render(src))
+
+    val t = elaborate(p) match
+        Ok(t) -> t
+        Err(ds) -> return Err(rendered(ds, src))
+
+    emit_program(t, fpe_trap) match
+        Ok(text) -> Ok(text)
+        Err(ds) -> Err(rendered(ds, src))
+
+private rendered(ds: Buf[Diagnostic], src: Source) -> string
+    var r = full_report()
+
+    for d in ds
+        r.add(d)
+
+    r.render(src)
+
+// The program in `file` compiled to a native program at `out`, its intermediate files in `work`.
+compile_file(file: string, out: string, work: string, tc: Toolchain, fpe_trap: bool) -> Result[unit, string] =
+    lower_module(mlir_of(file, fpe_trap)?, out, work, tc)
+
+// An MLIR module lowered to a native program at `out`, its intermediate files in `work`.
+lower_module(mlir: string, out: string, work: string, tc: Toolchain) -> Result[unit, string]
+    val input = s"$work/program.mlir"
+    val lowered = s"$work/program.llvm.mlir"
+    val ir = s"$work/program.ll"
+
+    write_text(input, mlir).map_err((e) -> s"nex: cannot write $input: $e")?
+    tool(s"${tc.llvm_bin}/mlir-opt", [input, s"--pass-pipeline=$PIPELINE", "-o", lowered], Inherit)?
+    write_text(ir, tool(s"${tc.llvm_bin}/mlir-translate", ["--mlir-to-llvmir"], Stdio.FromPath(lowered))?).map_err((e) -> s"nex: cannot write $ir: $e")?
+    tool(s"${tc.llvm_bin}/clang", ["-Wno-override-module", "-O2", ir, tc.runtime, "-lm", "-o", out], Inherit)?
+    Ok(())
+
+// A tool run that must succeed, its standard output answered.
+private tool(program: string, args: []const string, stdin: Stdio) -> Result[string, string]
+    val out = capture(program, args, stderr = true, stdin = stdin).map_err((e) -> s"nex: cannot run $program: $e")?
+
+    if !out.status.ok() then return Err(s"nex: $program failed (${out.status}):\n${out.err.unwrap_or("")}")
+
+    Ok(out.text)
+
+// `file` compiled into a fresh temporary directory, which the caller removes; the program's path.
+compile_temp(file: string, tc: Toolchain, fpe_trap: bool) -> Result[(string, string), string]
+    val work = make_temp_dir("nex").map_err((e) -> s"nex: cannot make a temporary directory: $e")?
+    val exe = s"$work/program"
+
+    compile_file(file, exe, work, tc, fpe_trap) match
+        Ok(_) -> Ok((work, exe))
+        Err(m) ->
+            _ = remove_dir_all(work)
+            Err(m)

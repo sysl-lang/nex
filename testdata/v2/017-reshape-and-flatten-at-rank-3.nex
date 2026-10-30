@@ -1,0 +1,28 @@
+// `flatten` and `reshape` (DESIGN §4.3) read and lay out elements column-major, so a round trip at
+// any rank gives the array back; `transpose` swaps a matrix's axes; a size that differs traps.
+
+def main() =
+  val t = [[[1, 2], [3, 4]],
+           [[5, 6], [7, 8]]]
+  val f = flatten(t)
+  print(f)
+  print(reshape(f, (2, 2, 2)))
+  print(all(flatten(reshape(f, (2, 2, 2))) == f))
+  print(reshape(f, (2, 4)))
+  print(reshape(f, (4, 2)))
+  print(reshape(f, (2, 4))[2, 3])
+  print(reshape(reshape(t, (4, 2)), (2, 2, 2)))
+  print(reshape(f, 2, 4))
+  print(transpose(reshape(f, (2, 4))))
+  print(shape(reshape(f, (2, 1, 4))))
+  print(extents(reshape(f, (2, 1, 4))))
+
+  val m = reshape(1..6, (2, 3))
+  print(m)
+  print(m[2, :])
+  print(m @ [1, 1, 1])
+  print([1, 1] @ m)
+  print(m @ transpose(m))
+
+  assert_traps(() -> print(reshape(f, (3, 3))), "reshape")
+  print("done")

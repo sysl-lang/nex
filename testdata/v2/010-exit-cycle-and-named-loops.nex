@@ -1,0 +1,18 @@
+def main() =
+  outer: for j in 1..4
+    for k in 1..4
+      if k == j then cycle outer
+      if k > 2 then exit
+      print(s"$j $k")
+  var n = 0
+  while true
+    n += 1
+    if n % 2 == 0 then cycle
+    if n > 7 then exit
+    print(n)
+  search: for a in 1..9
+    for b in a..9
+      if a * b == 24 then
+        print(s"$a * $b")
+        exit search
+  print("end")

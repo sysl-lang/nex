@@ -1,0 +1,349 @@
+@tests
+
+// Programs compiled and run: the source through the elaborator, the emitter and the toolchain to a
+// native program, which must print its expected output byte for byte (PLAN.md's oracle). The corpus
+// categories of scalar programs and the `testdata/v2/` programs are each one test; the behaviours
+// no corpus program reaches — a trap nothing catches, `stop`, the program's arguments, standard
+// error, `--fpe-trap` — are tests of their own, on standard error and the exit status too.
+//
+// LLVM is found as the driver finds it; without `mlir-opt` every test skips.
+
+import sh.sysl.parsing.{Diagnostic, Source, source_of}
+import sysl.buf.{Buf, buf}
+import sysl.env.get_or
+import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
+import sysl.process.{Output, Status, Var, capture}
+import sysl.testing.{compiler, skip}
+import sysl.text.{from_utf8, join, split}
+
+private val CORPUS_INDEX = from_utf8(embed("testdata/corpus/index.tsv")).unwrap()
+private val V2_INDEX = from_utf8(embed("testdata/v2/index.tsv")).unwrap()
+
+// The categories PLAN.md's M3 counts.
+private val M3_CATEGORIES = ["top-level bindings + print", "scalar arithmetic", "comparison + logical", "chained comparison", "chained comparisons", "control flow", "blocks + scoping", "top-level initialization", "compound assignment", "functions", "string interpolation", "const fn calls", "inout by-ref"]
+
+// The programs of those categories that need an array whose elements are not scalars, which the
+// emitter does not compile yet: 058 an array of tuples (`enumerate`), 060 an array of closures.
+private val WAITING = ["058-for-with-tuple-destructuring-on-enumerate-xs", "060-array-of-lambdas-each-closure-fits-in-16-byte-slots"]
+
+// A scratch directory and the toolchain, the runtime built into it by the compiler running the tests.
+struct Bench
+    work: string
+    tc: Toolchain
+
+bench() -> Bench
+    val bin = s"${get_or("NEX_LLVM_HOME", "/opt/homebrew/opt/llvm")}/bin"
+
+    if !exists(s"$bin/mlir-opt") then skip(s"no mlir-opt in $bin")
+
+    val work = make_temp_dir("nex-run").unwrap()
+    val archive = s"$work/libnex_rt.a"
+    val built = capture(compiler(), ["build-c", "runtime", "-o", archive], stderr = true).unwrap()
+
+    assert(built.status.ok(), built.err.unwrap_or(""))
+    Bench(work, Toolchain(bin, archive))
+
+// What the emitter makes of `text`: the module, or its diagnostics, one to a line.
+emitted(text: string, fpe_trap: bool = false) -> Result[string, string]
+    val src = source_of("t.nex", text)
+
+    val p = parse_program(src) match
+        Ok(p) -> p
+        Err(d) -> return Err(s"error: ${d.message} @${src.locate(d.span.start)}")
+
+    val t = elaborate(p) match
+        Ok(t) -> t
+        Err(ds) -> return Err(lines(ds, src))
+
+    emit_program(t, fpe_trap) match
+        Ok(m) -> Ok(m)
+        Err(ds) -> Err(lines(ds, src))
+
+private lines(ds: Buf[Diagnostic], src: Source) -> string
+    var out: Buf[string] = buf()
+
+    for d in ds
+        out.push(s"error: ${d.message} @${src.locate(d.span.start)}")
+
+    join(out.view(), "\n")
+
+// `text` compiled and run with `args`: what it wrote and how it ended.
+ran(b: Bench, text: string, args: []const string = [], fpe_trap: bool = false) -> Output
+    val m = emitted(text, fpe_trap) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+
+    val exe = s"${b.work}/program"
+
+    lower_module(m, exe, b.work, b.tc) match
+        Ok(_) -> ()
+        Err(e) -> fail_with(e)
+
+    capture(exe, args, stderr = true).unwrap()
+
+fail_with(message: string) -> never
+    assert(false, message)
+    panic(message)
+
+finish(b: Bench)
+    remove_dir_all(b.work).unwrap()
+
+// Whether every diagnostic says its construct waits on a later part of the compiler.
+private only_later(diagnostics: string) -> bool
+    for line in split(diagnostics, "\n")
+        if !line.contains("is not compiled yet") && !line.contains("is not elaborated yet") then return false
+
+    true
+
+private in_categories(cols: []const string, categories: []const string) -> bool
+    for c in categories
+        if cols[1] == c then return true
+
+    false
+
+// What the corpus programs of `categories` did: how many printed their `.out`, the ones that failed
+// and why, and the ones that wait on a part of the compiler not built yet.
+struct CorpusRun
+    passed: int
+    failed: Buf[string]
+    waiting: Buf[string]
+
+corpus_run(categories: []const string) -> CorpusRun
+    val b = bench()
+    var r = CorpusRun(0, buf(), buf())
+
+    for line in split(CORPUS_INDEX, "\n")
+        if line.len == 0 || line.starts_with("file\t") then continue
+
+        val cols = split(line, "\t")
+
+        if !in_categories(cols, categories) then continue
+
+        val name = cols[0]
+        val text = read_text(s"testdata/corpus/$name.nex").unwrap()
+
+        emitted(text) match
+            Err(e) -> if only_later(e) then r.waiting.push(name) else r.failed.push(s"$name: $e")
+            Ok(m) ->
+                val exe = s"${b.work}/program"
+
+                lower_module(m, exe, b.work, b.tc) match
+                    Err(e) -> r.failed.push(s"$name: $e")
+                    Ok(_) ->
+                        val out = capture(exe, [], stderr = true).unwrap()
+
+                        if out.status.ok() && out.text == read_text(s"testdata/corpus/$name.out").unwrap() then r.passed += 1
+                        else r.failed.push(s"$name: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+
+    finish(b)
+    r
+
+@test("every program of PLAN.md's M3 corpus categories prints its .out, but for those waiting on arrays")
+run_m3_corpus()
+    val r = corpus_run(M3_CATEGORIES[..])
+
+    assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
+    assert_eq(join(r.waiting.view(), "\n"), join(WAITING[..], "\n"))
+    assert_eq(r.passed, 151)
+
+@test("every program of testdata/v2 prints its .out")
+run_v2()
+    val b = bench()
+    var passed = 0
+    var failed: Buf[string] = buf()
+
+    for line in split(V2_INDEX, "\n")
+        if line.len == 0 || line.starts_with("file\t") then continue
+
+        val name = split(line, "\t")[0]
+        val out = ran(b, read_text(s"testdata/v2/$name.nex").unwrap())
+
+        if out.status.ok() && out.text == read_text(s"testdata/v2/$name.out").unwrap() then passed += 1
+        else failed.push(s"$name: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+
+    finish(b)
+    assert(failed.len() == 0, join(failed.view(), "\n"))
+    assert_eq(passed, 19)
+
+@test("a trap nothing catches writes its message to standard error after what was printed, and aborts")
+run_uncaught_trap()
+    val b = bench()
+    val overflow = ran(b, "def main() =\n  print(\"before\")\n  val a: int8 = 127\n  print(a + 1)\n  print(\"after\")\n")
+    val division = ran(b, "def f(n: integer) = 10 div n\ndef main() =\n  print(f(5))\n  print(f(0))\n")
+    val conversion = ran(b, "def main() =\n  val x = -1\n  print(uint32(x))\n")
+    val complex_div = ran(b, "def main() =\n  val z = 0 + 0i\n  print((1 + 1i) / z)\n")
+    val assertion = ran(b, "def main() =\n  val n = 3\n  assert(n == 4, s\"n is $n\")\n")
+    val no_trap = ran(b, "def main() = assert_traps(() -> print(1))\n")
+
+    finish(b)
+    assert_eq(overflow.text, "before\n")
+    assert_eq(overflow.err.unwrap_or(""), "trap: int8 overflow\n")
+    assert(overflow.status == Status.Signalled(6), s"${overflow.status}")
+    assert_eq(division.text, "2\n")
+    assert_eq(division.err.unwrap_or(""), "trap: integer division by zero\n")
+    assert_eq(conversion.err.unwrap_or(""), "trap: int64 value out of range for uint32\n")
+    assert_eq(complex_div.err.unwrap_or(""), "trap: complex division by zero\n")
+    assert_eq(assertion.err.unwrap_or(""), "trap: assertion failed: n is 3\n")
+    assert_eq(no_trap.text, "1\n")
+    assert_eq(no_trap.err.unwrap_or(""), "trap: assert_traps: the function did not trap\n")
+
+@test("stop ends the program with its status, from any depth, after what was printed")
+run_stop()
+    val b = bench()
+    val three = ran(b, "def g(k: integer) =\n  for j in 1..10\n    if j == k then stop 3\n    print(j)\ndef main() =\n  g(2)\n  print(\"unreached\")\n")
+    val zero = ran(b, "def main() =\n  print(\"a\")\n  stop\n  print(\"b\")\n")
+    val value = ran(b, "def pick(n: integer): integer = if n > 0 then n else stop 7\ndef main() =\n  print(pick(1))\n  print(pick(0))\n")
+
+    finish(b)
+    assert_eq(three.text, "1\n")
+    assert(three.status == Status.Exited(3), s"${three.status}")
+    assert_eq(zero.text, "a\n")
+    assert(zero.status == Status.Exited(0), s"${zero.status}")
+    assert_eq(value.text, "1\n")
+    assert(value.status == Status.Exited(7), s"${value.status}")
+    assert(stop_refused().contains("exit status"), stop_refused())
+
+private stop_refused() -> string = emitted("def main() = stop 1.5\n").err().unwrap_or("")
+
+@test("main(args) holds the arguments after the program's name, from 1, and an index past them traps")
+run_args()
+    val b = bench()
+    val program = "def main(args: [string]) =\n  print(length(args))\n  print(args[1])\n  for a in args\n    print(s\"<$a>\")\n  print(args[length(args) + 1])\n"
+    val some = ran(b, program, ["one", "two words"])
+    val none = ran(b, "def main(args: [string]) = print(length(args))\n")
+
+    finish(b)
+    assert_eq(some.text, "2\none\n<one>\n<two words>\n")
+    assert_eq(some.err.unwrap_or(""), "trap: index 3 out of bounds 1..2\n")
+    assert_eq(none.text, "0\n")
+
+@test("eprint writes to standard error and print to standard output")
+run_eprint()
+    val b = bench()
+    val out = ran(b, "def main() =\n  val x = 2.5\n  print(\"out\")\n  eprint(\"err\")\n  eprint(s\"x = $x\")\n  print(x)\n")
+
+    finish(b)
+    assert_eq(out.text, "out\n2.5\n")
+    assert_eq(out.err.unwrap_or(""), "err\nx = 2.5\n")
+    assert(out.status.ok())
+
+@test("--fpe-trap makes real division by zero, an invalid operation and an overflow trap; without it they are IEEE")
+run_fpe_trap()
+    val b = bench()
+    val division = "def main() =\n  val z = 0.0\n  print(1.0 / z)\n"
+    val invalid = "def main() =\n  val x = -1.0\n  print(sqrt(x))\n"
+    val overflow = "def main() =\n  val x: real32 = 3.0e38\n  print(x * 10.0)\n"
+    val narrowing = "def main() =\n  val x = 1.0e300\n  print(real32(x))\n"
+    val quiet = ran(b, division)
+    val d = ran(b, division, fpe_trap = true)
+    val i = ran(b, invalid, fpe_trap = true)
+    val o = ran(b, overflow, fpe_trap = true)
+    val n = ran(b, narrowing, fpe_trap = true)
+    val fine = ran(b, "def main() =\n  val x = 1.5\n  print(x / 3.0 + sqrt(x))\n", fpe_trap = true)
+    val nan_in = ran(b, "def main() =\n  val x = nan\n  print(x + 1.0)\n", fpe_trap = true)
+
+    finish(b)
+    assert_eq(quiet.text, "inf\n")
+    assert_eq(d.err.unwrap_or(""), "trap: floating-point division by zero\n")
+    assert_eq(i.err.unwrap_or(""), "trap: floating-point invalid operation\n")
+    assert_eq(o.err.unwrap_or(""), "trap: floating-point overflow\n")
+    assert_eq(n.err.unwrap_or(""), "trap: floating-point overflow\n")
+    assert_eq(fine.text, "1.724744871391589\n")
+    assert_eq(nan_in.text, "nan\n")
+
+@test("a program needing what the emitter does not compile yet is refused with a diagnostic naming it")
+emit_refuses_what_waits()
+    assert_eq(emitted("def main() =\n  val xs = [1, 2]\n  print(enumerate(xs))\n").err().unwrap_or(""), "error: `enumerate` on an array is not compiled yet @3:9")
+    assert_eq(emitted("def f(x: integer) = x\ndef main() =\n  val g = f\n  print(g(2))\n  print([f])\n").err().unwrap_or(""), "error: an array of (int64) -> int64 is not compiled yet @5:9")
+
+@test("the module names every symbol with a prefix no C name has, and makes main the only public function")
+emit_symbols()
+    val m = emitted("def malloc(n: integer): integer = n + 1\ndef main() = print(malloc(1))\n").unwrap()
+
+    assert(m.contains("func.func private @\"n.malloc\"(%a0: i64) -> i64"), m)
+    assert(m.contains("func.func private @\"n.main\"()"), m)
+    assert(m.contains("func.func @main(%argc: i32, %argv: !llvm.ptr) -> i32"), m)
+
+@test("module-level bindings initialize in the order they read each other, and functions keep a module-level var")
+run_globals()
+    val b = bench()
+    val out = ran(b, "val b = twice_a()\nval a = 21\nvar hits = 0\ndef twice_a(): integer = 2 * a\ndef count() = hits += 1\ndef main() =\n  print(b)\n  count()\n  count()\n  print(hits)\n")
+
+    finish(b)
+    assert_eq(out.text, "42\n2\n")
+
+@test("strings concatenate, compare and interpolate as values, and every specifier formats")
+run_strings()
+    val b = bench()
+    val out = ran(b, "def main() =\n  val s = \"ab\" + \"cd\"\n  print(s)\n  print(s == \"abcd\")\n  print(s != \"abcd\")\n  val t = s\"[$s]\"\n  print(t + \"!\")\n  val n = 255\n  print(f\"<$n%-6s>\")\n  print(f\"<$n%6x>\")\n  val x = 12345.678\n  print(f\"$x%e\")\n  print(f\"$x%.3g\")\n  print(f\"<$s%6s>\")\n  val q = \"say \\\"hi\\\"\\n\"\n  print(q)\n")
+
+    finish(b)
+    assert_eq(out.text, "abcd\ntrue\nfalse\n[abcd]!\n<255   >\n<    ff>\n1.234568e+04\n1.23e+04\n<  abcd>\nsay \"hi\"\n\n")
+
+@test("closures: a local def calls itself, a returned lambda keeps its capture, a loop's lambda sees its pass")
+run_closures()
+    val b = bench()
+    val out = ran(b, "def adder(k: integer): (integer -> integer) = x -> x + k\ndef main() =\n  def fact(k: integer): integer = if k <= 1 then 1 else k * fact(k - 1)\n  print(fact(10))\n  val add5 = adder(5)\n  print(add5(10))\n  var sum = 0\n  for k in 1..4\n    val f = (m: integer) -> m * k\n    sum += f(10)\n  print(sum)\n")
+
+    finish(b)
+    assert_eq(out.text, "3628800\n15\n100\n")
+
+@test("the prelude's scalar functions at every width, and complex square roots on the branch cut")
+run_prelude_scalars()
+    val b = bench()
+    val out = ran(b, "def main() =\n  val y: real32 = 2.0\n  print(sqrt(y))\n  print(exp(y))\n  val h: real16 = 2.0\n  print(sqrt(h))\n  print(sin(h))\n  val z = 3 + 4i\n  print(abs(z))\n  print(conj(z))\n  print(sqrt(-4 + 0i))\n  print(sqrt(3 + 4i))\n  print(sqrt(-3 - 4i))\n  print(sqrt(0 + 0i))\n  val w: complex[real32] = -4 + 0i\n  print(sqrt(w))\n  print(log(-1 + 0i))\n  print(max(3, 9, 4))\n  print(min(2.5, -1.0, 0.0))\n  print(sign(-3))\n  print(sign(0.0))\n  print(sign(-2.5))\n  print(abs(-2.5))\n  print(round(2.5))\n  print(round(-2.5))\n  print(floor(-2.5))\n  print(atan2(1.0, 1.0))\n  print(hypot(3.0, 4.0))\n  val u: uint8 = 250\n  var last: uint8 = 0\n  for k in u..255 do last = k\n  print(last)\n")
+
+    finish(b)
+    assert_eq(out.text, "1.4142135\n7.389056\n1.414\n0.909\n5.0\n3.0-4.0i\n0.0+2.0i\n2.0+1.0i\n1.0-2.0i\n0.0+0.0i\n0.0+2.0i\n0.0+3.141592653589793i\n9\n-1.0\n-1\n0.0\n-1.0\n2.5\n3.0\n-3.0\n-3.0\n0.7853981633974483\n5.0\n255\n")
+
+@test("an exit, cycle or return inside an operand skips the rest of its statement: no call, store or trap")
+run_leave_inside_operand()
+    val b = bench()
+    val out = ran(b, "var log = 0\ndef f(n: integer): integer =\n  print(if n < 0 then return -1 else n)\n  n * 2\ndef g(n: integer): integer =\n  val q = 10 div (if n == 0 then return 0 else n)\n  q\ndef h(n: integer) =\n  log = if n > 5 then return else n\ndef main() =\n  print(f(-3))\n  print(f(4))\n  print(g(0))\n  print(g(5))\n  h(3)\n  print(log)\n  h(9)\n  print(log)\n  for k in 1..5 do print(if k == 3 then cycle else k)\n  for k in 1..5 do print(if k == 3 then exit else k)\n")
+
+    finish(b)
+    assert_eq(out.text, "-1\n4\n8\n0\n2\n3\n3\n1\n2\n4\n5\n1\n2\n")
+    assert(out.status.ok(), out.err.unwrap_or(""))
+
+@test("a for header is evaluated once, before the first pass")
+run_for_header_once()
+    val b = bench()
+    val out = ran(b, "def main() =\n  var n = 3\n  var step = 1\n  for k in 1..n by step\n    n += 1\n    step = 5\n    print(k)\n  print(n)\n")
+
+    finish(b)
+    assert_eq(out.text, "1\n2\n3\n6\n")
+
+@test("the nex command builds a program at -o, and runs one with its arguments and exit status")
+run_command()
+    val b = bench()
+    val nex = s"${b.work}/nex"
+    val built = capture(compiler(), ["build", ".", "-o", nex], stderr = true).unwrap()
+
+    assert(built.status.ok(), built.err.unwrap_or(""))
+
+    val env = [Var("NEX_RUNTIME", b.tc.runtime)]
+    val src = s"${b.work}/hello.nex"
+
+    write_text(src, "def main(args: [string]) =\n  print(s\"hello ${args[1]}\")\n  stop length(args)\n").unwrap()
+
+    val build = capture(nex, ["build", src, "-o", s"${b.work}/hello"], env = env, stderr = true).unwrap()
+    val direct = capture(s"${b.work}/hello", ["world"], stderr = true).unwrap()
+    val run = capture(nex, ["run", src, "--", "there", "again"], env = env, stderr = true).unwrap()
+    val refused = capture(nex, ["run", "testdata/corpus/058-for-with-tuple-destructuring-on-enumerate-xs.nex"], env = env, stderr = true).unwrap()
+
+    finish(b)
+    assert(build.status.ok(), build.err.unwrap_or(""))
+    assert_eq(direct.text, "hello world\n")
+    assert(direct.status == Status.Exited(1), s"${direct.status}")
+    assert_eq(run.text, "hello there\n")
+    assert(run.status == Status.Exited(2), s"${run.status}")
+    assert(refused.status == Status.Exited(1), s"${refused.status}")
+    assert(refused.err.unwrap_or("").contains("`enumerate` on an array is not compiled yet"), refused.err.unwrap_or(""))
+
+@test("a chained comparison evaluates each operand once, left to right, and stops at the first false link")
+run_chain_once()
+    val b = bench()
+    val out = ran(b, "def f(n: integer): integer =\n  print(n)\n  n\ndef main() =\n  print(f(1) < f(2) < f(3))\n  print(f(3) < f(2) < f(4))\n  print(0 < f(5) <= 5)\n  print(f(9) < 0 < f(8))\n")
+
+    finish(b)
+    assert_eq(out.text, "1\n2\n3\ntrue\n3\n2\nfalse\n5\ntrue\n9\nfalse\n")

@@ -1,0 +1,63 @@
+struct Item
+  name: string
+  count: integer
+end Item
+
+enum Shape =
+  Named(label: string, size: real)
+  Anon
+
+def make_counter(prefix: string): () -> string =
+  var n = 0
+  () ->
+    n = n + 1
+    prefix + s"$n"
+
+def describe(s: Shape): string =
+  s match
+    Named(l, z) -> s"$l of $z"
+    Anon -> "anon"
+
+def pair(k: integer): (string, integer) = s"k$k", k * 2
+
+def main() =
+  val next = make_counter("c")
+  var total = ""
+  for k in 1..200
+    val t = next()
+    total = total + t
+    if k % 50 == 0 then print(t)
+  print(total == "")
+  var it = Item("a" + "b", 1)
+  for k in 1..100
+    it.name = it.name + "x"
+    it.count += 1
+  print(it.count)
+  def fib(n: integer): integer = if n < 2 then n else fib(n - 1) + fib(n - 2)
+  print(fib(15))
+  var shapes = Anon
+  for k in 1..100
+    shapes = if k % 2 == 0 then Named(s"s$k", 1.5) else Anon
+  print(describe(shapes))
+  var a, b = pair(1)
+  for k in 1..50
+    a, b = pair(k)
+  print(s"$a $b")
+  a, b = (a + "!", b)
+  print(a)
+  val add = (x: integer) -> x + it.count
+  print(add(1))
+  var w = ""
+  while w + "" != "xxxxx" and (w + "y") != ""
+    w = w + "x"
+  print(w + greeting)
+  print(times)
+  print(if w == "" then "empty" else w + "?")
+  args_like(next)
+
+val greeting, times = "hi" + "", 2
+
+def args_like(f: () -> string) =
+  for k in 1..3
+    if f() == "never" then return
+  print(f())
