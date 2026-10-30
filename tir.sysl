@@ -1,0 +1,159 @@
+// The typed IR: the program after elaboration, every name resolved and every type known.
+//
+// **Every expression carries its type, and nothing about it is left implicit.** A widening along
+// the lattice of DESIGN §2.2 is a `TPromote` node whose type is the wider one; a literal or a prelude
+// constant that took its type from its context (DESIGN §2.3) says so with `adopted`; a conversion
+// function is a `TConvert` that says whether it can trap (DESIGN §2.4); a compound assignment carries
+// its operator and a right-hand side already in the target's type. So a later phase reads off what
+// to do and never decides it again.
+//
+// **A name is resolved to its binding.** A local — a parameter, a `val`, `var`, a loop variable, a
+// lambda's parameter — is a number into `TProgram.locals`, which holds its name, its type and how it
+// was bound; two bindings that share a spelling have two numbers. A module-level binding and a
+// function are their names, which the top level keeps unique. A loop is a number too, which is what
+// an `exit` or a `cycle` names once its label is resolved.
+//
+// **A lambda is a number into `TProgram.lambdas`**, with its parameters, its result type, the locals
+// it captures from the functions around it and its body. A local `def` is a lambda bound to a local.
+// Keeping them in a table is what lets a lambda whose parameter types come from its first call be
+// elaborated at that call, after the binding that holds it was built.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+enum Lit
+    IntVal(v: i64)
+    RealVal(v: real)
+    BoolVal(v: bool)
+    StrVal(v: string)
+    // `()`: the one value of `void`.
+    VoidVal
+
+struct TExpr
+    span: Span
+    ty: Ty
+    kind: &TKind
+
+// One comparison of a chain: the operator, and its two sides written over `TChainOperand` leaves,
+// promoted to the type the comparison is made in.
+struct Link
+    op: string
+    lhs: TExpr
+    rhs: TExpr
+
+// A piece of an interpolated literal: text, or a value with its `f"..."` specifier (`""` for none).
+enum TPart
+    TText(text: string)
+    TValue(value: TExpr, spec: string)
+
+enum TKind
+    TLiteral(value: Lit, adopted: bool)
+    // A prelude constant, `pi`, `e`, `inf`, `nan` or the imaginary unit `i`, typed like a literal.
+    TConstant(name: string, adopted: bool)
+    TLocal(id: usize)
+    TGlobalRef(name: string)
+    // A top-level `def` used as a value or called.
+    TFnRef(name: string)
+    // The implicit widening of `value` to this node's type.
+    TPromote(value: TExpr)
+    // A conversion function applied to `value`; `traps` where the value can be out of the target's
+    // range (a narrower integer, a change of signedness, a real to an integer).
+    TConvert(value: TExpr, traps: bool)
+    // `complex[realN](re, im)`: both parts already of the part type.
+    TMakeComplex(re: TExpr, im: TExpr)
+    // `z.re` or `z.im`.
+    TComplexPart(value: TExpr, imag: bool)
+    // An arithmetic or comparison operator on two operands already of one type; the node's type is
+    // the result's.
+    TBinary(op: string, lhs: TExpr, rhs: TExpr)
+    // `and` or `or`, which evaluate the right only where the left does not decide.
+    TLogical(op: string, lhs: TExpr, rhs: TExpr)
+    // `-x` or `not x`.
+    TUnary(op: string, operand: TExpr)
+    // `a < b <= c`: each operand evaluated once, left to right, stopping at the first false link.
+    TChain(operands: Buf[TExpr], links: Buf[Link])
+    // The `k`th operand of the chain around it, inside one of its links.
+    TChainOperand(k: usize)
+    // A call of a function value: a `TFnRef`, a local holding a function or a lambda. The arguments
+    // are in parameter order with every default filled in, each already of its parameter's type.
+    TCall(callee: TExpr, args: Buf[TExpr])
+    // A prelude function, `print`, `sqrt`, `max`, by name.
+    TBuiltin(name: string, args: Buf[TExpr])
+    // The caller's place passed to an `inout` parameter.
+    TBorrow(place: TExpr)
+    TLambdaRef(id: usize)
+    TInterp(parts: Buf[TPart], format: bool)
+    TIf(cond: TExpr, then_branch: TExpr, else_branch: Option[TExpr])
+    TWhile(loop_id: usize, cond: TExpr, body: TExpr)
+    // `for v in lo..hi by step`: an integer loop over a range, `inclusive` of `hi` or stopping before
+    // it; `var_id` is the loop variable's local.
+    TFor(loop_id: usize, var_id: usize, lo: TExpr, hi: TExpr, inclusive: bool, step: Option[TExpr], body: TExpr)
+    TBlock(items: Buf[TExpr], result: TExpr)
+    // `val`/`var` inside a body: the local it binds, and its initial value in the local's type.
+    TLet(id: usize, init: TExpr)
+    // `target = value` or a compound `target += value`, whose `op` is the operator (`=` for a plain
+    // store); `value` is already in the target's type.
+    TAssign(op: string, target: TExpr, value: TExpr)
+    TReturn(value: Option[TExpr])
+    TExit(loop_id: usize)
+    TCycle(loop_id: usize)
+    TStop(code: Option[TExpr])
+    // What could not be elaborated, after its diagnostic.
+    TInvalid
+end TKind
+
+// How a local came to be.
+enum LocalKind
+    LVal
+    LVar
+    // A parameter, read-only or an `inout` borrow.
+    LParam(mode: Mode)
+    // A loop variable, read-only.
+    LLoop
+
+struct LocalInfo
+    name: string
+    ty: Ty
+    kind: LocalKind
+
+struct TLambda
+    // The name of a local `def`; `""` for a lambda.
+    name: string
+    params: Buf[usize]
+    ret: Ty
+    // The locals of enclosing functions the body reads or writes, in the order first used.
+    captures: Buf[usize]
+    body: TExpr
+
+// A loop, by the label it was given (`""` for none).
+struct TLoop
+    label: string
+
+struct TGlobal
+    span: Span
+    name: string
+    kind: BindKind
+    ty: Ty
+    init: TExpr
+
+struct TFun
+    span: Span
+    name: string
+    params: Buf[usize]
+    // Each parameter's default, already of the parameter's type.
+    defaults: Buf[Option[TExpr]]
+    ret: Ty
+    body: TExpr
+
+enum TDecl
+    GlobalDecl(g: TGlobal)
+    FunDecl(f: TFun)
+
+struct TProgram
+    // In the order the source declares them.
+    decls: Buf[TDecl]
+    locals: Buf[LocalInfo]
+    lambdas: Buf[TLambda]
+    loops: Buf[TLoop]
+
+texpr(span: Span, ty: Ty, kind: TKind) -> TExpr = TExpr(span, ty, kind)

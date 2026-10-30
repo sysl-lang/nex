@@ -1,0 +1,429 @@
+// Calls: of a `def`, of a function value, of a numeric type name (a conversion, DESIGN §2.4), and of
+// the prelude's scalar functions.
+//
+// **A name is looked up before it is taken for a conversion or a prelude function**, so a program
+// that binds `sqrt` or `real` calls its own, as DESIGN §12 has `i` shadowed by a binding.
+//
+// **A call of a `def` resolves its arguments against the parameter list**: positional ones first,
+// then named ones in any order, then each parameter left out takes its default. A function value —
+// a parameter of function type, a lambda bound to a local — has no names and no defaults, so its
+// arguments are positional only.
+//
+// **The prelude functions are typed here by rule, not declared**: each is generic over the numeric
+// families in a way DESIGN §2.6's constraints will express once the elaborator has generics.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The prelude functions of one real argument whose result is a real of the argument's width (an
+// integer argument is first widened to `real64`).
+private val REAL_FUNCTIONS = ["sqrt", "cbrt", "exp", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "floor", "ceil", "round", "trunc"]
+
+// Those of them that also take a complex and give one.
+private val COMPLEX_FUNCTIONS = ["sqrt", "exp", "log", "sin", "cos", "tan"]
+
+private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "min", "max", "assert", "assert_eq", "to_real", "to_integer", "to_complex"]
+
+// The prelude's array functions (DESIGN §4.2, §4.3, §7.4), which come with arrays, and the
+// assertions over arrays and lambdas.
+private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "assert_approx", "assert_traps"]
+
+private among(name: string, set: []const string) -> bool
+    for s in set
+        if s == name then return true
+
+    false
+
+// Whether `name` is a prelude function.
+is_builtin(name: string) -> bool = among(name, REAL_FUNCTIONS) || among(name, OTHER_BUILTINS)
+
+is_array_builtin(name: string) -> bool = among(name, ARRAY_BUILTINS)
+
+impl Elab
+    call(*self, span: Span, callee: Expr, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        *callee.kind match
+            Name(n) ->
+                self.lookup_local(n) match
+                    Some(id) ->
+                        self.pending_of(id) match
+                            Some(k) -> return self.call_pending(span, callee.span, id, k, args)
+                            None -> return self.call_value(span, self.local_ref(callee.span, id, None), args)
+                    None -> ()
+
+                self.find_top(n) match
+                    Some(TopFun(k)) -> return self.call_fun(span, callee.span, k, args)
+                    Some(TopValue(_)) -> return self.call_value(span, self.name(callee.span, n, None), args)
+                    None -> ()
+
+                scalar_named(n) match
+                    Some(t) -> return self.conversion(span, n, t, args)
+                    None -> ()
+
+                if is_builtin(n) then return self.builtin(span, n, args, want)
+                if is_array_builtin(n) then return self.not_yet(span, s"the array function `${n}`")
+
+                self.unknown_name(callee.span, n)
+                self.invalid(span)
+            Index(target, indices) ->
+                // `complex[real32](z)`: the type name of a complex kind, called.
+                *target.kind match
+                    Name(n) ->
+                        if n == "complex" && indices.len() == 1 && self.lookup_local(n).is_none() && self.find_top(n).is_none()
+                            val part = *indices[0].kind match
+                                Name(p) -> scalar_named(p)
+                                _ -> None
+
+                            part match
+                                Some(Real(b)) -> return self.conversion(span, s"complex[real${b}]", Complex(b), args)
+                                _ ->
+                                    self.fail(indices[0].span, "a complex type names a real part type: `complex[real32]`")
+                                    return self.invalid(span)
+                    _ -> ()
+
+                self.call_value(span, self.infer(callee), args)
+            _ -> self.call_value(span, self.infer(callee), args)
+    end call
+
+    // `x.f(args)` is `f(x, args)`.
+    method_call(*self, span: Span, receiver: Expr, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        var all: Buf[Expr] = buf()
+
+        all.push(receiver)
+        all.extend(args.view())
+        self.call(span, Expr(span, ExprKind.Name(name)), all, want)
+
+    // `z.re` and `z.im`; the fields of structs and tuples come with them.
+    field(*self, span: Span, receiver: Expr, name: string) -> TExpr
+        val v = self.infer(receiver)
+
+        v.ty match
+            Complex(b) ->
+                if name == "re" || name == "im" then return texpr(span, Real(b), TComplexPart(v, name == "im"))
+
+                self.fail(span, s"a complex number has the fields `re` and `im`, not `${name}`")
+                self.invalid(span)
+            Error -> self.invalid(span)
+            _ -> self.not_yet(span, "a field")
+    end field
+
+    // An argument passed to an `inout` parameter: a variable the callee borrows, exactly of the
+    // parameter's type, since a borrow cannot convert (DESIGN §8).
+    borrow(*self, arg: Expr, ty: Ty) -> TExpr
+        *arg.kind match
+            Name(_) -> ()
+            Index(_, _) -> return self.not_yet(arg.span, "an element or a slice passed `inout`")
+            Field(_, _) -> return self.not_yet(arg.span, "a field passed `inout`")
+            _ ->
+                self.fail(arg.span, "an `inout` argument is a variable the callee can write to")
+                return self.invalid(arg.span)
+
+        val p = self.place(arg)
+
+        if !ty_eq(p.ty, ty) && !is_wild(p.ty) && !is_error(ty)
+            self.fail(arg.span, s"an `inout` argument must be exactly ${show_ty(ty)}, since it is borrowed and not converted; this is ${show_ty(p.ty)}")
+
+        texpr(arg.span, ty, TBorrow(p))
+    end borrow
+
+    // One argument against its parameter's type and mode.
+    argument(*self, arg: Expr, ty: Ty, mode: Mode, name: string) -> TExpr =
+        if mode == Inout then self.borrow(arg, ty) else self.check(arg, ty, name)
+
+    // A call of a function value, with positional arguments only.
+    call_value(*self, span: Span, f: TExpr, args: Buf[Expr]) -> TExpr
+        val sig = f.ty match
+            Fn(sig) -> *sig
+            Error -> return self.invalid(span)
+            _ ->
+                self.fail(f.span, s"this is ${show_ty(f.ty)} and cannot be called")
+                return self.invalid(span)
+
+        if args.len() != sig.params.len()
+            self.fail(span, s"this function takes ${sig.params.len()} argument${if sig.params.len() == 1 then "" else "s"}, and ${args.len()} ${if args.len() == 1 then "is" else "are"} given")
+            return self.invalid(span)
+
+        var out: Buf[TExpr] = buf()
+
+        for k in 0..<args.len()
+            *args[k].kind match
+                NamedArg(n, _) ->
+                    self.fail(args[k].span, s"a function value has no parameter names, so `${n} = ...` cannot be passed; pass it by position")
+                    out.push(self.invalid(args[k].span))
+                _ -> out.push(self.argument(args[k], sig.params[k], sig.modes[k], s"argument ${k + 1}"))
+
+        texpr(span, sig.ret, TCall(f, out))
+    end call_value
+
+    // The first call of a lambda waiting for its parameter types: the arguments give them.
+    call_pending(*self, span: Span, at: Span, id: usize, k: usize, args: Buf[Expr]) -> TExpr
+        if args.len() != self.pending[k].params.len()
+            self.fail(span, s"`${self.locals[id].name}` takes ${self.pending[k].params.len()} arguments, and ${args.len()} are given")
+            return self.invalid(span)
+
+        var vals: Buf[TExpr] = buf()
+        var tys: Buf[Ty] = buf()
+
+        for a in args
+            val v = self.infer(a)
+
+            vals.push(v)
+            tys.push(v.ty)
+
+        val ty = self.resolve_pending(k, tys)
+        val f = self.local_ref(at, id, None)
+
+        var out: Buf[TExpr] = buf()
+
+        ty match
+            Fn(sig) ->
+                for j in 0..<vals.len()
+                    out.push(self.coerce(vals[j], sig.params[j], s"argument ${j + 1}"))
+
+                texpr(span, sig.ret, TCall(f, out))
+            _ -> self.invalid(span)
+    end call_pending
+
+    // A call of the `k`th `def`, with positional and named arguments and defaults.
+    call_fun(*self, span: Span, at: Span, k: usize, args: Buf[Expr]) -> TExpr
+        val sig = self.fsig[k]
+        val name = self.funs[k].name
+        var slots: Buf[Option[Expr]] = buf()
+        var named = false
+
+        for _ in sig.names
+            slots.push(None)
+
+        var next: usize = 0
+
+        for a in args
+            *a.kind match
+                NamedArg(n, value) ->
+                    named = true
+
+                    var found = false
+
+                    for j in 0..<sig.names.len()
+                        if sig.names[j] == n
+                            found = true
+
+                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots.set(j, Some(value))
+
+                    if !found then self.fail(a.span, s"`${name}` has no parameter `${n}`")
+                _ ->
+                    if named
+                        self.fail(a.span, "a positional argument cannot follow a named one")
+                    elif next >= slots.len()
+                        self.fail(a.span, s"`${name}` takes ${sig.names.len()} argument${if sig.names.len() == 1 then "" else "s"}")
+                    else
+                        slots.set(next, Some(a))
+
+                    next += 1
+
+        var out: Buf[TExpr] = buf()
+
+        for j in 0..<slots.len()
+            slots[j] match
+                Some(a) -> out.push(self.argument(a, sig.tys[j], sig.modes[j], s"`${sig.names[j]}`"))
+                None ->
+                    sig.defaults[j] match
+                        Some(d) -> out.push(d)
+                        None ->
+                            self.fail(span, s"`${name}` needs its argument `${sig.names[j]}`")
+                            out.push(self.invalid(span))
+
+        val ty = self.fun_type(k, at)
+        val ret = ty match
+            Fn(s) -> s.ret
+            _ -> Error
+
+        texpr(span, ret, TCall(texpr(at, ty, TFnRef(name)), out))
+    end call_fun
+
+    // -- conversions ------------------------------------------------------------------------------
+
+    // `real32(x)`, `int16(n)`, `complex[real32](re, im)`: a type name called (DESIGN §2.4).
+    conversion(*self, span: Span, name: string, target: Ty, args: Buf[Expr]) -> TExpr
+        if !is_numeric(target)
+            self.fail(span, s"`${name}` is a type, not a conversion; only the numeric types convert")
+            return self.invalid(span)
+
+        if is_complex(target) && args.len() == 2
+            val part = Real(bits_of(target))
+            val re = self.check(args[0], part, "the real part")
+            val im = self.check(args[1], part, "the imaginary part")
+
+            return texpr(span, target, TMakeComplex(re, im))
+
+        if args.len() != 1
+            self.fail(span, s"`${name}(...)` converts one value")
+            return self.invalid(span)
+
+        val class = self.literal_class(args[0])
+        val v = if class != NOT_LITERAL && adoption(class, target).is_some() then self.elab(args[0], Some(target)) else self.infer(args[0])
+        val from = v.ty
+
+        if is_error(from) then return self.invalid(span)
+        if ty_eq(from, target) then return v
+        if promotes(from, target) then return texpr(span, target, TPromote(v))
+
+        if !is_numeric(from)
+            self.fail(args[0].span, s"`${name}(...)` converts a number, and this is ${show_ty(from)}")
+            return self.invalid(span)
+
+        if is_complex(from)
+            self.fail(args[0].span, s"a complex number does not convert to ${show_ty(target)}: take `.re` (or `abs`, `arg`) first")
+            return self.invalid(span)
+
+        // A narrower integer, a change of signedness, or a real to an integer can be out of range.
+        texpr(span, target, TConvert(v, is_int(target)))
+    end conversion
+
+    // -- the prelude ------------------------------------------------------------------------------
+
+    // Arguments that are elaborated together into one common type, literals adopting it.
+    unified(*self, span: Span, what: string, args: Buf[Expr]) -> Buf[TExpr]
+        var vals: Buf[Option[TExpr]] = buf()
+        var shared: Option[Ty] = None
+
+        for a in args
+            if self.literal_class(a) != NOT_LITERAL
+                vals.push(None)
+            else
+                val v = self.infer(a)
+
+                shared = shared match
+                    Some(t) -> self.common_of(span, what, t, v.ty)
+                    None -> Some(v.ty)
+                vals.push(Some(v))
+
+        var out: Buf[TExpr] = buf()
+
+        for k in 0..<args.len()
+            out.push(vals[k] match
+                Some(v) -> v
+                None ->
+                    val class = self.literal_class(args[k])
+
+                    self.elab(args[k], shared match
+                        Some(t) -> Some(adoption(class, t).unwrap_or(default_of(class)))
+                        None -> None))
+
+        var ty = out[0].ty
+
+        for k in 1..<out.len()
+            ty = common(ty, out[k].ty).unwrap_or(Error)
+
+        for k in 0..<out.len()
+            out.set(k, promote(out[k], ty))
+
+        out
+    end unified
+
+    builtin(*self, span: Span, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        for a in args
+            *a.kind match
+                NamedArg(n, _) ->
+                    self.fail(a.span, s"`${name}` takes no named arguments")
+                    return self.invalid(span)
+                _ -> ()
+
+        if name == "print" || name == "eprint" then return self.print_call(span, name, args)
+        if name == "to_real" then return self.conversion(span, name, REAL, args)
+        if name == "to_integer" then return self.conversion(span, name, INTEGER, args)
+        if name == "to_complex" then return self.conversion(span, name, COMPLEX, args)
+
+        if name == "assert"
+            if args.len() < 1 || args.len() > 2 then return self.arity(span, name, "a condition and an optional message")
+
+            var out: Buf[TExpr] = buf()
+
+            out.push(self.check(args[0], Bool, "the condition"))
+            if args.len() == 2 then out.push(self.check(args[1], Ty.Str, "the message"))
+
+            return texpr(span, Void, TBuiltin(name, out))
+
+        if name == "assert_eq"
+            if args.len() != 2 then return self.arity(span, name, "two values")
+
+            return texpr(span, Void, TBuiltin(name, self.unified(span, name, args)))
+
+        if name == "min" || name == "max"
+            if args.len() < 2 then return self.arity(span, name, "two or more values")
+
+            val out = self.unified(span, name, args)
+
+            if !is_ordered(out[0].ty) && !is_error(out[0].ty) then self.fail(span, s"`${name}` compares integers and reals; these are ${show_ty(out[0].ty)}")
+
+            return texpr(span, out[0].ty, TBuiltin(name, out))
+
+        if name == "atan2" || name == "hypot"
+            if args.len() != 2 then return self.arity(span, name, "two values")
+
+            var out = self.unified(span, name, args)
+            val ty = if is_int(out[0].ty) then REAL else out[0].ty
+
+            if !is_real(ty) && !is_error(ty) then self.fail(span, s"`${name}` takes reals; these are ${show_ty(ty)}")
+
+            for k in 0..<out.len()
+                out.set(k, promote(out[k], ty))
+
+            return texpr(span, ty, TBuiltin(name, out))
+
+        if args.len() != 1 then return self.arity(span, name, "one value")
+
+        val v = self.infer(args[0])
+        var out: Buf[TExpr] = buf()
+
+        out.push(v)
+
+        if is_error(v.ty) then return texpr(span, Error, TBuiltin(name, out))
+
+        val result = self.scalar_result(span, name, v.ty)
+
+        // An integer argument to a real function is widened to `real64` first.
+        if is_real(result) && is_int(v.ty) then out.set(0, promote(v, REAL))
+
+        texpr(span, result, TBuiltin(name, out))
+    end builtin
+
+    // The result type of a one-argument prelude function on an argument of type `t`.
+    scalar_result(*self, span: Span, name: string, t: Ty) -> Ty
+        if name == "abs"
+            if is_complex(t) then return Real(bits_of(t))
+            if is_ordered(t) then return t
+        elif name == "sign"
+            if is_ordered(t) then return t
+        elif name == "conj"
+            if is_complex(t) then return t
+        elif name == "arg"
+            if is_complex(t) then return Real(bits_of(t))
+        else
+            if is_int(t) then return REAL
+            if is_real(t) then return t
+            if is_complex(t) && among(name, COMPLEX_FUNCTIONS) then return t
+
+        self.fail(span, s"`${name}` does not take ${show_ty(t)}")
+        Error
+    end scalar_result
+
+    print_call(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        if args.len() > 1 then return self.arity(span, name, "one value; interpolate several: `s\"$a $b\"`")
+
+        var out: Buf[TExpr] = buf()
+
+        for a in args
+            val v = self.infer(a)
+
+            v.ty match
+                Void -> self.fail(a.span, "this has no value to print: it is void")
+                Fn(_) -> self.fail(a.span, s"a function cannot be printed")
+                _ -> ()
+
+            out.push(v)
+
+        texpr(span, Void, TBuiltin(name, out))
+
+    arity(*self, span: Span, name: string, wants: string) -> TExpr
+        self.fail(span, s"`${name}` takes ${wants}")
+        self.invalid(span)
+end Elab

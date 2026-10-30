@@ -1,0 +1,964 @@
+// Expressions and statements: each AST node to its typed node.
+//
+// **`elab` takes the type its position expects, where it has one**, and the expectation is only ever
+// advice: it gives a literal or a prelude constant its type (DESIGN §2.3), a lambda its parameter
+// types, and the branches of an `if` a common goal. Whether the value then fits is `coerce`'s
+// question, asked by the position: an annotated binding, an argument, a result, an assignment.
+//
+// **A statement is elaborated expecting `void`.** That is what lets an `if` without a common type,
+// or a call whose value nobody uses, stand as a statement, while the same `if` as a value is refused.
+//
+// **A literal is any expression made only of literals and prelude constants**: `2`, `-0.5`, `2pi`,
+// `3 + 4i`. It has no type of its own until its context gives one, so `x32 * 2pi` computes in
+// `real32` (DESIGN §2.3). Its class — integer, real, or complex — is what decides which types it
+// may adopt.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The class of a literal: what it adopts, and its type where nothing gives it one.
+val NOT_LITERAL = 0
+val INT_LITERAL = 1
+val REAL_LITERAL = 2
+val COMPLEX_LITERAL = 3
+
+private val PRELUDE_CONSTANTS = ["pi", "e", "inf", "nan", "i"]
+
+private val COMPARISONS = ["==", "!=", "<", "<=", ">", ">="]
+
+private is_comparison(op: string) -> bool
+    for c in COMPARISONS
+        if c == op then return true
+
+    false
+
+private is_ordering(op: string) -> bool = op == "<" || op == "<=" || op == ">" || op == ">="
+
+private max_class(a: int, b: int) -> int = if a > b then a else b
+
+// The type a literal of `class` takes beside, or in the place of, a value of type `other`; `None`
+// where it cannot take that type and keeps its own.
+adoption(class: int, other: Ty) -> Option[Ty]
+    if class == INT_LITERAL && is_numeric(other) then return Some(other)
+    if class == REAL_LITERAL && (is_real(other) || is_complex(other)) then return Some(other)
+
+    if class == COMPLEX_LITERAL
+        other match
+            Real(b) -> return Some(Complex(b))
+            Complex(_) -> return Some(other)
+            _ -> ()
+
+    None
+
+default_of(class: int) -> Ty =
+    if class == INT_LITERAL then INTEGER elif class == REAL_LITERAL then REAL else COMPLEX
+
+// The type a literal of `class` takes where its position expects `want`.
+private literal_type(class: int, want: Option[Ty]) -> Ty = want match
+    Some(t) -> adoption(class, t).unwrap_or(default_of(class))
+    None -> default_of(class)
+
+private some_adoption(class: int, other: Ty) -> Option[Ty] = Some(adoption(class, other).unwrap_or(default_of(class)))
+
+// The widening of `v` to `to`, as a node, where it is not already of that type.
+promote(v: TExpr, to: Ty) -> TExpr =
+    if ty_eq(v.ty, to) || is_wild(v.ty) || is_error(to) then v else texpr(v.span, to, TPromote(v))
+
+// Two operands, each elaborated.
+struct Operands
+    lhs: TExpr
+    rhs: TExpr
+
+// The bounds of a signed or unsigned integer of `bits`, as the largest magnitudes an `i64` literal
+// can be compared against.
+private fits(v: i64, t: Ty) -> bool = t match
+    Int(b, signed) ->
+        if b == 64 then (signed || v >= 0)
+        elif signed then v >= -(1i64 << i64(b - 1)) && v < (1i64 << i64(b - 1))
+        else v >= 0 && v < (1i64 << i64(b))
+    _ -> true
+
+// The largest finite magnitude of each real width, rounded up to where rounding to nearest would
+// give infinity.
+private overflows(v: real, t: Ty) -> bool
+    val m = if v < 0.0 then -v else v
+    val b = bits_of(t)
+
+    if b == 16 then return m >= 65520.0
+    if b == 32 then return m >= 3.4028235677973366e38
+
+    false
+
+impl Elab
+    // -- the entry points -------------------------------------------------------------------------
+
+    infer(*self, e: Expr) -> TExpr = self.elab(e, None)
+
+    // `e`, which its position requires to be of type `ty`.
+    check(*self, e: Expr, ty: Ty, what: string) -> TExpr = self.coerce(self.elab(e, Some(ty)), ty, what)
+
+    // `v` where a `ty` is required: as it is, widened along the lattice, or refused.
+    coerce(*self, v: TExpr, ty: Ty, what: string) -> TExpr
+        if promotes(v.ty, ty) then return promote(v, ty)
+
+        var message = s"${what} must be ${show_ty(ty)}, but this is ${show_ty(v.ty)}"
+
+        if is_numeric(v.ty) && is_numeric(ty)
+            message = message + s": that would narrow it; convert it explicitly, `${show_ty(ty)}(...)`"
+
+        self.fail(v.span, message)
+        texpr(v.span, Error, TInvalid)
+    end coerce
+
+    // The value a binding with no written type is given: anything but `void`.
+    bound_value(*self, init: Expr, name: string) -> TExpr
+        val v = self.infer(init)
+
+        if is_void(v.ty)
+            self.fail(init.span, s"`${name}` would hold nothing: this is void")
+            return texpr(v.span, Error, TInvalid)
+
+        v
+
+    // -- literals ---------------------------------------------------------------------------------
+
+    // Whether `name` here is the prelude constant rather than a binding of the program.
+    is_prelude_constant(self, name: string) -> bool
+        if self.lookup_local(name).is_some() || self.find_top(name).is_some() then return false
+
+        for c in PRELUDE_CONSTANTS
+            if c == name then return true
+
+        false
+
+    // The class of `e` as a literal, or `NOT_LITERAL`.
+    literal_class(self, e: Expr) -> int
+        *e.kind match
+            IntLit(_) -> INT_LITERAL
+            RealLit(_) -> REAL_LITERAL
+            Unary(op, x) -> if op == "-" then self.literal_class(x) else NOT_LITERAL
+            Name(n) ->
+                if !self.is_prelude_constant(n) then NOT_LITERAL elif n == "i" then COMPLEX_LITERAL else REAL_LITERAL
+            Juxtapose(c, b) -> self.literal_pair(c, b, false)
+            BinOp(op, l, r) ->
+                if op == "+" || op == "-" || op == "*" || op == "^" then self.literal_pair(l, r, false)
+                elif op == "/" then self.literal_pair(l, r, true)
+                else NOT_LITERAL
+            _ -> NOT_LITERAL
+    end literal_class
+
+    private literal_pair(self, l: Expr, r: Expr, divides: bool) -> int
+        val a = self.literal_class(l)
+        val b = self.literal_class(r)
+
+        if a == NOT_LITERAL || b == NOT_LITERAL then return NOT_LITERAL
+
+        val c = max_class(a, b)
+
+        if divides then max_class(c, REAL_LITERAL) else c
+
+    private int_literal(*self, span: Span, v: i64, want: Option[Ty]) -> TExpr
+        val ty = literal_type(INT_LITERAL, want)
+
+        if !fits(v, ty)
+            self.fail(span, s"${v} does not fit in ${show_ty(ty)}")
+        elif is_real(ty) && overflows(real(v), ty)
+            self.fail(span, s"${v} is too large for ${show_ty(ty)}: it would round to infinity")
+
+        texpr(span, ty, TLiteral(IntVal(v), !ty_eq(ty, INTEGER)))
+
+    private real_literal(*self, span: Span, v: real, want: Option[Ty]) -> TExpr
+        val ty = literal_type(REAL_LITERAL, want)
+
+        if overflows(v, ty) then self.fail(span, s"${v} is too large for ${show_ty(ty)}: it would round to infinity")
+
+        texpr(span, ty, TLiteral(RealVal(v), !ty_eq(ty, REAL)))
+
+    private constant(*self, span: Span, name: string, want: Option[Ty]) -> TExpr
+        val class = if name == "i" then COMPLEX_LITERAL else REAL_LITERAL
+        val ty = literal_type(class, want)
+
+        texpr(span, ty, TConstant(name, !ty_eq(ty, default_of(class))))
+
+    // -- the dispatch -----------------------------------------------------------------------------
+
+    elab(*self, e: Expr, want: Option[Ty]) -> TExpr
+        val span = e.span
+
+        *e.kind match
+            IntLit(v) -> self.int_literal(span, v, want)
+            RealLit(v) -> self.real_literal(span, v, want)
+            BoolLit(v) -> texpr(span, Bool, TLiteral(BoolVal(v), false))
+            StrLit(v) -> texpr(span, Ty.Str, TLiteral(StrVal(v), false))
+            UnitLit -> texpr(span, Void, TLiteral(VoidVal, false))
+            Interp(parts, format) -> self.interpolation(span, parts, format)
+            Name(n) -> self.name(span, n, want)
+            BinOp(op, l, r) -> self.binary(span, op, l, r, want)
+            Chain(operands, ops) -> self.chain(span, operands, ops)
+            Unary(op, x) -> self.unary(span, op, x, want)
+            Juxtapose(c, b) -> self.binary(span, "*", c, b, want)
+            Call(callee, args) -> self.call(span, callee, args, want)
+            MethodCall(receiver, name, args) -> self.method_call(span, receiver, name, args, want)
+            Field(receiver, name) -> self.field(span, receiver, name)
+            Lambda(params, body) -> self.lambda(span, params, body, want)
+            If(cond, then_branch, else_branch) -> self.if_expr(span, cond, then_branch, else_branch, want)
+            For(label, pat, iterable, body) -> self.for_loop(span, label, pat, iterable, body)
+            While(label, cond, body) -> self.while_loop(span, label, cond, body)
+            Return(value) -> self.return_expr(span, value)
+            Exit(label) -> texpr(span, Never, TExit(self.loop_target(span, "exit", label)))
+            Cycle(label) -> texpr(span, Never, TCycle(self.loop_target(span, "cycle", label)))
+            Stop(code) ->
+                val c = code match
+                    Some(x) -> Some(self.check(x, INTEGER, "an exit status"))
+                    None -> None
+
+                texpr(span, Never, TStop(c))
+            Assign(op, target, value) -> self.assign(span, op, target, value)
+            Block(items, result) -> self.block(span, items, result, want)
+            Measured(_, _) -> self.not_yet(span, "a value with a unit of measure")
+            Range(_, _, _, _) -> self.not_yet(span, "a range as a value (an integer array)")
+            ExprKind.Array(_) -> self.not_yet(span, "an array literal")
+            ExprKind.Tuple(_) -> self.not_yet(span, "a tuple")
+            Index(_, _) -> self.not_yet(span, "indexing")
+            TupleField(_, _) -> self.not_yet(span, "a tuple field")
+            ParallelFor(_, _, _) -> self.not_yet(span, "a `parallel for`")
+            Parallel(_) -> self.not_yet(span, "a `parallel` expression")
+            Match(_, _) -> self.not_yet(span, "a `match`")
+            NamedArg(_, _) ->
+                self.fail(span, "a named argument stands only in a call's argument list")
+                self.invalid(span)
+            AxisAll ->
+                self.fail(span, "`:` stands only in an index list")
+                self.invalid(span)
+            End ->
+                self.fail(span, "`end` as an index stands only in an index list")
+                self.invalid(span)
+    end elab
+
+    not_yet(*self, span: Span, what: string) -> TExpr
+        self.later(span, what)
+        self.invalid(span)
+
+    // -- names ------------------------------------------------------------------------------------
+
+    name(*self, span: Span, n: string, want: Option[Ty]) -> TExpr
+        self.lookup_local(n) match
+            Some(id) -> return self.local_ref(span, id, want)
+            None -> ()
+
+        self.find_top(n) match
+            Some(TopValue(k)) ->
+                val ty = self.global_type(k, span)
+
+                if self.fx.in_const && self.globals[k].kind == Var
+                    self.fail(span, s"a `const` cannot read the `var` `${n}`")
+
+                return texpr(span, ty, TGlobalRef(n))
+            Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(n))
+            None -> ()
+
+        if self.is_prelude_constant(n) then return self.constant(span, n, want)
+
+        if is_builtin(n) || is_array_builtin(n)
+            self.later(span, s"the prelude function `${n}` as a value")
+        elif scalar_named(n).is_some()
+            self.fail(span, s"`${n}` is a type; call it to convert a value: `${n}(x)`")
+        else
+            self.unknown_name(span, n)
+
+        self.invalid(span)
+    end name
+
+    // A local, read: noted as a capture by every lambda it is read from inside, and given its
+    // parameter types first where it is a lambda still waiting for them.
+    local_ref(*self, span: Span, id: usize, want: Option[Ty]) -> TExpr
+        self.note_capture(id)
+
+        self.pending_of(id) match
+            Some(k) ->
+                val fixed = want match
+                    Some(Fn(sig)) -> if sig.params.len() == self.pending[k].params.len() then Some(sig.params) else None
+                    _ -> None
+
+                fixed match
+                    Some(tys) -> self.resolve_pending(k, tys)
+                    None ->
+                        self.fail(span, s"the parameter types of `${self.locals[id].name}` are not known here: call it first, or write them (`(x: real) -> ...`)")
+                        return self.invalid(span)
+            None -> ()
+
+        texpr(span, self.locals[id].ty, TLocal(id))
+    end local_ref
+
+    pending_of(self, id: usize) -> Option[usize]
+        for k in 0..<self.pending.len()
+            if self.pending[k].local == id then return Some(k)
+
+        None
+
+    // Elaborates the waiting lambda `k` with parameter types `tys`, inside the scope it was written
+    // in, and gives its local the function type that results.
+    resolve_pending(*self, k: usize, tys: Buf[Ty]) -> Ty
+        val p = self.pending.remove(k)
+        val current = self.fx
+        var names: Buf[string] = buf()
+        var ptys: Buf[Ty] = buf()
+        var modes: Buf[Mode] = buf()
+
+        self.fx = p.saved
+
+        for j in 0..<p.params.len()
+            names.push(p.params[j].name)
+            ptys.push(p.params[j].typ match
+                Some(t) -> self.resolve_type(t)
+                None -> tys[j])
+            modes.push(Read)
+
+        val ty = self.lambda_body(p.lambda, "", p.span, names, ptys, modes, None, p.body)
+
+        self.fx = current
+        self.locals.set(p.local, LocalInfo(self.locals[p.local].name, ty, LVal))
+        ty
+    end resolve_pending
+
+    // -- operators --------------------------------------------------------------------------------
+
+    // Both operands of a binary operator, a literal one taking the other's type (DESIGN §2.3), and
+    // two literals the type the position expects.
+    operands(*self, l: Expr, r: Expr, want: Option[Ty]) -> Operands
+        val cl = self.literal_class(l)
+        val cr = self.literal_class(r)
+
+        if cl != NOT_LITERAL && cr != NOT_LITERAL
+            val t = Some(literal_type(max_class(cl, cr), want))
+
+            return Operands(self.elab(l, t), self.elab(r, t))
+
+        if cl != NOT_LITERAL
+            val b = self.infer(r)
+
+            return Operands(self.elab(l, some_adoption(cl, b.ty)), b)
+
+        if cr != NOT_LITERAL
+            val a = self.infer(l)
+
+            return Operands(a, self.elab(r, some_adoption(cr, a.ty)))
+
+        Operands(self.infer(l), self.infer(r))
+    end operands
+
+    binary(*self, span: Span, op: string, l: Expr, r: Expr, want: Option[Ty]) -> TExpr
+        if op == "and" || op == "or"
+            val a = self.check(l, Bool, s"an operand of `${op}`")
+            val b = self.check(r, Bool, s"an operand of `${op}`")
+
+            return texpr(span, Bool, TLogical(op, a, b))
+
+        if op == "^" then return self.power(span, l, r, want)
+        if op == "@" then return self.not_yet(span, "the matrix product `@`")
+
+        val o = self.operands(l, r, want)
+
+        self.apply(span, op, o.lhs, o.rhs)
+
+    // A pair of operands whose common type is `ty`, or the diagnostic for a pair that has none.
+    common_of(*self, span: Span, op: string, a: Ty, b: Ty) -> Option[Ty]
+        common(a, b) match
+            Some(t) -> Some(t)
+            None ->
+                if is_int(a) && is_int(b)
+                    val signed = if is_signed(a) then a else b
+
+                    self.fail(span, s"`${op}` mixes ${show_ty(a)} and ${show_ty(b)}, and neither holds the other's range; convert one: `${show_ty(signed)}(u) ${op} n`")
+                else
+                    self.fail(span, s"`${op}` cannot combine ${show_ty(a)} and ${show_ty(b)}")
+                None
+    end common_of
+
+    // An arithmetic or comparison operator on two elaborated operands.
+    apply(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
+        if is_error(a.ty) || is_error(b.ty) then return texpr(span, Error, TBinary(op, a, b))
+        if is_array(a.ty) || is_array(b.ty) then return self.not_yet(span, "an element-wise operation on arrays")
+
+        if is_comparison(op)
+            if is_numeric(a.ty) && is_numeric(b.ty)
+                val c = self.common_of(span, op, a.ty, b.ty).unwrap_or(Error)
+
+                if is_ordering(op) && is_complex(c) then self.fail(span, s"`${op}` orders integers and reals; complex numbers have no order")
+
+                return texpr(span, Bool, TBinary(op, promote(a, c), promote(b, c)))
+
+            val equality = op == "==" || op == "!="
+            val comparable = a.ty match
+                Bool -> true
+                Str -> true
+                _ -> false
+
+            if !(equality && comparable && ty_eq(a.ty, b.ty))
+                if ty_eq(a.ty, b.ty) && comparable
+                    self.fail(span, s"`${op}` orders integers and reals; ${show_ty(a.ty)} values are only equal or not")
+                else
+                    self.fail(span, s"`${op}` cannot compare ${show_ty(a.ty)} with ${show_ty(b.ty)}")
+
+            return texpr(span, Bool, TBinary(op, a, b))
+
+        if op == "+" && ty_eq(a.ty, Ty.Str) && ty_eq(b.ty, Ty.Str) then return texpr(span, Ty.Str, TBinary(op, a, b))
+
+        if !is_numeric(a.ty) || !is_numeric(b.ty)
+            self.fail(span, s"`${op}` needs numbers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+            return texpr(span, Error, TBinary(op, a, b))
+
+        if op == "div" || op == "%"
+            if !is_int(a.ty) || !is_int(b.ty)
+                self.fail(span, s"`${op}` needs two integers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+                return texpr(span, Error, TBinary(op, a, b))
+
+        val c = (if op == "/" && is_int(a.ty) && is_int(b.ty) then Some(REAL) else self.common_of(span, op, a.ty, b.ty)).unwrap_or(Error)
+
+        texpr(span, c, TBinary(op, promote(a, c), promote(b, c)))
+    end apply
+
+    // `base ^ exponent`. An integer exponent leaves the base's type alone, whatever its width
+    // (DESIGN §2.2); any other exponent meets the base in their common type.
+    power(*self, span: Span, l: Expr, r: Expr, want: Option[Ty]) -> TExpr
+        val cl = self.literal_class(l)
+        val cr = self.literal_class(r)
+        var base = texpr(span, Error, TInvalid)
+        var exp = texpr(span, Error, TInvalid)
+
+        if cl != NOT_LITERAL && cr != NOT_LITERAL
+            val t = Some(literal_type(max_class(cl, cr), want))
+
+            base = self.elab(l, t)
+            exp = self.elab(r, if cr == INT_LITERAL then None else t)
+        elif cl != NOT_LITERAL
+            exp = self.infer(r)
+            base = self.elab(l, if is_int(exp.ty) then None else some_adoption(cl, exp.ty))
+        elif cr != NOT_LITERAL
+            base = self.infer(l)
+            exp = self.elab(r, if cr == INT_LITERAL then None else some_adoption(cr, base.ty))
+        else
+            base = self.infer(l)
+            exp = self.infer(r)
+
+        if is_error(base.ty) || is_error(exp.ty) then return texpr(span, Error, TBinary("^", base, exp))
+
+        if !is_numeric(base.ty) || !is_numeric(exp.ty)
+            self.fail(span, s"`^` needs numbers; found ${show_ty(base.ty)} and ${show_ty(exp.ty)}")
+            return texpr(span, Error, TBinary("^", base, exp))
+
+        if is_int(exp.ty) then return texpr(span, base.ty, TBinary("^", base, exp))
+
+        val c = self.common_of(span, "^", base.ty, exp.ty).unwrap_or(Error)
+
+        texpr(span, c, TBinary("^", promote(base, c), promote(exp, c)))
+    end power
+
+    unary(*self, span: Span, op: string, x: Expr, want: Option[Ty]) -> TExpr
+        if op == "not" then return texpr(span, Bool, TUnary(op, self.check(x, Bool, "the operand of `not`")))
+
+        // A minus written on a number is part of the literal, so `-128` fits an `int8`.
+        *x.kind match
+            IntLit(v) -> return self.int_literal(span, -v, want)
+            RealLit(v) -> return self.real_literal(span, -v, want)
+            _ -> ()
+
+        val v = self.elab(x, want)
+
+        if !is_numeric(v.ty) && !is_error(v.ty)
+            self.fail(span, s"`-` needs a number; found ${show_ty(v.ty)}")
+            return texpr(span, Error, TUnary(op, v))
+
+        texpr(span, v.ty, TUnary(op, v))
+    end unary
+
+    // `a < b <= c`. Each operand is elaborated once, a literal one taking the common type of the
+    // others, and each link compares its two neighbours in their own common type.
+    chain(*self, span: Span, exprs: Buf[Expr], ops: Buf[string]) -> TExpr
+        var vals: Buf[Option[TExpr]] = buf()
+        var shared: Option[Ty] = None
+
+        for x in exprs
+            if self.literal_class(x) != NOT_LITERAL
+                vals.push(None)
+            else
+                val v = self.infer(x)
+
+                shared = shared match
+                    Some(t) -> Some(common(t, v.ty).unwrap_or(t))
+                    None -> Some(v.ty)
+                vals.push(Some(v))
+
+        var operands: Buf[TExpr] = buf()
+
+        for k in 0..<exprs.len()
+            operands.push(vals[k] match
+                Some(v) -> v
+                None ->
+                    val class = self.literal_class(exprs[k])
+
+                    self.elab(exprs[k], shared match
+                        Some(t) -> some_adoption(class, t)
+                        None -> None))
+
+        var links: Buf[Link] = buf()
+
+        for k in 0..<ops.len()
+            val a = operands[k]
+            val b = operands[k + 1]
+            val pair = self.apply(a.span.to(b.span), ops[k], texpr(a.span, a.ty, TChainOperand(k)), texpr(b.span, b.ty, TChainOperand(k + 1)))
+
+            *pair.kind match
+                TBinary(op, x, y) -> links.push(Link(op, x, y))
+                _ -> ()
+
+        texpr(span, Bool, TChain(operands, links))
+    end chain
+
+    // -- control flow -----------------------------------------------------------------------------
+
+    if_expr(*self, span: Span, cond: Expr, then_: Expr, else_: Option[Expr], want: Option[Ty]) -> TExpr
+        val c = self.check(cond, Bool, "the condition of `if`")
+
+        val other = else_ match
+            Some(x) -> x
+            None -> return texpr(span, Void, TIf(c, self.elab(then_, Some(Void)), None))
+
+        val cl = self.literal_class(then_)
+        val cr = self.literal_class(other)
+        var a = texpr(span, Error, TInvalid)
+        var b = texpr(span, Error, TInvalid)
+
+        if cl != NOT_LITERAL && cr == NOT_LITERAL
+            b = self.elab(other, want)
+            a = self.elab(then_, some_adoption(cl, b.ty))
+        elif cr != NOT_LITERAL && cl == NOT_LITERAL
+            a = self.elab(then_, want)
+            b = self.elab(other, some_adoption(cr, a.ty))
+        elif cl != NOT_LITERAL
+            val t = Some(literal_type(max_class(cl, cr), want))
+
+            a = self.elab(then_, t)
+            b = self.elab(other, t)
+        else
+            a = self.elab(then_, want)
+            b = self.elab(other, want)
+
+        val ty = self.branch_type(span, a.ty, b.ty, want)
+
+        texpr(span, ty, TIf(c, promote(a, ty), Some(promote(b, ty))))
+    end if_expr
+
+    // The type of an `if` whose branches have types `a` and `b`: their common type, or `void` in a
+    // statement, where the value is not used.
+    branch_type(*self, span: Span, a: Ty, b: Ty, want: Option[Ty]) -> Ty
+        if is_wild(a) then return b
+        if is_wild(b) || ty_eq(a, b) then return a
+
+        val statement = want match
+            Some(Void) -> true
+            _ -> false
+
+        if is_numeric(a) && is_numeric(b)
+            common(a, b) match
+                Some(t) -> return t
+                None -> ()
+
+        if statement then return Void
+
+        self.fail(span, s"the branches of this `if` differ: ${show_ty(a)} and ${show_ty(b)}")
+        Error
+    end branch_type
+
+    new_loop(*self, label: Option[string]) -> usize
+        self.loops.push(TLoop(label.unwrap_or("")))
+        self.loops.len() - 1
+
+    while_loop(*self, span: Span, label: Option[string], cond: Expr, body: Expr) -> TExpr
+        val id = self.new_loop(label)
+        val c = self.check(cond, Bool, "the condition of `while`")
+
+        self.fx.loops.push(id)
+
+        val b = self.elab(body, Some(Void))
+
+        self.fx.loops.pop()
+        texpr(span, Void, TWhile(id, c, b))
+
+    // `for v in lo..hi [by step]`: a counted loop over integers (DESIGN §11.1).
+    for_loop(*self, span: Span, label: Option[string], pat: Pattern, iterable: Expr, body: Expr) -> TExpr
+        val name = *pat.kind match
+            Name(n) -> n
+            Wildcard -> "_"
+            _ -> return self.not_yet(pat.span, "a destructuring loop variable")
+
+        val (lo, hi, inclusive, stride) = *iterable.kind match
+            Range(Some(lo), Some(hi), inclusive, stride) -> (lo, hi, inclusive, stride)
+            _ -> return self.not_yet(iterable.span, "a `for` over an array")
+
+        val bounds = self.operands(lo, hi, None)
+        var ty = self.common_of(iterable.span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
+
+        if !is_int(ty) && !is_error(ty)
+            self.fail(iterable.span, s"a `for` range counts in integers; this one is ${show_ty(ty)}")
+            ty = Error
+
+        val step = stride match
+            Some(s) -> Some(self.check(s, ty, "the step"))
+            None -> None
+
+        val id = self.new_loop(label)
+
+        self.open()
+
+        val var_id = self.declare_local(pat.span, name, ty, LLoop)
+
+        self.fx.loops.push(id)
+
+        val b = self.elab(body, Some(Void))
+
+        self.fx.loops.pop()
+        self.close()
+        texpr(span, Void, TFor(id, var_id, promote(bounds.lhs, ty), promote(bounds.rhs, ty), inclusive, step, b))
+    end for_loop
+
+    // The loop an `exit` or a `cycle` acts on: the innermost one, or the one with its label. A
+    // lambda's body is a function of its own, and the loops around it are not its loops.
+    loop_target(*self, span: Span, word: string, label: Option[string]) -> usize
+        val base = self.fx.frames[self.fx.frames.len() - 1].loop_base
+        var k = self.fx.loops.len()
+
+        if k == base
+            self.fail(span, s"`${word}` stands only inside a loop")
+            return 0
+
+        label match
+            Some(want) ->
+                while k > base
+                    k -= 1
+
+                    val id = self.fx.loops[k]
+
+                    if self.loops[id].label == want then return id
+
+                self.fail(span, s"no loop around this `${word}` is named `${want}`")
+                0
+            None -> self.fx.loops[k - 1]
+    end loop_target
+
+    return_expr(*self, span: Span, value: Option[Expr]) -> TExpr
+        val top = self.fx.frames.len() - 1
+        val frame = self.fx.frames[top]
+
+        val v = value match
+            Some(x) -> Some(if frame.ret_known then self.check(x, frame.ret, "the result") else self.infer(x))
+            None ->
+                if frame.ret_known && !is_void(frame.ret) && !is_wild(frame.ret)
+                    self.fail(span, s"this function returns ${show_ty(frame.ret)}; `return` needs a value")
+
+                None
+
+        // The first `return` of a function with no declared result type gives it its type.
+        if !frame.ret_known
+            val ty = v match
+                Some(x) -> x.ty
+                None -> Void
+
+            if !is_wild(ty) then self.fx.frames.set(top, Frame(frame.lambda, ty, true, frame.loop_base))
+
+        texpr(span, Never, TReturn(v))
+    end return_expr
+
+    // -- blocks and bindings ----------------------------------------------------------------------
+
+    block(*self, span: Span, items: Buf[BlockItem], result: Expr, want: Option[Ty]) -> TExpr
+        var out: Buf[TExpr] = buf()
+
+        self.open()
+
+        for item in items
+            item match
+                Item(d) -> out.push(self.local_decl(d))
+                Stmt(e) -> out.push(self.elab(e, Some(Void)))
+
+        val r = self.elab(result, want)
+
+        self.close()
+        texpr(span, r.ty, TBlock(out, r))
+    end block
+
+    // A declaration inside a body: a `val`, `var` or `const`, or a local `def`.
+    local_decl(*self, d: Decl) -> TExpr
+        *d.kind match
+            Bind(kind, pat, typ, init) ->
+                val lkind = if kind == Var then LVar else LVal
+
+                val name = *pat.kind match
+                    Name(n) -> n
+                    Wildcard -> return self.infer(init)
+                    _ -> return self.not_yet(pat.span, "a destructuring binding")
+
+                typ match
+                    Some(t) ->
+                        val ty = self.resolve_type(t)
+                        val v = self.check(init, ty, s"`${name}`")
+
+                        texpr(d.span, Void, TLet(self.declare_local(pat.span, name, ty, lkind), v))
+                    None ->
+                        *init.kind match
+                            Lambda(params, body) ->
+                                if kind != Var && untyped_params(params) then return self.defer_lambda(d.span, pat.span, name, params, body)
+                            _ -> ()
+
+                        val v = self.bound_value(init, name)
+
+                        texpr(d.span, Void, TLet(self.declare_local(pat.span, name, v.ty, lkind), v))
+            Fun(name, tparams, params, ret, body) ->
+                if tparams.len() > 0 then return self.not_yet(d.span, "a generic local function")
+
+                body match
+                    Some(b) -> self.local_fun(d.span, name, params, ret, b)
+                    None ->
+                        self.fail(d.span, s"`${name}` has no body")
+                        self.invalid(d.span)
+            _ ->
+                self.fail(d.span, "only `val`, `var`, `const` and `def` are declared inside a body")
+                self.invalid(d.span)
+    end local_decl
+
+    // `val f = x -> ...` with a parameter type left out: bound now, elaborated at its first use.
+    defer_lambda(*self, span: Span, at: Span, name: string, params: Buf[LambdaParam], body: Expr) -> TExpr
+        val lid = self.reserve_lambda(span)
+        val saved = copy_fx(self.fx)
+        val id = self.declare_local(at, name, Error, LVal)
+
+        self.pending.push(Pending(id, lid, span, params, body, saved))
+        texpr(span, Void, TLet(id, texpr(span, Error, TLambdaRef(lid))))
+
+    // A `def` inside a body: a named lambda. One that declares its result type is in scope in its own
+    // body, so it may call itself.
+    local_fun(*self, span: Span, name: string, params: Buf[Param], ret: Option[Type], body: Expr) -> TExpr
+        var names: Buf[string] = buf()
+        var tys: Buf[Ty] = buf()
+        var modes: Buf[Mode] = buf()
+
+        for p in params
+            if p.default.is_some() then self.later(span, "a default on a local function's parameter")
+
+            names.push(p.name)
+            tys.push(self.resolve_type(p.typ))
+            modes.push(p.mode)
+
+        val lid = self.reserve_lambda(span)
+
+        ret match
+            Some(t) ->
+                val r = self.resolve_type(t)
+                val id = self.declare_local(span, name, fn_type(tys, modes, r), LVal)
+
+                self.lambda_body(lid, name, span, names, tys, modes, Some(r), body)
+                texpr(span, Void, TLet(id, texpr(span, self.locals[id].ty, TLambdaRef(lid))))
+            None ->
+                val ty = self.lambda_body(lid, name, span, names, tys, modes, None, body)
+                val id = self.declare_local(span, name, ty, LVal)
+
+                texpr(span, Void, TLet(id, texpr(span, ty, TLambdaRef(lid))))
+    end local_fun
+
+    // -- lambdas ----------------------------------------------------------------------------------
+
+    reserve_lambda(*self, span: Span) -> usize
+        self.lambdas.push(TLambda("", buf(), Error, buf(), texpr(span, Error, TInvalid)))
+        self.lambdas.len() - 1
+
+    // `(x, y) -> body`: its parameter types as written, or from the function type its position
+    // expects.
+    lambda(*self, span: Span, params: Buf[LambdaParam], body: Expr, want: Option[Ty]) -> TExpr
+        var names: Buf[string] = buf()
+        var tys: Buf[Ty] = buf()
+        var modes: Buf[Mode] = buf()
+        var ret: Option[Ty] = None
+
+        val expected = want match
+            Some(Fn(sig)) -> if sig.params.len() == params.len() then Some(*sig) else None
+            _ -> None
+
+        for k in 0..<params.len()
+            val p = params[k]
+
+            names.push(p.name)
+
+            val ty = p.typ match
+                Some(t) -> self.resolve_type(t)
+                None -> expected match
+                    Some(sig) -> sig.params[k]
+                    None ->
+                        self.fail(span, s"the type of `${p.name}` is not known here; write it: `(${p.name}: real) -> ...`")
+                        Error
+
+            tys.push(ty)
+            modes.push(expected match
+                Some(sig) -> sig.modes[k]
+                None -> Read)
+
+        expected match
+            Some(sig) -> ret = Some(sig.ret)
+            None -> ()
+
+        val lid = self.reserve_lambda(span)
+        val ty = self.lambda_body(lid, "", span, names, tys, modes, ret, body)
+
+        texpr(span, ty, TLambdaRef(lid))
+    end lambda
+
+    // Elaborates a lambda's body into its slot, in a frame of its own, and gives its function type.
+    lambda_body(*self, lid: usize, name: string, span: Span, names: Buf[string], tys: Buf[Ty], modes: Buf[Mode], ret: Option[Ty], body: Expr) -> Ty
+        self.fx.frames.push(Frame(Some(lid), ret.unwrap_or(Error), ret.is_some(), self.fx.loops.len()))
+        self.open()
+
+        var ids: Buf[usize] = buf()
+
+        for k in 0..<names.len()
+            if contains_before(names, k) then self.fail(span, s"redeclaration of `${names[k]}`")
+
+            val id = self.new_local(names[k], tys[k], LParam(modes[k]))
+
+            self.bind(id)
+            ids.push(id)
+
+        val b = self.body_of(body)
+        val frame = self.fx.frames.pop().unwrap()
+
+        self.close()
+        self.lambdas.set(lid, TLambda(name, ids, frame.ret, buf(), b))
+        fn_type(tys, modes, frame.ret)
+    end lambda_body
+
+    // -- assignment -------------------------------------------------------------------------------
+
+    // The place a name stands for on the left of `=`, or the diagnostic for one that is not a place.
+    place(*self, target: Expr) -> TExpr
+        val span = target.span
+
+        val n = *target.kind match
+            Name(n) -> n
+            _ -> return self.not_yet(span, "assignment to an element or a field")
+
+        self.lookup_local(n) match
+            Some(id) ->
+                self.note_capture(id)
+
+                val writable = self.locals[id].kind match
+                    LVar -> true
+                    LParam(m) -> m == Inout
+                    _ -> false
+
+                if !writable then self.fail(span, s"`${n}` cannot be assigned: ${what_local(self.locals[id].kind)}")
+
+                return texpr(span, self.locals[id].ty, TLocal(id))
+            None -> ()
+
+        self.find_top(n) match
+            Some(TopValue(k)) ->
+                val ty = self.global_type(k, span)
+
+                if self.globals[k].kind != Var then self.fail(span, s"`${n}` cannot be assigned: it is a `${if self.globals[k].kind == Val then "val" else "const"}`")
+
+                texpr(span, ty, TGlobalRef(n))
+            Some(TopFun(_)) ->
+                self.fail(span, s"`${n}` is a function and cannot be assigned")
+                self.invalid(span)
+            None ->
+                self.unknown_name(span, n)
+                self.invalid(span)
+    end place
+
+    assign(*self, span: Span, op: string, target: Expr, value: Expr) -> TExpr
+        val p = self.place(target)
+
+        if op == "=" then return texpr(span, Void, TAssign(op, p, self.check(value, p.ty, "the value")))
+
+        // `x op= v` computes `x op v` and stores it back, which must not narrow `x` (DESIGN §2.2).
+        val bop = op[0..<op.len - 1]
+        val class = self.literal_class(value)
+        val v = if class != NOT_LITERAL then self.elab(value, some_adoption(class, p.ty)) else self.infer(value)
+        val r = self.apply(span, bop, p, v)
+
+        if !is_wild(r.ty) && !is_wild(p.ty) && !ty_eq(r.ty, p.ty)
+            var message = s"`${op}` computes ${show_ty(r.ty)}, which `${show_place(target)}` (${show_ty(p.ty)}) cannot hold without narrowing"
+
+            if bop == "/" && is_int(p.ty) then message = message + "; `div` divides integers"
+
+            self.fail(span, message)
+
+        texpr(span, Void, TAssign(op, p, promote(v, p.ty)))
+    end assign
+
+    // -- interpolation ----------------------------------------------------------------------------
+
+    interpolation(*self, span: Span, parts: Buf[Part], format: bool) -> TExpr
+        var out: Buf[TPart] = buf()
+
+        for part in parts
+            part match
+                Text(t) -> out.push(TText(t))
+                Value(x, spec) ->
+                    val v = self.infer(x)
+
+                    if is_void(v.ty) then self.fail(x.span, "this has no value to put in a string: it is void")
+                    if format && spec.len > 0 then self.check_spec(x.span, spec, v.ty)
+
+                    out.push(TValue(v, spec))
+
+        texpr(span, Ty.Str, TInterp(out, format))
+
+    // An `f"..."` specifier against the type of its value: `d x X o b` format an integer, `f e g` a
+    // real, `s` anything.
+    check_spec(*self, span: Span, spec: string, ty: Ty)
+        if is_error(ty) then return
+
+        val c = spec.bytes[spec.len - 1]
+
+        if c == u8('d') || c == u8('x') || c == u8('X') || c == u8('o') || c == u8('b')
+            if !is_int(ty) then self.fail(span, s"`${spec}` formats an integer, and this is ${show_ty(ty)}")
+        elif c == u8('f') || c == u8('e') || c == u8('g')
+            if !is_real(ty) then self.fail(span, s"`${spec}` formats a real, and this is ${show_ty(ty)}")
+        elif c != u8('s')
+            self.fail(span, s"`${spec}` is not a format: the conversion is one of `d x X o b f e g s`")
+    end check_spec
+end Elab
+
+// Whether any parameter of a lambda leaves its type out.
+private untyped_params(params: Buf[LambdaParam]) -> bool
+    for p in params
+        if p.typ.is_none() then return true
+
+    false
+
+private contains_before(names: Buf[string], k: usize) -> bool
+    for j in 0..<k
+        if names[j] == names[k] then return true
+
+    false
+
+private what_local(kind: LocalKind) -> string = kind match
+    LVal -> "it is a `val`"
+    LVar -> "it is a `var`"
+    LParam(_) -> "a parameter is read-only unless it is `inout`"
+    LLoop -> "a loop variable is read-only"
+
+private show_place(e: Expr) -> string = *e.kind match
+    Name(n) -> n
+    _ -> "the target"
+
+copy_fx(fx: Fx) -> Fx
+    var scope: Buf[ScopeEntry] = buf()
+    var marks: Buf[usize] = buf()
+    var loops: Buf[usize] = buf()
+    var frames: Buf[Frame] = buf()
+
+    scope.extend(fx.scope.view())
+    marks.extend(fx.marks.view())
+    loops.extend(fx.loops.view())
+    frames.extend(fx.frames.view())
+    Fx(scope, marks, loops, frames, fx.in_const)

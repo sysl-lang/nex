@@ -1,8 +1,9 @@
 // The `nex` command. The subcommands arrive with the phases they drive, in the order PLAN.md
-// gives: `tokens` prints what the lexer reads, `parse` the tree the parser builds.
+// gives: `tokens` prints what the lexer reads, `parse` the tree the parser builds, `elaborate` the
+// typed IR, or every diagnostic the elaborator gives.
 
 import sysl.fs.read_bytes
-import sh.sysl.parsing.{Source, source}
+import sh.sysl.parsing.{Source, full_report, source}
 
 private val usage = "usage: nex <tokens | parse | elaborate | run | test | compile> <file.nex>"
 
@@ -14,7 +15,7 @@ main(args: []string)
     val command = args[1]
     val file = args[2]
 
-    if command != "tokens" && command != "parse"
+    if command != "tokens" && command != "parse" && command != "elaborate"
         print(s"nex: '${command}' is not implemented yet")
         exit(1)
 
@@ -31,10 +32,25 @@ main(args: []string)
         lex(src) match
             Ok(toks) -> prints(show_tokens(src, toks))
             Err(d) -> fail(d.render(src))
-    else
-        parse_program(src) match
-            Ok(p) -> print(show_program(p))
-            Err(d) -> fail(d.render(src))
+        return
+
+    val p = parse_program(src) match
+        Ok(p) -> p
+        Err(d) -> fail(d.render(src))
+
+    if command == "parse"
+        print(show_program(p))
+        return
+
+    elaborate(p) match
+        Ok(t) -> print(show_tprogram(t))
+        Err(ds) ->
+            var r = full_report()
+
+            for d in ds
+                r.add(d)
+
+            fail(r.render(src))
 end main
 
 private fail(text: string) -> never

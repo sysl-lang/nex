@@ -1,0 +1,192 @@
+// The printed form of the typed IR: what `nex elaborate` prints and what the elaborator's tests
+// compare against.
+//
+// **It is the S-expression form of `show.sysl` with the types added.** A node that computes a
+// value writes its type after its head, `(+:real32 x#1 (adopt:real32 2.0))`, unless the value is
+// `void` or the node never yields; a name and an unadopted literal print bare. A local prints as its
+// name and its number, `x#3`, so two bindings that share a spelling read apart; a module-level
+// binding and a function print as their names. A loop prints as `L` and its number, with its label
+// in front where it has one: `outer:L2`. In a chain the operands print once and the links name them
+// by position, `$1`, `$2`.
+//
+// A function prints as `(def name ((param type) ...) result body)` and a module-level binding as
+// `(val name type init)`; the lambdas follow the declarations, one to a line, as
+// `(lambda N name ((param type) ...) result (captures ...) body)`.
+
+import sysl.buf.{Buf, buf}
+import sysl.fmt.shortest
+import sysl.text.join
+import sh.sysl.parsing.write_quoted
+
+show_tprogram(p: TProgram) -> string
+    var out: Buf[string] = buf()
+
+    for d in p.decls
+        out.push(d match
+            GlobalDecl(g) -> s"(${bind_word(g.kind)} ${g.name} ${show_ty(g.ty)} ${show_texpr(p, g.init)})"
+            FunDecl(f) -> s"(def ${f.name} ${show_params(p, f.params, f.defaults)} ${show_ty(f.ret)} ${show_texpr(p, f.body)})")
+
+    for k in 0..<p.lambdas.len()
+        val l = p.lambdas[k]
+        var caps: Buf[string] = buf()
+
+        for c in l.captures
+            caps.push(local_name(p, c))
+
+        var nodefaults: Buf[Option[TExpr]] = buf()
+
+        for _ in l.params
+            nodefaults.push(None)
+
+        val name = if l.name.len == 0 then "_" else l.name
+
+        out.push(s"(lambda ${k} ${name} ${show_params(p, l.params, nodefaults)} ${show_ty(l.ret)} ${tform("captures", caps)} ${show_texpr(p, l.body)})")
+
+    join(out.view(), "\n")
+end show_tprogram
+
+private bind_word(kind: BindKind) -> string = kind match
+    Val -> "val"
+    Var -> "var"
+    Const -> "const"
+
+private local_name(p: TProgram, id: usize) -> string = s"${p.locals[id].name}#${id}"
+
+private loop_name(p: TProgram, id: usize) -> string
+    val label = p.loops[id].label
+
+    if label.len == 0 then s"L${id}" else s"${label}:L${id}"
+
+// `((x#1 int64) (y#2 inout real64) (n#3 int64 1))`: each parameter, its mode, and its default.
+private show_params(p: TProgram, params: Buf[usize], defaults: Buf[Option[TExpr]]) -> string
+    var out: Buf[string] = buf()
+
+    for k in 0..<params.len()
+        val info = p.locals[params[k]]
+        val mode = info.kind match
+            LParam(m) -> if m == Inout then "inout " else ""
+            _ -> ""
+
+        var text = local_name(p, params[k]) + " " + mode + show_ty(info.ty)
+
+        defaults[k] match
+            Some(d) -> text = text + " " + show_texpr(p, d)
+            None -> ()
+
+        out.push("(" + text + ")")
+
+    "(" + join(out.view(), " ") + ")"
+end show_params
+
+private tform(head: string, items: Buf[string]) -> string =
+    if items.len() == 0 then "(" + head + ")" else "(" + head + " " + join(items.view(), " ") + ")"
+
+// The head of a node, with its type where it yields a value.
+private typed(head: string, t: Ty) -> string = t match
+    Void -> head
+    Never -> head
+    _ -> head + ":" + show_ty(t)
+
+private show_real(x: real) -> string
+    val text = shortest(x)
+
+    for c in text.bytes
+        if c == u8('.') || c == u8('e') || c == u8('n') then return text
+
+    text + ".0"
+
+private show_lit(v: Lit) -> string = v match
+    IntVal(n) -> s"${n}"
+    RealVal(x) -> show_real(x)
+    BoolVal(b) -> if b then "true" else "false"
+    StrVal(s) -> write_quoted(s, u8('"'))
+    VoidVal -> "()"
+
+show_texpr(p: TProgram, e: TExpr) -> string
+    var items: Buf[string] = buf()
+
+    *e.kind match
+        TLiteral(v, adopted) -> if adopted then s"(${typed("adopt", e.ty)} ${show_lit(v)})" else show_lit(v)
+        TConstant(name, adopted) -> if adopted then s"(${typed("adopt", e.ty)} ${name})" else name
+        TLocal(id) -> local_name(p, id)
+        TGlobalRef(name) -> name
+        TFnRef(name) -> name
+        TPromote(v) -> s"(${typed("promote", e.ty)} ${show_texpr(p, v)})"
+        TConvert(v, traps) -> s"(${typed(if traps then "convert-trap" else "convert", e.ty)} ${show_texpr(p, v)})"
+        TMakeComplex(re, im) -> s"(${typed("complex", e.ty)} ${show_texpr(p, re)} ${show_texpr(p, im)})"
+        TComplexPart(v, imag) -> s"(${typed(if imag then ".im" else ".re", e.ty)} ${show_texpr(p, v)})"
+        TBinary(op, l, r) -> s"(${typed(op, e.ty)} ${show_texpr(p, l)} ${show_texpr(p, r)})"
+        TLogical(op, l, r) -> s"(${op} ${show_texpr(p, l)} ${show_texpr(p, r)})"
+        TUnary(op, x) -> s"(${typed(op, e.ty)} ${show_texpr(p, x)})"
+        TChain(operands, links) ->
+            var ops: Buf[string] = buf()
+
+            for o in operands
+                ops.push(show_texpr(p, o))
+
+            items.push(tform("operands", ops))
+
+            for l in links
+                items.push(s"(${l.op} ${show_texpr(p, l.lhs)} ${show_texpr(p, l.rhs)})")
+
+            tform("chain", items)
+        TChainOperand(k) -> "$" + s"${k + 1}"
+        TCall(f, args) ->
+            items.push(show_texpr(p, f))
+            texprs_into(p, &items, args)
+            tform(typed("call", e.ty), items)
+        TBuiltin(name, args) ->
+            texprs_into(p, &items, args)
+            tform(typed(name, e.ty), items)
+        TBorrow(place) -> s"(inout ${show_texpr(p, place)})"
+        TLambdaRef(id) -> s"(lambda ${id})"
+        TInterp(parts, format) ->
+            for part in parts
+                items.push(part match
+                    TText(t) -> write_quoted(t, u8('"'))
+                    TValue(v, spec) -> if spec.len > 0 then s"(${show_texpr(p, v)} ${spec})" else show_texpr(p, v))
+
+            tform(if format then "f" else "s", items)
+        TIf(c, a, b) ->
+            items.push(show_texpr(p, c))
+            items.push(show_texpr(p, a))
+
+            b match
+                Some(x) -> items.push(show_texpr(p, x))
+                None -> ()
+
+            tform(typed("if", e.ty), items)
+        TWhile(id, c, body) -> s"(while ${loop_name(p, id)} ${show_texpr(p, c)} ${show_texpr(p, body)})"
+        TFor(id, v, lo, hi, inclusive, step, body) ->
+            var range = s"${show_texpr(p, lo)} ${if inclusive then ".." else "..<"} ${show_texpr(p, hi)}"
+
+            step match
+                Some(s) -> range = range + " by " + show_texpr(p, s)
+                None -> ()
+
+            s"(for ${loop_name(p, id)} ${local_name(p, v)}:${show_ty(p.locals[v].ty)} (${range}) ${show_texpr(p, body)})"
+        TBlock(stmts, result) ->
+            texprs_into(p, &items, stmts)
+            items.push(show_texpr(p, result))
+            tform(typed("block", e.ty), items)
+        TLet(id, init) ->
+            val word = p.locals[id].kind match
+                LVar -> "var"
+                _ -> "val"
+
+            s"(${word} ${local_name(p, id)}:${show_ty(p.locals[id].ty)} ${show_texpr(p, init)})"
+        TAssign(op, target, value) -> s"(${op} ${show_texpr(p, target)} ${show_texpr(p, value)})"
+        TReturn(v) -> v match
+            Some(x) -> s"(return ${show_texpr(p, x)})"
+            None -> "(return)"
+        TExit(id) -> s"(exit ${loop_name(p, id)})"
+        TCycle(id) -> s"(cycle ${loop_name(p, id)})"
+        TStop(code) -> code match
+            Some(x) -> s"(stop ${show_texpr(p, x)})"
+            None -> "(stop)"
+        TInvalid -> "?"
+end show_texpr
+
+private texprs_into(p: TProgram, out: *Buf[string], es: Buf[TExpr])
+    for e in es
+        out.push(show_texpr(p, e))
