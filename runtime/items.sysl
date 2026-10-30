@@ -3,10 +3,16 @@
 //
 // **An array of non-numbers** ("items") is its elements' storage and how to count them. The payload
 // is words: the storage, the element count, the bytes of one element, the functions that take and
-// give back a count on the element at an address (null where the element holds none), the rank, and
-// then the extent of each nex axis. The elements lie in storage order, nex axis 1 fastest, each in its
-// stored form. An array is shared by its places, each holding a count, and one about to be written is
-// first made its place's own (`nex_items_own`), so a write is never seen through another place.
+// give back a count on the element at an address (null where the element holds none), the rank, the
+// window it is of where it is a window (below), and then the extent of each nex axis. The elements
+// lie in storage order, nex axis 1 fastest, each in its stored form. An array is shared by its
+// places, each holding a count, and one about to be written is first made its place's own
+// (`nex_items_own`), so a write is never seen through another place.
+//
+// **A window array** has no storage of its own: its elements are those a window takes of another
+// array, its base, on which it holds a count, and a write to one is a write to the base. It is what an
+// `inout` argument that is a slice is lent as, so the callee writes the caller's elements in place.
+// Made its place's own while another place shares it, it becomes an array of its own like any other.
 //
 // **A stored array of numbers** is the memref descriptor of its storage (`array.sysl`), which the
 // object frees with itself.
@@ -23,9 +29,12 @@ struct Items
     hold: *extern(*u8) -> unit
     drop: *extern(*u8) -> unit
     rank: long
+    base: *u8
+    win: *long
+    base_rank: long
 
 // The payload's words before the extents.
-private val ITEMS_WORDS: long = 6
+private val ITEMS_WORDS: long = 9
 
 private items(p: *u8) -> *Items = ptr_cast(p)
 
@@ -47,16 +56,53 @@ items_new(count: long, size: long, hold: *extern(*u8) -> unit, drop: *extern(*u8
     if rank == 1 then extents(p)[0] = count
     p
 
-// What an array holds released: a count on each element, then the storage.
+// What an array holds released: a count on each element, then the storage; a window array's count
+// on its base and its window.
 @export("nex_items_free")
 items_free(p: *u8)
     val a = items(p)
+
+    if a.base != null
+        release(a.base)
+        free(ptr_cast(a.win))
+        return
 
     if a.drop != null
         for k in 0..<usize(a.count)
             a.drop(&a.data[k * usize(a.size)])
 
     free(a.data)
+
+// The address of element `t` (from 0, storage order) of the array at `p`, a window array's in its base.
+private at(p: *u8, t: long) -> *u8
+    val a = items(p)
+
+    if a.base == null then return &a.data[usize(t) * usize(a.size)]
+
+    at(a.base, window_at(a.base, a.base_rank, a.win, t))
+
+// A copy of the array at `p` with its elements counted again, of `rank` axes: its own extents where
+// that is its rank, else one axis of its count.
+private copied(p: *u8, rank: long) -> *u8
+    val a = items(p)
+    val q = items_new(a.count, a.size, a.hold, a.drop, rank)
+    val z = usize(a.size)
+
+    if a.base == null
+        memcpy(items(q).data, a.data, usize(a.count) * z)
+    else
+        for t in 0..<a.count
+            memcpy(&items(q).data[usize(t) * z], at(p, t), z)
+
+    if rank == a.rank
+        for k in 0..<usize(a.rank)
+            extents(q)[k] = extents(p)[k]
+
+    if a.hold != null
+        for t in 0..<a.count
+            a.hold(&items(q).data[usize(t) * z])
+
+    q
 
 // The array the place at `slot` holds made the place's own: where another place shares it, the place
 // is given a copy, each element counted again, and its count on the shared one given back.
@@ -66,33 +112,207 @@ items_own(slot: **u8)
 
     if p == null || count_of(p) == 1 then return
 
-    val a = items(p)
-    val q = items_new(a.count, a.size, a.hold, a.drop, a.rank)
-
-    memcpy(items(q).data, a.data, usize(a.count * a.size))
-
-    for k in 0..<usize(a.rank)
-        extents(q)[k] = extents(p)[k]
-
-    if a.hold != null
-        for k in 0..<usize(a.count)
-            a.hold(&a.data[k * usize(a.size)])
-
-    slot[0] = q
+    slot[0] = copied(p, items(p).rank)
     release(p)
+
+// The elements of the array at `p` as a new array of one axis, in storage order.
+@export("nex_items_flat")
+items_flat(p: *u8) -> *u8 = if p == null then null else copied(p, 1)
 
 // How many elements the array at `p` holds; none where there is no array yet.
 @export("nex_items_count")
 items_count(p: *u8) -> long = if p == null then 0 else items(p).count
+
+// The extent of axis `k` (from 1) of the array at `p`; 0 where there is no array yet.
+@export("nex_items_extent")
+items_extent(p: *u8, k: long) -> long = if p == null then 0 else extents(p)[usize(k - 1)]
+
+// The extent of axis `k` (from 1) of the new array at `p` set to `n`.
+@export("nex_items_set_extent")
+items_set_extent(p: *u8, k: long, n: long)
+    extents(p)[usize(k - 1)] = n
 
 // The address of element `k`, counted from 1, of the array at `p`; outside the array a trap.
 @export("nex_items_at")
 items_at(p: *u8, k: long) -> *u8
     if k < 1 || k > items_count(p) then trap_with("index out of bounds")
 
+    at(p, k - 1)
+
+// -- windows --------------------------------------------------------------------------------------
+//
+// A window on an array of `rank` axes is four words per axis: the offset of its first element from
+// 0, its extent, its stride (negative walking down), and 1 where the axis is kept (0 where an integer
+// subscript collapses it, its extent 1). Its elements are taken in storage order, axis 1 fastest.
+
+private val WINDOW_WORDS: usize = 4
+
+// How many elements the window `win` takes.
+private window_count(rank: long, win: *long) -> long
+    var n: long = 1
+
+    for a in 0..<usize(rank)
+        n *= win[a * WINDOW_WORDS + 1]
+
+    n
+
+// The storage position in the array at `p` of the window's `t`th element (from 0).
+private window_at(p: *u8, rank: long, win: *long, t: long) -> long
+    var rest = t
+    var pos: long = 0
+    var step: long = 1
+
+    for a in 0..<usize(rank)
+        val n = win[a * WINDOW_WORDS + 1]
+
+        pos += (win[a * WINDOW_WORDS] + rest % n * win[a * WINDOW_WORDS + 2]) * step
+        rest /= n
+        step *= extents(p)[a]
+
+    pos
+
+// The address of the window's `t`th element (from 0) in the array at `p`.
+private window_elem(p: *u8, rank: long, win: *long, t: long) -> *u8 = at(p, window_at(p, rank, win, t))
+
+// The extents of the window's kept axes given to the new array at `q`.
+private kept_extents(q: *u8, rank: long, win: *long)
+    var j: usize = 0
+
+    for a in 0..<usize(rank)
+        if win[a * WINDOW_WORDS + 3] != 0
+            extents(q)[j] = win[a * WINDOW_WORDS + 1]
+            j += 1
+
+// Whether the array at `src` has the extents of the window's kept axes; a trap with `message` where
+// it does not.
+private fits(src: *u8, rank: long, win: *long, message: string)
+    var j: long = 1
+
+    for a in 0..<usize(rank)
+        if win[a * WINDOW_WORDS + 3] != 0
+            if items_extent(src, j) != win[a * WINDOW_WORDS + 1] then trap_with(message)
+            j += 1
+
+// The window `win` of the array at `p` as a new array of `kept` axes, each element counted again.
+@export("nex_items_gather")
+items_gather(p: *u8, rank: long, win: *long, kept: long) -> *u8
+    if p == null then return null
+
+    val a = items(p)
+    val n = window_count(rank, win)
+    val q = items_new(n, a.size, a.hold, a.drop, kept)
+    val z = usize(a.size)
+
+    kept_extents(q, rank, win)
+
+    for t in 0..<n
+        val e = &items(q).data[usize(t) * z]
+
+        memcpy(e, window_elem(p, rank, win, t), z)
+        if a.hold != null then a.hold(e)
+
+    q
+
+// The window `win` of the array at `p` as a window array of `kept` axes, which holds a count on `p`
+// and a copy of the window.
+@export("nex_items_window")
+items_window(p: *u8, rank: long, win: *long, kept: long) -> *u8
+    if p == null then return null
+
+    val a = items(p)
+    val q = new_object((ITEMS_WORDS + kept) * 8, &items_free)
+    val b = items(q)
+    val w: *long = ptr_cast(calloc(usize(rank) * WINDOW_WORDS * 8, 1))
+
+    for k in 0..<usize(rank) * WINDOW_WORDS
+        w[k] = win[k]
+
+    retain(p)
+    b.count = window_count(rank, win)
+    b.size = a.size
+    b.hold = a.hold
+    b.drop = a.drop
+    b.rank = kept
+    b.base = p
+    b.win = w
+    b.base_rank = rank
+    kept_extents(q, rank, win)
+    q
+
+// An array holding no elements with the extents of the window's kept axes: what a slice of a place
+// is while it is being written through, which only its extents are read of.
+@export("nex_items_shape")
+items_shape(rank: long, win: *long, kept: long) -> *u8
+    val q = items_new(0, 0, null, null, kept)
+
+    kept_extents(q, rank, win)
+    q
+
+// The element at `e` of the array `a` given the value at `x`: the new value counted before the old
+// one is given back, so a value written over itself survives.
+private put(a: *Items, e: *u8, x: *u8)
+    if a.hold != null
+        a.hold(x)
+        a.drop(e)
+
+    memcpy(e, x, usize(a.size))
+
+// The elements of the array at `src` written into the window `win` of the array at `p`, which its
+// place owns; `src` must have the extents of the window's kept axes.
+@export("nex_items_scatter")
+items_scatter(p: *u8, rank: long, win: *long, src: *u8)
+    fits(src, rank, win, "slice assignment length mismatch")
+
+    val n = window_count(rank, win)
+
+    if n == 0 then return
+
+    // An array written into a window of itself is read from a copy, so no element is read after
+    // it has been written.
+    val from = if src == p || items(src).base != null then copied(src, items(src).rank) else src
+
+    for t in 0..<n
+        put(items(p), window_elem(p, rank, win, t), at(from, t))
+
+    if from != src then release(from)
+
+// After a call given the window array `lent` of the window `win` of the array the place at `slot`
+// holds, as an `inout` argument: what the call left in its place, `back`. The call wrote `lent` in
+// place; one that put another array there has it written into the window, which it must still fit.
+@export("nex_items_hand_back")
+items_hand_back(slot: **u8, rank: long, win: *long, lent: *u8, back: *u8)
+    if back == lent then return
+
+    fits(back, rank, win, "shape mismatch")
+    items_own(slot)
+    items_scatter(slot[0], rank, win, back)
+
+// Every element of the window `win` of the array at `p`, which its place owns, given the value at
+// `x`.
+@export("nex_items_fill")
+items_fill(p: *u8, rank: long, win: *long, x: *u8)
+    val n = window_count(rank, win)
+
+    for t in 0..<n
+        put(items(p), window_elem(p, rank, win, t), x)
+
+// The elements of the array at `part` made row `k` (from 1) of the new array at `p`, whose axes
+// after the first must be the extents of `part`.
+@export("nex_items_stack")
+items_stack(p: *u8, k: long, part: *u8)
     val a = items(p)
 
-    &a.data[usize(k - 1) * usize(a.size)]
+    for j in 1..<usize(a.rank)
+        if items_extent(part, long(j)) != extents(p)[j] then trap_with("shape mismatch")
+
+    val n = extents(p)[0]
+    val z = usize(a.size)
+
+    for j in 0..<items_count(part)
+        val e = &a.data[usize(k - 1 + n * j) * z]
+
+        memcpy(e, at(part, j), z)
+        if a.hold != null then a.hold(e)
 
 // A stored array of numbers released: its storage, the descriptor's first word.
 @export("nex_array_free")

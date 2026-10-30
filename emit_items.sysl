@@ -1,7 +1,8 @@
 // Arrays whose elements are not numbers: strings, functions, tuples, structs and enums. A memref
 // holds only numbers, so such an array is never a tensor: it is an object of the counted heap
-// (`runtime/items.sysl`) holding its elements in their stored form, and a value of it is the object's
-// address, held and counted as a string is (`emit_own.sysl`).
+// (`runtime/items.sysl`) holding its elements in their stored form, in storage order (nex axis 1
+// fastest) with the extent of each axis, and a value of it is the object's address, held and counted
+// as a string is (`emit_own.sysl`).
 //
 // **Places share an array until one writes it.** Binding or passing an array takes a count on it;
 // a write through a place first makes the place's array its own (`nex_items_own`, a copy where
@@ -9,11 +10,29 @@
 // array holds a count on it for the loop, so the loop sees the elements it started with whatever the
 // body writes.
 //
+// **A slice is a window**: per axis an offset, an extent and a stride, computed and checked as for
+// an array of numbers (`window`). Read as a value, a slice is a new array of the window's elements,
+// each counted again: the elements are shared, not copied, so no write through one place is seen
+// through another, which is all DESIGN §6 asks of a view. A slice written to is a window on the root
+// place's own array, the windows of a slice of a slice composed (`composed`), and the runtime writes
+// the elements in place; an `inout` window is lent as a window array, through which the callee
+// writes the caller's elements in place.
+//
 // Element access goes through the runtime, which checks the index and answers the element's
 // address; an array not yet given a value has no elements.
 
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
+
+// An `inout` argument that is a window of an array of non-numbers: the root place's slot, the window
+// on its array, that array's rank, the window array lent (`runtime/items.sysl`) and the slot of the
+// call's own it is lent in.
+struct ItemsLent
+    slot: string
+    win: string
+    rank: usize
+    view: string
+    lent: string
 
 impl Emitter
     // -- objects ----------------------------------------------------------------------------------
@@ -25,7 +44,8 @@ impl Emitter
 
         self.def(s"llvm.ptrtoint $end : !llvm.ptr to i64")
 
-    // A new rank-1 array of type `t` with `n` (an `i64`) zeroed elements, which the statement owns.
+    // A new array of type `t` with `n` (an `i64`) zeroed elements, which the statement owns. A rank-1
+    // array's extent is `n`; the caller sets the extents of any other.
     new_items(*self, span: Span, t: Ty, n: string) -> string
         val et = elem_of(t)
         var hold = ""
@@ -38,13 +58,31 @@ impl Emitter
             hold = self.def("llvm.mlir.zero : !llvm.ptr")
             drop = hold
 
-        val r = self.call("nex_items_new", s"$n, ${self.item_size(span, et)}, $hold, $drop, %one", "i64, i64, !llvm.ptr, !llvm.ptr, i64", "!llvm.ptr")
+        val rank = self.def(s"arith.constant ${rank_of(t)} : i64")
+        val r = self.call("nex_items_new", s"$n, ${self.item_size(span, et)}, $hold, $drop, $rank", "i64, i64, !llvm.ptr, !llvm.ptr, i64", "!llvm.ptr")
 
         self.own_ref(r)
 
     items_count(*self, h: string) -> string = self.call("nex_items_count", h, "!llvm.ptr", "i64")
 
-    // The address of element `k` (an `i64` counted from 1) of the array `h`; a trap outside it.
+    // The extent of nex axis `axis` (from 1) of the array `h`, as an `i64`.
+    items_extent(*self, h: string, axis: usize) -> string =
+        self.call("nex_items_extent", s"$h, ${self.def(s"arith.constant $axis : i64")}", "!llvm.ptr, i64", "i64")
+
+    set_extent(*self, h: string, axis: usize, n: string)
+        self.call("nex_items_set_extent", s"$h, ${self.def(s"arith.constant $axis : i64")}, $n", "!llvm.ptr, i64, i64", "")
+
+    // Every extent of the array `h` of type `t`, as `i64`s, nex order.
+    items_extents(*self, h: string, t: Ty) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for a in 1..rank_of(t)
+            out.push(self.items_extent(h, a))
+
+        out
+
+    // The address of element `k` (an `i64` counted from 1, storage order) of the array `h`; a trap
+    // outside it.
     item_at(*self, h: string, k: string) -> string = self.call("nex_items_at", s"$h, $k", "!llvm.ptr, i64", "!llvm.ptr")
 
     // The element of type `et` at `p`, borrowed from its array.
@@ -55,6 +93,183 @@ impl Emitter
     item_init(*self, span: Span, h: string, k: string, v: string, et: Ty)
         self.retain(v, et)
         self.store(span, self.item_at(h, k), v, et)
+
+    // The storage position, from 1, of the element at the 0-based indices `at` of an array of
+    // extents `ns`, both `i64`s in nex order.
+    linear(*self, at: Buf[string], ns: Buf[string]) -> string
+        var k = "%one"
+        var step = ""
+
+        for a in 0..<at.len()
+            k = self.def(s"arith.addi $k, ${if step == "" then at[a] else self.def(s"arith.muli ${at[a]}, $step : i64")} : i64")
+
+            if a + 1 < at.len() then step = if step == "" then ns[a] else self.def(s"arith.muli $step, ${ns[a]} : i64")
+
+        k
+
+    // A window (offsets, extents and strides as `index` values by axis, nex order, every axis of the
+    // array) as the runtime reads it: four words per axis, the last 1 where the axis is kept.
+    items_win(*self, subs: Buf[TSub], offs: Buf[string], sizes: Buf[string], strides: Buf[string]) -> string
+        val w = self.alloca(s"!llvm.array<${4 * subs.len()} x i64>")
+
+        for a in 0..<subs.len()
+            val kept = subs[a] match
+                TSubAt(_) -> 0
+                _ -> 1
+            var words: Buf[string] = buf()
+
+            words.push(self.to_i64(offs[a]))
+            words.push(self.to_i64(sizes[a]))
+            words.push(self.to_i64(strides[a]))
+            words.push(self.def(s"arith.constant $kept : i64"))
+
+            for j in 0..<4
+                self.op(s"llvm.store ${words[j]}, ${self.def(s"llvm.getelementptr $w[${4 * a + j}] : (!llvm.ptr) -> !llvm.ptr, i64")} : i64, !llvm.ptr")
+
+        w
+
+    // The window of the array `h` of type `t` as a new array the statement owns.
+    items_gathered(*self, span: Span, h: string, t: Ty, subs: Buf[TSub], offs: Buf[string], sizes: Buf[string], strides: Buf[string]) -> string
+        val r = self.def(s"arith.constant ${rank_of(t)} : i64")
+        val kept = self.def(s"arith.constant ${kept_axes(subs)} : i64")
+
+        self.own_ref(self.call("nex_items_gather", s"$h, $r, ${self.items_win(subs, offs, sizes, strides)}, $kept", "!llvm.ptr, i64, !llvm.ptr, i64", "!llvm.ptr"))
+
+    // -- places -----------------------------------------------------------------------------------
+
+    // The place a slice place `e` is a window of: the first that is not itself a slice.
+    items_root(*self, e: TExpr) -> TExpr = *e.kind match
+        TArray(op) -> *op match
+            TIndex(src, _) -> if is_items(e.ty) then self.items_root(src) else e
+            _ -> e
+        _ -> e
+
+    // The array the place `e` holds now, its root's array (at `slot`) made the place's own first; each
+    // slice opened on the way pushed onto `frames`, a slice standing as an array of its extents only.
+    open_items(*self, e: TExpr, slot: string, frames: *Buf[Opened]) -> string
+        *e.kind match
+            TArray(op) -> *op match
+                TIndex(src, subs) ->
+                    if is_items(e.ty)
+                        val cur = self.open_items(src, slot, frames)
+                        val (offs, sizes, strides) = self.window(e.span, cur, src.ty, subs, buf())
+                        val r = self.def(s"arith.constant ${rank_of(src.ty)} : i64")
+                        val kept = self.def(s"arith.constant ${kept_axes(subs)} : i64")
+                        val v = self.own_ref(self.call("nex_items_shape", s"$r, ${self.items_win(subs, offs, sizes, strides)}, $kept", "i64, !llvm.ptr, i64", "!llvm.ptr"))
+
+                        frames.push(Opened(src, e, cur, subs, offs, sizes, strides, v))
+                        return v
+                _ -> ()
+            _ -> ()
+
+        self.call("nex_items_own", slot, "!llvm.ptr", "")
+        self.effect(s"llvm.load $slot : !llvm.ptr -> !llvm.ptr", "!llvm.ptr")
+
+    // The window `subs` of the place `target` as a window of its root's array: the window, the root's
+    // array and its rank. The root's array is made the place's own first.
+    items_window_of(*self, span: Span, target: TExpr, subs: Buf[TSub]) -> (Buf[TSub], Buf[string], Buf[string], Buf[string], string, usize)
+        var frames: Buf[Opened] = buf()
+        val cur = self.open_items(target, self.place_ptr(self.items_root(target)), &frames)
+        val (offs, sizes, strides) = self.window(span, cur, target.ty, subs, buf())
+        val (s, o, z, t) = self.composed(frames, frames.len(), subs, offs, sizes, strides)
+
+        if frames.len() == 0 then return (s, o, z, t, cur, rank_of(target.ty))
+
+        (s, o, z, t, frames[0].cur, rank_of(frames[0].src.ty))
+
+    // The address of the element of `target` that `subs` names, every subscript an integer; the
+    // array made the place's own first where the element is to be written.
+    items_place(*self, span: Span, target: TExpr, subs: Buf[TSub], write: bool) -> string
+        if write
+            val (_, o, _, _, h, _) = self.items_window_of(span, target, subs)
+
+            return self.item_at(h, self.items_linear(h, o))
+
+        val tv = self.ex(target)
+        val (offs, _, _) = self.window(span, tv, target.ty, subs, self.shifts_of(target))
+
+        self.item_at(tv, self.items_linear(tv, offs))
+
+    // The storage position, from 1, of the element at the 0-based `index` offsets `offs` of `h`.
+    items_linear(*self, h: string, offs: Buf[string]) -> string
+        var at: Buf[string] = buf()
+        var ns: Buf[string] = buf()
+
+        for a in 0..<offs.len()
+            at.push(self.to_i64(offs[a]))
+            ns.push(self.items_extent(h, a + 1))
+
+        self.linear(at, ns)
+
+    // `a[…] op= v` on an array of non-numbers: one element, or a window given an array of its shape
+    // or filled with one value.
+    items_assign(*self, span: Span, op: string, target: TExpr, subs: Buf[TSub], value: TExpr)
+        val et = elem_of(target.ty)
+
+        if kept_axes(subs) == 0
+            val v = self.ex(value)
+            val p = self.items_place(span, target, subs, true)
+
+            if op == "=" then self.keep(span, p, v, et)
+            else self.keep(span, p, self.binary(span, op[0..<op.len - 1], self.item_load(span, p, et), v, et), et)
+
+            return
+
+        if op != "="
+            self.unsupported(span, s"`$op` on a slice of an array of ${show_ty(et)}")
+            return
+
+        val x = *value.kind match
+            TArray(a) -> *a match
+                TBroadcast(s) -> s
+                _ -> value
+            _ -> value
+        val v = self.ex(x)
+        val (s, o, z, t, h, r) = self.items_window_of(span, target, subs)
+        val win = self.items_win(s, o, z, t)
+        val rank = self.def(s"arith.constant $r : i64")
+
+        if is_items(x.ty)
+            self.call("nex_items_scatter", s"$h, $rank, $win, $v", "!llvm.ptr, i64, !llvm.ptr, !llvm.ptr", "")
+            return
+
+        val one = self.alloca(self.mem_ty(span, et))
+
+        self.store(span, one, v, et)
+        self.call("nex_items_fill", s"$h, $rank, $win, $one", "!llvm.ptr, i64, !llvm.ptr, !llvm.ptr", "")
+
+    // Whether the `inout` argument place `e` is a window of an array of non-numbers.
+    is_items_window(*self, e: TExpr) -> bool = *e.kind match
+        TArray(op) -> *op match
+            TIndex(_, _) -> is_items(e.ty)
+            _ -> false
+        _ -> false
+
+    // An `inout` window lent to a call: a window array on the place's own array, in a slot of the
+    // call's own, through which the callee writes the place's elements in place (DESIGN §8.4).
+    items_lend(*self, span: Span, place: TExpr) -> ItemsLent
+        var frames: Buf[Opened] = buf()
+        val slot = self.place_ptr(self.items_root(place))
+
+        self.open_items(place, slot, &frames)
+
+        val f = frames[frames.len() - 1]
+        val (s, o, z, t) = self.composed(frames, frames.len() - 1, f.subs, f.offs, f.sizes, f.strides)
+        val r = rank_of(frames[0].src.ty)
+        val win = self.items_win(s, o, z, t)
+        val x = self.call("nex_items_window", s"${frames[0].cur}, ${self.def(s"arith.constant $r : i64")}, $win, ${self.def(s"arith.constant ${rank_of(place.ty)} : i64")}", "!llvm.ptr, i64, !llvm.ptr, i64", "!llvm.ptr")
+        val lent = self.alloca("!llvm.ptr")
+
+        self.op(s"llvm.store $x, $lent : !llvm.ptr, !llvm.ptr")
+        ItemsLent(slot, win, r, x, lent)
+
+    // After the call: an array the callee put in place of the lent window written into the window,
+    // which it must still fit, and what the slot holds given back.
+    items_hand_back(*self, l: ItemsLent)
+        val back = self.def(s"llvm.load ${l.lent} : !llvm.ptr -> !llvm.ptr")
+
+        self.call("nex_items_hand_back", s"${l.slot}, ${self.def(s"arith.constant ${l.rank} : i64")}, ${l.win}, ${l.view}, $back", "!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr", "")
+        self.release_ref(back)
 
     // -- nodes ------------------------------------------------------------------------------------
 
@@ -68,65 +283,61 @@ impl Emitter
     items_node(*self, e: TExpr, op: TArr) -> string
         op match
             TArrayLit(xs) -> self.items_literal(e, xs)
-            TIndex(target, subs) -> self.item_load(e.span, self.items_place(e.span, target, subs, false), e.ty)
+            TIndex(target, subs) ->
+                if is_items(e.ty) then self.items_view(e, target, subs)
+                else self.item_load(e.span, self.items_place(e.span, target, subs, false), e.ty)
+            TView(target, subs) -> self.items_view(e, target, subs)
             TForEach(id, var_id, a, body) -> self.items_for_each(e.span, id, var_id, a, body)
             TCopy(v, _) -> self.ex(v)
             TTransfer(v, _) -> self.ex(v)
+            TShapeCheck(v) -> self.shape_checked(e.span, self.ex(v), v.ty, e.ty)
+            TOrigin(source, firsts) -> self.origin(source, firsts)
             _ -> self.unsupported(e.span, s"this operation on an array of ${show_ty(elem_of(array_of_node(e, op)))}")
 
-    // `[a, b, c]` of non-numbers.
+    // A slice of an array of non-numbers read as a value.
+    items_view(*self, e: TExpr, target: TExpr, subs: Buf[TSub]) -> string
+        val tv = self.ex(target)
+        val (offs, sizes, strides) = self.window(e.span, tv, target.ty, subs, self.shifts_of(target))
+
+        self.shape_checked(e.span, self.items_gathered(e.span, tv, target.ty, subs, offs, sizes, strides), self.view_ty(e.ty), e.ty)
+
+    // `[a, b, c]` of non-numbers; at rank 2 or more each item is a row, and all must have one shape.
     items_literal(*self, e: TExpr, xs: Buf[TExpr]) -> string
         val et = elem_of(e.ty)
 
-        if rank_of(e.ty) != 1 || is_arr(et) then return self.unsupported(e.span, s"an array of ${show_ty(et)} of rank ${rank_of(e.ty)}")
+        if is_arr(et) then return self.unsupported(e.span, s"an array of ${show_ty(et)}")
 
         var vals: Buf[string] = buf()
 
         for x in xs
             vals.push(self.ex(x))
 
-        val h = self.new_items(e.span, e.ty, self.def(s"arith.constant ${xs.len()} : i64"))
+        val n = self.def(s"arith.constant ${xs.len()} : i64")
+        val r = rank_of(e.ty)
+
+        if r == 1
+            val h = self.new_items(e.span, e.ty, n)
+
+            for k in 0..<vals.len()
+                self.item_init(e.span, h, self.def(s"arith.constant ${k + 1} : i64"), vals[k], et)
+
+            return h
+
+        val row = xs[0].ty
+        val h = self.new_items(e.span, e.ty, self.def(s"arith.muli $n, ${self.items_count(vals[0])} : i64"))
+
+        self.set_extent(h, 1, n)
+
+        for a in 1..<r
+            self.set_extent(h, a + 1, self.items_extent(vals[0], a))
 
         for k in 0..<vals.len()
-            self.item_init(e.span, h, self.def(s"arith.constant ${k + 1} : i64"), vals[k], et)
+            self.call("nex_items_stack", s"$h, ${self.def(s"arith.constant ${k + 1} : i64")}, ${vals[k]}", "!llvm.ptr, i64, !llvm.ptr", "")
 
         h
 
-    // The address of the element of `target` that `subs` names: one integer subscript, the array made
-    // the place's own first where the element is to be written.
-    items_place(*self, span: Span, target: TExpr, subs: Buf[TSub], write: bool) -> string
-        if subs.len() != 1 then return self.unsupported(span, "an array of non-numbers of rank above 1")
-
-        subs[0] match
-            TSubAt(i) ->
-                var h = ""
-
-                if write
-                    val slot = self.place_ptr(target)
-
-                    self.call("nex_items_own", slot, "!llvm.ptr", "")
-                    h = self.effect(s"llvm.load $slot : !llvm.ptr -> !llvm.ptr", "!llvm.ptr")
-                else
-                    h = self.ex(target)
-
-                self.item_at(h, self.widen64(self.ex(i), bits_of(i.ty), is_signed(i.ty)))
-            _ ->
-                self.unsupported(span, "a slice of an array of non-numbers")
-                "%one"
-
-    // `a[i] op= v` on an array of non-numbers.
-    items_assign(*self, span: Span, op: string, target: TExpr, subs: Buf[TSub], value: TExpr)
-        val v = self.ex(value)
-        val et = elem_of(target.ty)
-        val p = self.items_place(span, target, subs, true)
-
-        if op == "="
-            self.keep(span, p, v, et)
-        else
-            self.keep(span, p, self.binary(span, op[0..<op.len - 1], self.item_load(span, p, et), v, et), et)
-
-    // `for x in a` over an array of non-numbers: the array held for the loop, each element bound in
-    // turn.
+    // `for x in a` over an array of non-numbers, in storage order: the array held for the loop, each
+    // element bound in turn.
     items_for_each(*self, span: Span, id: usize, var_id: usize, a: TExpr, body: TExpr) -> string
         val h = self.ex(a)
         val et = elem_of(a.ty)
@@ -161,15 +372,90 @@ impl Emitter
     // A prelude function taking or making an array of non-numbers.
     items_builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
         if name == "enumerate" || name == "zip" then return self.paired(span, name, args, t)
+        if name == "map" then return self.items_map(span, args, t)
 
         if !is_items(args[0].ty) then return self.unsupported(span, s"`$name` making an array of ${show_ty(elem_of(t))}")
 
-        if name == "length" || name == "size" || name == "shape" || (name == "extent" && args.len() == 1)
-            return self.convert(span, self.items_count(self.ex(args[0])), INTEGER, t, false)
+        if name == "extent" && args.len() == 1 then return self.convert(span, self.items_count(self.ex(args[0])), INTEGER, t, false)
 
-        if name == "rank" then return self.int_const("1", bits_of(t))
+        for shape in SHAPE_FUNCTIONS
+            if name == shape then return self.array_builtin(span, name, args, t)
+
+        if name == "reverse" then return self.reversed_at(span, args, t)
+        if name == "flatten" then return self.own_ref(self.call("nex_items_flat", self.ex(args[0]), "!llvm.ptr", "!llvm.ptr"))
 
         self.unsupported(span, s"`$name` on an array of ${show_ty(elem_of(args[0].ty))}")
+
+    // `map(a, f)` where `a` or the result is an array of non-numbers: `f` applied to each element
+    // in storage order, the result of `a`'s shape.
+    items_map(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val a = args[0]
+        val src = self.ex(a)
+        var frame: Buf[string] = buf()
+
+        frame.push("")
+        frame.push(self.ex(args[1]))
+
+        var leaves: Buf[TExpr] = buf()
+
+        leaves.push(chain_leaf(a, 0))
+
+        val et = elem_of(t)
+        val apply = texpr(span, et, TCall(texpr(span, args[1].ty, TChainOperand(1)), leaves))
+        val r = rank_of(t)
+        var dims: Buf[string] = buf()
+        var ns: Buf[string] = buf()
+
+        // Tensor order, nex's last axis first, as the loop nest takes them.
+        for k in 0..<r
+            dims.push(self.dim(span, src, a.ty, r - k))
+
+        for d in backwards(dims)
+            ns.push(self.to_i64(d))
+
+        var h = ""
+        var tt = ""
+        var init = ""
+
+        if is_items(t)
+            var total = "%one"
+
+            for x in ns
+                total = self.def(s"arith.muli $total, $x : i64")
+
+            h = self.new_items(span, t, total)
+
+            for k in 0..<r
+                self.set_extent(h, k + 1, ns[k])
+        else
+            tt = self.tensor_ty(span, self.view_ty(t))
+            init = self.def(s"tensor.empty(${joined(dims)}) : $tt")
+
+        val n = self.nest_open(dims, init, tt)
+        val m = self.mark()
+        var at: Buf[string] = buf()
+
+        for iv in backwards(n.ivs)
+            at.push(self.def(s"arith.index_cast $iv : index to i64"))
+
+        val k = self.linear(at, ns)
+
+        frame.set(0, if is_items(a.ty) then self.item_load(span, self.item_at(src, k), elem_of(a.ty))
+                     else self.def(s"tensor.extract $src[${joined(n.ivs)}] : ${self.tensor_ty(span, a.ty)}"))
+
+        val y = self.in_frame(frame, apply)
+
+        if is_items(t)
+            self.item_init(span, h, k, y, et)
+            self.release_from(m)
+            self.nest_close(n, "")
+            return h
+
+        val put = self.def(s"tensor.insert $y into ${n.accs[n.accs.len() - 1]}[${joined(n.ivs)}] : $tt")
+
+        self.release_from(m)
+        self.cast(span, self.nest_close(n, put), self.view_ty(t), t)
+    end items_map
 
     // The length of any rank-1 array, as an `i64`, and element `k` (an `i64` from 1) of it.
     any_length(*self, span: Span, v: string, t: Ty) -> string =
@@ -228,25 +514,51 @@ impl Emitter
 
     // -- printing ---------------------------------------------------------------------------------
 
-    // An array of non-numbers written to a sink: `[a, b, c]`.
+    // An array of non-numbers written to a sink: `[a, b, c]`, a matrix as its rows, and so on at
+    // every rank, nex axis 1 outermost.
     put_items(*self, span: Span, sink: string, h: string, t: Ty)
-        val n = self.items_count(h)
+        var at: Buf[string] = buf()
+
+        self.put_items_level(span, sink, h, t, 1, &at)
+
+    put_items_level(*self, span: Span, sink: string, h: string, t: Ty, axis: usize, at: *Buf[string])
+        val zero = self.def("arith.constant 0 : i64")
         val iv = self.fresh()
 
         self.put_text(sink, "[")
-        self.op(s"scf.for $iv = %one to ${self.def(s"arith.addi $n, %one : i64")} step %one : i64 {")
-        self.op(s"scf.if ${self.def(s"arith.cmpi ne, $iv, %one : i64")} {")
+        self.op(s"scf.for $iv = $zero to ${self.items_extent(h, axis)} step %one : i64 {")
+        self.op(s"scf.if ${self.def(s"arith.cmpi ne, $iv, $zero : i64")} {")
         self.put_text(sink, ", ")
         self.op("}")
+        at.push(iv)
 
-        // What printing an element pins is the pass's own.
-        val m = self.mark()
+        if axis == rank_of(t)
+            // What printing an element pins is the pass's own.
+            val m = self.mark()
 
-        self.put_value(span, sink, self.item_load(span, self.item_at(h, iv), elem_of(t)), elem_of(t))
-        self.release_from(m)
+            self.put_value(span, sink, self.item_load(span, self.item_at(h, self.linear(*at, self.items_extents(h, t))), elem_of(t)), elem_of(t))
+            self.release_from(m)
+        else
+            self.put_items_level(span, sink, h, t, axis + 1, at)
+
+        at.pop()
         self.op("}")
         self.put_text(sink, "]")
 end Emitter
+
+// The shape functions, which read an array of non-numbers' extents as an array of numbers' (`dim`).
+private val SHAPE_FUNCTIONS = ["length", "rows", "cols", "rank", "shape", "size", "extent", "extents"]
+
+// How many axes an index list keeps.
+kept_axes(subs: Buf[TSub]) -> usize
+    var n: usize = 0
+
+    for s in subs
+        s match
+            TSubAt(_) -> ()
+            _ -> n += 1
+
+    n
 
 // The type of the array array node `e` is about: the one it indexes or loops over, or its own.
 array_of_node(e: TExpr, op: TArr) -> Ty = op match

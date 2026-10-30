@@ -184,7 +184,10 @@ impl Emitter
     index_const(*self, n: usize) -> string = self.def(s"arith.constant $n : index")
 
     // The extent of nex axis `axis` (from 1) of the tensor `v` of array type `t`, as an `index`.
+    // An array of non-numbers keeps its extents in its object (`emit_items.sysl`).
     dim(*self, span: Span, v: string, t: Ty, axis: usize) -> string
+        if is_items(t) then return self.def(s"arith.index_cast ${self.items_extent(v, axis)} : i64 to index")
+
         val r = rank_of(t)
 
         self.def(s"tensor.dim $v, ${self.index_const(r - axis)} : ${self.tensor_ty(span, t)}")
@@ -692,6 +695,8 @@ impl Emitter
 
     // `v` of array type `from` seen as type `to`, where only static extents differ.
     cast(*self, span: Span, v: string, from: Ty, to: Ty) -> string
+        if is_items(from) then return v
+
         val a = self.tensor_ty(span, from)
         val b = self.tensor_ty(span, to)
 
@@ -714,6 +719,8 @@ impl Emitter
         if ok == "" then return self.cast(span, v, from, to)
 
         self.trap_if(self.not(ok), "shape mismatch")
+
+        if is_items(from) then return v
 
         // The cast only where the shape fits: where the trap is taken and the shape is known when
         // compiling, the cast would be one between two static shapes that differ, which is invalid.

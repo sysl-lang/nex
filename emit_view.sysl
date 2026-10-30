@@ -208,11 +208,22 @@ impl Emitter
     // windows compose, so the write is the root's own and bufferizes in place. `xt` is the type of
     // `x`, `""` for an element.
     insert_through(*self, span: Span, frames: Buf[Opened], subs: Buf[TSub], offs: Buf[string], sizes: Buf[string], strides: Buf[string], x: string, xt: string)
+        val (s, o, z, t) = self.composed(frames, frames.len(), subs, offs, sizes, strides)
+        val root = frames[0]
+        val tt = self.tensor_ty(span, root.src.ty)
+        val v = if xt == "" then self.def(s"tensor.insert $x into ${root.cur}[${joined(backwards(o))}] : $tt")
+                else self.def(s"tensor.insert_slice $x into ${root.cur}${self.slice_text(s, o, z, t)} : $xt into $tt")
+
+        self.set_place(root.src, v, true)
+
+    // The window `subs` (offsets, extents and strides by axis, nex order) of the slice place the first
+    // `upto` of `frames` opened, as a window of the root place's array: the windows compose.
+    composed(*self, frames: Buf[Opened], upto: usize, subs: Buf[TSub], offs: Buf[string], sizes: Buf[string], strides: Buf[string]) -> (Buf[TSub], Buf[string], Buf[string], Buf[string])
         var s = subs
         var o = offs
         var z = sizes
         var t = strides
-        var k = frames.len()
+        var k = upto
 
         while k > 0
             k -= 1
@@ -243,13 +254,8 @@ impl Emitter
             z = nz
             t = nt
 
-        val root = frames[0]
-        val tt = self.tensor_ty(span, root.src.ty)
-        val v = if xt == "" then self.def(s"tensor.insert $x into ${root.cur}[${joined(backwards(o))}] : $tt")
-                else self.def(s"tensor.insert_slice $x into ${root.cur}${self.slice_text(s, o, z, t)} : $xt into $tt")
-
-        self.set_place(root.src, v, true)
-    end insert_through
+        (s, o, z, t)
+    end composed
 
     // -- `reverse(a, k)` --------------------------------------------------------------------------
 
@@ -278,6 +284,8 @@ impl Emitter
             sizes.push(n)
             strides.push(self.def(s"arith.index_cast ${self.def(s"arith.select $hit, $down, %one : i64")} : i64 to index"))
             subs.push(TSubAll)
+
+        if is_items(at) then return self.items_gathered(span, v, at, subs, offs, sizes, strides)
 
         self.sliced(span, v, at, self.slice_text(subs, offs, sizes, strides), t)
 end Emitter

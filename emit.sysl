@@ -332,8 +332,10 @@ struct Emitter
         v
 
     // Storage for local `id` where it is bound; a captured one gets a fresh cell each time, the one
-    // bound before released. The function owns what the slot holds unless `borrowed` (a parameter's
-    // value, which its caller owns).
+    // bound before released: one bound in a loop is bound again on every pass, by the same code, so
+    // the release is made wherever the slot already holds a cell (its slot starts null). The
+    // function owns what the slot holds unless `borrowed` (a parameter's value, which its caller
+    // owns).
     bind_local(*self, span: Span, id: usize, borrowed: bool = false)
         val t = self.prog.locals[id].ty
 
@@ -341,8 +343,8 @@ struct Emitter
             if self.slot[id] == ""
                 self.slot.set(id, self.zeroed_alloca("!llvm.ptr"))
                 self.owned.push(id)
-            else
-                self.release_ref(self.def(s"llvm.load ${self.slot[id]} : !llvm.ptr -> !llvm.ptr"))
+
+            self.release_ref(self.def(s"llvm.load ${self.slot[id]} : !llvm.ptr -> !llvm.ptr"))
 
             val cell = self.new_object((self.words(t) + self.shift_words(id)) * 8, if self.part_managed(t) then self.helper_ref("cell", t) else "")
 

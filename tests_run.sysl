@@ -249,9 +249,9 @@ run_fpe_trap()
 
 @test("a program needing what the emitter does not compile yet is refused with a diagnostic naming it")
 emit_refuses_what_waits()
-    assert_eq(emitted("def main() =\n  print([[\"a\", \"b\"], [\"c\", \"d\"]])\n").err().unwrap_or(""), "error: an array of string of rank 2 is not compiled yet @2:9")
-    assert_eq(emitted("def main() =\n  val xs = [\"a\", \"b\"]\n  print(map(xs, x -> x + \"!\"))\n").err().unwrap_or(""), "error: `map` on an array of string is not compiled yet @3:9")
-    assert_eq(emitted("def main() =\n  val xs = [\"a\", \"b\", \"c\"]\n  print(xs[2..3])\n").err().unwrap_or(""), "error: this operation on an array of string is not compiled yet @3:9")
+    assert_eq(emitted("def main() =\n  print(transpose([[\"a\", \"b\"], [\"c\", \"d\"]]))\n").err().unwrap_or(""), "error: `transpose` on an array of string is not compiled yet @2:9")
+    assert_eq(emitted("def main() =\n  val xs = [\"a\", \"b\"]\n  print(filter(xs, x -> x == \"a\"))\n").err().unwrap_or(""), "error: `filter` on an array of string is not compiled yet @3:9")
+    assert_eq(emitted("def main() =\n  val xs = [\"a\", \"b\", \"c\"]\n  print(reduce(xs[2..3], \"\", (a, b) -> a + b))\n").err().unwrap_or(""), "error: `reduce` on an array of string is not compiled yet @3:9")
 
 @test("the module names every symbol with a prefix no C name has, and makes main the only public function")
 emit_symbols()
@@ -328,7 +328,7 @@ run_command()
     val run = capture(nex, ["run", src, "--", "there", "again"], env = env, stderr = true).unwrap()
     val waiting = s"${b.work}/waiting.nex"
 
-    write_text(waiting, "def main() =\n  print([[\"a\"], [\"b\"]])\n").unwrap()
+    write_text(waiting, "def main() =\n  print(transpose([[\"a\"], [\"b\"]]))\n").unwrap()
 
     val refused = capture(nex, ["run", waiting], env = env, stderr = true).unwrap()
 
@@ -339,7 +339,7 @@ run_command()
     assert_eq(run.text, "hello there\n")
     assert(run.status == Status.Exited(2), s"${run.status}")
     assert(refused.status == Status.Exited(1), s"${refused.status}")
-    assert(refused.err.unwrap_or("").contains("an array of string of rank 2 is not compiled yet"), refused.err.unwrap_or(""))
+    assert(refused.err.unwrap_or("").contains("`transpose` on an array of string is not compiled yet"), refused.err.unwrap_or(""))
 
 @test("a chained comparison evaluates each operand once, left to right, and stops at the first false link")
 run_chain_once()
