@@ -56,6 +56,30 @@ array_ranges_and_for()
     assert_eq(refused("def main() = print(1.0..2.0)\n"), "error: a range counts in integers; this one is real64 (`linspace` spaces reals) @1:20")
     assert_eq(refused("def f(x: real) =\n  for y in x do print(y)\n" + MAIN), "error: a `for` walks a range or an array; this is real64 @2:12")
 
+@test("a for over an array of tuples takes each element apart, written with or without parentheses")
+array_for_destructuring()
+    val each = "(for L0 _#1:(int64, int64) (in (enumerate:[(int64, int64)] xs#0)) (block (val (i#2:int64 x#3:int64) _#1) (print (s i#2 \": \" x#3))))"
+
+    assert_eq(elaborated("def main() =\n  val xs = [10, 20]\n  for i, x in enumerate(xs)\n    print(s\"$i: $x\")\n"), s"(def main () void (block (val xs#0:[int64] (array:[int64] 10 20)) ${each}))")
+    assert_eq(elaborated("def main() =\n  val xs = [10, 20]\n  for (i, x) in enumerate(xs)\n    print(s\"$i: $x\")\n"), s"(def main () void (block (val xs#0:[int64] (array:[int64] 10 20)) ${each}))")
+    assert_eq(elaborated("def f(xs: [integer], ys: [real]) =\n  for i, (a, _) in enumerate(zip(xs, ys))\n    print(a + i)\n" + MAIN),
+        "(def f ((xs#0 [int64]) (ys#1 [real64])) void (for L0 _#2:(int64, (int64, real64)) (in (enumerate:[(int64, (int64, real64))] (zip:[(int64, real64)] xs#0 ys#1))) (block (val (i#3:int64 (a#4:int64 _)) _#2) (print (+:int64 a#4 i#3)))))\n(def main () void ())")
+
+@test("a for pattern must match its element, cannot test a variant, and binds read-only names")
+array_for_destructuring_refused()
+    assert_eq(refused("def f(xs: [integer]) =\n  for i, x in xs\n    print(i)\n" + MAIN), "error: a destructuring pattern takes a tuple apart, and this is int64 @2:7")
+    assert_eq(refused("def f(xs: [integer]) =\n  for i, x, y in enumerate(xs)\n    print(i)\n" + MAIN), "error: this pattern takes 3 elements apart, and the value has 2: (int64, int64) @2:7")
+    assert_eq(refused("def main() =\n  for i, j in 0..3\n    print(i)\n"), "error: a counted `for` names one integer; there is no tuple to take apart @2:7")
+    assert_eq(refused("def f(xs: [integer]) =\n  for i, x in enumerate(xs)\n    i = 2\n" + MAIN), "error: `i` cannot be assigned: a loop variable is read-only @3:5")
+    assert_eq(refused("def f(xs: [integer]) =\n  for i, x in enumerate(xs)\n    print(i)\n  print(x)\n" + MAIN), "error: unknown name `x`; did you mean `xs`? @4:9")
+    assert_eq(refused("def f(xs: [integer]) =\n  for Some(x) in xs\n    print(x)\n" + MAIN), "error: a binding cannot test which variant a value is; take `Some` apart with `match` @2:7")
+
+@test("zip pairs the elements of two arrays")
+array_zip()
+    assert_eq(elaborated("def f(xs: [integer], ys: [real32; 2, 2]) = zip(xs, ys)\n" + MAIN), "(def f ((xs#0 [int64]) (ys#1 [real32; 2, 2])) [(int64, real32)] (zip:[(int64, real32)] xs#0 ys#1))\n(def main () void ())")
+    assert_eq(refused("def f(xs: [integer]) = zip(xs)\n" + MAIN), "error: `zip` takes two arrays @1:24")
+    assert_eq(refused("def f(xs: [integer]) = zip(xs, 3)\n" + MAIN), "error: `zip` takes an array; this is int64 @1:32")
+
 // -- indexing ---------------------------------------------------------------------------------------
 
 @test("an index list collapses integer axes, keeps the others and writes out the trailing ones")

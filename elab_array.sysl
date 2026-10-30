@@ -697,8 +697,10 @@ impl Elab
 
     // -- loops ------------------------------------------------------------------------------------
 
-    // `for x in a`: every element of an array, in storage order (DESIGN §4.3).
-    for_each(*self, span: Span, label: Option[string], name: string, at: Span, iterable: Expr, body: Expr) -> TExpr
+    // `for x in a`: every element of an array, in storage order (DESIGN §4.3). Where the loop
+    // variable is a pattern, `for i, x in enumerate(a)`, the element is held in an unnamed loop
+    // variable and taken apart at the top of each pass, as a `val` would take it apart.
+    for_each(*self, span: Span, label: Option[string], pat: Pattern, iterable: Expr, body: Expr) -> TExpr
         val a = self.infer(iterable)
 
         val ty = a.ty match
@@ -712,7 +714,16 @@ impl Elab
 
         self.open()
 
-        val var_id = self.declare_local(at, name, ty, LLoop)
+        val name = *pat.kind match
+            PatternKind.Name(n) -> n
+            _ -> "_"
+
+        val var_id = self.declare_local(pat.span, name, ty, LLoop)
+
+        val parts = *pat.kind match
+            PatternKind.Name(_) -> None
+            Wildcard -> None
+            _ -> Some(self.bind_pattern(pat, ty, LLoop, buf()))
 
         self.fx.loops.push(id)
 
@@ -720,7 +731,16 @@ impl Elab
 
         self.fx.loops.pop()
         self.close()
-        texpr(span, Void, TArray(TForEach(id, var_id, a, b)))
+
+        val pass = parts match
+            Some(p) ->
+                var items: Buf[TExpr] = buf()
+
+                items.push(texpr(pat.span, Void, TDestructure(Val, p, texpr(pat.span, ty, TLocal(var_id)))))
+                texpr(body.span, Void, TBlock(items, b))
+            None -> b
+
+        texpr(span, Void, TArray(TForEach(id, var_id, a, pass)))
     end for_each
 end Elab
 

@@ -533,7 +533,7 @@ impl Elab
 
     // Binds what `pat` names to the parts of a value of type `ty`: locals of `kind`, or, where
     // `members` is not empty, the module-level bindings of a group.
-    private bind_pattern(*self, pat: Pattern, ty: Ty, kind: LocalKind, members: Buf[usize]) -> TBind
+    bind_pattern(*self, pat: Pattern, ty: Ty, kind: LocalKind, members: Buf[usize]) -> TBind
         *pat.kind match
             PatternKind.Name(n) ->
                 if members.len() == 0 then return BLocal(self.declare_local(pat.span, n, ty, kind))

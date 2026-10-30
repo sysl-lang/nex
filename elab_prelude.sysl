@@ -153,6 +153,20 @@ impl Elab
 
         if name == "permute" then return self.permute(span, a, pos)
 
+        if name == "zip"
+            if pos.len() != 2 then return self.arity(span, name, "two arrays")
+
+            val b = self.array_arg(name, pos[1])
+
+            if is_error(b.ty) then return self.invalid(span)
+
+            var pair: Buf[Ty] = buf()
+
+            pair.push(e)
+            pair.push(elem_of(b.ty))
+            out.push(b)
+            return texpr(span, Ty.Array(Ty.Tuple(pair), dynamic_axes(1)), TBuiltin(name, out))
+
         if pos.len() != 1 then return self.arity(span, name, "one array")
 
         if name == "rank" || name == "size" || name == "length" then return texpr(span, INTEGER, TBuiltin(name, out))

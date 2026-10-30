@@ -66,8 +66,8 @@ corpus_scalar_programs_elaborate()
 
                 waiting += 1
 
-    assert_eq(clean, 152)
-    assert_eq(waiting, 1)
+    assert_eq(clean, 153)
+    assert_eq(waiting, 0)
 
 // The categories whose programs are arrays and the array prelude.
 private val ARRAY_CATEGORIES = ["arrays", "prelude", "[byte] buffer"]

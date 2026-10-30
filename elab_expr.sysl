@@ -610,14 +610,16 @@ impl Elab
 
     // `for v in lo..hi [by step]`: a counted loop over integers (DESIGN §11.1).
     for_loop(*self, span: Span, label: Option[string], pat: Pattern, iterable: Expr, body: Expr) -> TExpr
+        val (lo, hi, inclusive, stride) = *iterable.kind match
+            Range(Some(lo), Some(hi), inclusive, stride) -> (lo, hi, inclusive, stride)
+            _ -> return self.for_each(span, label, pat, iterable, body)
+
         val name = *pat.kind match
             Name(n) -> n
             Wildcard -> "_"
-            _ -> return self.not_yet(pat.span, "a destructuring loop variable")
-
-        val (lo, hi, inclusive, stride) = *iterable.kind match
-            Range(Some(lo), Some(hi), inclusive, stride) -> (lo, hi, inclusive, stride)
-            _ -> return self.for_each(span, label, name, pat.span, iterable, body)
+            _ ->
+                self.fail(pat.span, "a counted `for` names one integer; there is no tuple to take apart")
+                "_"
 
         val bounds = self.operands(lo, hi, None)
         var ty = self.common_of(iterable.span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
