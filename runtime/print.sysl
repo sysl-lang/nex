@@ -12,7 +12,7 @@
 // Arrays arrive as MLIR memref descriptors by pointer, which is what `llvm.emit_c_interface` passes,
 // so the printer honours the descriptor's offset and stride and a strided view prints with no copy.
 
-import sysl.fmt.format_real
+import sysl.fmt.{format_real, real_digits}
 import sysl.text.parse_real
 
 // The descriptor MLIR lays out for a rank-1 memref of `f64`: the allocation, the aligned base the
@@ -59,6 +59,26 @@ private shortest_digits(v: real) -> (string, int)
             text = candidate
             break
 
+    split_exponent(text)
+
+// The same for a `real16`, widened exactly to `v`: the fewest digits whose nearest `real16` is `v`'s.
+// A decimal of five digits or fewer that rounds to a `real16` through `real64` rounds to it directly
+// too, since no such decimal lies within a `real64` rounding of a `real16` halfway point.
+private shortest_digits16(v: real) -> (string, int)
+    val h = f16(v)
+    var text = format_real(v, "%.*e", 0, 4)
+
+    for p in 1..5
+        val candidate = format_real(v, "%.*e", 0, p - 1)
+
+        if f16(parse_real(candidate).unwrap()) == h then
+            text = candidate
+            break
+
+    split_exponent(text)
+
+// `%e` text taken apart into its digits, trailing zeros dropped, and its exponent.
+private split_exponent(text: string) -> (string, int)
     val b = text.bytes
     var digits = ""
     var i = if b[0] == u8('-') then 1 else 0
@@ -90,13 +110,15 @@ private zeros(n: int) -> string
 
     out
 
-private format_real_nex(v: real) -> string
+// A real of `bits` bits, widened exactly to `v`: its digits are the fewest that read back at its own
+// width, so the `real32` nearest 0.1 is `0.1`, not the `0.10000000149011612` its widening would need.
+format_real_nex(v: real, bits: int = 64) -> string
     if v != v then return "nan"
     if v == 1.0 / 0.0 then return "inf"
     if v == -1.0 / 0.0 then return "-inf"
     if (if v < 0.0 then -v else v) < 1e15 && v == real(long(v)) then return s"${long(v)}.0"
 
-    val (digits, e) = shortest_digits(v)
+    val (digits, e) = if bits == 64 then shortest_digits(v) elif bits == 32 then digits32(f32(v)) else shortest_digits16(v)
     val n = int(digits.len)
     val sign = if v < 0.0 then "-" else ""
 
@@ -109,11 +131,17 @@ private format_real_nex(v: real) -> string
 
     s"$sign${digits[0..<1]}.${fraction}E$e"
 
+private digits32(x: f32) -> (string, int)
+    val d = real_digits(x)
+
+    (d.digits, d.exponent)
+
+// A complex of parts of `bits` bits: `<re><sign><|im|>i`, the sign taken from `im >= 0`.
+complex_text(re: real, im: real, bits: int = 64) -> string =
+    format_real_nex(re, bits) + (if im >= 0.0 then "+" else "-") + format_real_nex(if im < 0.0 then -im else im, bits) + "i"
+
 private put_complex(re: real, im: real)
-    prints(format_real_nex(re))
-    prints(if im >= 0.0 then "+" else "-")
-    prints(format_real_nex(if im < 0.0 then -im else im))
-    prints("i")
+    prints(complex_text(re, im))
 
 @export("nex_print_int")
 print_int(v: long)
@@ -150,3 +178,29 @@ print_array_complex(a: *MemrefComplex)
         put_complex(z.re, z.im)
 
     prints("]\n")
+
+// A value written to a sink (`text.sysl`), in nex's spelling, at each width.
+@export("nex_put_real")
+put_real(sink: long, v: real)
+    put(sink, format_real_nex(v))
+
+@export("nex_put_real32")
+put_real32(sink: long, v: f32)
+    put(sink, format_real_nex(real(v), 32))
+
+// A `real16`, widened exactly to `real32` by the caller.
+@export("nex_put_real16")
+put_real16(sink: long, v: f32)
+    put(sink, format_real_nex(real(v), 16))
+
+@export("nex_put_complex")
+put_complex64(sink: long, re: real, im: real)
+    put(sink, complex_text(re, im))
+
+@export("nex_put_complex32")
+put_complex32(sink: long, re: f32, im: f32)
+    put(sink, complex_text(real(re), real(im), 32))
+
+@export("nex_put_complex16")
+put_complex16(sink: long, re: f32, im: f32)
+    put(sink, complex_text(real(re), real(im), 16))

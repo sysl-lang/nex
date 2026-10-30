@@ -1,0 +1,661 @@
+// MLIR emission: the typed IR to the text of one MLIR module, which `driver.sysl` lowers to a native
+// program.
+//
+// **Every local lives in memory.** A local is an `llvm.alloca` in its function's entry block, read
+// with `llvm.load` and written with `llvm.store`; LLVM's `mem2reg` turns them back into registers. So
+// nothing has to thread a variable's current value through a structured region.
+//
+// **Control flow is structured**: `scf.if` and `scf.while`, as bufferization requires of every
+// function (it refuses a `cf` loop). `exit`, `cycle` and `return` cannot leave a region, so a function
+// that has them keeps a control word in memory: `exit` and `cycle` of loop `L` set it to `2L + 2` and
+// `2L + 3`, `return` to 1 with its value stored aside. A statement after one that may set it runs
+// under `scf.if` on the word being 0, a loop runs while it is 0, and the loop it names clears it.
+//
+// **A local a lambda captures lives in a cell**: storage of its own from `malloc`, whose address the
+// entry-block slot holds. The lambda's environment is the addresses of the cells it captures, so a
+// lambda sees later writes to them and they to it (corpus 079), and it may outlive the frame that
+// made it. An `inout` parameter is held the same way, its slot holding the caller's place.
+//
+// **A function value is a pair of pointers**, `!llvm.struct<(ptr, ptr)>`: code that takes the
+// environment as its first argument, and the environment. A lambda is emitted as such code; a
+// top-level `def` used as a value gets a wrapper that drops the environment and calls it.
+//
+// **A string is a pointer to NUL-terminated UTF-8**: a literal is a private constant global, and every
+// other string is built by the runtime (`runtime/text.sysl`).
+//
+// **Every check that fails calls the runtime's one trap entry**, `nex_trap`, with the message as a
+// constant string, inside an `scf.if` on the failed condition.
+//
+// Symbols are prefixed so that no user name meets a C one: a function is `@"n.name"`, a module-level
+// binding `@"g.name"`, a lambda `@"l.N"`, a function's value wrapper `@"r.name"`, a string `@"s.N"`.
+// The program's C `main` sets the arguments aside, initializes the module-level bindings in the order
+// their initializers need, and calls `@"n.main"`.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.{StrBuilder, str_builder}
+import sh.sysl.parsing.{Diagnostic, Span, error}
+
+struct Emitter
+    prog: TProgram
+    diags: Buf[Diagnostic]
+    // `--fpe-trap`: real division by zero, an invalid operation and an overflow trap.
+    fpe_trap: bool
+
+    // The module's declarations: externs, string constants, module-level storage.
+    top: StrBuilder
+    // The finished functions.
+    funcs: StrBuilder
+    // The current function's entry-block allocations, and the rest of its body.
+    entry: StrBuilder
+    body: StrBuilder
+    next: usize
+    ret: Ty
+    // The current function's control word and the slot a `return` stores its value in, `""` where
+    // it has no `exit`, `cycle` or `return`.
+    ctl: string
+    ret_slot: string
+
+    declared: Buf[string]
+    strings: Buf[string]
+    // By local number: the entry-block slot, and whether it holds a cell's address.
+    slot: Buf[string]
+    boxed: Buf[bool]
+    // The operand values of the chains around the cursor, innermost last.
+    chains: Buf[Buf[string]]
+    lambdas_wanted: Buf[usize]
+    lambdas_done: Buf[bool]
+    wrappers: Buf[string]
+    // The local `main(args: [string])` binds, which the runtime holds.
+    args_local: Option[usize]
+
+    // -- diagnostics ------------------------------------------------------------------------------
+
+    later(*self, span: Span, what: string)
+        self.diags.push(error(span, s"${what} is not compiled yet"))
+
+    // -- text -------------------------------------------------------------------------------------
+
+    fresh(*self) -> string
+        self.next += 1
+        s"%v${self.next}"
+
+    // One operation, or one line of a region's braces.
+    op(*self, text: string)
+        self.body.push("    ")
+        self.body.push(text)
+        self.body.push("\n")
+
+    // An operation that defines a value, and the value.
+    def(*self, text: string) -> string
+        val v = self.fresh()
+
+        self.op(s"$v = $text")
+        v
+
+    // The zero of `t`: what a branch that never yields stands in with, where its region must yield.
+    zero_of(*self, span: Span, t: Ty) -> string = t match
+        Int(b, _) -> self.def(s"arith.constant 0 : i$b")
+        Real(b) -> self.real_const(0.0, b)
+        Complex(b) -> self.complex_const(self.real_const(0.0, b), self.real_const(0.0, b), b)
+        Bool -> self.def("arith.constant false")
+        _ -> self.def(s"llvm.mlir.zero : ${self.ty(span, t)}")
+
+    // The control word is 0: no `exit`, `cycle` or `return` is under way.
+    flowing(*self) -> string
+        val w = self.def(s"llvm.load ${self.ctl} : !llvm.ptr -> i64")
+
+        self.def(s"arith.cmpi eq, $w, ${self.def("arith.constant 0 : i64")} : i64")
+
+    set_ctl(*self, word: usize)
+        self.op(s"llvm.store ${self.def(s"arith.constant $word : i64")}, ${self.ctl} : i64, !llvm.ptr")
+
+    // The control word cleared where it holds `word`.
+    clear_ctl(*self, word: usize)
+        val w = self.def(s"llvm.load ${self.ctl} : !llvm.ptr -> i64")
+
+        self.op(s"scf.if ${self.def(s"arith.cmpi eq, $w, ${self.def(s"arith.constant $word : i64")} : i64")} {")
+        self.set_ctl(0)
+        self.op("}")
+
+    // A declaration at module level, written once.
+    declare(*self, name: string, text: string)
+        for d in self.declared
+            if d == name then return
+
+        self.declared.push(name)
+        self.top.push(s"  $text\n")
+
+    // A runtime or C function, by its C name.
+    external(*self, name: string, params: string, result: string)
+        self.declare(name, s"func.func private @$name($params)${arrow(result)}")
+
+    call(*self, name: string, args: string, params: string, result: string) -> string
+        self.external(name, params, result)
+
+        if result == ""
+            self.op(s"func.call @$name($args) : ($params) -> ()")
+            return ""
+
+        self.def(s"func.call @$name($args) : ($params) -> $result")
+
+    // The address of a string constant.
+    string_ref(*self, text: string) -> string
+        var k = 0
+
+        loop
+            if k == self.strings.len()
+                self.strings.push(text)
+                self.top.push(s"  llvm.mlir.global private constant @\"s.$k\"(\"${mlir_bytes(text)}\\00\") {addr_space = 0 : i32} : !llvm.array<${text.len + 1} x i8>\n")
+                break
+
+            if self.strings[k] == text then break
+            k += 1
+
+        self.def(s"llvm.mlir.addressof @\"s.$k\" : !llvm.ptr")
+
+    // A trap with `message` where `cond` holds.
+    trap_if(*self, cond: string, message: string)
+        self.external("nex_trap", "!llvm.ptr", "")
+
+        val m = self.string_ref(message)
+
+        self.op(s"scf.if $cond {")
+        self.op(s"  func.call @nex_trap($m) : (!llvm.ptr) -> ()")
+        self.op("}")
+
+    // -- types ------------------------------------------------------------------------------------
+
+    // A value's MLIR type; `""` for `void` and `never`, which have no value.
+    ty(*self, span: Span, t: Ty) -> string = t match
+        Int(b, _) -> s"i$b"
+        Real(b) -> s"f$b"
+        Complex(b) -> s"complex<f$b>"
+        Bool -> "i1"
+        Str -> "!llvm.ptr"
+        Fn(_) -> CLOSURE
+        Void -> ""
+        Never -> ""
+        _ ->
+            self.later(span, s"a value of type ${show_ty(t)}")
+            "i64"
+
+    // The type a value of `t` is stored as: a complex as a struct of its parts.
+    mem_ty(*self, span: Span, t: Ty) -> string = t match
+        Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
+        _ -> self.ty(span, t)
+
+    load(*self, span: Span, ptr: string, t: Ty) -> string
+        val m = self.mem_ty(span, t)
+        val v = self.def(s"llvm.load $ptr : !llvm.ptr -> $m")
+
+        t match
+            Complex(b) ->
+                val re = self.def(s"llvm.extractvalue $v[0] : $m")
+                val im = self.def(s"llvm.extractvalue $v[1] : $m")
+
+                self.def(s"complex.create $re, $im : complex<f$b>")
+            _ -> v
+
+    store(*self, span: Span, ptr: string, v: string, t: Ty)
+        val m = self.mem_ty(span, t)
+        var w = v
+
+        t match
+            Complex(b) ->
+                val re = self.def(s"complex.re $v : complex<f$b>")
+                val im = self.def(s"complex.im $v : complex<f$b>")
+                val u = self.def(s"llvm.mlir.undef : $m")
+                val a = self.def(s"llvm.insertvalue $re, $u[0] : $m")
+
+                w = self.def(s"llvm.insertvalue $im, $a[1] : $m")
+            _ -> ()
+
+        self.op(s"llvm.store $w, $ptr : $m, !llvm.ptr")
+
+    // -- locals -----------------------------------------------------------------------------------
+
+    alloca(*self, ty: string) -> string
+        val v = self.fresh()
+
+        self.entry.push(s"    $v = llvm.alloca %one x $ty : (i64) -> !llvm.ptr\n")
+        v
+
+    // Storage for local `id` where it is bound; a captured one gets a fresh cell each time.
+    bind_local(*self, span: Span, id: usize)
+        val t = self.prog.locals[id].ty
+
+        if self.boxed[id]
+            if self.slot[id] == "" then self.slot.set(id, self.alloca("!llvm.ptr"))
+
+            val n = self.def(s"arith.constant ${size_of(t)} : i64")
+            val cell = self.def(s"llvm.call @malloc($n) : (i64) -> !llvm.ptr")
+
+            self.declare("malloc", "llvm.func @malloc(i64) -> !llvm.ptr")
+            self.op(s"llvm.store $cell, ${self.slot[id]} : !llvm.ptr, !llvm.ptr")
+        elif self.slot[id] == ""
+            self.slot.set(id, self.alloca(self.mem_ty(span, t)))
+
+    // A local whose slot holds the address of storage someone else owns: an `inout` parameter, or a
+    // capture inside the lambda.
+    bind_borrowed(*self, id: usize, address: string)
+        if self.slot[id] == "" then self.slot.set(id, self.alloca("!llvm.ptr"))
+        self.op(s"llvm.store $address, ${self.slot[id]} : !llvm.ptr, !llvm.ptr")
+
+    // The address local `id`'s value is stored at.
+    local_ptr(*self, span: Span, id: usize) -> string
+        if self.slot[id] == ""
+            self.later(span, s"`${self.prog.locals[id].name}` here")
+            return "%one"
+
+        if self.boxed[id] || is_inout(self.prog.locals[id].kind) then return self.def(s"llvm.load ${self.slot[id]} : !llvm.ptr -> !llvm.ptr")
+
+        self.slot[id]
+
+    // The address a place is stored at: a local or a module-level binding.
+    place_ptr(*self, e: TExpr) -> string = *e.kind match
+        TLocal(id) -> self.local_ptr(e.span, id)
+        TGlobalRef(name) -> self.def(s"llvm.mlir.addressof @\"g.$name\" : !llvm.ptr")
+        _ ->
+            self.later(e.span, "this place")
+            "%one"
+
+    // -- functions --------------------------------------------------------------------------------
+
+    // Per-function state, cleared.
+    begin(*self, ret: Ty, body: TExpr)
+        self.entry = str_builder()
+        self.body = str_builder()
+        self.ret = ret
+        self.chains = buf()
+        self.ctl = ""
+        self.ret_slot = ""
+
+        for k in 0..<self.slot.len()
+            self.slot.set(k, "")
+
+        self.entry.push("    %one = arith.constant 1 : i64\n")
+
+        if may_leave(body)
+            self.ctl = self.alloca("i64")
+            self.entry.push(s"    %zero = arith.constant 0 : i64\n    llvm.store %zero, ${self.ctl} : i64, !llvm.ptr\n")
+
+            val r = self.ty(body.span, ret)
+
+            if r != "" then self.ret_slot = self.alloca(self.mem_ty(body.span, ret))
+
+    // The current function, finished, under `header`.
+    end(*self, header: string)
+        self.funcs.push(header)
+        self.funcs.push(" {\n")
+        self.funcs.push(self.entry.finish())
+        self.funcs.push(self.body.finish())
+        self.funcs.push("  }\n\n")
+
+    // The end of a body whose value is `v`.
+    finish_body(*self, span: Span, v: string)
+        val r = self.ty(span, self.ret)
+
+        if r == ""
+            self.op("func.return")
+            return
+
+        val value = if v == "" then self.zero_of(span, self.ret) else v
+
+        if self.ctl == ""
+            self.op(s"func.return $value : $r")
+            return
+
+        // A body that ran to its end gives its value; one that returned stored it already.
+        self.op(s"scf.if ${self.flowing()} {")
+        self.store(span, self.ret_slot, value, self.ret)
+        self.op("}")
+        self.op(s"func.return ${self.load(span, self.ret_slot, self.ret)} : $r")
+
+    // A parameter's MLIR type: an `inout` one is its caller's place.
+    param_ty(*self, span: Span, id: usize) -> string =
+        if is_inout(self.prog.locals[id].kind) then "!llvm.ptr" else self.ty(span, self.prog.locals[id].ty)
+
+    // The parameters bound in the prologue, from block arguments `%a0`, `%a1`, ...
+    bind_params(*self, span: Span, params: Buf[usize])
+        for k in 0..<params.len()
+            val id = params[k]
+
+            if is_inout(self.prog.locals[id].kind)
+                self.bind_borrowed(id, s"%a$k")
+            else
+                self.bind_local(span, id)
+                self.store(span, self.local_ptr(span, id), s"%a$k", self.prog.locals[id].ty)
+
+    params_text(*self, span: Span, params: Buf[usize], env: bool) -> string
+        var out = if env then "%env: !llvm.ptr" else ""
+
+        for k in 0..<params.len()
+            if out != "" then out += ", "
+            out += s"%a$k: ${self.param_ty(span, params[k])}"
+
+        out
+
+    fun(*self, f: TFun)
+        self.begin(f.ret, f.body)
+
+        var params = f.params
+
+        if f.name == "main" && f.params.len() == 1
+            self.args_local = Some(f.params[0])
+            params = buf()
+
+        self.bind_params(f.span, params)
+        self.finish_body(f.span, self.ex(f.body))
+        self.end(s"  func.func private @\"n.${f.name}\"(${self.params_text(f.span, params, false)})${arrow(self.ty(f.span, f.ret))}")
+
+    lambda(*self, id: usize)
+        val l = self.prog.lambdas[id]
+
+        self.begin(l.ret, l.body)
+
+        for k in 0..<l.captures.len()
+            val p = self.def(s"llvm.getelementptr %env[$k] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")
+
+            self.bind_borrowed(l.captures[k], self.def(s"llvm.load $p : !llvm.ptr -> !llvm.ptr"))
+
+        self.bind_params(l.body.span, l.params)
+        self.finish_body(l.body.span, self.ex(l.body))
+        self.end(s"  func.func private @\"l.$id\"(${self.params_text(l.body.span, l.params, true)})${arrow(self.ty(l.body.span, l.ret))}")
+
+    // The function type of code taking an environment and `params`.
+    code_type(*self, span: Span, params: Buf[usize], ret: Ty) -> string
+        var out = "!llvm.ptr"
+
+        for id in params
+            out += s", ${self.param_ty(span, id)}"
+
+        s"($out) -> ${result_text(self.ty(span, ret))}"
+
+    // A function value: `code` and the environment `env`.
+    closure(*self, code: string, ty: string, env: string) -> string
+        val c = self.def(s"func.constant @\"$code\" : $ty")
+        val p = self.def(s"builtin.unrealized_conversion_cast $c : $ty to !llvm.ptr")
+        val u = self.def(s"llvm.mlir.undef : $CLOSURE")
+        val a = self.def(s"llvm.insertvalue $p, $u[0] : $CLOSURE")
+
+        self.def(s"llvm.insertvalue $env, $a[1] : $CLOSURE")
+
+    // Lambda `id` as a value, its environment the cells of what it captures.
+    lambda_value(*self, span: Span, id: usize) -> string
+        val l = self.prog.lambdas[id]
+
+        if !self.lambdas_done[id]
+            self.lambdas_done.set(id, true)
+            self.lambdas_wanted.push(id)
+
+        var env = ""
+
+        if l.captures.len() == 0
+            env = self.def("llvm.mlir.zero : !llvm.ptr")
+        else
+            val n = self.def(s"arith.constant ${8 * l.captures.len()} : i64")
+
+            self.declare("malloc", "llvm.func @malloc(i64) -> !llvm.ptr")
+            env = self.def(s"llvm.call @malloc($n) : (i64) -> !llvm.ptr")
+
+            for k in 0..<l.captures.len()
+                val cell = self.local_ptr(span, l.captures[k])
+                val p = self.def(s"llvm.getelementptr $env[$k] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")
+
+                self.op(s"llvm.store $cell, $p : !llvm.ptr, !llvm.ptr")
+
+        self.closure(s"l.$id", self.code_type(span, l.params, l.ret), env)
+
+    // A top-level `def` as a value, through a wrapper that takes and ignores an environment.
+    fn_value(*self, span: Span, name: string) -> string
+        val f = self.find_fun(name)
+
+        if f.is_none()
+            self.later(span, s"`$name` as a value")
+            return ""
+
+        val g = f.unwrap()
+        val ty = self.code_type(span, g.params, g.ret)
+
+        if !contains(self.wrappers, name)
+            self.wrappers.push(name)
+
+            var params = "%env: !llvm.ptr"
+            var args = ""
+            var tys = ""
+
+            for k in 0..<g.params.len()
+                val t = self.param_ty(span, g.params[k])
+
+                params += s", %a$k: $t"
+                if k > 0
+                    args += ", "
+                    tys += ", "
+                args += s"%a$k"
+                tys += t
+
+            val r = self.ty(span, g.ret)
+            var text = s"  func.func private @\"r.$name\"($params)${arrow(r)} {\n"
+
+            if r == ""
+                text += s"    func.call @\"n.$name\"($args) : ($tys) -> ()\n    func.return\n  }\n\n"
+            else
+                text += s"    %r = func.call @\"n.$name\"($args) : ($tys) -> $r\n    func.return %r : $r\n  }\n\n"
+
+            self.funcs.push(text)
+
+        self.closure(s"r.$name", ty, self.def("llvm.mlir.zero : !llvm.ptr"))
+
+    find_fun(*self, name: string) -> Option[TFun]
+        for d in self.prog.decls
+            d match
+                FunDecl(f) -> if f.name == name then return Some(f)
+                _ -> ()
+
+        None
+
+    // -- the module -------------------------------------------------------------------------------
+
+    whole_module(*self) -> string
+        var globals: Buf[TGlobal] = buf()
+
+        for d in self.prog.decls
+            d match
+                FunDecl(f) -> self.fun(f)
+                GlobalDecl(g) -> globals.push(g)
+                TupleGlobalDecl(g) -> self.later(g.span, "a module-level destructuring binding")
+                StructDecl(s) -> self.later(s.span, "a struct")
+                EnumDecl(e) -> self.later(e.span, "an enum")
+
+        // Each lambda is emitted after the function that makes it, and may make more.
+        var k = 0
+
+        while k < self.lambdas_wanted.len()
+            self.lambda(self.lambdas_wanted[k])
+            k += 1
+
+        self.entry_point(globals)
+
+        while k < self.lambdas_wanted.len()
+            self.lambda(self.lambdas_wanted[k])
+            k += 1
+
+        var out = str_builder()
+
+        out.push("module {\n")
+        out.push(self.top.finish())
+        out.push("\n")
+        out.push(self.funcs.finish())
+        out.push("}\n")
+        out.finish()
+    end whole_module
+
+    // The C `main`: the arguments set aside, every module-level binding initialized before anything
+    // reads it, the program's `main` called and what it printed written out.
+    entry_point(*self, globals: Buf[TGlobal])
+        self.begin(Void, texpr(Span(0, 0), Void, TLiteral(VoidVal, false)))
+
+        var main_found = false
+
+        for d in self.prog.decls
+            d match
+                FunDecl(f) -> if f.name == "main" then main_found = true
+                _ -> ()
+
+        if !main_found then self.diags.push(error(Span(0, 0), "the program has no `def main()`"))
+
+        self.call("nex_set_args", "%argc, %argv", "i32, !llvm.ptr", "")
+
+        for g in init_order(self.prog, globals)
+            val m = self.mem_ty(g.span, g.ty)
+
+            self.top.push(s"  llvm.mlir.global internal @\"g.${g.name}\"() {addr_space = 0 : i32} : $m {\n")
+            self.top.push(s"    %z = llvm.mlir.zero : $m\n    llvm.return %z : $m\n  }\n")
+
+            val v = self.ex(g.init)
+
+            self.store(g.span, self.def(s"llvm.mlir.addressof @\"g.${g.name}\" : !llvm.ptr"), v, g.ty)
+
+        self.op("func.call @\"n.main\"() : () -> ()")
+        self.call("nex_finish", "", "", "")
+
+        val z = self.def("arith.constant 0 : i32")
+
+        self.op(s"func.return $z : i32")
+        self.end("  func.func @main(%argc: i32, %argv: !llvm.ptr) -> i32")
+end Emitter
+
+val CLOSURE = "!llvm.struct<(ptr, ptr)>"
+
+// The program as an MLIR module, or why it cannot be compiled.
+emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
+    var slots: Buf[string] = buf()
+    var boxed: Buf[bool] = buf()
+
+    for _ in 0..<p.locals.len()
+        slots.push("")
+        boxed.push(false)
+
+    var done: Buf[bool] = buf()
+
+    for l in p.lambdas
+        done.push(false)
+
+        for c in l.captures
+            boxed.set(c, true)
+
+    var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
+                    buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None)
+    val text = e.whole_module()
+
+    if e.diags.len() > 0 then return Err(e.diags)
+
+    Ok(text)
+
+private arrow(result: string) -> string = if result == "" then "" else s" -> $result"
+
+result_text(t: string) -> string = if t == "" then "()" else t
+
+is_inout(k: LocalKind) -> bool = k match
+    LParam(m) -> m == Inout
+    _ -> false
+
+private contains(names: Buf[string], name: string) -> bool
+    for n in names
+        if n == name then return true
+
+    false
+
+// Whether `e` holds an `exit`, a `cycle` or a `return` of the function it is in.
+may_leave(e: TExpr) -> bool
+    *e.kind match
+        TReturn(_) -> return true
+        TExit(_) -> return true
+        TCycle(_) -> return true
+        _ -> ()
+
+    for c in children(e)
+        if may_leave(c) then return true
+
+    false
+
+// The bytes a value of `t` takes in a cell.
+private size_of(t: Ty) -> int = t match
+    Int(b, _) -> b / 8
+    Real(b) -> b / 8
+    Complex(b) -> b / 4
+    Bool -> 1
+    Fn(_) -> 16
+    _ -> 8
+
+// A string's bytes as an MLIR string attribute spells them: printable ASCII as itself, the rest, a
+// quote and a backslash as two hex digits after a backslash.
+mlir_bytes(text: string) -> string
+    var out = str_builder()
+    val digits = "0123456789ABCDEF"
+
+    for k in 0..<text.len
+        val c = text.bytes[k]
+
+        if c >= 32 && c < 127 && c != u8('"') && c != u8('\\')
+            out.push(text[k..<k + 1])
+        else
+            out.push("\\")
+            out.push(digits[usize(c >> 4)..<usize(c >> 4) + 1])
+            out.push(digits[usize(c & 15)..<usize(c & 15) + 1])
+
+    out.finish()
+
+// The module-level bindings in an order where each is initialized before any initializer reads it,
+// through the functions it calls too. The elaborator has refused a cycle.
+private init_order(p: TProgram, globals: Buf[TGlobal]) -> Buf[TGlobal]
+    var out: Buf[TGlobal] = buf()
+    var placed: Buf[bool] = buf()
+
+    for _ in globals
+        placed.push(false)
+
+    for k in 0..<globals.len()
+        place_global(p, globals, k, &placed, &out)
+
+    out
+
+private place_global(p: TProgram, globals: Buf[TGlobal], k: usize, placed: *Buf[bool], out: *Buf[TGlobal])
+    if placed[k] then return
+
+    placed.set(k, true)
+
+    var names: Buf[string] = buf()
+    var seen: Buf[string] = buf()
+
+    reads(p, globals[k].init, &names, &seen)
+
+    for n in names
+        for j in 0..<globals.len()
+            if globals[j].name == n then place_global(p, globals, j, placed, out)
+
+    out.push(globals[k])
+
+// The module-level bindings `e` reads, directly or through the functions and lambdas it reaches;
+// `seen` holds the functions already walked.
+private reads(p: TProgram, e: TExpr, names: *Buf[string], seen: *Buf[string])
+    for c in children(e)
+        reads(p, c, names, seen)
+
+    *e.kind match
+        TGlobalRef(n) -> names.push(n)
+        TFnRef(n) ->
+            if !contains(*seen, n)
+                seen.push(n)
+
+                for d in p.decls
+                    d match
+                        FunDecl(f) -> if f.name == n then reads(p, f.body, names, seen)
+                        _ -> ()
+        TLambdaRef(id) ->
+            val key = s"#$id"
+
+            if !contains(*seen, key)
+                seen.push(key)
+                reads(p, p.lambdas[id].body, names, seen)
+        _ -> ()

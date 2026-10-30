@@ -30,18 +30,45 @@ private var catch_env: [JMP_BUF_WORDS]u64 = [0; JMP_BUF_WORDS]
 private var depth = 0
 private var last_message = ""
 
-private trap(message: string) -> never
+trap_with(message: string) -> never
+    note_trap(message)
+    raise_trap()
+
+// A trap's message, kept for the catch; with nothing catching, written out, and the program ends.
+// A message built from values is noted here, in a call that returns, so that no frame holds it across
+// the `longjmp` of `raise_trap`.
+note_trap(message: string)
     if depth == 0 then
         flush()
         eprints(s"trap: $message\n")
         abort()
 
     last_message = message
+
+raise_trap() -> never
     longjmp(&catch_env[0], 1)
+
+// The one entry generated code traps through, with the message the compiler wrote for the check
+// that failed.
+@export("nex_trap")
+trap(message: *u8) -> never
+    note_trap(c_text(message))
+    raise_trap()
 
 @export("nex_trap_complex_div_zero")
 trap_complex_div_zero() -> never
-    trap("complex division by zero")
+    trap_with("complex division by zero")
+
+// `stop n`: what was printed is written out, and the program ends with status `n`.
+@export("nex_stop")
+stop(code: int) -> never
+    flush()
+    exit(code)
+
+// The end of `main`: what was printed is written out.
+@export("nex_finish")
+finish()
+    flush()
 
 // Run `body`, answering true if it trapped and false if it returned. What it printed before the trap
 // stays printed; the trap's message is not written, and `nex_last_trap_message` answers it.

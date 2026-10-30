@@ -1,0 +1,279 @@
+// Emission of the prelude's scalar functions, printing and interpolation, and the program's
+// arguments.
+//
+// **Text goes to a sink** (`runtime/text.sysl`): `print` writes each piece of its value to sink 1,
+// `eprint` to sink 2, and an interpolation used as a value gathers its pieces in a sink of its own and
+// closes it into a string. So `print(s"$a and $b")` builds no string at all.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The prelude's real functions that C's library computes, by their `real64` names; the `real32`
+// one adds `f`. `sqrt`, `floor`, `ceil`, `trunc` and `round` are MLIR's `math` operations instead,
+// which lower at every width.
+private val LIBM = ["cbrt", "exp", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "atan2", "hypot"]
+
+private among(name: string, names: []const string) -> bool
+    for n in names
+        if n == name then return true
+
+    false
+
+impl Emitter
+    builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        if name == "print" || name == "eprint"
+            val sink = self.def(s"arith.constant ${if name == "print" then 1 else 2} : i64")
+
+            *args[0].kind match
+                TInterp(parts, _) -> self.interp_into(sink, parts)
+                _ -> self.put_value(args[0].span, sink, self.ex(args[0]), args[0].ty)
+
+            self.call("nex_put_newline", sink, "i64", "")
+            return ""
+
+        if name == "length" || name == "size" || name == "rank"
+            if self.is_args(args[0])
+                return if name == "rank" then self.int_const("1", 64) else self.call("nex_arg_count", "", "", "i64")
+
+            return self.unsupported(span, s"`$name` of an array")
+
+        if name == "assert"
+            val ok = self.ex(args[0])
+            val failed = self.not(ok)
+
+            if args.len() == 1
+                self.trap_if(failed, "assertion failed")
+            else
+                val message = self.ex(args[1])
+
+                self.op(s"scf.if $failed {")
+                self.external("nex_str_concat", "!llvm.ptr, !llvm.ptr", "!llvm.ptr")
+                self.external("nex_trap", "!llvm.ptr", "")
+
+                val prefix = self.string_ref("assertion failed: ")
+                val text = self.def(s"func.call @nex_str_concat($prefix, $message) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr")
+
+                self.op(s"func.call @nex_trap($text) : (!llvm.ptr) -> ()")
+                self.op("}")
+
+            return ""
+
+        if name == "assert_eq"
+            val a = self.ex(args[0])
+            val b = self.ex(args[1])
+
+            self.trap_if(self.not(self.binary(span, "==", a, b, args[0].ty)), "assert_eq failed")
+            return ""
+
+        if name == "min" || name == "max"
+            var v = self.ex(args[0])
+
+            for k in 1..<args.len()
+                v = self.min_max(name, v, self.ex(args[k]), t)
+
+            return v
+
+        val x = self.ex(args[0])
+
+        if name == "abs" then return self.abs(span, x, args[0].ty)
+        if name == "sign" then return self.sign(span, x, args[0].ty)
+
+        if is_complex(args[0].ty)
+            val c = self.ty(span, args[0].ty)
+
+            if name == "conj" then return self.def(s"complex.conj $x : $c")
+            if name == "arg" then return self.def(s"complex.angle $x : $c")
+
+            return self.def(s"complex.$name $x : $c")
+
+        val bits = bits_of(t)
+
+        if name == "sqrt" || name == "floor" || name == "ceil" || name == "trunc" || name == "round"
+            val r = self.def(s"math.$name $x : f$bits")
+
+            return if name == "sqrt" then self.fpe_check(r, x, x, bits) else r
+
+        if among(name, LIBM)
+            var operands: Buf[string] = buf()
+
+            operands.push(x)
+
+            for k in 1..<args.len()
+                operands.push(self.ex(args[k]))
+
+            return self.libm(name, operands, bits)
+
+        self.unsupported(span, s"`$name`")
+    end builtin
+
+    // A C library function at `bits`: a `real16` computes in `real32` and rounds (DESIGN §2.1).
+    libm(*self, name: string, operands: Buf[string], bits: int) -> string
+        val at = if bits == 16 then 32 else bits
+        val c = if at == 32 then name + "f" else name
+        var vals = ""
+        var tys = ""
+
+        for v in operands
+            if vals != ""
+                vals += ", "
+                tys += ", "
+
+            vals += if bits == 16 then self.def(s"arith.extf $v : f16 to f32") else v
+            tys += s"f$at"
+
+        val r = self.call(c, vals, tys, s"f$at")
+        val out = if bits == 16 then self.def(s"arith.truncf $r : f32 to f16") else r
+
+        self.fpe_check(out, operands[0], operands[operands.len() - 1], bits)
+
+    min_max(*self, name: string, a: string, b: string, t: Ty) -> string = t match
+        Int(bits, signed) -> self.def(s"arith.${name}${if signed then "si" else "ui"} $a, $b : i$bits")
+        Real(bits) -> self.def(s"arith.${if name == "min" then "minimumf" else "maximumf"} $a, $b : f$bits")
+        _ -> ""
+
+    abs(*self, span: Span, x: string, t: Ty) -> string = t match
+        Int(bits, signed) ->
+            if !signed then return x
+
+            val min = self.int_const(s"${-(i128(1) << (bits - 1))}", bits)
+
+            self.trap_if(self.def(s"arith.cmpi eq, $x, $min : i$bits"), s"int$bits overflow")
+            self.def(s"math.absi $x : i$bits")
+        Real(bits) -> self.def(s"math.absf $x : f$bits")
+        Complex(bits) -> self.def(s"complex.abs $x : complex<f$bits>")
+        _ -> self.unsupported(span, s"`abs` of ${show_ty(t)}")
+
+    // -1, 0 or 1 in the argument's type; a real's zero and NaN are their own sign.
+    sign(*self, span: Span, x: string, t: Ty) -> string = t match
+        Int(bits, signed) ->
+            val i = s"i$bits"
+            val zero = self.int_const("0", bits)
+            val pos = self.def(s"arith.extui ${self.def(s"arith.cmpi ${if signed then "sgt" else "ugt"}, $x, $zero : $i")} : i1 to $i")
+
+            if !signed then return pos
+
+            self.def(s"arith.subi $pos, ${self.def(s"arith.extui ${self.def(s"arith.cmpi slt, $x, $zero : $i")} : i1 to $i")} : $i")
+        Real(bits) ->
+            val f = s"f$bits"
+            val zero = self.real_const(0.0, bits)
+            val pos = self.def(s"arith.cmpf ogt, $x, $zero : $f")
+            val neg = self.def(s"arith.cmpf olt, $x, $zero : $f")
+            val r = self.def(s"arith.select $neg, ${self.real_const(-1.0, bits)}, $x : $f")
+
+            self.def(s"arith.select $pos, ${self.real_const(1.0, bits)}, $r : $f")
+        _ -> self.unsupported(span, s"`sign` of ${show_ty(t)}")
+
+    // -- text -------------------------------------------------------------------------------------
+
+    interp_into(*self, sink: string, parts: Buf[TPart])
+        for part in parts
+            part match
+                TText(text) -> if text.len > 0 then self.call("nex_put_str", s"$sink, ${self.string_ref(text)}", "i64, !llvm.ptr", "")
+                TValue(v, spec) ->
+                    val x = self.ex(v)
+
+                    if spec == "" then self.put_value(v.span, sink, x, v.ty)
+                    else self.put_formatted(v.span, sink, x, v.ty, if spec.starts_with("%") then spec else "%" + spec)
+
+    // A value written to a sink in nex's spelling.
+    put_value(*self, span: Span, sink: string, v: string, t: Ty)
+        t match
+            Int(bits, signed) ->
+                if bits == 64 && !signed then self.call("nex_put_uint", s"$sink, $v", "i64, i64", "")
+                else self.call("nex_put_int", s"$sink, ${self.widen64(v, bits, signed)}", "i64, i64", "")
+            Real(bits) ->
+                if bits == 64 then self.call("nex_put_real", s"$sink, $v", "i64, f64", "")
+                elif bits == 32 then self.call("nex_put_real32", s"$sink, $v", "i64, f32", "")
+                else self.call("nex_put_real16", s"$sink, ${self.def(s"arith.extf $v : f16 to f32")}", "i64, f32", "")
+            Complex(bits) ->
+                val c = s"complex<f$bits>"
+                var re = self.def(s"complex.re $v : $c")
+                var im = self.def(s"complex.im $v : $c")
+                val at = if bits == 16 then 32 else bits
+
+                if bits == 16
+                    re = self.def(s"arith.extf $re : f16 to f32")
+                    im = self.def(s"arith.extf $im : f16 to f32")
+
+                self.call(s"nex_put_complex${if bits == 64 then "" else s"$bits"}", s"$sink, $re, $im", s"i64, f$at, f$at", "")
+            Bool -> self.call("nex_put_bool", s"$sink, $v", "i64, i1", "")
+            Str -> self.call("nex_put_str", s"$sink, $v", "i64, !llvm.ptr", "")
+            _ -> self.later(span, s"printing ${show_ty(t)}")
+
+    // A value under an `f"..."` specifier, which the elaborator has checked against its type.
+    put_formatted(*self, span: Span, sink: string, v: string, t: Ty, spec: string)
+        val s = self.string_ref(spec)
+
+        if spec.ends_with("s")
+            var text = v
+
+            if !ty_eq(t, Ty.Str)
+                val inner = self.call("nex_sink_new", "", "", "i64")
+
+                self.put_value(span, inner, v, t)
+                text = self.call("nex_sink_finish", inner, "i64", "!llvm.ptr")
+
+            self.call("nex_put_fmt_str", s"$sink, $text, $s", "i64, !llvm.ptr, !llvm.ptr", "")
+            return
+
+        t match
+            Int(bits, signed) ->
+                val b = self.def(s"arith.constant $bits : i32")
+                val sg = self.def(s"arith.constant $signed")
+
+                self.call("nex_put_fmt_int", s"$sink, ${self.widen64(v, bits, signed)}, $b, $sg, $s", "i64, i64, i32, i1, !llvm.ptr", "")
+            Real(bits) ->
+                val x = if bits == 64 then v else self.def(s"arith.extf $v : f$bits to f64")
+
+                self.call("nex_put_fmt_real", s"$sink, $x, $s", "i64, f64, !llvm.ptr", "")
+            _ -> self.later(span, s"`$spec` on ${show_ty(t)}")
+
+    // -- the program's arguments ------------------------------------------------------------------
+
+    is_args(*self, e: TExpr) -> bool = *e.kind match
+        TLocal(id) -> self.args_local == Some(id)
+        _ -> false
+
+    // An array node: `args[k]` and `for a in args` on the arguments `main` takes; every other array
+    // is not compiled yet.
+    array(*self, e: TExpr, op: TArr) -> string
+        op match
+            TIndex(target, subs) ->
+                if self.is_args(target) && subs.len() == 1
+                    subs[0] match
+                        TSubAt(k) ->
+                            val i = self.ex(k)
+
+                            return self.call("nex_arg", self.widen64(i, bits_of(k.ty), is_signed(k.ty)), "i64", "!llvm.ptr")
+                        _ -> ()
+            TForEach(id, var_id, a, body) ->
+                if self.is_args(a) then return self.for_args(e.span, id, var_id, body)
+            _ -> ()
+
+        self.unsupported(e.span, "an array")
+
+    // `for a in args`: the arguments from the first.
+    for_args(*self, span: Span, id: usize, var_id: usize, body: TExpr) -> string
+        val n = self.call("nex_arg_count", "", "", "i64")
+        val counter = self.alloca("i64")
+
+        self.op(s"llvm.store %one, $counter : i64, !llvm.ptr")
+        self.op("scf.while : () -> () {")
+
+        val more = self.def(s"arith.cmpi sle, ${self.def(s"llvm.load $counter : !llvm.ptr -> i64")}, $n : i64")
+
+        self.loop_condition(more)
+        self.op("} do {")
+
+        val k = self.def(s"llvm.load $counter : !llvm.ptr -> i64")
+
+        self.bind_local(span, var_id)
+        self.store(span, self.local_ptr(span, var_id), self.call("nex_arg", k, "i64", "!llvm.ptr"), Ty.Str)
+        self.ex(body)
+        self.end_pass(id)
+        self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
+        self.op("scf.yield")
+        self.op("}")
+        self.after_loop(id)
+        ""
+end Emitter

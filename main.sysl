@@ -1,11 +1,15 @@
-// The `nex` command. The subcommands arrive with the phases they drive, in the order PLAN.md
-// gives: `tokens` prints what the lexer reads, `parse` the tree the parser builds, `elaborate` the
-// typed IR, or every diagnostic the elaborator gives.
+// The `nex` command. `tokens` prints what the lexer reads, `parse` the tree the parser builds,
+// `elaborate` the typed IR, or every diagnostic the elaborator gives; `emit` the MLIR module.
+// `compile` makes a native program, and `run` makes one in a temporary directory, runs it with the
+// arguments after `--` and exits with its status. `--fpe-trap`, before the file, makes real division
+// by zero, invalid operations and overflow trap (DESIGN §2.5).
 
-import sysl.fs.read_bytes
+import sysl.buf.{Buf, buf}
+import sysl.fs.{make_temp_dir, read_bytes, remove_dir_all}
+import sysl.process.run
 import sh.sysl.parsing.{Source, full_report, source}
 
-private val usage = "usage: nex <tokens | parse | elaborate | run | test | compile> <file.nex>"
+private val usage = "usage: nex <tokens | parse | elaborate | emit | compile | run> [--fpe-trap] <file.nex> [-o out] [-- args]"
 
 main(args: []string)
     if args.len < 3
@@ -13,11 +17,59 @@ main(args: []string)
         exit(2)
 
     val command = args[1]
-    val file = args[2]
+    var fpe_trap = false
+    var k = 2
+
+    if args[k] == "--fpe-trap"
+        fpe_trap = true
+        k += 1
+
+    if k >= args.len
+        print(usage)
+        exit(2)
+
+    val file = args[k]
+
+    if command == "emit"
+        mlir_of(file, fpe_trap) match
+            Ok(text) -> prints(text)
+            Err(m) -> fail(m)
+        return
+
+    if command == "compile" || command == "run"
+        val tc = find_toolchain(args[0]) match
+            Ok(t) -> t
+            Err(m) -> fail(m)
+
+        if command == "compile"
+            val out = if k + 2 < args.len && args[k + 1] == "-o" then args[k + 2] else default_output(file)
+
+            compile_file_here(file, out, tc, fpe_trap)
+            return
+
+        var program_args: Buf[string] = buf()
+
+        if k + 1 < args.len && args[k + 1] == "--"
+            for a in args[k + 2..]
+                program_args.push(a)
+
+        val (work, exe) = compile_temp(file, tc, fpe_trap) match
+            Ok(p) -> p
+            Err(m) -> fail(m)
+
+        val status = run(exe, program_args.view())
+
+        remove_dir_all(work)
+
+        status match
+            Ok(Exited(code)) -> exit(code)
+            Ok(Signalled(sig)) -> exit(128 + sig)
+            Ok(other) -> fail(s"nex: ${other}")
+            Err(e) -> fail(s"nex: cannot run the program: $e")
 
     if command != "tokens" && command != "parse" && command != "elaborate"
-        print(s"nex: '${command}' is not implemented yet")
-        exit(1)
+        print(s"nex: '${command}' is not a command\n$usage")
+        exit(2)
 
     val bytes = read_bytes(file) match
         Ok(b) -> b
@@ -52,6 +104,23 @@ main(args: []string)
 
             fail(r.render(src))
 end main
+
+// `program.nex` compiles to `program`.
+private default_output(file: string) -> string =
+    if file.ends_with(".nex") then file[0..<file.len - 4] elif file.ends_with(".lnex") then file[0..<file.len - 5] else file + ".out"
+
+private compile_file_here(file: string, out: string, tc: Toolchain, fpe_trap: bool)
+    val work = make_temp_dir("nex") match
+        Ok(w) -> w
+        Err(e) -> fail(s"nex: cannot make a temporary directory: $e")
+
+    val done = compile_file(file, out, work, tc, fpe_trap)
+
+    remove_dir_all(work)
+
+    done match
+        Ok(_) -> ()
+        Err(m) -> fail(m)
 
 private fail(text: string) -> never
     eprints(text)
