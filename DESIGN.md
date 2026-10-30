@@ -1463,32 +1463,32 @@ and runs it under `mpirun -np N` (`NEX_MPIRUN` overrides the launcher; inside a 
 importing `mpi` run without a launcher is a single rank (`MPI_Init` gives a world of one), which is
 how it runs in the playground's compiled mode and in `nex test` without `--np`.
 
-#### 9.6.8 Open questions
+#### 9.6.8 Decisions
 
 1. **Rank numbering.** MPI numbers ranks from 0; nex indexes from 1 and Fortran's `this_image()`
-   from 1. *Recommendation: 0-based ranks in `mpi`*, since a rank is an identity, not an index, and
+   from 1. *Decided: 0-based ranks in `mpi`*, since a rank is an identity, not an index, and
    every `mpirun` message, Slurm's `SLURM_PROCID` and MPI document are 0-based; coarray images
    (§9.7) are 1-based, as Fortran's are.
-2. **Implicit `MPI_Init`/`MPI_Finalize`.** *Recommendation: implicit, by importing `mpi`*, as
+2. **Implicit `MPI_Init`/`MPI_Finalize`.** *Decided: implicit, by importing `mpi`*, as
    coarrays are; an explicit `init()` is one more thing to forget and to call twice.
 3. **The nonblocking form.** The `exchange` block (scoped, checked, no request values) or a
    `Request` value with `wait` (MPI's shape, flexible, not checkable without linear types).
-   *Recommendation: the block*, with `Request` left out until a program needs a request that
+   *Decided: the block*, with `Request` left out until a program needs a request that
    outlives a scope.
 4. **The shim's language.** C compiled by the found `mpicc` (the cluster's own source of headers
-   and flags), or sysl in the runtime built per MPI. *Recommendation: C through `mpicc`*, a few
+   and flags), or sysl in the runtime built per MPI. *Decided: C through `mpicc`*, a few
    hundred lines that exist only to read `mpi.h`; everything else in the module is nex.
 5. **Default reduction determinism.** Reproducible for a fixed rank count by default with
    `fast = true` to opt out (above), or MPI's own by default with `reproducible = true` to opt in.
-   *Recommendation: reproducible by default*, the rule `parallel` already follows; the cost is one
+   *Decided: reproducible by default*, the rule `parallel` already follows; the cost is one
    allgather of partials, small next to the computation of a real code, and `fast = true` is there
    for the code that measures otherwise.
 6. **`global_sum`'s np-independence across rank counts.** Worth a separate entry point, or folded
    into `allreduce` of a distributed array once arrays know their distribution (coarrays).
-   *Recommendation: the separate `global_sum`/`global_dot`/`global_norm2` now*, since they are what
+   *Decided: the separate `global_sum`/`global_dot`/`global_norm2` now*, since they are what
    a Krylov solver needs and the only place rank-count independence is cheap.
 7. **Errors.** Traps only (above), or a `Result` form for the errors a fault-tolerant program
-   handles. *Recommendation: traps only*, with fault tolerance as its own later item.
+   handles. *Decided: traps only*, with fault tolerance as its own later item.
 
 ### 9.7 Coarrays (planned)
 
@@ -1521,12 +1521,12 @@ and locks `MPI_Fetch_and_op` / `MPI_Compare_and_swap` on a counter window; `form
 shim, datatype cache and determinism rule are what coarrays reuse; failed images
 (`stat_failed_image`) wait for ULFM.
 
-**Open questions for coarrays.**
+**Decisions for coarrays.**
 
-8. **Coindex spelling.** Fortran's square brackets are nex's indexing. *Recommendation: braces*,
+8. **Coindex spelling.** Fortran's square brackets are nex's indexing. *Decided: braces*,
    `u{p}[i]` — free in expressions today (only import lists use them), short, and visibly not an
    index.
-9. **Mixing `mpi` and coarrays in one program.** *Recommendation: allowed*, with `world()` the
+9. **Mixing `mpi` and coarrays in one program.** *Decided: allowed*, with `world()` the
    initial team's communicator, as Fortran compilers built over MPI allow it in practice.
 
 ---
