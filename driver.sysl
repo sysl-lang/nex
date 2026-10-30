@@ -74,8 +74,8 @@ mlir_of(file: string, fpe_trap: bool, opts: LoadOptions = LoadOptions(None, fals
 compile_file(file: string, out: string, work: string, tc: Toolchain, fpe_trap: bool, opts: LoadOptions = LoadOptions(None, false)) -> Result[unit, string] =
     lower_module(mlir_of(file, fpe_trap, opts)?, out, work, tc)
 
-// An MLIR module lowered to a native program at `out`, its intermediate files in `work`.
-lower_module(mlir: string, out: string, work: string, tc: Toolchain) -> Result[unit, string]
+// An MLIR module lowered to LLVM IR in `work`; the file's path.
+private translate(mlir: string, work: string, tc: Toolchain) -> Result[string, string]
     val input = s"$work/program.mlir"
     val lowered = s"$work/program.llvm.mlir"
     val ir = s"$work/program.ll"
@@ -83,7 +83,16 @@ lower_module(mlir: string, out: string, work: string, tc: Toolchain) -> Result[u
     write_text(input, mlir).map_err((e) -> s"nex: cannot write $input: $e")?
     tool(s"${tc.llvm_bin}/mlir-opt", [input, s"--pass-pipeline=${pipeline_for(mlir)}", "-o", lowered], Inherit)?
     write_text(ir, tool(s"${tc.llvm_bin}/mlir-translate", ["--mlir-to-llvmir"], Stdio.FromPath(lowered))?).map_err((e) -> s"nex: cannot write $ir: $e")?
+    Ok(ir)
 
+// An MLIR module as the LLVM IR `clang -O2` optimizes it to, before code generation: where a loop
+// shows whether it was vectorized.
+optimized_ir(mlir: string, work: string, tc: Toolchain) -> Result[string, string] =
+    tool(s"${tc.llvm_bin}/clang", ["-Wno-override-module", "-O2", "-S", "-emit-llvm", translate(mlir, work, tc)?, "-o", "-"], Inherit)
+
+// An MLIR module lowered to a native program at `out`, its intermediate files in `work`.
+lower_module(mlir: string, out: string, work: string, tc: Toolchain) -> Result[unit, string]
+    val ir = translate(mlir, work, tc)?
     var args: Buf[string] = buf()
 
     for a in ["-Wno-override-module", "-O2", ir, tc.runtime, "-lm", "-o", out]
