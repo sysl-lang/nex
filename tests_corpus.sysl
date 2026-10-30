@@ -33,7 +33,7 @@ corpus_lexes()
     assert_eq(count, 433)
 
 // The categories whose programs are scalar: they use no struct, enum, generic or unit. Some of them
-// still reach for an array or a tuple, which the elaborator does not handle yet.
+// still reach for an array, which the elaborator does not handle yet.
 private val SCALAR_CATEGORIES = ["top-level bindings + print", "scalar arithmetic", "comparison + logical", "chained comparison", "chained comparisons", "control flow", "blocks + scoping", "top-level initialization", "compound assignment", "functions", "string interpolation", "const fn calls", "inout by-ref"]
 
 private scalar_names() -> Buf[string]
@@ -49,7 +49,7 @@ private scalar_names() -> Buf[string]
 
     out
 
-@test("every scalar corpus program elaborates, or waits only on arrays or tuples")
+@test("every scalar corpus program elaborates, or waits only on arrays")
 corpus_scalar_programs_elaborate()
     var clean = 0
     var waiting = 0
@@ -66,8 +66,8 @@ corpus_scalar_programs_elaborate()
 
                 waiting += 1
 
-    assert_eq(clean, 151)
-    assert_eq(waiting, 2)
+    assert_eq(clean, 152)
+    assert_eq(waiting, 1)
 
 // The categories whose programs are arrays and the array prelude.
 private val ARRAY_CATEGORIES = ["arrays", "prelude", "[byte] buffer"]
@@ -91,6 +91,34 @@ corpus_array_programs_elaborate()
                 Err(ds) -> assert(false, s"${cols[0]}: ${ds[0].message} @${src.locate(ds[0].span.start)}")
 
     assert_eq(clean, 139)
+
+// The categories of structs, tuples, enums and escaping closures.
+private val AGGREGATE_CATEGORIES = ["structs", "tuple destructuring", "paren-less tuple construction", "sum types (enums)", "closure escape (§4.11)"]
+
+@test("every struct, tuple, enum and closure-escape corpus program elaborates")
+corpus_aggregate_programs_elaborate()
+    var clean = 0
+
+    for line in split(INDEX, "\n")
+        if line.len == 0 || line.starts_with("file\t") then continue
+
+        val cols = split(line, "\t")
+        var wanted = false
+
+        for c in AGGREGATE_CATEGORIES
+            if cols[1] == c then wanted = true
+
+        if !wanted then continue
+
+        val name = cols[0]
+        val src = source_of(name, read_text(s"testdata/corpus/${name}.nex").unwrap())
+
+        elaborate(parse_program(src).unwrap()) match
+            Ok(_) -> clean += 1
+            Err(ds) -> assert(false, s"${name}: ${ds[0].message} @${src.locate(ds[0].span.start)}")
+
+    assert_eq(clean, 38)
+end corpus_aggregate_programs_elaborate
 
 @test("all 433 corpus programs parse")
 corpus_parses()

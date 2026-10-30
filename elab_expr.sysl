@@ -221,12 +221,12 @@ impl Elab
             Measured(_, _) -> self.not_yet(span, "a value with a unit of measure")
             Range(lo, hi, inclusive, stride) -> self.range_value(span, lo, hi, inclusive, stride, want)
             ExprKind.Array(elems) -> self.array_literal(span, elems, want)
-            ExprKind.Tuple(_) -> self.not_yet(span, "a tuple")
+            ExprKind.Tuple(elems) -> self.tuple(span, elems, want)
             Index(target, indices) -> self.index(span, self.infer(target), indices)
-            TupleField(_, _) -> self.not_yet(span, "a tuple field")
+            TupleField(receiver, index) -> self.tuple_field(span, receiver, index)
             ParallelFor(_, _, _) -> self.not_yet(span, "a `parallel for`")
             Parallel(_) -> self.not_yet(span, "a `parallel` expression")
-            Match(_, _) -> self.not_yet(span, "a `match`")
+            Match(scrutinee, cases) -> self.match_expr(span, scrutinee, cases, want)
             NamedArg(_, _) ->
                 self.fail(span, "a named argument stands only in a call's argument list")
                 self.invalid(span)
@@ -256,6 +256,10 @@ impl Elab
 
                 return texpr(span, ty, TGlobalRef(n))
             Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(n))
+            None -> ()
+
+        self.type_or_variant(span, n) match
+            Some(v) -> return v
             None -> ()
 
         if self.is_prelude_constant(n) then return self.constant(span, n, want)
@@ -717,12 +721,7 @@ impl Elab
                 val name = *pat.kind match
                     Name(n) -> n
                     Wildcard -> return self.infer(init)
-                    _ ->
-                        // Its names are still bound, untyped, so their uses are not reported too.
-                        for n in pattern_names(pat)
-                            self.declare_local(pat.span, n, Error, lkind)
-
-                        return self.not_yet(pat.span, "a destructuring binding")
+                    _ -> return self.destructure_local(d.span, kind, pat, typ, init)
 
                 typ match
                     Some(t) ->
@@ -794,7 +793,7 @@ impl Elab
     // -- lambdas ----------------------------------------------------------------------------------
 
     reserve_lambda(*self, span: Span) -> usize
-        self.lambdas.push(TLambda("", buf(), Error, buf(), texpr(span, Error, TInvalid)))
+        self.lambdas.push(TLambda("", buf(), Error, buf(), texpr(span, Error, TInvalid), true))
         self.lambdas.len() - 1
 
     // `(x, y) -> body`: its parameter types as written, or from the function type its position
@@ -832,6 +831,11 @@ impl Elab
             None -> ()
 
         val lid = self.reserve_lambda(span)
+
+        if self.agg.passing
+            self.agg.passing = false
+            self.agg.passed.push(lid)
+
         val ty = self.lambda_body(lid, "", span, names, tys, modes, ret, body)
 
         texpr(span, ty, TLambdaRef(lid))
@@ -856,7 +860,7 @@ impl Elab
         val frame = self.fx.frames.pop().unwrap()
 
         self.close()
-        self.lambdas.set(lid, TLambda(name, ids, frame.ret, buf(), b))
+        self.lambdas.set(lid, TLambda(name, ids, frame.ret, buf(), b, self.check_captures(lid, span)))
         fn_type(tys, modes, frame.ret)
     end lambda_body
 
@@ -868,8 +872,12 @@ impl Elab
 
         val n = *target.kind match
             Name(n) -> n
+            Field(receiver, name) -> return self.select_field(span, self.place(receiver), name)
+            TupleField(receiver, index) -> return self.select_element(span, self.place(receiver), index)
             Index(t, indices) -> return self.index(span, self.place(t), indices)
-            _ -> return self.not_yet(span, "assignment to a field")
+            _ ->
+                self.fail(span, "only a variable, an element or a field can be assigned")
+                return self.invalid(span)
 
         self.lookup_local(n) match
             Some(id) ->
@@ -999,6 +1007,8 @@ private what_local(kind: LocalKind) -> string = kind match
 
 private show_place(e: Expr) -> string = *e.kind match
     Name(n) -> n
+    Field(r, name) -> show_place(r) + "." + name
+    TupleField(r, index) -> show_place(r) + s".${index}"
     _ -> "the target"
 
 copy_fx(fx: Fx) -> Fx

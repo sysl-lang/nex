@@ -499,6 +499,8 @@ impl Elab
 
                 val lid = self.reserve_lambda(e.span)
 
+                // Written straight as the argument, it is borrowed for the call and does not escape.
+                self.agg.passed.push(lid)
                 texpr(e.span, self.lambda_body(lid, "", e.span, names, tys, reads(names.len()), None, body), TLambdaRef(lid))
             _ -> self.elab(e, Some(fn_type(ptys, reads(ptys.len()), Error)))
 

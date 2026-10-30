@@ -11,7 +11,14 @@
 //
 // A function prints as `(def name ((param type) ...) result body)` and a module-level binding as
 // `(val name type init)`; the lambdas follow the declarations, one to a line, as
-// `(lambda N name ((param type) ...) result (captures ...) body)`.
+// `(lambda N name ((param type) ...) result (captures ...) body)`, with `passed` before the body of
+// one written straight as an argument, which does not outlive the call.
+//
+// A struct prints as `(struct Name (field type) ...)` and an enum as `(enum Name Bare (Fielded (field
+// type) ...) ...)`, before the other declarations. A struct built is `(new:T args...)`, a variant
+// `(variant:T Name args...)`, a field `(.x:T value)` and a tuple's element `(.1:T value)`; a
+// destructuring binding prints its pattern, `(val (a#0:int64 _) init)`, and a `match` arm its
+// pattern beside its body, `((Converged x#1) x#1)`.
 
 import sysl.buf.{Buf, buf}
 import sysl.fmt.shortest
@@ -23,7 +30,16 @@ show_tprogram(p: TProgram) -> string
 
     for d in p.decls
         out.push(d match
+            StructDecl(s) -> s"(struct ${s.name}${show_fields(s.fields)})"
+            EnumDecl(e) ->
+                var vs: Buf[string] = buf()
+
+                for v in e.variants
+                    vs.push(if v.fields.len() == 0 then v.name else s"(${v.name}${show_fields(v.fields)})")
+
+                tform("enum " + e.name, vs)
             GlobalDecl(g) -> s"(${bind_word(g.kind)} ${g.name} ${show_ty(g.ty)} ${show_texpr(p, g.init)})"
+            TupleGlobalDecl(g) -> s"(${bind_word(g.kind)} ${show_bind(p, g.pat)} ${show_ty(g.ty)} ${show_texpr(p, g.init)})"
             FunDecl(f) -> s"(def ${f.name} ${show_params(p, f.params, f.defaults)} ${show_ty(f.ret)} ${show_texpr(p, f.body)})")
 
     for k in 0..<p.lambdas.len()
@@ -40,7 +56,9 @@ show_tprogram(p: TProgram) -> string
 
         val name = if l.name.len == 0 then "_" else l.name
 
-        out.push(s"(lambda ${k} ${name} ${show_params(p, l.params, nodefaults)} ${show_ty(l.ret)} ${tform("captures", caps)} ${show_texpr(p, l.body)})")
+        val passed = if l.escapes then "" else " passed"
+
+        out.push(s"(lambda ${k} ${name} ${show_params(p, l.params, nodefaults)} ${show_ty(l.ret)} ${tform("captures", caps)}${passed} ${show_texpr(p, l.body)})")
 
     join(out.view(), "\n")
 end show_tprogram
@@ -185,9 +203,70 @@ show_texpr(p: TProgram, e: TExpr) -> string
         TStop(code) -> code match
             Some(x) -> s"(stop ${show_texpr(p, x)})"
             None -> "(stop)"
+        TTuple(elems) ->
+            texprs_into(p, &items, elems)
+            tform(typed("tuple", e.ty), items)
+        TTupleField(v, k) -> s"(${typed(s".${k + 1}", e.ty)} ${show_texpr(p, v)})"
+        TNew(args) ->
+            texprs_into(p, &items, args)
+            tform(typed("new", e.ty), items)
+        TField(v, name, _) -> s"(${typed("." + name, e.ty)} ${show_texpr(p, v)})"
+        TVariant(name, _, args) ->
+            items.push(name)
+            texprs_into(p, &items, args)
+            tform(typed("variant", e.ty), items)
+        TMatch(s, arms) ->
+            items.push(show_texpr(p, s))
+
+            for a in arms
+                items.push(s"(${show_pat(p, a.pat)} ${show_texpr(p, a.body)})")
+
+            tform(typed("match", e.ty), items)
+        TDestructure(kind, pat, init) -> s"(${bind_word(kind)} ${show_bind(p, pat)} ${show_texpr(p, init)})"
         TArray(op) -> show_tarr(p, e.ty, *op)
         TInvalid -> "?"
 end show_texpr
+
+// ` (x real64) (y real64)`: each field and its type, after a struct's or a variant's name.
+private show_fields(fields: Buf[FieldInfo]) -> string
+    var out = ""
+
+    for f in fields
+        out = out + s" (${f.name} ${show_ty(f.ty)})"
+
+    out
+
+// `(a#0:int64 (b#1:real64 _))`: what a destructuring binding binds, a local with its type.
+private show_bind(p: TProgram, b: TBind) -> string = b match
+    BLocal(id) -> s"${local_name(p, id)}:${show_ty(p.locals[id].ty)}"
+    BGlobal(name) -> name
+    BSkip -> "_"
+    BTuple(elems) ->
+        var out: Buf[string] = buf()
+
+        for x in elems
+            out.push(show_bind(p, x))
+
+        "(" + join(out.view(), " ") + ")"
+
+// `Red`, `(Converged x#1)`, `(MaxIters _ last#2)`, `c#3` or `_`.
+private show_pat(p: TProgram, pat: TPat) -> string = pat match
+    PVariant(name, _, fields) ->
+        if fields.len() == 0 then return name
+
+        var out: Buf[string] = buf()
+
+        out.push(name)
+
+        for f in fields
+            out.push(f match
+                Some(id) -> local_name(p, id)
+                None -> "_")
+
+        "(" + join(out.view(), " ") + ")"
+    PAny(bind) -> bind match
+        Some(id) -> local_name(p, id)
+        None -> "_"
 
 private texprs_into(p: TProgram, out: *Buf[string], es: Buf[TExpr])
     for e in es

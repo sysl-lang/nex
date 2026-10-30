@@ -641,6 +641,8 @@ impl Elab
     fun_argument(*self, k: usize, arg: Expr, ty: Ty, mode: Mode, what: string) -> TExpr
         if mode == Inout || is_array(ty) || is_wild(ty) || has_error(ty) then return self.argument(arg, ty, mode, what)
 
+        self.pass_lambda(arg)
+
         val v = self.elab(arg, Some(ty))
 
         if !is_array(v.ty) then return self.coerce(v, ty, what)
@@ -734,6 +736,8 @@ end impurity
 // The module-level binding a place is in, where it is in one.
 private root_global(place: TExpr) -> Option[string] = *place.kind match
     TGlobalRef(n) -> Some(n)
+    TField(v, _, _) -> root_global(v)
+    TTupleField(v, _) -> root_global(v)
     TArray(op) -> *op match
         TIndex(target, _) -> root_global(target)
         _ -> None
@@ -800,6 +804,17 @@ private children(e: TExpr) -> Buf[TExpr]
         TStop(v) -> v match
             Some(x) -> out.push(x)
             None -> ()
+        TTuple(elems) -> out.extend(elems.view())
+        TTupleField(v, _) -> out.push(v)
+        TNew(args) -> out.extend(args.view())
+        TField(v, _, _) -> out.push(v)
+        TVariant(_, _, args) -> out.extend(args.view())
+        TMatch(s, arms) ->
+            out.push(s)
+
+            for a in arms
+                out.push(a.body)
+        TDestructure(_, _, init) -> out.push(init)
         TArray(op) -> array_children(*op, &out)
         _ -> ()
 
