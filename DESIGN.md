@@ -1748,7 +1748,13 @@ with these rules (**PROPOSED** where marked).
   capture an `inout` parameter (**PROPOSED** for a local `def`, which Fortran's internal procedures
   would allow; nex's may be returned). A `var` array moves into the one lambda that captures it, and
   a second lambda capturing it is a compile error; a scalar `var` or a `val` may be captured by any
-  number.
+  number. **A lambda captures the variable, not its value**, as a Fortran internal procedure reaches
+  its host's variables: a write the function makes after the lambda is made is seen by the lambda,
+  a write the lambda makes is seen by the function, and every lambda capturing one `var` shares it.
+  The variable lives as long as the last lambda holding it, so a returned closure keeps counting
+  (a `counter()` returning a lambda that adds 1 to its local `n`), and two calls make two variables. A binding is a new
+  variable each time it runs: a lambda made on one pass of a loop keeps that pass's `val` and loop
+  variable.
 - **`print` spells an aggregate as the reference does**: a tuple `(1, a)`, a struct
   `Point { x=1.0, y=2.0 }`, a variant `Converged(3.14)` or `Diverged`, each field as `print` spells
   it alone (a string without quotes). A generic struct prints by its own name, without its type

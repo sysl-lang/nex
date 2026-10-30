@@ -341,6 +341,9 @@ not_interpreted_is_exact()
     for f in entries(repo("compiler")).unwrap()
         if f.starts_with("tests_") && f.ends_with(".sysl") && f != "tests_not_interpreted.sysl" then sources += read_text(repo(s"compiler/$f")).unwrap()
 
+    // Every entry the interpreter runs, so one run names them all.
+    var running = ""
+
     for (c, stage) in NOT_INTERPRETED
         assert(stage == "I2" || stage == "I3" || stage == "I4" || stage == "I5", s"`$c`: `$stage` is no stage of the interpreter")
         assert(!listed(c), s"`$c` is in COMPILED_ONLY too, which already keeps it from the interpreter")
@@ -354,7 +357,9 @@ not_interpreted_is_exact()
                 found = true
 
                 load_source(source_of(file, read_text(file).unwrap())) match
-                    Ok(p) -> assert(interpretable(p).len() > 0, s"`$c` is in NOT_INTERPRETED, but the interpreter runs it: take it out")
+                    Ok(p) -> if interpretable(p).len() == 0 then running += s" `$c`"
                     Err(_) -> ()
 
         assert(found, s"`$c` in NOT_INTERPRETED names no testdata program and no test")
+
+    assert(running == "", s"in NOT_INTERPRETED, but the interpreter runs them: take them out:$running")

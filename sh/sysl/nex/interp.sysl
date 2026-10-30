@@ -53,22 +53,34 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
     for a in args
         kept.push(a)
 
-    val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), None, false, buf(), buf())
+    val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), buf(), 0)
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), None, false, buf(), buf(), buf())
     val init = it.program(test)
 
-    if it.diags.len() > 0 then return Err(it.diags)
+    if it.diags.len() > 0
+        shut(m)
+        return Err(it.diags)
 
-    Ok(run_program(m, init))
+    val ending = run_program(m, init)
+
+    shut(m)
+    Ok(ending)
 
 // What of `p` the interpreter does not run yet, each a diagnostic; empty where it runs all of it.
 // Nothing is run.
 interpretable(p: TProgram) -> Buf[Diagnostic]
-    val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), None, false, buf(), buf())
+    val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), buf(), 0)
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), None, false, buf(), buf(), buf())
 
     it.program(None)
+    shut(m)
     it.diags
+
+// The machine let go of its code: every compiled closure holds the machine, so the two would keep
+// each other alive past the run.
+private shut(m: &Machine)
+    m.funs = buf()
+    m.lambdas = buf()
 
 // The initializers run in order, then `main`; the first signal that leaves one ends the program.
 private run_program(m: &Machine, init: Buf[Compiled]) -> Ending
@@ -90,19 +102,33 @@ private ended(s: Signal) -> Ending = s match
 
 private[nex] type Code = &Fn(&Cells) -> Answer
 
+// What binds a value to a local or a pattern's names, and what stores one into a list of places.
+private[nex] type Binder = &Fn(&Cells, Value) -> unit
+private[nex] type Storer = &Fn(&Cells, Value) -> Answer
+
 // A function compiled: its code, and how many slots its frame holds.
 private[nex] struct Compiled
     code: Code
     slots: usize
 
+// A lambda or a local `def` compiled. Its frame holds its parameters, then what it captures, in
+// `TLambda.captures` order; a local `def` that calls itself finds itself in `self_slot`.
+private[nex] struct Lambda
+    code: Code
+    slots: usize
+    params: usize
+    self_slot: Option[usize]
+
 // What every closure of a running program shares: its arguments, where its text goes, whether real
-// arithmetic traps, the module-level bindings, the functions by number, and how deep the calls are.
+// arithmetic traps, the module-level bindings, the functions and the lambdas by number, and how deep
+// the calls are.
 private[nex] struct Machine
     args: Buf[string]
     write: &Fn(Stream, string) -> unit
     fpe: bool
     globals: &Cells
     funs: Buf[Compiled]
+    lambdas: Buf[Lambda]
     depth: int
 
 private frame_of(slots: usize) -> &Cells
@@ -125,14 +151,6 @@ private landed(s: Signal, loop_id: usize) -> int = s match
     Cycling(id) -> if id == loop_id then 2 else 0
     _ -> 0
 
-private deref(v: Value) -> Value = v match
-    VRef(cells, k) -> cells.v[k]
-    _ -> v
-
-private store_through(r: Value, v: Value) = r match
-    VRef(cells, k) -> cells.v.set(k, v)
-    _ -> ()
-
 // A call of function `k`: its frame made, the arguments stored in its first slots, its body run, a
 // `return` taken as its value.
 private call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answer
@@ -144,11 +162,34 @@ private call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answer
 
         frame.v.set(j, a(c)?)
 
+    run_frame(m, f.code, frame)
+
+// A call of lambda `k` made with `env`: the arguments in the first slots of its frame, what it
+// captures after them.
+private call_lambda(m: &Machine, k: usize, env: Buf[Value], args: Buf[Code], c: &Cells) -> Answer
+    val l = m.lambdas[k]
+    val frame = frame_of(l.slots)
+
+    for j in 0..<args.len()
+        val a = args[j]
+
+        frame.v.set(j, a(c)?)
+
+    for j in 0..<env.len()
+        frame.v.set(l.params + j, env[j])
+
+    l.self_slot match
+        Some(s) -> frame.v.set(s, VClosure(k, env))
+        None -> ()
+
+    run_frame(m, l.code, frame)
+
+// A body run in its frame, a call deeper.
+private run_frame(m: &Machine, code: Code, frame: &Cells) -> Answer
     if m.depth >= MAX_CALL_DEPTH then return trapped(call_depth_message())
 
     m.depth += 1
 
-    val code = f.code
     val r = code(frame)
 
     m.depth -= 1
@@ -181,6 +222,8 @@ private[nex] struct Interp
     reported: bool
     fun_names: Buf[string]
     global_names: Buf[string]
+    // By local, whether a lambda captures it, which puts it in a cell its slot holds a `VRef` to.
+    captured: Buf[bool]
 
 impl Interp
     // A construct not interpreted yet, reported once per function.
@@ -200,6 +243,11 @@ impl Interp
 
         for _ in 0..<self.prog.locals.len()
             self.slot.push(-1)
+            self.captured.push(false)
+
+        for l in self.prog.lambdas
+            for id in l.captures
+                self.captured.set(id, true)
 
         for d in self.prog.decls
             d match
@@ -212,8 +260,7 @@ impl Interp
                     self.m.globals.v.push(VVoid)
                 TupleGlobalDecl(g) ->
                     tuples.push(g)
-                    self.reported = false
-                    self.later(g.span, "a tuple taken apart")
+                    self.global_binds(g.pat)
                 ExternDecl(x) -> self.diags.push(error(x.span, "a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled"))
                 _ -> ()
 
@@ -225,7 +272,7 @@ impl Interp
         var out: Buf[Compiled] = buf()
 
         for k in init_order(self.prog, globals, tuples)
-            if k < globals.len() then out.push(self.global(globals[k], k))
+            out.push(if k < globals.len() then self.global(globals[k], self.global_number(globals[k].name)) else self.global_tuple(tuples[k - globals.len()]))
 
         out.push(self.entry(test match
             Some(k) -> self.prog.tests[k]
@@ -260,9 +307,47 @@ impl Interp
 
         if f.name == "main" && f.params.len() == 1 then self.args_local = Some(f.params[0])
 
-        val body = self.ex(f.body)
+        val body = self.boxing(f.params, self.ex(f.body))
 
         Compiled(body, self.next)
+
+    // `body` after the parameters a lambda captures are moved into cells, each a cell of its own.
+    boxing(*self, params: Buf[usize], body: Code) -> Code
+        var boxed: Buf[usize] = buf()
+
+        for p in params
+            if self.captured[p] && !self.is_inout(p) then boxed.push(self.slot_of(p))
+
+        if boxed.len() == 0 then return body
+
+        (c) ->
+            for s in boxed
+                c.v.set(s, cell(c.v[s]))
+
+            body(c)
+
+    // The module-level bindings a destructuring binding at module level names.
+    global_binds(*self, pat: TBind)
+        pat match
+            BGlobal(name) ->
+                self.global_names.push(name)
+                self.m.globals.v.push(VVoid)
+            BTuple(elems) ->
+                for e in elems
+                    self.global_binds(e)
+            _ -> ()
+
+    // `val a, b = …` at module level: its initializer run once, its tuple taken apart.
+    global_tuple(*self, g: TGlobalTuple) -> Compiled
+        self.begin()
+
+        val init = self.ex(g.init)
+        val bind = self.binder(g.pat)
+
+        Compiled((c) ->
+            bind(c, init(c)?)
+            Ok(VVoid)
+        , self.next)
 
     // A module-level binding's initializer, run in a frame of its own, its value stored.
     global(*self, g: TGlobal, k: usize) -> Compiled
@@ -307,13 +392,61 @@ impl Interp
         0
 
     // Whether a value of `t` is one the interpreter holds, or what it is that it does not.
-    unheld(*self, t: Ty) -> Option[string] = t match
-        Array(_, _) -> Some("an array")
-        Tuple(_) -> Some("a tuple")
-        Nominal(_, _) -> Some("a struct or an enum")
-        Measured(_, _) -> Some("a value with a unit of measure")
-        CPtr -> Some("a C pointer")
-        _ -> None
+    // An aggregate is held where every field is.
+    unheld(*self, t: Ty) -> Option[string]
+        t match
+            Array(_, _) -> return Some("an array")
+            Measured(_, _) -> return Some("a value with a unit of measure")
+            CPtr -> return Some("a C pointer")
+            _ -> ()
+
+        for f in self.parts(t)
+            self.unheld(f) match
+                Some(what) -> return Some(what)
+                None -> ()
+
+        None
+
+    // The types of every field of a tuple, a struct or each variant of an enum; none for a scalar.
+    parts(*self, t: Ty) -> Buf[Ty]
+        var out: Buf[Ty] = buf()
+
+        t match
+            Tuple(es) ->
+                for e in es
+                    out.push(e)
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) ->
+                        for f in s.fields
+                            out.push(f.ty)
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) ->
+                        for v in e.variants
+                            for f in v.fields
+                                out.push(f.ty)
+                    None -> ()
+            _ -> ()
+
+        out
+
+    struct_of(*self, name: string) -> Option[TStruct]
+        for d in self.prog.decls
+            d match
+                StructDecl(s) -> if s.name == name then return Some(s)
+                _ -> ()
+
+        None
+
+    enum_of(*self, name: string) -> Option[TEnum]
+        for d in self.prog.decls
+            d match
+                EnumDecl(e) -> if e.name == name then return Some(e)
+                _ -> ()
+
+        None
 
     is_args(*self, e: TExpr) -> bool = *e.kind match
         TLocal(id) -> self.args_local == Some(id)
@@ -339,7 +472,7 @@ impl Interp
 
                 val s = self.slot_of(id)
 
-                if self.is_inout(id) then return (c) -> Ok(deref(c.v[s]))
+                if self.indirect(id) then return (c) -> Ok(deref(c.v[s]))
 
                 return (c) -> Ok(c.v[s])
             TGlobalRef(name) ->
@@ -386,7 +519,7 @@ impl Interp
             TCall(callee, args) -> return self.call(e.span, callee, args)
             TBuiltin(name, args) -> return self.builtin(e.span, name, args, e.ty)
             TBorrow(_) -> return self.later(e.span, "a place passed `inout` other than as an argument")
-            TLambdaRef(_) -> return self.later(e.span, "a lambda")
+            TLambdaRef(lid) -> return self.closure(lid, None)
             TInterp(parts, _) ->
                 val text = self.interp(parts)
 
@@ -428,10 +561,25 @@ impl Interp
                     None -> ()
 
                 val s = self.slot_of(id)
-                val v = self.ex(init)
+
+                if !self.captured[id]
+                    val v = self.ex(init)
+
+                    return (c) ->
+                        c.v.set(s, v(c)?)
+                        Ok(VVoid)
+
+                // The cell is made before the value, so a local `def` captured by a lambda inside
+                // itself finds it; one that only calls itself reaches itself without it.
+                val v = *init.kind match
+                    TLambdaRef(lid) -> self.closure(lid, Some(id))
+                    _ -> self.ex(init)
 
                 return (c) ->
-                    c.v.set(s, v(c)?)
+                    val r = cell(VVoid)
+
+                    c.v.set(s, r)
+                    store_through(r, v(c)?)
                     Ok(VVoid)
             TAssign(op, target, value) -> return self.assign(e.span, op, target, value)
             TReturn(v) ->
@@ -456,13 +604,23 @@ impl Interp
             TParallel(_) -> return self.later(e.span, "a `parallel` construct")
             TRescale(_, _) -> return self.later(e.span, "a value with a unit of measure")
             TUnitAs(_) -> return self.later(e.span, "a value with a unit of measure")
-            TTuple(_) -> return self.later(e.span, "a tuple")
-            TTupleField(_, _) -> return self.later(e.span, "a tuple")
-            TNew(_) -> return self.later(e.span, "a struct")
-            TField(_, _, _) -> return self.later(e.span, "a struct")
-            TVariant(_, _, _) -> return self.later(e.span, "an enum")
-            TDestructure(_, _, _) -> return self.later(e.span, "a tuple taken apart")
-            TAssignTuple(_, _) -> return self.later(e.span, "a tuple taken apart")
+            TTuple(elems) -> return self.aggregate(0, elems)
+            TNew(args) -> return self.aggregate(0, args)
+            TVariant(_, tag, args) -> return self.aggregate(tag, args)
+            TTupleField(v, k) -> return self.field(v, k)
+            TField(v, _, k) -> return self.field(v, k)
+            TDestructure(_, pat, init) ->
+                val v = self.ex(init)
+                val bind = self.binder(pat)
+
+                return (c) ->
+                    bind(c, v(c)?)
+                    Ok(VVoid)
+            TAssignTuple(target, value) ->
+                val v = self.ex(value)
+                val store = self.storer(target)
+
+                return (c) -> store(c, v(c)?)
             TInvalid -> return self.later(e.span, "an invalid expression")
     end ex_kind
 
@@ -470,7 +628,199 @@ impl Interp
         LParam(mode) -> mode == Inout
         _ -> false
 
+    // Whether local `id`'s slot holds a place rather than its value: an `inout` parameter's, or the
+    // cell of a local a lambda captures.
+    indirect(*self, id: usize) -> bool = self.captured[id] || self.is_inout(id)
+
     constant_code(*self, v: Value) -> Code = (c) -> Ok(v)
+
+    // -- aggregates --------------------------------------------------------------------------------
+
+    // A struct, a tuple or a variant built from its fields' values, left to right.
+    aggregate(*self, tag: usize, elems: Buf[TExpr]) -> Code
+        var codes: Buf[Code] = buf()
+
+        for e in elems
+            codes.push(self.ex(e))
+
+        (c) ->
+            var fields: Buf[Value] = buf()
+
+            for k in 0..<codes.len()
+                val f = codes[k]
+
+                fields.push(f(c)?)
+
+            Ok(VAgg(tag, fields))
+
+    field(*self, v: TExpr, k: usize) -> Code
+        val a = self.ex(v)
+
+        (c) -> Ok(field_at(a(c)?, k))
+
+    // What stores a value into local `id` as it is bound: into a cell of its own where a lambda
+    // captures it, one cell per binding, so a lambda made on one pass of a loop keeps that pass's.
+    local_binder(*self, id: usize) -> Binder
+        val s = self.slot_of(id)
+
+        if self.captured[id] then return (c, v) -> c.v.set(s, cell(v))
+
+        (c, v) -> c.v.set(s, v)
+
+    // What binds the names of a destructuring pattern to the parts of a tuple.
+    binder(*self, pat: TBind) -> Binder = pat match
+        BLocal(id) -> self.local_binder(id)
+        BGlobal(name) ->
+            val m = self.m
+            val g = self.global_number(name)
+
+            (c, v) -> m.globals.v.set(g, v)
+        BSkip -> (c, v) -> ()
+        BTuple(elems) ->
+            var parts: Buf[Binder] = buf()
+
+            for e in elems
+                parts.push(self.binder(e))
+
+            (c, v) ->
+                for k in 0..<parts.len()
+                    val b = parts[k]
+
+                    b(c, field_at(v, k))
+
+    // What stores a tuple into the places of a tuple assignment, left to right.
+    storer(*self, target: TTarget) -> Storer = target match
+        TPlace(place) ->
+            val r = self.place_ref(place)
+
+            (c, v) ->
+                store_through(r(c)?, v)
+                Ok(VVoid)
+        TDrop -> (c, v) -> Ok(VVoid)
+        TTargets(elems) ->
+            var parts: Buf[Storer] = buf()
+
+            for e in elems
+                parts.push(self.storer(e))
+
+            (c, v) ->
+                for k in 0..<parts.len()
+                    val s = parts[k]
+
+                    s(c, field_at(v, k))?
+
+                Ok(VVoid)
+
+    // The place `e` names, as a `VRef`: a local, a module-level binding, or a field of a place.
+    place_ref(*self, e: TExpr) -> Code
+        val m = self.m
+
+        *e.kind match
+            TLocal(id) ->
+                val s = self.slot_of(id)
+
+                if self.indirect(id) then return (c) -> Ok(c.v[s])
+
+                return (c) -> Ok(VRef(c, s, buf()))
+            TGlobalRef(name) ->
+                val g = self.global_number(name)
+
+                return (c) -> Ok(VRef(m.globals, g, buf()))
+            TField(v, _, k) -> return self.field_ref(v, k)
+            TTupleField(v, k) -> return self.field_ref(v, k)
+            TComplexPart(_, _) -> return self.later(e.span, "a complex's part as a place")
+            _ -> return self.later(e.span, "an element as a place")
+
+    field_ref(*self, v: TExpr, k: usize) -> Code
+        val r = self.place_ref(v)
+
+        (c) -> Ok(deeper(r(c)?, k))
+
+    // -- lambdas -----------------------------------------------------------------------------------
+
+    // Lambda `lid` as a value: compiled into the machine's lambdas, and at each pass its environment
+    // taken from the frame — each captured local's cell, or the place a captured `inout` parameter
+    // holds. `self_local` is the local `def` being bound to it, which it reaches through its own
+    // frame where it calls itself.
+    closure(*self, lid: usize, self_local: Option[usize]) -> Code
+        val l = self.prog.lambdas[lid]
+        var own: Option[usize] = None
+
+        self_local match
+            Some(id) ->
+                for x in l.captures
+                    if x == id then own = Some(id)
+            None -> ()
+
+        var from: Buf[long] = buf()
+
+        for x in l.captures
+            from.push(if own == Some(x) then -1 else long(self.slot_of(x)))
+
+        val k = self.lambda(l, own)
+
+        (c) ->
+            var env: Buf[Value] = buf()
+
+            for s in from
+                env.push(if s < 0 then VVoid else c.v[usize(s)])
+
+            Ok(VClosure(k, env))
+
+    // Lambda `l` compiled into a frame of its own, the state of the function around it set aside
+    // and given back.
+    lambda(*self, l: TLambda, own: Option[usize]) -> usize
+        val used = self.used
+        val next = self.next
+        val chains = self.chains
+        var outer: Buf[long] = buf()
+
+        for x in l.captures
+            outer.push(self.slot[x])
+            self.slot.set(x, -1)
+
+        self.used = buf()
+        self.next = 0
+        self.chains = buf()
+
+        for p in l.params
+            self.slot_of(p)
+
+        for x in l.captures
+            self.slot_of(x)
+
+        // A local `def` holds itself as its value, not in a cell, in its own frame.
+        own match
+            Some(id) -> self.captured.set(id, false)
+            None -> ()
+
+        val k = self.m.lambdas.len()
+
+        self.m.lambdas.push(Lambda((c) -> Ok(VVoid), 0, 0, None))
+
+        val body = self.boxing(l.params, self.ex(l.body))
+        val self_slot: Option[usize] = own match
+            Some(id) -> Some(usize(self.slot[id]))
+            None -> None
+
+        self.m.lambdas.set(k, Lambda(body, self.next, l.params.len(), self_slot))
+
+        own match
+            Some(id) -> self.captured.set(id, true)
+            None -> ()
+
+        for id in self.used
+            self.slot.set(id, -1)
+
+        self.used = used
+        self.next = next
+        self.chains = chains
+
+        for j in 0..<l.captures.len()
+            self.slot.set(l.captures[j], outer[j])
+
+        k
+    end lambda
 
     literal(*self, span: Span, v: Lit, t: Ty) -> Value = v match
         IntVal(n) -> base_of(t) match
@@ -514,7 +864,66 @@ impl Interp
             elif op == "==" then Some((a, b) -> Ok(VBool(str_of(a) == str_of(b))))
             elif op == "!=" then Some((a, b) -> Ok(VBool(str_of(a) != str_of(b))))
             else None
+        Tuple(_) -> self.aggregate_op(span, op, t)
+        Nominal(_, _) -> self.aggregate_op(span, op, t)
         _ -> None
+
+    // `==` or `!=` on two structs, tuples or enums of type `t`.
+    aggregate_op(*self, span: Span, op: string, t: Ty) -> Option[Op2]
+        if op != "==" && op != "!=" then return None
+
+        val eq = self.equality(span, t) match
+            Some(f) -> f
+            None -> return None
+
+        if op == "==" then Some(eq) else Some((a, b) -> Ok(VBool(!bool_of(eq(a, b)?))))
+
+    // Whether two aggregates of type `t` are equal (DESIGN §11.4): the same variant, for an enum, and
+    // every field equal as `==` compares the field's type, so a `nan` field makes them unequal.
+    equality(*self, span: Span, t: Ty) -> Option[Op2]
+        // By variant — the one of a struct or a tuple — the `==` of each field.
+        var by: Buf[Buf[Op2]] = buf()
+        var kinds: Buf[Buf[Ty]] = buf()
+
+        t match
+            Tuple(es) -> kinds.push(es)
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) -> kinds.push(field_tys(s.fields))
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) ->
+                        for v in e.variants
+                            kinds.push(field_tys(v.fields))
+                    None -> ()
+            _ -> ()
+
+        for ts in kinds
+            var ops: Buf[Op2] = buf()
+
+            for f in ts
+                self.op2(span, "==", f) match
+                    Some(eq) -> ops.push(eq)
+                    None -> return None
+
+            by.push(ops)
+
+        Some((a, b) ->
+            val tag = tag_of(a)
+
+            if tag != tag_of(b) then return Ok(VBool(false))
+
+            val ops = by[tag]
+
+            for k in 0..<ops.len()
+                val eq = ops[k]
+
+                if !bool_of(eq(field_at(a, k), field_at(b, k))?) then return Ok(VBool(false))
+
+            Ok(VBool(true))
+        )
+    end equality
 
     // `base ^ n` with an integer `n` of its own type, the base keeping its type (DESIGN §2.2).
     power(*self, span: Span, at: Ty, nt: Ty) -> Option[Op2]
@@ -671,21 +1080,7 @@ impl Interp
     // An argument: its value, or for an `inout` parameter the place it names.
     argument(*self, a: TExpr) -> Code
         *a.kind match
-            TBorrow(place) ->
-                val m = self.m
-
-                *place.kind match
-                    TLocal(id) ->
-                        val s = self.slot_of(id)
-
-                        if self.is_inout(id) then return (c) -> Ok(c.v[s])
-
-                        return (c) -> Ok(VRef(c, s))
-                    TGlobalRef(name) ->
-                        val g = self.global_number(name)
-
-                        return (c) -> Ok(VRef(m.globals, g))
-                    _ -> return self.later(a.span, "an element or a field passed `inout`")
+            TBorrow(place) -> self.place_ref(place)
             _ -> self.ex(a)
 
     // -- statements --------------------------------------------------------------------------------
@@ -704,7 +1099,7 @@ impl Interp
             TLocal(id) ->
                 val s = self.slot_of(id)
 
-                if self.is_inout(id)
+                if self.indirect(id)
                     return (c) ->
                         val x = v(c)?
 
@@ -724,7 +1119,15 @@ impl Interp
 
                     m.globals.v.set(g, step(m.globals.v[g], x)?)
                     Ok(VVoid)
-            _ -> self.later(span, "an assignment to an element or a field")
+            _ ->
+                val r = self.place_ref(target)
+
+                (c) ->
+                    val x = v(c)?
+                    val at = r(c)?
+
+                    store_through(at, step(deref(at), x)?)
+                    Ok(VVoid)
 
     while_loop(*self, id: usize, cond: TExpr, body: TExpr) -> Code
         val k = self.ex(cond)
@@ -755,7 +1158,7 @@ impl Interp
         val step = step_e match
             Some(s) -> self.ex(s)
             None -> self.constant_code(VInt(1))
-        val s = self.slot_of(var_id)
+        val bind = self.local_binder(var_id)
         val b = self.ex(body)
 
         (c) ->
@@ -776,7 +1179,7 @@ impl Interp
             var k = first
 
             loop
-                c.v.set(s, VInt(long.wrap(k)))
+                bind(c, VInt(long.wrap(k)))
 
                 b(c) match
                     Ok(_) -> ()
@@ -793,25 +1196,58 @@ impl Interp
             Ok(VVoid)
     end for_loop
 
-    // `s match ...` over a scalar: its one arm binds the value, or ignores it.
+    // `s match ...`: the first arm whose variant is the value's, or that takes any value, its names
+    // bound to the variant's fields or to the whole value.
     match_expr(*self, span: Span, s: TExpr, arms: Buf[TArm]) -> Code
         val v = self.ex(s)
+        // By arm: the tag it takes, -1 for any; what binds its names; its body.
+        var tags: Buf[long] = buf()
+        var binds: Buf[Binder] = buf()
+        var bodies: Buf[Code] = buf()
 
-        arms[0].pat match
-            PAny(bind) ->
-                val body = self.ex(arms[0].body)
+        for arm in arms
+            arm.pat match
+                PVariant(_, tag, fields) ->
+                    var parts: Buf[Binder] = buf()
+                    var at: Buf[usize] = buf()
 
-                bind match
-                    Some(id) ->
-                        val k = self.slot_of(id)
+                    for k in 0..<fields.len()
+                        fields[k] match
+                            Some(id) ->
+                                parts.push(self.local_binder(id))
+                                at.push(k)
+                            None -> ()
 
-                        (c) ->
-                            c.v.set(k, v(c)?)
-                            body(c)
-                    None -> (c) ->
-                        v(c)?
-                        body(c)
-            PVariant(_, _, _) -> self.later(span, "a `match` on an enum")
+                    tags.push(long(tag))
+                    binds.push((c, x) ->
+                        for j in 0..<parts.len()
+                            val b = parts[j]
+
+                            b(c, field_at(x, at[j]))
+                    )
+                PAny(bind) ->
+                    tags.push(-1)
+                    binds.push(bind match
+                        Some(id) -> self.local_binder(id)
+                        None -> (c, x) -> ()
+                    )
+
+            bodies.push(self.ex(arm.body))
+
+        (c) ->
+            val x = v(c)?
+            val tag = long(tag_of(x))
+
+            for k in 0..<tags.len()
+                if tags[k] < 0 || tags[k] == tag
+                    val b = binds[k]
+                    val body = bodies[k]
+
+                    b(c, x)
+                    return body(c)
+
+            Ok(VVoid)
+    end match_expr
 
     // -- the program's arguments -------------------------------------------------------------------
 
@@ -830,12 +1266,12 @@ impl Interp
                         _ -> ()
             TForEach(id, var_id, xs, body) ->
                 if self.is_args(xs)
-                    val s = self.slot_of(var_id)
+                    val bind = self.local_binder(var_id)
                     val b = self.ex(body)
 
                     return (c) ->
                         for k in 0..<m.args.len()
-                            c.v.set(s, VStr(m.args[k]))
+                            bind(c, VStr(m.args[k]))
 
                             b(c) match
                                 Ok(_) -> ()
@@ -861,6 +1297,7 @@ private arg_at(m: &Machine, k: long) -> Answer
 // A call through a function value.
 private[nex] call_value(m: &Machine, f: Value, args: Buf[Code], c: &Cells) -> Answer = f match
     VFn(k) -> call_fun(m, k, args, c)
+    VClosure(k, env) -> call_lambda(m, k, env, args, c)
     _ -> trapped("a call of a value that is not a function")
 
 // A real of `fb` bits as one of `tb`: a widening, or a rounding that traps an overflow under

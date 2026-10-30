@@ -217,11 +217,85 @@ itp_args()
     assert_eq(interpreted("def main(args: [string]) =\n  print(length(args))\n  for a in args\n    print(a)\n  print(args[2])\n  print(args[3])\n", ["x", "y"]),
               "2\nx\ny\ny\ntrap: index 3 out of bounds 1..2")
 
+// -- aggregates -------------------------------------------------------------------------------------
+
+private val POINT = "struct Point\n  x: real\n  y: real = 2.0\nstruct Seg\n  a: Point\n  b: Point\n"
+
+@test("a struct is built with its defaults, read and written by field at any depth, and copied by value")
+itp_structs()
+    assert_eq(interpreted(POINT + main_of(["var p = Point(1.0)", "print(p)", "p.x = 5.0", "p.y += 1.0", "print(p.x + p.y)", "var q = p", "q.x = 0.0", "print(p)", "print(q)",
+                                           "var s = Seg(p, q)", "s.b.y = 9.0", "val t = s", "s.a.x -= 1.0", "print(s)", "print(t.a.x)"])),
+              "Point { x=1.0, y=2.0 }\n8.0\nPoint { x=5.0, y=3.0 }\nPoint { x=0.0, y=3.0 }\nSeg { a=Point { x=4.0, y=3.0 }, b=Point { x=0.0, y=9.0 } }\n5.0\nexit 0")
+
+@test("a field is a place an inout parameter borrows, at any depth, and an inout struct is written by field")
+itp_inout_fields()
+    assert_eq(interpreted(POINT + "def bump(v: inout real) = v += 1.0\ndef shift(p: inout Point) =\n  p.x *= 10.0\n  bump(p.y)\n" +
+                          main_of(["var s = Seg(Point(1.0), Point(3.0, 4.0))", "bump(s.a.x)", "shift(s.b)", "var t = (1, 2.5)", "bump(t.2)", "print(s)", "print(t)"])),
+              "Seg { a=Point { x=2.0, y=2.0 }, b=Point { x=30.0, y=5.0 } }\n(1, 3.5)\nexit 0")
+
+@test("a tuple's fields count from 1, it is taken apart by a nested pattern, at module level too, and a, b = b, a swaps")
+itp_tuples()
+    assert_eq(interpreted("val g, (h, _) = 1, (\"x\", true)\n" + main_of(["var t = (1, \"two\", 3.0)", "print(t.2)", "t.3 = 4.5", "print(t)", "val a, (b, c) = 7, (t.1, false)",
+                                                                      "var x = 1", "var y = 2", "x, y = y, x", "print(s\"$a $b $c $x $y $g $h\")", "var p = (0, 0)", "p.1, p.2 = p.2 + 5, p.1 + 6", "print(p)"])),
+              "two\n(1, two, 4.5)\n7 1 false 2 1 1 x\n(5, 6)\nexit 0")
+
+private val SHAPE = "enum Shape =\n  Circle(r: real)\n  Rect(w: real, h: real)\n  Dot\n"
+
+@test("match takes the first arm of the value's variant or the catch-all, binding fields or the whole value")
+itp_enums()
+    assert_eq(interpreted(SHAPE + "def area(s: Shape): real = s match\n  Circle(r) -> 3.0 * r * r\n  Rect(w, _) -> w\n  other -> -1.0\n" +
+                          main_of(["for k in 1..3", "  val s = if k == 1 then Circle(2.0) elif k == 2 then Rect(4.0, 5.0) else Dot", "  print(s)", "  print(area(s))"])),
+              "Circle(2.0)\n12.0\nRect(4.0, 5.0)\n4.0\nDot\n-1.0\nexit 0")
+
+@test("== compares structs, tuples and enums field by field: the variant first, and a nan field is unequal")
+itp_aggregate_equality()
+    assert_eq(interpreted(POINT + SHAPE + main_of(["print(Point(1.0) == Point(1.0, 2.0))", "print(Point(1.0) != Point(1.0, 3.0))", "print((1, \"a\") == (1, \"a\"))", "print((1, \"a\") == (1, \"b\"))",
+                                                   "print(Circle(1.0) == Circle(1.0))", "print(Circle(1.0) == Rect(1.0, 1.0))", "print(Dot == Dot)", "print(Point(nan) == Point(nan))",
+                                                   "assert_eq(Rect(1.0, 2.0), Rect(1.0, 2.0))", "assert_eq((1, 2), (1, 3))"])),
+              "true\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrap: assert_eq failed")
+
+@test("an aggregate prints and interpolates as print spells it, its fields each spelled alone, under %s too")
+itp_aggregate_text()
+    assert_eq(interpreted("struct Pair[A, B]\n  fst: A\n  snd: B\n" + SHAPE + main_of(["val p = Pair(1, \"b\")", "val x: real32 = 0.1", "print(s\"<$p> ${(Dot, x)}\")", "print(f\"[${Circle(0.1)}%-14s]\")"])),
+              "<Pair { fst=1, snd=b }> (Dot, 0.1)\n[Circle(0.1)   ]\nexit 0")
+
+// -- lambdas and closures ---------------------------------------------------------------------------
+
+@test("a lambda shares the cells of what it captures with its function: each sees the other's writes")
+itp_closure_cells()
+    assert_eq(interpreted(main_of(["var k = 1", "val f = (x: integer) -> x + k", "print(f(10))", "k = 100", "print(f(10))", "val g = () ->", "  k += 1", "g()", "g()", "print(k)"])),
+              "11\n110\n102\nexit 0")
+
+@test("a returned closure keeps its own cell: two counters count apart, and a parameter captured is a cell of its own")
+itp_counters()
+    assert_eq(interpreted("def counter(from: integer): (() -> integer) =\n  var n = from\n  () ->\n    n += 1\n    n\ndef adder(by: integer): ((integer) -> integer) = (x: integer) -> x + by\n" +
+                          main_of(["val a = counter(0)", "val b = counter(10)", "print(a())", "print(a())", "print(b())", "print(a())", "print(adder(3)(4))"])),
+              "1\n2\n11\n3\n7\nexit 0")
+
+@test("a lambda made on each pass of a loop keeps that pass's binding")
+itp_closures_per_pass()
+    assert_eq(interpreted("struct F\n  f: (integer) -> integer\n" +
+                          main_of(["var fs = (F((x: integer) -> x), F((x: integer) -> x))", "for i in 1..2", "  val j = i * 10", "  val f = F((x: integer) -> x + i + j)",
+                                   "  if i == 1 then fs.1 = f else fs.2 = f", "val a, b = fs", "print(a.f(0))", "print(b.f(0))"])),
+              "11\n22\nexit 0")
+
+@test("a local def calls itself, and a lambda nested two deep reaches the outer function's local through the middle one")
+itp_local_defs()
+    assert_eq(interpreted(main_of(["def fact(n: integer): integer = if n <= 1 then 1 else n * fact(n - 1)", "print(fact(10))", "var total = 0",
+                                   "val outer = (a: integer) ->", "  val inner = (b: integer) ->", "    total += a * b", "  inner(2)", "  inner(3)", "outer(5)", "print(total)"])),
+              "3628800\n25\nexit 0")
+
+@test("a closure traps through the call that runs it, and assert_traps takes one as a value")
+itp_closure_traps()
+    assert_eq(interpreted(main_of(["val big: int8 = 100", "val f = () -> big + big", "assert_traps(f, \"int8 overflow\")", "print(\"caught\")", "print(f())"])),
+              "caught\ntrap: int8 overflow")
+
 // -- refusals ---------------------------------------------------------------------------------------
 
 @test("what the interpreter does not run yet is refused before anything runs, at the construct")
 itp_refusals()
     assert_eq(interpreted(main_of(["print(1)", "val xs = [1, 2, 3]", "print(xs)"])), "refused: an array is not interpreted yet @3:3")
-    assert_eq(interpreted(main_of(["val f = (x: integer) -> x + 1", "print(f(2))"])), "refused: a lambda is not interpreted yet @2:11")
+    assert_eq(interpreted("struct S\n  xs: [real]\n" + main_of(["print(1)", "val s = S([1.0])"])), "refused: an array is not interpreted yet @5:3")
+    assert_eq(interpreted(main_of(["var z = 1.0 + 2.0i", "z.re = 3.0", "print(z)"])), "refused: a complex's part as a place is not interpreted yet @3:3")
     assert_eq(interpreted("extern def cos(x: real): real\n" + main_of(["print(cos(0.0))"])),
               "refused: a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled @1:1")

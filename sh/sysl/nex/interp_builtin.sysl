@@ -3,7 +3,8 @@ module sh.sysl.nex
 // The prelude's scalar functions, printing and interpolation, as the interpreter compiles them: each
 // as `compiler/emit_builtin.sysl` computes it, its text spelled by the runtime's functions.
 
-import nex_runtime.sh.sysl.nex_runtime.{ASSERTION_FAILED, ASSERT_EQ_FAILED, DID_NOT_TRAP, NOT_MENTIONED, assertion_message, overflow_message}
+import nex_runtime.sh.sysl.nex_runtime.{ASSERTION_FAILED, ASSERT_EQ_FAILED, DID_NOT_TRAP, FIELD_SEPARATOR, NOT_MENTIONED, STRUCT_CLOSE, TUPLE_CLOSE, TUPLE_OPEN,
+                                        assertion_message, field_label, overflow_message, str_spec_text, struct_open}
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
@@ -278,5 +279,90 @@ impl Interp
                 return (c) -> Ok("")
             _ -> ()
 
-        if spec == "" then (c) -> Ok(scalar_text(a(c)?, t)) else (c) -> Ok(formatted_text(a(c)?, t, spec))
+        val text = self.printer(t)
+
+        if spec == "" then return (c) -> Ok(text(a(c)?))
+        if spec.ends_with("s") then return (c) -> Ok(str_spec_text(text(a(c)?), spec))
+
+        (c) -> Ok(formatted_text(a(c)?, t, spec))
+
+    // What spells a value of type `t` as `print` does (DESIGN §11.4): a scalar by the runtime, an
+    // aggregate by each field spelled alone, between the runtime's punctuation.
+    printer(*self, t: Ty) -> Printer
+        t match
+            Tuple(es) ->
+                val parts = self.printers(es)
+
+                return (v) -> TUPLE_OPEN + fields_text(parts, v) + TUPLE_CLOSE
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) ->
+                        val parts = self.printers(field_tys(s.fields))
+                        var labels: Buf[string] = buf()
+
+                        for f in s.fields
+                            labels.push(field_label(f.name))
+
+                        val open = struct_open(display_name(s.name))
+
+                        return (v) ->
+                            var out = open
+
+                            for k in 0..<parts.len()
+                                val p = parts[k]
+
+                                if k > 0 then out += FIELD_SEPARATOR
+                                out += labels[k] + p(field_at(v, k))
+
+                            out + STRUCT_CLOSE
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) ->
+                        var names: Buf[string] = buf()
+                        var by: Buf[Buf[Printer]] = buf()
+
+                        for x in e.variants
+                            names.push(x.name)
+                            by.push(self.printers(field_tys(x.fields)))
+
+                        return (v) ->
+                            val tag = tag_of(v)
+                            val parts = by[tag]
+
+                            if parts.len() == 0 then names[tag] else names[tag] + TUPLE_OPEN + fields_text(parts, v) + TUPLE_CLOSE
+                    None -> ()
+            _ -> ()
+
+        (v) -> scalar_text(v, t)
+
+    printers(*self, ts: Buf[Ty]) -> Buf[Printer]
+        var out: Buf[Printer] = buf()
+
+        for t in ts
+            out.push(self.printer(t))
+
+        out
 end Interp
+
+private[nex] type Printer = &Fn(Value) -> string
+
+// The fields of `v` spelled by `parts`, separated.
+private fields_text(parts: Buf[Printer], v: Value) -> string
+    var out = ""
+
+    for k in 0..<parts.len()
+        val p = parts[k]
+
+        if k > 0 then out += FIELD_SEPARATOR
+        out += p(field_at(v, k))
+
+    out
+
+private[nex] field_tys(fields: Buf[FieldInfo]) -> Buf[Ty]
+    var out: Buf[Ty] = buf()
+
+    for f in fields
+        out.push(f.ty)
+
+    out

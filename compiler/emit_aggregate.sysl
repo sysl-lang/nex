@@ -11,6 +11,7 @@
 // `match` is an `scf.index_switch` on the tag.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{FIELD_SEPARATOR, STRUCT_CLOSE, TUPLE_CLOSE, TUPLE_OPEN, field_label, struct_open}
 import sysl.buf.{Buf, buf}
 import sysl.math.max
 import sysl.text.str_builder
@@ -521,25 +522,25 @@ impl Emitter
 
         t match
             Tuple(es) ->
-                self.put_text(sink, "(")
+                self.put_text(sink, TUPLE_OPEN)
 
                 for k in 0..<es.len()
-                    if k > 0 then self.put_text(sink, ", ")
+                    if k > 0 then self.put_text(sink, FIELD_SEPARATOR)
                     self.put_value(span, sink, self.field(v, m, k, es[k]), es[k])
 
-                self.put_text(sink, ")")
+                self.put_text(sink, TUPLE_CLOSE)
                 return
             Nominal(name, _) ->
                 self.struct_of(name) match
                     Some(s) ->
-                        self.put_text(sink, s"${display_name(s.name)} { ")
+                        self.put_text(sink, struct_open(display_name(s.name)))
 
                         for k in 0..<s.fields.len()
-                            if k > 0 then self.put_text(sink, ", ")
-                            self.put_text(sink, s"${s.fields[k].name}=")
+                            if k > 0 then self.put_text(sink, FIELD_SEPARATOR)
+                            self.put_text(sink, field_label(s.fields[k].name))
                             self.put_value(span, sink, self.field(v, m, k, s.fields[k].ty), s.fields[k].ty)
 
-                        self.put_text(sink, " }")
+                        self.put_text(sink, STRUCT_CLOSE)
                         return
                     None -> ()
 
@@ -557,13 +558,13 @@ impl Emitter
                                 val p = self.payload(v, t, fields)
                                 val pt = self.payload_ty(span, fields)
 
-                                self.put_text(sink, "(")
+                                self.put_text(sink, TUPLE_OPEN)
 
                                 for k in 0..<fields.len()
-                                    if k > 0 then self.put_text(sink, ", ")
+                                    if k > 0 then self.put_text(sink, FIELD_SEPARATOR)
                                     self.put_value(span, sink, self.field(p, pt, k, fields[k].ty), fields[k].ty)
 
-                                self.put_text(sink, ")")
+                                self.put_text(sink, TUPLE_CLOSE)
 
                             self.op("scf.yield")
                             self.op("}")
