@@ -135,6 +135,8 @@ impl Emitter
         // The elements of arrays of numbers lent as `inout` scalars, written back after the call.
         var elements: Buf[ElementLent] = buf()
 
+        self.lend_roots(args)
+
         for j in 0..<x.params.len()
             datas.push("")
 

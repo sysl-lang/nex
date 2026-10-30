@@ -1,0 +1,271 @@
+// What a callee writes through an `inout` argument before it traps stays written once the trap is
+// caught (DESIGN §8.4): whole arrays, windows strided and reversed, elements, fields, module-level
+// arrays, through function values, two levels down, and whole assignments of the parameter of the
+// shape it has. The arrays live in the cells of lambdas `assert_traps` runs, so the caller sees them
+// after the trap; caught many times over, the traps leave nothing held.
+
+struct Grid
+  cells: [integer]
+  name: string
+
+struct Pair
+  xs: [real]
+  n: integer
+
+var shared = [1, 2, 3, 4]
+
+def wt(v: inout [integer]) =
+  v[1] = 99
+  assert(false, "boom")
+
+def bump_all(v: inout [integer]) =
+  for k in 1..length(v)
+    v[k] += 10
+    if k == 2 then assert(false, "boom")
+
+def set_el(x: inout integer) =
+  x = 42
+  assert(false, "boom")
+
+def set_real(x: inout real) =
+  x = 0.5
+  assert(false, "boom")
+
+def set_bool(x: inout bool) =
+  x = true
+  assert(false, "boom")
+
+def set_complex(x: inout complex) =
+  x = 3 + 4i
+  assert(false, "boom")
+
+def mid(v: inout [integer]) =
+  v[2] = 7
+  wt(v)
+
+def outer(v: inout [integer]) =
+  mid(v)
+
+def doubled(v: inout [integer]) =
+  v = v * 2
+  assert(false, "boom")
+
+def replaced(v: inout [integer]) =
+  v = [5, 6, 7, 8]
+  assert(false, "boom")
+
+def added(v: inout [integer]) =
+  v += 1
+  assert(false, "boom")
+
+def regrown(v: inout [integer]) =
+  v = [5, 6, 7]
+  v = [7, 8, 9, 10, 11]
+
+def twice(x: inout integer, y: inout integer) =
+  x = 1
+  y = 2
+  assert(false, "boom")
+
+def window_and_element(v: inout [integer], x: inout integer) =
+  v[1] = 31
+  x = 32
+  assert(false, "boom")
+
+def pair_trap(p: inout Pair) =
+  p.xs[2] = 9.5
+  p.n = 3
+  assert(false, "boom")
+
+def inc(x: inout integer) =
+  x += 100
+
+def bump(v: inout [integer]) =
+  for k in 1..length(v)
+    v[k] += 1
+
+def bumped(v: inout [integer]): integer =
+  bump(v)
+  v[1]
+
+def whole() =
+  var a = [1, 2, 3, 4]
+  assert_traps(() -> wt(a), "boom")
+  print(a)
+
+def windows() =
+  var w1 = [1, 2, 3, 4, 5, 6]
+  assert_traps(() -> bump_all(w1[2..5]), "boom")
+  print(w1)
+  var w2 = [1, 2, 3, 4, 5, 6]
+  assert_traps(() -> bump_all(w2[1..end by 2]), "boom")
+  print(w2)
+  var w3 = [1, 2, 3, 4, 5, 6]
+  assert_traps(() -> bump_all(w3[.. by -1]), "boom")
+  print(w3)
+  var m1 = [[1, 2, 3], [4, 5, 6]]
+  assert_traps(() -> bump_all(m1[:, 2]), "boom")
+  print(m1)
+  var m2 = [[1, 2, 3], [4, 5, 6]]
+  assert_traps(() -> bump_all(m2[2, :]), "boom")
+  print(m2)
+
+def elements() =
+  var e1 = [1, 2, 3, 4]
+  assert_traps(() -> set_el(e1[2]), "boom")
+  print(e1)
+  var e2 = [1, 2, 3, 4]
+  assert_traps(() -> set_el(e2[3..][2]), "boom")
+  print(e2)
+  var m1 = [[1, 2, 3], [4, 5, 6]]
+  assert_traps(() -> set_el(m1[1, 3]), "boom")
+  print(m1)
+  var m2 = [[1, 2, 3], [4, 5, 6]]
+  assert_traps(() -> set_el(m2[:, 1][2]), "boom")
+  print(m2)
+  var m3 = [[1, 2, 3], [4, 5, 6]]
+  assert_traps(() -> set_el(m3[.. by -1, 2..][1, 2]), "boom")
+  print(m3)
+  var r = [1.0, 2.0]
+  assert_traps(() -> set_real(r[2]), "boom")
+  print(r)
+  var b = [false, false]
+  assert_traps(() -> set_bool(b[1]), "boom")
+  print(b)
+  var z = [1 + 1i, 2 + 2i]
+  assert_traps(() -> set_complex(z[2]), "boom")
+  print(z)
+
+def fields() =
+  var g = Grid([1, 2, 3], "g")
+  assert_traps(() -> wt(g.cells), "boom")
+  print(g.cells)
+  var h = Grid([1, 2, 3], "h")
+  assert_traps(() -> set_el(h.cells[3]), "boom")
+  print(h.cells)
+  var p = Pair([1.0, 2.0], 0)
+  assert_traps(() -> pair_trap(p), "boom")
+  print(p.xs)
+  print(p.n)
+
+def nested() =
+  var n = [1, 2, 3, 4]
+  assert_traps(() -> outer(n), "boom")
+  print(n)
+
+def module_level() =
+  assert_traps(() -> wt(shared), "boom")
+  assert_traps(() -> set_el(shared[4]), "boom")
+  print(shared)
+
+def through_values() =
+  var f = [1, 2, 3, 4]
+  val through = wt
+  assert_traps(() -> through(f), "boom")
+  print(f)
+  var l = [1, 2, 3, 4]
+  def local(v: inout [integer]) =
+    v[3] = 0
+    assert(false, "boom")
+  assert_traps(() -> local(l[2..]), "boom")
+  print(l)
+
+def sharing() =
+  var s = [1, 2, 3, 4]
+  val view = s
+  assert_traps(() -> wt(s), "boom")
+  print(s)
+  print(view)
+
+def several() =
+  var t = [1, 2, 3, 4]
+  assert_traps(() -> twice(t[1], t[4]), "boom")
+  print(t)
+  var u = [1, 2, 3, 4]
+  assert_traps(() -> window_and_element(u[1..2], u[4]), "boom")
+  print(u)
+  var x = 1
+  assert_traps(() -> set_el(x), "boom")
+  print(x)
+
+def assigned() =
+  var d = [1, 2, 3, 4]
+  assert_traps(() -> doubled(d), "boom")
+  print(d)
+  var s = [1, 2, 3, 4]
+  assert_traps(() -> replaced(s), "boom")
+  print(s)
+  var w = [1, 2, 3, 4]
+  assert_traps(() -> added(w[2..3]), "boom")
+  print(w)
+  var g = [1, 2, 3, 4]
+  val grow = () -> regrown(g)
+  grow()
+  print(g)
+
+def repeated() =
+  var r = [1, 2, 3, 4]
+  for k in 1..300
+    assert_traps(() -> bump_all(r[2..3]), "boom")
+  print(r)
+  var e = [1, 2, 3, 4]
+  for k in 1..300
+    assert_traps(() -> set_el(e[k % 4 + 1]), "boom")
+  print(e)
+
+def set_text(v: inout [string]) =
+  v[1] = "z"
+  assert(false, "boom")
+
+def set_word(x: inout string) =
+  x = "q"
+  assert(false, "boom")
+
+def strings() =
+  var s = ["a", "b", "c"]
+  assert_traps(() -> set_text(s[2..3]), "boom")
+  print(s)
+  var t = ["a", "b", "c"]
+  assert_traps(() -> set_text(t), "boom")
+  print(t)
+  var u = ["a", "b", "c"]
+  assert_traps(() -> set_word(u[3]), "boom")
+  print(u)
+
+// Without a trap: what a statement read of an array before lending it is what it had then, and a loop
+// over an array walks the elements it had when the loop began.
+def reads_around_calls() =
+  var a = [1, 2, 3, 4]
+  val f = () ->
+    val old = a[2]
+    inc(a[2])
+    print(old)
+    print(a[2])
+    inc(a[2])
+    print(a[2] + a[2])
+  f()
+  print(a)
+  val x = shared[1] + bumped(shared) + shared[1]
+  print(x)
+  print(shared)
+  var total = 0
+  for y in shared
+    bump(shared)
+    total += y
+  print(total)
+  print(shared)
+
+def main() =
+  whole()
+  windows()
+  elements()
+  fields()
+  nested()
+  module_level()
+  through_values()
+  sharing()
+  several()
+  assigned()
+  repeated()
+  strings()
+  reads_around_calls()

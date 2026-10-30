@@ -1,0 +1,20 @@
+// The perf oracle's axpy kernel (PLAN.md): `y = a*x + y` over 10⁷ `real64`, fifty passes, timed
+// inside the program. Prints nanoseconds per pass, then a checksum; `axpy.f90` is its twin.
+
+extern def clock_gettime_nsec_np(clock: int32): uint64
+
+def main() =
+  val n = 10000000
+  val reps = 50
+  val a = 1.0e-3
+  var x: [real] = zeros(n)
+  var y: [real] = zeros(n)
+  for i in 1..n
+    x[i] = 1.0 / i
+    y[i] = 1.0 * (i % 7)
+  val start = clock_gettime_nsec_np(4)
+  for r in 1..reps
+    y = a * x + y
+  val done = clock_gettime_nsec_np(4)
+  print((done - start) / reps)
+  print(sum(y))

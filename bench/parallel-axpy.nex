@@ -1,0 +1,21 @@
+// The perf oracle's parallel axpy kernel (PLAN.md): `axpy.nex` as a `parallel for`, run with
+// `OMP_NUM_THREADS` set to the performance-core count. Prints nanoseconds per pass, then a checksum;
+// `parallel-axpy.f90` (`!$omp parallel do`) is its twin.
+
+extern def clock_gettime_nsec_np(clock: int32): uint64
+
+def main() =
+  val n = 10000000
+  val reps = 50
+  val a = 1.0e-3
+  var x: [real] = zeros(n)
+  var y: [real] = zeros(n)
+  for i in 1..n
+    x[i] = 1.0 / i
+    y[i] = 1.0 * (i % 7)
+  val start = clock_gettime_nsec_np(4)
+  for r in 1..reps
+    parallel for i in 1..n do y[i] = a * x[i] + y[i]
+  val done = clock_gettime_nsec_np(4)
+  print((done - start) / reps)
+  print(sum(y))

@@ -676,6 +676,8 @@ impl Emitter
         // The elements of arrays of numbers lent as `inout` scalars, which are written back after it.
         var elements: Buf[ElementLent] = buf()
 
+        self.lend_roots(args)
+
         for a in args
             var v = ""
             var t = ""
@@ -684,10 +686,11 @@ impl Emitter
                 TBorrow(place) ->
                     if is_arr(place.ty)
                         var frames: Buf[Opened] = buf()
+                        var root = LentRoot("", "", "")
 
-                        v = self.open_place(place, &frames)
+                        v = self.open_lent(place, &frames, &root)
                         t = self.ty(a.span, place.ty)
-                        back.push(Held(place, frames))
+                        back.push(Held(place, frames, root))
                     elif self.is_items_window(place)
                         val l = self.items_lend(a.span, place)
 

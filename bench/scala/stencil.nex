@@ -1,0 +1,16 @@
+// stencil.nex for the Scala reference's AOT backend: the work of ../stencil.nex, 0-based, timed
+// from outside. Its loops are blocks, not `do` lines.
+
+def main() =
+  val n = 10000000
+  var x = fill(n, 0.0)
+  var y = fill(n, 0.0)
+  for k in 0..n
+    x[k] = to_real((k + 1) % 13)
+    y[k] = x[k]
+  for s in 0..50
+    for k in 1..n - 1
+      y[k] = (x[k - 1] + x[k] + x[k + 1]) / 3.0
+    for k in 1..n - 1
+      x[k] = (y[k - 1] + y[k] + y[k + 1]) / 3.0
+  print(sum(x))

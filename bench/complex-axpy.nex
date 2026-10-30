@@ -1,0 +1,23 @@
+// The perf oracle's complex axpy kernel (PLAN.md): `y = a*x + y` over 10⁷ `complex` (real64 parts),
+// fifty passes. Prints nanoseconds per pass, then the checksum's real and imaginary parts;
+// `complex-axpy.f90` is its twin.
+
+extern def clock_gettime_nsec_np(clock: int32): uint64
+
+def main() =
+  val n = 10000000
+  val reps = 50
+  val a = complex(1.0e-3, 2.0e-3)
+  var x: [complex] = zeros(n)
+  var y: [complex] = zeros(n)
+  for i in 1..n
+    x[i] = complex(1.0 / i, 0.5)
+    y[i] = complex(1.0 * (i % 7), 1.0)
+  val start = clock_gettime_nsec_np(4)
+  for r in 1..reps
+    y = a * x + y
+  val done = clock_gettime_nsec_np(4)
+  print((done - start) / reps)
+  val s = sum(y)
+  print(s.re)
+  print(s.im)
