@@ -418,9 +418,10 @@ impl Elab
 
     // `p.x` on a struct, or `z.re` and `z.im` on a complex number.
     select_field(*self, span: Span, v: TExpr, name: string) -> TExpr
-        v.ty match
+        base_of(v.ty) match
             Complex(b) ->
-                if name == "re" || name == "im" then return texpr(span, Real(b), TComplexPart(v, name == "im"))
+                // The parts of a `complex<V>` are each a `real<V>`.
+                if name == "re" || name == "im" then return texpr(span, measured(Real(b), unit_of(v.ty)), TComplexPart(v, name == "im"))
 
                 self.fail(span, s"a complex number has the fields `re` and `im`, not `${name}`")
             Nominal(n, _) ->

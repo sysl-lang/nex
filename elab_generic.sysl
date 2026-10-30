@@ -537,7 +537,7 @@ impl Elab
 
         val k = self.funs.len()
 
-        self.funs.push(FunSrc(f.decl, name, f.params, f.ret, f.body))
+        self.funs.push(FunSrc(f.decl, name, f.params, f.ret, f.body, buf()))
         self.fret.push(Error)
         self.fret_known.push(false)
         self.fstate.push(Waiting)

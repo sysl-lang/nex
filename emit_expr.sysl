@@ -35,6 +35,8 @@ impl Emitter
             val i = self.ex(im)
 
             self.def(s"complex.create $r, $i : ${self.ty(e.span, e.ty)}")
+        TRescale(_, _) -> self.unsupported(e.span, "a value with a unit of measure")
+        TUnitAs(_) -> self.unsupported(e.span, "a value with a unit of measure")
         TComplexPart(v, imag) -> self.def(s"complex.${if imag then "im" else "re"} ${self.ex(v)} : ${self.ty(e.span, v.ty)}")
         TBinary(op, l, r) ->
             val a = self.ex(l)
