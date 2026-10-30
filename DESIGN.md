@@ -880,7 +880,9 @@ the checker rejects:
 
    Every other pair of places on one root is a compile error, and the message suggests the split
    form: *"`a[1..k]` and `a[j..n]` may overlap; borrow `a[1..e]` and `a[e+1..]` at one split point
-   `e`"*. No run-time disjointness check is made.
+   `e`"*, on the first axis where the two places differ — two windows `..e` and `e+1..` there, every
+   other axis whole, or, where both are elements, `m[e, 1]` and `m[e+1, 1]` with the other subscripts
+   kept. No run-time disjointness check is made.
 
    The three forms are one rule: on one axis, two subscripts are disjoint when the last index one
    reaches and the first the other reaches are **the same base plus two constants, the first
@@ -940,8 +942,13 @@ to the caller's variable. Every nex function except `main` is emitted `private`;
 `drop-equivalent-buffer-results` before `buffer-deallocation-pipeline`, a result that is its own
 argument's buffer disappears, the function returns nothing and writes the caller's buffer in place
 (`parallel.mlir`, `axpy`). Kept public, the same function returns its argument and the deallocation
-pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer argument
-*(unverified)*. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
+pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer argument. An element
+of an array of numbers passed `inout` (`a[i]`, `m[:, j][i]`) is a value in its array's tensor: its
+indices are evaluated and bounds-checked once before the call, its value crosses in a stack slot whose
+address is the argument (to a `def`, a function value or a C scalar parameter; inside a rank-0
+descriptor to a `[*; ..]` one), and after the call the slot is inserted at the same indices into what
+the array place holds then. An element of an array of anything else has storage of its own and
+crosses as its address. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
 a row, a strided or reversed window and a line of a rank-3 array each reach the callee as a
 `memref.subview` of the caller's buffer, with no allocation and no copy, in a `parallel for` body as
 in sequential code. A call through a function value (a local `def`, a lambda, a `val` bound to a

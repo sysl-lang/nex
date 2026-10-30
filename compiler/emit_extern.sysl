@@ -132,6 +132,8 @@ impl Emitter
         // the `logical` temporary it crosses in, in pairs.
         var lengths: Buf[string] = buf()
         var logicals: Buf[string] = buf()
+        // The elements of arrays of numbers lent as `inout` scalars, written back after the call.
+        var elements: Buf[ElementLent] = buf()
 
         for j in 0..<x.params.len()
             datas.push("")
@@ -152,7 +154,7 @@ impl Emitter
                             windows.push(self.open_window(place, true, &roots, true))
                             vals.push("")
                         else
-                            vals.push(self.scalar_desc(a.span, self.place_ptr(place), place.ty, true))
+                            vals.push(self.scalar_desc(a.span, self.lent_ptr(place, &elements), place.ty, true))
                     _ ->
                         val v = self.ex(a)
 
@@ -182,14 +184,14 @@ impl Emitter
                     elif x.fortran && is_logical_ty(place.ty)
                         // A `logical` is 4 bytes to Fortran: the place's value crosses in a temporary
                         // and is stored back after the call.
-                        val p = self.place_ptr(place)
+                        val p = self.lent_ptr(place, &elements)
                         val slot = self.fortran_temp(a.span, self.def(s"llvm.load $p : !llvm.ptr -> i1"), place.ty)
 
                         logicals.push(p)
                         logicals.push(slot)
                         vals.push(slot)
                     else
-                        vals.push(self.place_ptr(place))
+                        vals.push(self.lent_ptr(place, &elements))
                 _ ->
                     val v = self.ex(a)
 
@@ -239,6 +241,9 @@ impl Emitter
             val w = self.def(s"llvm.load ${logicals[2 * k + 1]} : !llvm.ptr -> i32")
 
             self.op(s"llvm.store ${self.def(s"arith.cmpi ne, $w, ${self.def("arith.constant 0 : i32")} : i32")}, ${logicals[2 * k]} : i1, !llvm.ptr")
+
+        for l in elements
+            self.element_back(span, l)
 
         if callbacks then self.call("nex_cb_end", "", "", "")
 

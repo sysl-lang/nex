@@ -407,7 +407,11 @@ The argument to an `inout` parameter is a **place** rooted in something mutable:
 | a slice | `scale(m[:, j], 2.0)`, `scale(a[1..n by 2], -1.0)` |
 
 A slice argument borrows exactly that window of the array and the callee writes it in place. Column
-`j` of `m` is scaled where it lies; the rest of `m` is untouched.
+`j` of `m` is scaled where it lies; the rest of `m` is untouched. An element may be taken through
+any number of slices (`a[2..][k]`, `m[:, j][i]`, `a[.. by -1][1]`), and its indices are evaluated
+once and checked against the array's bounds before the call starts, so an index out of bounds traps
+before the callee runs. The same holds for an `extern` taking a scalar `inout` or a `[*; ..]`
+parameter, which receives the element as a descriptor of rank 0.
 
 {{< note >}}
 That an `inout` slice is written in place without any temporary copy, including a strided one, is the
@@ -460,13 +464,16 @@ so:
 
 ```nex
 swap(a, a)                         // error: the same place twice
-swap(a[i], a[j])                   // error: i and j may be equal
+swap(a[i], a[j])                   // error: a[i] and a[j] may overlap;
+                                   //        borrow a[e] and a[e+1] at one split point e
 f(a[1..k], a[j..n])                // error: a[1..k] and a[j..n] may overlap;
                                    //        borrow a[1..e] and a[e+1..] at one split point e
 ```
 
-The message for overlapping windows suggests the split form, which is how such code is written. No
-run-time check is made: the rule is decided by the source, so a program that compiles cannot fail it.
+The message suggests the split form, which is how such code is written, on the first axis where the
+two places differ: two windows `..e` and `e+1..` there, or, where both places are elements, the
+elements `e` and `e+1` with the other subscripts kept (`m[e, 1]` and `m[e+1, 1]`). No run-time check
+is made: the rule is decided by the source, so a program that compiles cannot fail it.
 
 The split form is what divide-and-conquer algorithms need. The fast Walsh–Hadamard transform updates
 the two halves of the array against each other and then recurses into each:

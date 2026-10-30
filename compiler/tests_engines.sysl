@@ -55,6 +55,7 @@ val COMPILED_ONLY = [
     ("073-ffi-fortran-callbacks", "calls the Fortran test library through `@fortran`"),
     ("076-ffi-linear-algebra-units", "calls libm through `extern` beside the prelude's linear algebra"),
     ("085-ffi-descriptors", "calls the C test library through `extern`"),
+    ("087-ffi-inout-elements", "calls the C test library through `extern`"),
     ("extern_abi_matches_clang", "runs the C programs of testdata/v2"),
     ("mod_run_extern", "imports a module whose `extern` is libm's"),
     ("mod_run_extern_described", "imports a module whose `extern`s are the C test library's"),
@@ -334,7 +335,7 @@ compiled_only_is_exact()
 
         assert(found, s"`$c` in COMPILED_ONLY names no testdata program calling C and no test")
 
-    assert_eq(calling.len(), 11)
+    assert_eq(calling.len(), 12)
 
 @test("NOT_INTERPRETED names testdata programs the interpreter refuses and tests of this project, each with its stage")
 not_interpreted_is_exact()
