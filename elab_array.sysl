@@ -798,6 +798,9 @@ children(e: TExpr) -> Buf[TExpr]
         TAssign(_, t, v) ->
             out.push(t)
             out.push(v)
+        TAssignTuple(t, v) ->
+            out.push(v)
+            target_places(t, &out)
         TReturn(v) -> v match
             Some(x) -> out.push(x)
             None -> ()
@@ -863,6 +866,14 @@ private array_children(op: TArr, out: *Buf[TExpr])
             out.push(a)
             out.push(b)
 end array_children
+
+private target_places(t: TTarget, out: *Buf[TExpr])
+    t match
+        TPlace(p) -> out.push(p)
+        TDrop -> ()
+        TTargets(ts) ->
+            for x in ts
+                target_places(x, out)
 
 private subscript_children(target: TExpr, subs: Buf[TSub], out: *Buf[TExpr])
     out.push(target)

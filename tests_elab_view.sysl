@@ -64,6 +64,8 @@ transfer_by_later_use()
         "(def main () void (block (var a#0:[int64] (array:[int64] 10 20 30)) (var b#1:[int64] (clone a#0)) (= (index:int64 b#1 1) 999) (print (index:int64 a#0 1))))")
     assert_eq(elaborated("def main() =\n  var a = [1, 2, 3]\n  var b = [9, 9, 9]\n  b = a\n  print(a[1])\n"),
         "(def main () void (block (var a#0:[int64] (array:[int64] 1 2 3)) (var b#1:[int64] (array:[int64] 9 9 9)) (= b#1 (clone a#0)) (print (index:int64 a#0 1))))")
+    assert_eq(elaborated("def main() =\n  var a = [1, 2]\n  var b = a\n  var x = 0\n  var y = 0\n  x, y = a[1], b[1]\n"),
+        "(def main () void (block (var a#0:[int64] (array:[int64] 1 2)) (var b#1:[int64] (clone a#0)) (var x#2:int64 0) (var y#3:int64 0) (= (x#2 y#3) (tuple:(int64, int64) (index:int64 a#0 1) (index:int64 b#1 1)))))")
 
 @test("a transfer clones a parameter, a captured local, a module binding and one a loop comes back to")
 transfer_clones()
