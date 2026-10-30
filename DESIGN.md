@@ -241,7 +241,7 @@ The closed constraint set of ref §6.10 widens to the sized types:
 | `Float` | `real16`, `real32`, `real64` |
 | `Complex` | `complex[real16]`, `complex[real32]`, `complex[real64]` |
 | `Ord` | every integer and real type |
-| `Eq` | every numeric type, `bool`, `string` |
+| `Eq` | every numeric type, `bool`, `string`, and every struct, tuple and enum that holds no function value (§11.4) |
 | `Rank` | not a type: a rank (§3.4) |
 | `Unit` | not a type: a unit of measure (§13.5) |
 
@@ -250,12 +250,30 @@ through the old tower.
 
 Generic functions, structs and enums (ref §3.6, §3.8, §6.10) stand, with these rules (**PROPOSED**).
 
-- **A generic is checked at each instance it is used at**, as a Fortran parameterized module
-  procedure or a C++ template is, not once against its constraints: `def twice[T: Numeric](x: T) =
-  x + x` is checked as `twice[int64]` where `twice(21)` is written, and a mistake in its body is
-  reported at the body, naming the instance, `bad[string]`. A generic that is never used is
-  never elaborated. The constraint is checked at every use: `min2("a", "b")` with `T: Ord` is a
-  compile error.
+- **A generic function's body is checked once, against its constraints, at its definition**,
+  whether or not anything uses it. In the body a type parameter is a type of which nothing is known
+  but what its constraint admits, so an operation is allowed only where it is allowed on every type
+  the constraint admits: `def bad[T](x: T) = x + 1` is a compile error at the `+`, reported once,
+  naming `T` and no instance, even if `bad` is never called. A generic refused there is refused at
+  every use without a second diagnostic.
+- **A use checks only that its arguments satisfy the constraints**: `min2("a", "b")` with
+  `T: Ord` is a compile error at the call, naming the constraint. A type parameter satisfies a
+  constraint that admits everything its own does: `T: Float` passes to `T: Ord`, `T: Numeric` does
+  not. The one thing an argument decides in a body already checked is whether a literal fits it:
+  `x + 300` with `T: Integral` is a compile error at the `int8` instance, naming it, `f[int8]`.
+- **What a constraint allows in a body**: arithmetic and `-` under Numeric and every constraint
+  inside it; `<`, `<=`, `>`, `>=`, `min`, `max` under Ord, Real, Integral and Float, never under
+  Numeric (it admits complex numbers); `==` and `!=` under Eq and every constraint inside it, not
+  under Any; `div` and `%` under Integral; the real functions (`sqrt`, `exp`, …) under Float, and
+  under Integral giving `real64`. `/` is allowed where the quotient has one type: under Float and
+  Complex it is `T`, under Integral `real64`, and under Numeric, Real and Ord, which admit integers
+  and reals both, it is a compile error (bound the parameter by Float, or convert). `abs` and `arg`
+  of a `T: Complex` give its real part's type, which no parameter names, and are a compile error.
+- **A value of a type parameter meets only its own type and the literals that can take it**: a
+  literal adopts `T` where every type its constraint admits can hold that literal kind (an integer
+  literal under any numeric constraint, a real literal under Float and Complex), and `T` widens to
+  nothing: with `T: Real`, `x * 2.5` and returning `x` as a `real` are compile errors, since the
+  common type would differ from one instance to the next.
 - **The type arguments are inferred, never written at a call.** The arguments that are not literals
   fix them first; a literal fixes a parameter only where nothing else does and otherwise adopts it
   (`add(x32, 2)` is `add[real32]`); a lambda argument comes last, its parameter types filled in from
@@ -276,9 +294,11 @@ Generic functions, structs and enums (ref §3.6, §3.8, §6.10) stand, with thes
   only a function takes one; a struct's or an enum's parameters are types.
 - **An instance that needs a larger instance of the same generic is a compile error**: `f[T]`
   calling `f[Box[T]]`, or `struct Grow[T]` with a field of `[Grow[Box[T]]]`, would never finish.
+  A function's is found when its body is checked and reported there, `f[Box[T]] inside f[T]`.
 - **An instance is named by its generic and its arguments**: `id[int64]`, `Pair[int64, string]`,
   `total[real64, 2]` (a rank argument is its number). The typed IR holds only instances, each a
-  separate declaration, and two instances of one generic are unrelated types.
+  separate declaration made for each set of arguments a use needs, and two instances of one generic
+  are unrelated types.
 
 ---
 
@@ -379,6 +399,12 @@ rank), as ref §6.10 specializes per type. The parser does not tell `[T; R]` fro
 extent const); name resolution does, from the generic list. Inside the body, `rank(a)` is the
 constant `R`. Rank-generic code works through whole-array operations, `map`, the reductions,
 `extent`, `size` and `flatten`; it cannot write an index list, whose length would be `R`.
+
+The body is checked once at no particular rank (§2.6), so what depends on the rank is a compile
+error there: an index list; a reduction with `dim`, whose result has rank `R` − 1; `minloc`,
+`maxloc`, `extents` and the other prelude functions whose result's type or arguments count the
+axes; and meeting an array of any other shape, `[T; R]` with `[T]` in an operator or where one is
+required. An axis given to `extent` is checked at each instance.
 
 Static extents as generic parameters (`def trace[N: Extent](m: [real; N, N])`) are not part of the
 language; a generic function takes dynamic axes and the caller's static shape converts to them.
@@ -585,16 +611,20 @@ m[:, end..1 by -1]     // the columns of m in reverse order
 
 - An open start is the last index of the axis (`end`); an open stop is index `1`.
 - Bounds are checked as going forward: the start must be a valid index of a non-empty window, the
-  stop must lie in `1..n` (or be `0` / `n + 1` for an empty window), and a window whose start is
-  below its stop is empty (`a[1..2 by -1]` is empty, as Fortran's `a(1:2:-1)`).
+  stop must lie in `1..n` (or be `0` / `n + 1` for an empty window), and a window whose stop is one
+  past its start is empty (`a[1..2 by -1]` and `a[3..<3 by -1]` are empty, as Fortran's
+  `a(1:2:-1)`). A stop further past the start traps `out of bounds`, as `a[5..2]` does going
+  forward: `a[2..5 by -1]` is an error, not an empty window.
 - A reversed slice is a view like any other (§6): **nothing is copied**. It is valid as an
   assignment target (`a[.. by -1] = b` writes `b` into `a` back to front).
 - The prelude's `reverse(a)` is `a[.. by -1]`, and `reverse(a, k)` reverses axis `k` only.
 
-**Lowering, unverified:** a negative stride in a `memref` strided layout must be probed. If the
-layout refuses it, a reversed axis lowers as an offset at the far end plus index arithmetic in the
-loop, and a reversed view crossing the FFI to BLAS (`incx < 0`) passes the pointer to the
-lowest-addressed element, since BLAS starts a negative-increment vector from that end.
+**Lowering:** a reversed axis is a `tensor.extract_slice` whose offset is the far end and whose
+stride is negative; bufferization makes it a `memref.subview` with that offset and stride, and
+`expand-strided-metadata` keeps both, so it is read and written in place like any other view
+(`experiments/mlir/negative-stride.mlir`). A reversed view crossing the FFI to BLAS (`incx < 0`)
+passes the pointer to the lowest-addressed element, since BLAS starts a negative-increment vector
+from that end.
 
 ## 6. Views
 
@@ -1424,7 +1454,17 @@ with these rules (**PROPOSED** where marked).
   §6.2 already store arrays and views in enum payloads. **PROPOSED.**
 - **A struct or an enum cannot contain itself** by value, directly or through other structs, enums
   or tuples (`struct Node` with a field `next: Node`, `enum List` with `Cons(head: real, tail:
-  List)`); it may hold itself through an array (`kids: [Node]`), which is a handle. **PROPOSED.**
+  List)`); it may hold itself through an array (`kids: [Node]`), which is a handle.
+- **`==` and `!=` compare structs, tuples and enums field by field**: two values are equal where
+  they are the same variant, for an enum, and every field is equal as `==` compares the field's
+  type, so a `nan` field makes them unequal. A field that is an array is equal where the two arrays
+  have the same shape and `all(a == b)` holds; arrays of different shapes make the values unequal,
+  where `==` on the arrays themselves would trap (§7.1). A struct, tuple or enum that holds a
+  function value, in a field at any depth or as an array's elements, has no `==`: comparing two is a
+  compile error naming the field, and `Eq` (§2.6) does not admit it. A tuple built in place or a
+  bare variant on one side takes its type from the other (`t == (1, 2.0)` with `t: (real, real)`,
+  `s == Empty`); a tuple is never a struct, so `p == (1.0, 2.0)` with `p: Point` is a compile
+  error. `<` and the other orderings are not defined on them.
 - **Struct, enum and variant names share the top level** with functions and module-level bindings,
   and each is declared once: a variant `Empty` in two enums is a redeclaration. A local binding of
   the same name shadows a variant.

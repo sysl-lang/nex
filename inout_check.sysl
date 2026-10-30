@@ -88,7 +88,7 @@ private by_reference(t: Ty) -> bool = t match
     Array(_, _) -> true
     Tuple(_) -> true
     Nominal(_, _) -> true
-    Param(_, _) -> true
+    Param(_, _, _) -> true
     Measured(b, _) -> by_reference(*b)
     _ -> false
 

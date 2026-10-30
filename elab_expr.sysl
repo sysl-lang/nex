@@ -26,6 +26,12 @@ private val PRELUDE_CONSTANTS = ["pi", "e", "inf", "nan", "i"]
 
 private val COMPARISONS = ["==", "!=", "<", "<=", ">", ">="]
 
+// The type a tuple or a variant on one side of `==` is elaborated expecting, from the other side.
+private aggregate_context(t: Ty) -> Option[Ty] = t match
+    Ty.Tuple(_) -> Some(t)
+    Nominal(_, _) -> Some(t)
+    _ -> None
+
 private is_comparison(op: string) -> bool
     for c in COMPARISONS
         if c == op then return true
@@ -118,7 +124,9 @@ impl Elab
         val target = if named.len > 0 then named else show_ty(ty)
         var message = s"${what} must be ${target}, but this is ${self.shown(v)}"
 
-        if has_unit(v.ty) || has_unit(ty)
+        if is_param(v.ty) || is_param(ty)
+            message = message + ": a type parameter's value is of that one type and widens to no other"
+        elif has_unit(v.ty) || has_unit(ty)
             if is_numeric(base_of(v.ty)) && is_numeric(base_of(ty)) then message = message + unit_note(v, ty)
         elif is_numeric(v.ty) && is_numeric(ty)
             message = message + s": that would narrow it; convert it explicitly, `${target}(...)`"
@@ -384,6 +392,18 @@ impl Elab
         if op == "^" then return self.power(span, l, r, want)
         if op == "@" then return self.matmul(span, l, r)
 
+        // A tuple built in place or a bare variant takes its type from the other side of `==`.
+        if op == "==" || op == "!="
+            if self.takes_context(l) && !self.takes_context(r)
+                val b = self.infer(r)
+
+                return self.apply(span, op, self.elab(l, aggregate_context(b.ty)), b)
+
+            if self.takes_context(r) && self.literal_class(l) == NOT_LITERAL
+                val a = self.infer(l)
+
+                return self.apply(span, op, a, self.elab(r, aggregate_context(a.ty)))
+
         val o = self.operands(l, r, want)
 
         self.apply(span, op, o.lhs, o.rhs)
@@ -398,7 +418,9 @@ impl Elab
         common(a, b) match
             Some(t) -> Some(t)
             None ->
-                if is_int(a) && is_int(b)
+                if is_param(a) || is_param(b)
+                    self.fail(span, s"`${op}` cannot combine ${an} and ${bn}: a type parameter's value meets only its own type and the literals that can take it")
+                elif is_int(a) && is_int(b)
                     val signed = if is_signed(a) then an else bn
 
                     self.fail(span, s"`${op}` mixes ${an} and ${bn}, and neither holds the other's range; convert one: `${signed}(u) ${op} n`")
@@ -419,21 +441,28 @@ impl Elab
             if is_numeric(a.ty) && is_numeric(b.ty)
                 val c = self.common_values(span, op, a, b).unwrap_or(Error)
 
-                if is_ordering(op) && is_complex(c) then self.fail(span, s"`${op}` orders integers and reals; complex numbers have no order")
+                if is_ordering(op) && !is_ordered(c) && !is_error(c)
+                    self.fail(span, s"`${op}` orders integers and reals; ${if is_param(c) then s"${param_text(c)} admits complex numbers, which" else "complex numbers"} have no order")
 
                 return texpr(span, Bool, TBinary(op, promote(a, c), promote(b, c)))
 
             val equality = op == "==" || op == "!="
             val comparable = a.ty match
-                Bool -> true
-                Str -> true
-                _ -> false
+                Ty.Tuple(_) -> true
+                Nominal(_, _) -> true
+                _ -> is_equatable(a.ty)
 
             if !(equality && comparable && ty_eq(a.ty, b.ty))
                 if ty_eq(a.ty, b.ty) && comparable
                     self.fail(span, s"`${op}` orders integers and reals; ${self.shown(a)} values are only equal or not")
+                elif equality && ty_eq(a.ty, b.ty) && is_param(a.ty)
+                    self.fail(span, s"`${op}` compares the values of a type parameter bounded by Eq or a narrower constraint, and ${param_text(a.ty)} is not")
                 else
                     self.fail(span, s"`${op}` cannot compare ${self.shown(a)} with ${self.shown(b)}")
+            else
+                self.function_inside(a.ty) match
+                    Some(f) -> self.fail(span, s"`${op}` cannot compare ${self.shown(a)} values: their $f, and function values are not compared")
+                    None -> ()
 
             return texpr(span, Bool, TBinary(op, a, b))
 
@@ -449,6 +478,12 @@ impl Elab
                 return texpr(span, Error, TBinary(op, a, b))
 
         val c = (if op == "/" && is_int(a.ty) && is_int(b.ty) then Some(REAL) else self.common_values(span, op, a, b)).unwrap_or(Error)
+
+        // Two integers divide to a `real64`, anything else to its own type: a parameter that may be
+        // either has no one type for the quotient.
+        if op == "/" && is_param(c) && (kinds_of(c) | KIND_INT) == kinds_of(c)
+            self.fail(span, s"`/` gives real64 for two integers and their own type otherwise, and ${param_text(c)} may be either; bound it by Float, or convert: `to_real(a) / b`")
+            return texpr(span, Error, TBinary(op, a, b))
 
         texpr(span, c, TBinary(op, promote(a, c), promote(b, c)))
     end apply

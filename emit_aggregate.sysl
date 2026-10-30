@@ -66,13 +66,7 @@ impl Emitter
 
         s"!llvm.struct<($out)>"
 
-    payload_ty(*self, span: Span, fields: Buf[FieldInfo]) -> string
-        var ts: Buf[Ty] = buf()
-
-        for f in fields
-            ts.push(f.ty)
-
-        self.fields_ty(span, ts)
+    payload_ty(*self, span: Span, fields: Buf[FieldInfo]) -> string = self.fields_ty(span, field_types(fields))
 
     // A bound on the size of a stored `t` in 8-byte words. No field is aligned to more than 8 bytes,
     // so the fields' words added up bound a struct; an enum is its tag's word and its largest
@@ -328,6 +322,79 @@ impl Emitter
                             self.targets(span, elems[k], self.field(v, m, k, es[k]), es[k], ptrs, vals, tys)
                     _ -> self.later(span, s"assigning a ${show_ty(t)} to a list of places")
 
+    // -- equality ---------------------------------------------------------------------------------
+
+    // `a == b` or `a != b` on two structs, tuples or enums of type `t`, field by field.
+    aggregate_compare(*self, span: Span, op: string, a: string, b: string, t: Ty) -> string
+        val eq = self.aggregate_equal(span, a, b, t)
+
+        if op == "==" then eq else self.not(eq)
+
+    // Whether the aggregates `a` and `b` of type `t` are equal: every field equal, and for an enum
+    // the same variant first.
+    aggregate_equal(*self, span: Span, a: string, b: string, t: Ty) -> string
+        val m = self.ty(span, t)
+
+        t match
+            Tuple(es) -> return self.fields_equal(span, a, b, m, es)
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) -> return self.fields_equal(span, a, b, m, field_types(s.fields))
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) -> return self.variants_equal(span, a, b, t, e)
+                    None -> ()
+            _ -> ()
+
+        self.unsupported(span, s"`==` on ${show_ty(t)}")
+
+    // Field by field, each compared as `==` compares its type, the results anded.
+    fields_equal(*self, span: Span, a: string, b: string, m: string, ts: Buf[Ty]) -> string
+        var all = self.def("arith.constant true")
+
+        for k in 0..<ts.len()
+            val eq = self.binary(span, "==", self.field(a, m, k, ts[k]), self.field(b, m, k, ts[k]), ts[k])
+
+            all = self.def(s"arith.andi $all, $eq : i1")
+
+        all
+
+    // The same tag, then the payloads of that variant compared field by field.
+    variants_equal(*self, span: Span, a: string, b: string, t: Ty, e: TEnum) -> string
+        val m = self.ty(span, t)
+        val ta = self.def(s"llvm.extractvalue $a[0] : $m")
+        val tb = self.def(s"llvm.extractvalue $b[0] : $m")
+        val same = self.def(s"arith.cmpi eq, $ta, $tb : i64")
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if $same -> (i1) {")
+
+        val s = self.fresh()
+
+        self.op(s"$s = scf.index_switch ${self.tag_index(a, m)} -> i1")
+
+        for tag in 0..<e.variants.len()
+            val fields = e.variants[tag].fields
+
+            self.op(s"case $tag {")
+
+            val eq = if fields.len() == 0 then self.def("arith.constant true")
+                     else self.fields_equal(span, self.payload(a, t, fields), self.payload(b, t, fields), self.payload_ty(span, fields), field_types(fields))
+
+            self.op(s"scf.yield $eq : i1")
+            self.op("}")
+
+        self.op("default {")
+        self.op(s"scf.yield ${self.def("arith.constant true")} : i1")
+        self.op("}")
+        self.op(s"scf.yield $s : i1")
+        self.op("} else {")
+        self.op(s"scf.yield $same : i1")
+        self.op("}")
+        r
+    end variants_equal
+
     // -- printing ---------------------------------------------------------------------------------
 
     put_text(*self, sink: string, text: string)
@@ -397,3 +464,11 @@ impl Emitter
         self.later(span, s"printing ${show_ty(t)}")
     end put_aggregate
 end Emitter
+
+private field_types(fields: Buf[FieldInfo]) -> Buf[Ty]
+    var out: Buf[Ty] = buf()
+
+    for f in fields
+        out.push(f.ty)
+
+    out

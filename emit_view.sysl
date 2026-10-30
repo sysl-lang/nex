@@ -1,0 +1,283 @@
+// Emission of what DESIGN §5 and §6 add to arrays: slices of slices as places, `origin` views and
+// `reverse` along an axis known only at run time.
+//
+// **A slice of a place is a place** (DESIGN §5.3). Writing `a[2..4][1] = 99` opens each slice from
+// the root outward — an `extract_slice` of what the place holds now, remembered as an `Opened` — makes
+// the write on the innermost, and closes them again from the inside out, each an `insert_slice` into
+// the value it was taken from, the root rebound to the result. One-shot bufferization turns the
+// pairs into subviews of the root's buffer, so the write is in place. An `inout` argument that is a
+// slice is opened and closed the same way around the call.
+//
+// **An `origin` view is its source's elements and, per axis, a shift**: the first index less one,
+// an `i64` value of the function that took it. Indexing subtracts it from every explicit index and
+// bound before the usual check, and `end` adds it back; read as a value the view is its source, so
+// nothing about it is allocated or copied (DESIGN §6.4).
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// One slice opened along a place: the place `src` it was taken from and the value `cur` that held,
+// the slice place `slot` itself, its window on `src` by axis, nex order, and the value it reads.
+struct Opened
+    src: TExpr
+    slot: TExpr
+    cur: string
+    subs: Buf[TSub]
+    offs: Buf[string]
+    sizes: Buf[string]
+    strides: Buf[string]
+    view: string
+
+// `xs` last first.
+backwards(xs: Buf[string]) -> Buf[string]
+    var out: Buf[string] = buf()
+    var k = xs.len()
+
+    while k > 0
+        k -= 1
+        out.push(xs[k])
+
+    out
+
+// An `inout` array argument: its place and the slices opened to reach it.
+struct Held
+    place: TExpr
+    frames: Buf[Opened]
+
+// A local bound to an `origin` view, and its shifts by axis.
+struct OriginLocal
+    id: usize
+    shifts: Buf[string]
+
+impl Emitter
+    // An integer expression's value as an `i64`.
+    index64(*self, x: TExpr) -> string = self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
+
+    // Index `w` on axis `k` (from 0) of a view with `shifts`, counted from 1 again.
+    shifted(*self, w: string, shifts: Buf[string], k: usize) -> string =
+        if k < shifts.len() then self.def(s"arith.subi $w, ${shifts[k]} : i64") else w
+
+    // A 1-based index `w` on axis `k` as the view with `shifts` counts it.
+    unshifted(*self, w: string, shifts: Buf[string], k: usize) -> string =
+        if k < shifts.len() then self.def(s"arith.addi $w, ${shifts[k]} : i64") else w
+
+    // An index list on `tv` (array type `t`, `origin` shifts `shifts`) begins: `end` reads it.
+    open_ends(*self, tv: string, t: Ty, shifts: Buf[string])
+        self.ends.push(tv)
+        self.end_tys.push(t)
+        self.end_shifts.push(shifts)
+
+    close_ends(*self)
+        self.ends.pop()
+        self.end_tys.pop()
+        self.end_shifts.pop()
+
+    // -- `origin` ---------------------------------------------------------------------------------
+
+    // The shifts of the array `e`, just emitted: an `origin` node's or an `origin` local's; none for
+    // any other array.
+    shifts_of(*self, e: TExpr) -> Buf[string]
+        *e.kind match
+            TLocal(id) ->
+                if self.shift_words(id) > 0 && self.boxed[id] then return self.cell_shifts(id)
+
+                var k = self.origins.len()
+
+                while k > 0
+                    k -= 1
+                    if self.origins[k].id == id then return self.origins[k].shifts
+            TArray(op) -> *op match
+                TOrigin(_, _) -> return self.last_shifts
+                _ -> ()
+            _ -> ()
+
+        buf()
+
+    // `origin(a, f1, ..., fk)`: the source's elements; the shifts are kept for the index lists.
+    origin(*self, source: TExpr, firsts: Buf[TExpr]) -> string
+        val v = self.ex(source)
+        var shifts: Buf[string] = buf()
+
+        for f in firsts
+            shifts.push(self.def(s"arith.subi ${self.index64(f)}, %one : i64"))
+
+        self.last_shifts = shifts
+        v
+
+    // Local `id` has just been bound to `init`: an `origin` local keeps its shifts. One a lambda
+    // captures keeps them in its cell after the array, where the lambda reads them too.
+    note_origin(*self, span: Span, id: usize, init: TExpr)
+        if self.shift_words(id) == 0 then return
+
+        val shifts = self.shifts_of(init)
+
+        if !self.boxed[id]
+            self.origins.push(OriginLocal(id, shifts))
+            return
+
+        // An axis given no first index starts at 1: a shift of 0.
+        for k in 0..<self.shift_words(id)
+            val s = if k < shifts.len() then shifts[k] else self.def("arith.constant 0 : i64")
+
+            self.op(s"llvm.store $s, ${self.shift_ptr(id, k)} : i64, !llvm.ptr")
+
+    // The words after the array in local `id`'s cell that hold its shifts: one per axis of an
+    // `origin` local, none for any other.
+    shift_words(*self, id: usize) -> usize = self.prog.locals[id].kind match
+        LOrigin -> rank_of(self.prog.locals[id].ty)
+        _ -> 0
+
+    // The address of the shift of axis `k` (from 0) in captured `origin` local `id`'s cell.
+    shift_ptr(*self, id: usize, k: usize) -> string =
+        self.def(s"llvm.getelementptr ${self.local_ptr(Span(0, 0), id)}[${self.words(self.prog.locals[id].ty) + k}] : (!llvm.ptr) -> !llvm.ptr, i64")
+
+    // A captured `origin` local's shifts, read from its cell.
+    cell_shifts(*self, id: usize) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for k in 0..<self.shift_words(id)
+            out.push(self.def(s"llvm.load ${self.shift_ptr(id, k)} : !llvm.ptr -> i64"))
+
+        out
+
+    // -- slices of places -------------------------------------------------------------------------
+
+    // The value `v` a `var` array local `id` starts from. An array literal folds to a constant, and
+    // a constant's storage cannot be written: the first write through a window of one, an `inout`
+    // argument above all, would copy the window and then the whole constant. Copied into a buffer of
+    // the variable's own here, every later write is in place.
+    var_start(*self, span: Span, id: usize, init: TExpr, v: string) -> string
+        self.prog.locals[id].kind match
+            LVar -> ()
+            _ -> return v
+
+        *init.kind match
+            TArray(op) -> *op match
+                TArrayLit(_) -> ()
+                _ -> return v
+            _ -> return v
+
+        // `alloc_tensor`, not `linalg.copy`: canonicalization erases a copy into a fresh tensor.
+        self.def(s"bufferization.alloc_tensor() copy($v) : ${self.tensor_ty(span, init.ty)}")
+
+    // The array the place `e` holds now; each slice opened on the way to it pushed onto `frames`.
+    open_place(*self, e: TExpr, frames: *Buf[Opened]) -> string
+        *e.kind match
+            TArray(op) -> *op match
+                TIndex(src, subs) ->
+                    val cur = self.open_place(src, frames)
+                    val (offs, sizes, strides) = self.window(e.span, cur, src.ty, subs, buf())
+                    val v = self.sliced(e.span, cur, src.ty, self.slice_text(subs, offs, sizes, strides), e.ty)
+
+                    frames.push(Opened(src, e, cur, subs, offs, sizes, strides, v))
+                    return v
+                _ -> ()
+            _ -> ()
+
+        self.place_value(e)
+
+    // The place `e`, opened through `frames`, rebound to the array `v`. A value `handed_back` by an
+    // `inout` call may have any shape: a whole place takes it, and a slice traps unless it kept the
+    // shape.
+    close_place(*self, span: Span, e: TExpr, v: string, frames: Buf[Opened], handed_back: bool)
+        if frames.len() == 0
+            self.set_place(e, v, !handed_back)
+            return
+
+        val f = frames[frames.len() - 1]
+        val st = self.view_ty(f.slot.ty)
+        var subs: Buf[TSub] = buf()
+        var offs: Buf[string] = buf()
+        var sizes: Buf[string] = buf()
+        var strides: Buf[string] = buf()
+
+        for a in 1..rank_of(f.slot.ty)
+            val n = self.dim(span, f.view, f.slot.ty, a)
+
+            if handed_back then self.trap_if(self.def(s"arith.cmpi ne, ${self.dim(span, v, f.slot.ty, a)}, $n : index"), "shape mismatch")
+
+            subs.push(TSubAll)
+            offs.push(self.index_const(0))
+            sizes.push(n)
+            strides.push(self.index_const(1))
+
+        self.insert_through(span, frames, subs, offs, sizes, strides, self.cast(span, v, f.slot.ty, st), self.tensor_ty(span, st))
+
+    // `x` written into the window `subs` (offsets, extents and strides by axis, nex order) of the
+    // slice place `frames` opened, as one `insert` or `insert_slice` into the root place's array: the
+    // windows compose, so the write is the root's own and bufferizes in place. `xt` is the type of
+    // `x`, `""` for an element.
+    insert_through(*self, span: Span, frames: Buf[Opened], subs: Buf[TSub], offs: Buf[string], sizes: Buf[string], strides: Buf[string], x: string, xt: string)
+        var s = subs
+        var o = offs
+        var z = sizes
+        var t = strides
+        var k = frames.len()
+
+        while k > 0
+            k -= 1
+
+            val f = frames[k]
+            var ns: Buf[TSub] = buf()
+            var no: Buf[string] = buf()
+            var nz: Buf[string] = buf()
+            var nt: Buf[string] = buf()
+            var j: usize = 0
+
+            for a in 0..<f.subs.len()
+                f.subs[a] match
+                    TSubAt(_) ->
+                        ns.push(f.subs[a])
+                        no.push(f.offs[a])
+                        nz.push(f.sizes[a])
+                        nt.push(f.strides[a])
+                    _ ->
+                        ns.push(s[j])
+                        no.push(self.def(s"arith.addi ${f.offs[a]}, ${self.def(s"arith.muli ${o[j]}, ${f.strides[a]} : index")} : index"))
+                        nz.push(z[j])
+                        nt.push(self.def(s"arith.muli ${f.strides[a]}, ${t[j]} : index"))
+                        j += 1
+
+            s = ns
+            o = no
+            z = nz
+            t = nt
+
+        val root = frames[0]
+        val tt = self.tensor_ty(span, root.src.ty)
+        val v = if xt == "" then self.def(s"tensor.insert $x into ${root.cur}[${joined(backwards(o))}] : $tt")
+                else self.def(s"tensor.insert_slice $x into ${root.cur}${self.slice_text(s, o, z, t)} : $xt into $tt")
+
+        self.set_place(root.src, v, true)
+    end insert_through
+
+    // -- `reverse(a, k)` --------------------------------------------------------------------------
+
+    // `reverse(a, k)` with `k` known only at run time: every axis whole, axis `k` walked from its
+    // end with stride −1; a `k` that is not an axis traps.
+    reversed_at(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val v = self.ex(args[0])
+        val at = args[0].ty
+        val k = self.index64(args[1])
+        val r = rank_of(at)
+        val zero = self.def("arith.constant 0 : i64")
+        val down = self.def("arith.constant -1 : i64")
+        var offs: Buf[string] = buf()
+        var sizes: Buf[string] = buf()
+        var strides: Buf[string] = buf()
+        var subs: Buf[TSub] = buf()
+
+        self.trap_if(self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64"), "not an axis of the array")
+
+        for a in 1..r
+            val hit = self.def(s"arith.cmpi eq, $k, ${self.def(s"arith.constant $a : i64")} : i64")
+            val n = self.dim(span, v, at, a)
+            val last = self.def(s"arith.maxsi ${self.def(s"arith.subi ${self.to_i64(n)}, %one : i64")}, $zero : i64")
+
+            offs.push(self.def(s"arith.index_cast ${self.def(s"arith.select $hit, $last, $zero : i64")} : i64 to index"))
+            sizes.push(n)
+            strides.push(self.def(s"arith.index_cast ${self.def(s"arith.select $hit, $down, %one : i64")} : i64 to index"))
+            subs.push(TSubAll)
+
+        self.sliced(span, v, at, self.slice_text(subs, offs, sizes, strides), t)
+end Emitter

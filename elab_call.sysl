@@ -437,6 +437,11 @@ impl Elab
 
     // The result type of a one-argument prelude function on an argument of type `t`.
     scalar_result(*self, span: Span, name: string, t: Ty) -> Ty
+        // The real part's type of a complex parameter is not a type the generic can name.
+        if (name == "abs" || name == "arg") && is_param(t) && is_complex(t)
+            self.fail(span, s"`${name}` of a complex number is its real part's type, which ${param_text(t)} does not name")
+            return Error
+
         if name == "abs"
             if is_complex(t) then return Real(bits_of(t))
             if is_ordered(t) then return t

@@ -1,11 +1,18 @@
 // Generic functions, structs and enums (DESIGN §2.6, §3.4), and their monomorphization.
 //
-// **A generic is elaborated once for each instance it is used at.** A call or a construction infers
+// **A generic function's body is checked once, against its constraints**, whether or not it is
+// used: each type parameter is a bound `Ty.Param`, an abstract type the operators and the prelude
+// classify by what its constraint admits (`kinds_of` in `types.sysl`), and each rank parameter an
+// array shape of no known rank. An operation the constraints do not allow is reported there, once,
+// and a generic so refused is never instantiated. What the check builds is undone after it.
+//
+// **A use only checks that its arguments satisfy the constraints.** A call or a construction infers
 // the generic's arguments, checks each against its constraint, and names the instance it needs:
 // `id[int64]`, `Pair[int64, string]`, `total[real64, 2]`. The first use of an instance creates it, an
 // ordinary `def`, struct or enum whose parameter types, body or fields are elaborated with each
-// generic parameter standing for its argument. The typed IR holds only the instances; a generic
-// declaration leaves nothing in it, and one that is never used is never elaborated.
+// generic parameter standing for its argument, for the typed IR; a body already checked reports
+// nothing there but what only an argument decides, a literal too large for it. The typed IR holds
+// only the instances; a generic declaration leaves nothing in it.
 //
 // **Inference matches each parameter's declared type against its argument's type.** The arguments
 // that are not literals go first, and a type parameter they give several numeric types takes the
@@ -39,12 +46,13 @@ enum GKind
     KRank
     KUnit
 
-// What a generic parameter is given. While a generic's own signature is read a rank parameter has
-// no rank yet, and an array whose shape it is keeps it as written.
+// What a generic parameter is given. While a generic's own signature is read, or its body checked,
+// a rank parameter has no rank: it is the rank parameter `name`, and an array whose shape it is keeps
+// it as written, `[T; R]`.
 enum TArg
     TypeArg(ty: Ty)
     RankArg(rank: usize)
-    RankFree
+    RankParam(name: string)
 
 // A generic parameter's name and its argument in the declaration being elaborated.
 struct Binding
@@ -94,8 +102,48 @@ struct Generics
     agg_insts: Buf[AggInstance]
     // The struct and enum instances whose fields are being resolved, innermost last.
     building: Buf[usize]
+    // Whether each generic function's body has been checked against its constraints.
+    checked: Buf[bool]
+    // The instance standing for the generic whose body is being checked, its parameters bound.
+    checking: Option[usize]
 
-empty_generics() -> Generics = Generics(buf(), buf(), buf(), buf(), buf())
+empty_generics() -> Generics = Generics(buf(), buf(), buf(), buf(), buf(), buf(), None)
+
+// The elaborator's tables before a generic's body is checked: the length of each one the check can
+// only add to, and a copy of each whose entries it can change.
+struct Mark
+    funs: usize
+    fsig: Buf[Sig]
+    fret: Buf[Ty]
+    fret_known: Buf[bool]
+    fstate: Buf[Progress]
+    fout: usize
+    gstate: Buf[Progress]
+    gty: Buf[Ty]
+    gout: usize
+    locals: usize
+    lambdas: usize
+    captures: usize
+    loops: usize
+    pending: usize
+    structs: usize
+    enums: usize
+    variants: usize
+    groups: usize
+    passed: usize
+    owners: usize
+    passing: bool
+    views: usize
+    fun_insts: usize
+    agg_insts: usize
+
+private copied[T](b: Buf[T]) -> Buf[T]
+    var out: Buf[T] = buf()
+
+    for x in b
+        out.push(x)
+
+    out
 
 // The arguments of one generic use while they are inferred: each one's argument where it has one,
 // whether something other than a literal fixed it, whether the expected type gave it (and nothing
@@ -116,21 +164,26 @@ kind_of(tp: TypeParam) -> GKind = tp.constraint match
 
 private constraint_of(tp: TypeParam) -> string = tp.constraint.unwrap_or("Any")
 
-// Whether a constraint admits a type (DESIGN §2.6).
+// Whether a constraint admits a type (DESIGN §2.6): a type parameter where its own constraint
+// admits nothing the other does not.
 admits(c: string, t: Ty) -> bool
-    if c == "Numeric" then return is_numeric(t)
-    if c == "Integral" then return is_int(t)
-    if c == "Real" || c == "Ord" then return is_ordered(t)
-    if c == "Float" then return is_real(t)
-    if c == "Complex" then return is_complex(t)
+    val k = constraint_kinds(c)
 
-    if c == "Eq"
-        return t match
-            Bool -> true
-            Str -> true
-            _ -> is_numeric(t)
+    (kinds_of(t) | k) == k
 
-    true
+// A type parameter with its constraint, as a diagnostic names it: `` `T: Numeric` ``.
+param_text(t: Ty) -> string = t match
+    Ty.Param(n, c, _) -> s"`${n}: ${c}`"
+    _ -> show_ty(t)
+
+// Whether `Eq` admits a struct, an enum or a tuple: one `==` compares, holding no function value.
+private admits_aggregate(c: string, t: Ty) -> bool
+    if c != "Eq" then return false
+
+    t match
+        Ty.Tuple(_) -> true
+        Nominal(_, _) -> true
+        _ -> false
 
 private admitted_text(c: string) -> string
     if c == "Numeric" then return "the integer, real and complex types"
@@ -138,14 +191,15 @@ private admitted_text(c: string) -> string
     if c == "Real" || c == "Ord" then return "the integer and real types"
     if c == "Float" then return "the real types"
     if c == "Complex" then return "the complex types"
-    if c == "Eq" then return "the numeric types, `bool` and `string`"
+    if c == "Eq" then return "the numeric types, `bool`, `string`, and the structs, enums and tuples that hold no function value"
 
     "every type"
 
-// Whether a type still holds a generic parameter: a `Ty.Param`, or an application of a generic
-// struct or enum to some (`Box[T]`), which only a generic's own signature has.
+// Whether a type still holds a generic parameter a use infers: a `Ty.Param` that is not bound, or an
+// application of a generic struct or enum to some (`Box[T]`), which only a generic's own signature
+// has.
 has_param(t: Ty) -> bool = t match
-    Ty.Param(_, _) -> true
+    Ty.Param(_, _, bound) -> !bound
     Nominal(_, args) -> args.len() > 0
     Ty.Array(elem, _) -> has_param(*elem)
     Ty.Tuple(elems) ->
@@ -163,7 +217,7 @@ has_param(t: Ty) -> bool = t match
 private show_targ(a: TArg) -> string = a match
     TypeArg(t) -> show_ty(t)
     RankArg(r) -> s"${r}"
-    RankFree -> "?"
+    RankParam(n) -> n
 
 // An instance's name: the generic's, with its arguments, `Pair[int64, string]`.
 mangle(name: string, args: Buf[TArg]) -> string
@@ -181,7 +235,9 @@ private targ_eq(a: TArg, b: TArg) -> bool = a match
     RankArg(x) -> b match
         RankArg(y) -> x == y
         _ -> false
-    RankFree -> false
+    RankParam(x) -> b match
+        RankParam(y) -> x == y
+        _ -> false
 
 private targs_eq(xs: Buf[TArg], ys: Buf[TArg]) -> bool
     if xs.len() != ys.len() then return false
@@ -230,6 +286,7 @@ impl Elab
         val valid = self.check_tparams(d.span, tparams, true)
 
         self.gen.funs.push(GenFun(d, name, tparams, params, ret, b, buf(), None, valid))
+        self.gen.checked.push(false)
     end collect_generic_fun
 
     collect_generic_agg(*self, d: Decl, name: string, tparams: Buf[TypeParam], is_enum: bool)
@@ -299,6 +356,7 @@ impl Elab
             if !f.valid then continue
 
             val saved = self.fx.subst
+            val base = self.diags.len()
             self.fx.subst = template_binds(f.tparams)
 
             var formals: Buf[Ty] = buf()
@@ -311,7 +369,9 @@ impl Elab
                 None -> None
 
             self.fx.subst = saved
-            self.gen.funs.set(g, GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, formals, result, true))
+
+            // A signature refused here is refused once, and its body is not checked.
+            self.gen.funs.set(g, GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, formals, result, self.diags.len() == base))
 
         for g in 0..<self.gen.aggs.len()
             val a = self.gen.aggs[g]
@@ -372,10 +432,10 @@ impl Elab
 
                 return b.arg match
                     RankArg(r) -> Some(dynamic_shape(r))
-                    RankFree ->
+                    RankParam(name) ->
                         var out: Buf[Extent] = buf()
 
-                        out.push(Extent.Named(n))
+                        out.push(Extent.Named(name))
                         Some(out)
                     TypeArg(_) ->
                         self.fail(span, s"`${n}` is a type, not a rank; an array's shape is a rank: `[T; R]` with `R: Rank`")
@@ -448,7 +508,8 @@ impl Elab
             val outer = self.gen.agg_insts[b]
 
             if outer.generic == g && name.len > outer.name.len
-                self.fail(span, s"`${a.name}` would hold ever larger instances of itself, ${name} inside ${outer.name}, and has no size")
+                // Reported wherever it is found, since it refuses the generic for good.
+                self.diags.push(error(span, s"`${a.name}` would hold ever larger instances of itself, ${name} inside ${outer.name}, and has no size"))
                 self.gen.aggs.set(g, GenAgg(a.decl, a.name, a.tparams, a.is_enum, a.variants, false))
                 return None
 
@@ -505,6 +566,8 @@ impl Elab
         for i in self.gen.fun_insts
             if i.generic == g && targs_eq(i.args, args) then return Some(i.fun)
 
+        self.check_generic(g)
+
         val f = self.gen.funs[g]
 
         if !f.valid then return None
@@ -520,7 +583,8 @@ impl Elab
             val outer = self.funs[self.gen.fun_insts[i].fun].name
 
             if self.gen.fun_insts[i].generic == g && name.len > outer.len
-                self.fail(span, s"`${f.name}` would need ever larger instances of itself, ${name} inside ${outer}, and they would never end")
+                // Reported wherever it is found, since it refuses the generic for good.
+                self.diags.push(error(span, s"`${f.name}` would need ever larger instances of itself, ${name} inside ${outer}, and they would never end"))
                 self.gen.funs.set(g, GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, f.formals, f.result, false))
                 return None
 
@@ -547,6 +611,132 @@ impl Elab
 
         Some(k)
     end instantiate_fun
+
+    // Checks a generic function's signature and body once, against its constraints, before its
+    // first instance and whether or not it has one. Each type parameter is a bound `Ty.Param`, an
+    // abstract type the operators and the prelude classify by its constraint, and each rank
+    // parameter an array shape of no known rank. Everything the check builds is undone after it,
+    // so the typed IR holds only instances; its diagnostics stay, and a generic they refuse is
+    // never instantiated. A diagnostic inside anything the body needs elaborated on its way — an
+    // instance of another generic, a function whose result type it needs — is not this body's, and
+    // that declaration reports it itself.
+    check_generic(*self, g: usize)
+        if self.gen.checked[g] || self.gen.checking.is_some() then return
+
+        self.gen.checked.set(g, true)
+
+        val f = self.gen.funs[g]
+
+        if !f.valid then return
+
+        val mark = self.mark()
+        val args = own_args(f.tparams, true)
+        val k = self.funs.len()
+        val inst = self.gen.fun_insts.len()
+
+        self.funs.push(FunSrc(f.decl, mangle(f.name, args), f.params, f.ret, f.body, buf()))
+        self.fret.push(Error)
+        self.fret_known.push(false)
+        self.fstate.push(Waiting)
+        self.gen.fun_insts.push(FunInstance(g, args, k, None))
+
+        val base = self.diags.len()
+        val saved = self.fx
+
+        self.fx = empty_fx()
+        self.gen.checking = Some(inst)
+        self.ensure_sig(k)
+        self.ensure_body(k)
+        self.gen.checking = None
+        self.fx = saved
+        self.undo(mark)
+
+        if self.diags.len() > base
+            val now = self.gen.funs[g]
+
+            self.gen.funs.set(g, GenFun(now.decl, now.name, now.tparams, now.params, now.ret, now.body, now.formals, now.result, false))
+    end check_generic
+
+    // Whether a diagnostic given now is reported: not while a generic's body is checked and the
+    // cursor is in something else that check needed elaborated.
+    reporting(self) -> bool = self.gen.checking match
+        Some(i) -> self.fx.instance match
+            Some(j) -> i == j
+            None -> false
+        None -> true
+
+    // The rank parameter an array type's shape is, `[T; R]` in the body of a generic being checked.
+    rank_param_of(self, t: Ty) -> Option[string] = t match
+        Ty.Array(_, axes) -> self.rank_param_axes(axes)
+        _ -> None
+
+    // Why two shapes of one length are not one rank, where either is a rank parameter: `[T; R]`
+    // meets only `[U; R]`.
+    rank_clash(self, xs: Buf[Extent], ys: Buf[Extent]) -> Option[string]
+        val a = self.rank_param_axes(xs)
+        val b = self.rank_param_axes(ys)
+
+        if a.is_none() && b.is_none() then return None
+
+        val r = a.unwrap_or(b.unwrap_or(""))
+        val other = if a.is_some() then b else a
+
+        other match
+            Some(s) -> if s == r then None else Some(s"`${r}` and `${s}` are two ranks")
+            None -> Some(s"`${r}` is a rank of its own, which no other shape is known to have")
+
+    private rank_param_axes(self, axes: Buf[Extent]) -> Option[string]
+        if axes.len() != 1 then return None
+
+        val n = axes[0] match
+            Extent.Named(n) -> n
+            _ -> return None
+
+        for b in self.fx.subst
+            b.arg match
+                RankParam(r) -> if r == n then return Some(n)
+                _ -> ()
+
+        None
+
+    // -- undoing a check --------------------------------------------------------------------------
+
+    // The tables as they stand, to be put back by `undo`.
+    private mark(self) -> Mark =
+        Mark(self.funs.len(), copied(self.fsig), copied(self.fret), copied(self.fret_known), copied(self.fstate), self.fout.len(),
+            copied(self.gstate), copied(self.gty), self.gout.len(), self.locals.len(), self.lambdas.len(), self.captures.len(),
+            self.loops.len(), self.pending.len(), self.agg.structs.len(), self.agg.enums.len(), self.agg.variants.len(),
+            self.agg.groups.len(), self.agg.passed.len(), self.agg.owners.len(), self.agg.passing, self.vw.locals.len(),
+            self.gen.fun_insts.len(), self.gen.agg_insts.len())
+
+    private undo(*self, m: Mark)
+        self.funs.truncate(m.funs)
+        self.fsig = m.fsig
+        self.fret = m.fret
+        self.fret_known = m.fret_known
+        self.fstate = m.fstate
+        self.fout.truncate(m.fout)
+        self.gstate = m.gstate
+        self.gty = m.gty
+        self.gout.truncate(m.gout)
+        self.locals.truncate(m.locals)
+        self.depth.truncate(m.locals)
+        self.spelled.truncate(m.locals)
+        self.lambdas.truncate(m.lambdas)
+        self.captures.truncate(m.captures)
+        self.loops.truncate(m.loops)
+        self.pending.truncate(m.pending)
+        self.agg.structs.truncate(m.structs)
+        self.agg.enums.truncate(m.enums)
+        self.agg.variants.truncate(m.variants)
+        self.agg.groups.truncate(m.groups)
+        self.agg.passed.truncate(m.passed)
+        self.agg.owners.truncate(m.owners)
+        self.agg.passing = m.passing
+        self.vw.locals.truncate(m.views)
+        self.gen.fun_insts.truncate(m.fun_insts)
+        self.gen.agg_insts.truncate(m.agg_insts)
+    end undo
 
     // The body state a function starts in: empty, with an instance's generic parameters bound.
     fx_for(self, k: usize) -> Fx
@@ -598,7 +788,7 @@ impl Elab
         if is_wild(actual) || has_error(actual) then return true
 
         formal match
-            Ty.Param(n, _) ->
+            Ty.Param(n, _, _) ->
                 self.bind_param(inf, n, TypeArg(actual), firm)
                 true
             Ty.Array(fe, fx) ->
@@ -609,7 +799,12 @@ impl Elab
                 if fx.len() == 1
                     fx[0] match
                         Extent.Named(n) ->
-                            if param_index(inf, n).is_some() then self.bind_param(inf, n, RankArg(rank_of(actual)), true)
+                            if param_index(inf, n).is_some()
+                                val rank = self.rank_param_of(actual) match
+                                    Some(r) -> RankParam(r)
+                                    None -> RankArg(rank_of(actual))
+
+                                self.bind_param(inf, n, rank, true)
                         _ -> ()
 
                 self.unify(*fe, ae, inf, firm)
@@ -698,7 +893,7 @@ impl Elab
     // type a lambda argument is elaborated against.
     private partial(*self, span: Span, t: Ty, inf: *Infer) -> Ty
         t match
-            Ty.Param(n, _) ->
+            Ty.Param(n, _, _) ->
                 param_index(inf, n) match
                     Some(k) -> inf.args[k] match
                         Some(TypeArg(a)) -> a
@@ -713,6 +908,9 @@ impl Elab
                             param_index(inf, n) match
                                 Some(k) -> inf.args[k] match
                                     Some(RankArg(r)) -> out = dynamic_shape(r)
+                                    Some(RankParam(r)) ->
+                                        out = buf()
+                                        out.push(Extent.Named(r))
                                     _ -> ()
                                 None -> ()
                         _ -> ()
@@ -821,9 +1019,20 @@ impl Elab
                 self.fail(span, s"`${tp.name}` of `${inf.owner}` would be ${show_ty(t)}, which holds no value")
                 return false
 
-            if !admits(c, t)
-                self.fail(span, s"`${inf.owner}` needs `${tp.name}: ${c}`, and ${show_ty(t)} is not ${c}: ${c} admits ${admitted_text(c)}")
+            if !(admits(c, t) || admits_aggregate(c, t))
+                val what = t match
+                    Ty.Param(n, pc, _) -> s"`${n}: ${pc}` may be a type that is not: ${pc} admits ${admitted_text(pc)}, and ${c}"
+                    _ -> s"${show_ty(t)} is not ${c}: ${c}"
+
+                self.fail(span, s"`${inf.owner}` needs `${tp.name}: ${c}`, and ${what} admits ${admitted_text(c)}")
                 return false
+
+            if !admits(c, t)
+                self.function_inside(t) match
+                    Some(f) ->
+                        self.fail(span, s"`${inf.owner}` needs `${tp.name}: ${c}`, and ${show_ty(t)} is not ${c}: its $f, and function values are not compared")
+                        return false
+                    None -> ()
 
         true
     end constraints_hold
@@ -910,6 +1119,8 @@ impl Elab
         concrete match
             Some(k) -> if self.concrete_applies(k, args, &pre) then return self.concrete_call(span, at, k, args, &pre)
             None -> ()
+
+        self.check_generic(g)
 
         val f = self.gen.funs[g]
 
@@ -1029,6 +1240,8 @@ impl Elab
 
     // A generic function as a value: the instance the function type its position expects gives.
     generic_value(*self, span: Span, g: usize, want: Option[Ty]) -> TExpr
+        self.check_generic(g)
+
         val f = self.gen.funs[g]
 
         if !f.valid then return self.invalid(span)
@@ -1182,7 +1395,7 @@ private param_index(inf: *Infer, n: string) -> Option[usize]
 private show_arg(a: TArg) -> string = a match
     TypeArg(t) -> show_ty(t)
     RankArg(r) -> s"rank ${r}"
-    RankFree -> "?"
+    RankParam(n) -> s"rank ${n}"
 
 private new_infer(owner: string, tparams: Buf[TypeParam]) -> Infer
     var args: Buf[Option[TArg]] = buf()
@@ -1213,16 +1426,19 @@ private settled(inf: *Infer) -> Buf[TArg]
 
     out
 
-// A generic's parameters as its own signature reads them: each type parameter a `Ty.Param`, each
-// rank parameter without its rank.
-private template_binds(tparams: Buf[TypeParam]) -> Buf[Binding]
-    var out: Buf[Binding] = buf()
+// A generic's parameters as its own signature reads them: each type parameter a `Ty.Param` a use
+// infers, each rank parameter without its rank.
+private template_binds(tparams: Buf[TypeParam]) -> Buf[Binding] = binds_of(tparams, own_args(tparams, false))
+
+// A generic's parameters standing for themselves: each type parameter a `Ty.Param`, bound where the
+// generic's body is checked, each rank parameter without its rank.
+private own_args(tparams: Buf[TypeParam], bound: bool) -> Buf[TArg]
+    var out: Buf[TArg] = buf()
 
     for tp in tparams
-        kind_of(tp) match
-            KType -> out.push(Binding(tp.name, TypeArg(Ty.Param(tp.name, constraint_of(tp)))))
-            KRank -> out.push(Binding(tp.name, RankFree))
-            KUnit -> ()
+        out.push(kind_of(tp) match
+            KRank -> RankParam(tp.name)
+            _ -> TypeArg(Ty.Param(tp.name, constraint_of(tp), bound)))
 
     out
 

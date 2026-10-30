@@ -79,6 +79,14 @@ proof_real_spelling()
 proof_precision()
     check_proof("precision", "experiments/mlir/precision.out")
 
+@test("a negative stride survives slicing, bufferization and strided metadata, read and written in place")
+proof_negative_stride()
+    check_proof("negative-stride", "experiments/mlir/negative-stride.out")
+
+@test("a read window and a disjoint inout window of one array passed to one call give the right values")
+proof_disjoint_read_inout()
+    check_proof("disjoint-read-inout", "experiments/mlir/disjoint-read-inout.out")
+
 @test("a trap inside MLIR-generated frames is caught and resumed by the runtime, and aborts uncaught")
 proof_trap_catch()
     val bin = llvm_bin()
