@@ -288,7 +288,7 @@ run_prelude_scalars()
     val out = ran(b, "def main() =\n  val y: real32 = 2.0\n  print(sqrt(y))\n  print(exp(y))\n  val h: real16 = 2.0\n  print(sqrt(h))\n  print(sin(h))\n  val z = 3 + 4i\n  print(abs(z))\n  print(conj(z))\n  print(sqrt(-4 + 0i))\n  print(sqrt(3 + 4i))\n  print(sqrt(-3 - 4i))\n  print(sqrt(0 + 0i))\n  val w: complex[real32] = -4 + 0i\n  print(sqrt(w))\n  print(log(-1 + 0i))\n  print(max(3, 9, 4))\n  print(min(2.5, -1.0, 0.0))\n  print(sign(-3))\n  print(sign(0.0))\n  print(sign(-2.5))\n  print(abs(-2.5))\n  print(round(2.5))\n  print(round(-2.5))\n  print(floor(-2.5))\n  print(atan2(1.0, 1.0))\n  print(hypot(3.0, 4.0))\n  val u: uint8 = 250\n  var last: uint8 = 0\n  for k in u..255 do last = k\n  print(last)\n")
 
     finish(b)
-    assert_eq(out.text, "1.4142135\n7.389056\n1.414\n0.909\n5.0\n3.0-4.0i\n0.0+2.0i\n2.0+1.0i\n1.0-2.0i\n0.0+0.0i\n0.0+2.0i\n0.0+3.141592653589793i\n9\n-1.0\n-1\n0.0\n-1.0\n2.5\n3.0\n-3.0\n-3.0\n0.7853981633974483\n5.0\n255\n")
+    assert_eq(out.text, "1.4142135\n7.389056\n1.414\n0.909\n5.0\n3.0-4.0i\n0.0+2.0i\n2.0+1.0i\n1.0-2.0i\n0.0+0.0i\n0.0+2.0i\n0.0+3.141592653589793i\n9\n-1.0\n-1\n0.0\n-1.0\n2.5\n3.0\n-3.0\n-3.0\n0.7853981633974483 rad\n5.0\n255\n")
 
 @test("an exit, cycle or return inside an operand skips the rest of its statement: no call, store or trap")
 run_leave_inside_operand()

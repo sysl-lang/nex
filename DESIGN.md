@@ -2050,14 +2050,18 @@ unit psi = lbf / in^2
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
   `sign(x)` and `arg(z)` return a plain number: the sign is −1, 0 or 1 whatever `x` measures, and
   `arg(z)` is in radians.
-  `atan2(y, x)` takes two values of one dimension and returns a plain number, in radians.
+  `atan2(y, x)` takes two values of one dimension and returns an angle, a `real<rad>`: the unit
+  they share cancels, so `atan2(1.0<m>, 2.0<mm>)` is an angle like `atan2(1.0, 2.0)`.
 - **`sin`, `cos` and `tan` take an angle**, in any angle unit, converted to radians
   (`sin(30.0<deg>)`), **or a plain number, which is radians**, as in Fortran; another unit, `sr`
   among them, is a compile error. They return a plain number.
 - `exp`, `log`, `asin`, `acos`, `atan` and the other elementary functions need a dimensionless
-  argument — an angle is not one — and return a dimensionless result. **The inverse functions and
-  `atan2` return a plain number, in radians**, as in Fortran; `asin(x) * 1.0<rad>` makes it an
-  angle.
+  argument — an angle is not one. **The inverse functions `asin`, `acos` and `atan`, and `atan2`,
+  return an angle**, a `real<rad>` of the argument's width (`real64<rad>` for an integer argument),
+  and element by element an array of angles; the others return a dimensionless result. The angle
+  goes back into `sin` unchanged (`sin(asin(x))`), converts with `to<deg>(atan(x))`, and is refused
+  where a plain number is expected, as any angle is: `strip(asin(x))` is its number in radians.
+  `asin`, `acos` and `atan` do not take a complex argument.
 - `product(a)` has unit `U^n`; for an `a` that carries a unit, `n` must be a static extent
   (**PROPOSED**), and otherwise it is a compile error that suggests `strip`.
 - `print` and string interpolation show the unit after the value, separated by a space: with
