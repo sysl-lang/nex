@@ -1347,13 +1347,19 @@ product both times, no copy.
    an operand that is `transpose(X)`, `conj(transpose(X))` (BLAS's `T` and `C` flags), or a rank-2
    view whose unit stride is along the second axis rather than the first (a transposed layout).
 3. A BLAS library is linked: Accelerate on macOS (the run in `blas.mlir`), OpenBLAS elsewhere
-   *(unverified)*, through the LP64 (`int32`) interface.
+   *(unverified on Linux)*, through the LP64 (`int32`) interface. **A program whose `@` or
+   linear-algebra prelude calls BLAS or LAPACK links it with no flag**, and one that calls neither
+   links none; `NEX_BLAS` names other link options in its place (`NEX_BLAS="-L/opt/openblas/lib
+   -lopenblas"`).
 
 The routine follows the shape: `gemm`, `gemv` (`T` flag for vector-matrix), `dot` (`dotu` for
-complex: nex's `@` does not conjugate). With static extents the decision is made at compile time;
-with dynamic ones the compiler emits both paths and a run-time test. Operands that fail §10.3's
-stride rules are copied first. `C = alpha * (A @ B) + beta * C` assigned to the same `C` is one
-`gemm` with `beta` (**PROPOSED**).
+complex: nex's `@` does not conjugate). `x @ conj(transpose(Y))`, which `gemv` has no flag for, is
+`gemm` with `x` as one row. With static extents the decision is made at compile time; with dynamic
+ones the compiler emits both paths and a run-time test, both writing one result buffer made before
+the test. Operands that fail §10.3's stride rules are copied first, and so is a matrix whose column
+stride is less than its row count. The prelude's `dot(x, y)` is a reduction (§9.2.1), reproducible
+and never dispatched; `x @ y` is the product and dispatches. `C = alpha * (A @ B) + beta * C`
+assigned to the same `C` is one `gemm` with `beta` (**PROPOSED**).
 
 **A BLAS result may differ in the last bits from the `linalg` path**, since it sums in a different
 order. Every corpus matrix is far below the threshold. A build flag disables dispatch
@@ -1383,17 +1389,57 @@ Pivot indices (`ipiv`) are `[int32]`, LAPACK's integer.
 
 **Later** (§15): banded and tridiagonal solvers, generalized eigenproblems, `rcond` / `cond`.
 
+**The number types are LAPACK's four**: `real32`, `real64`, `complex[real32]` and
+`complex[real64]` (`s`, `d`, `c`, `z`). An integer matrix is taken as `real64`; `solve` and `lstsq`
+meet their two operands in one type as `@` does; `real16` is a compile error. A matrix argument has
+rank 2 and a right-hand side rank 1 or 2. Where the extents that must agree are both static — a
+square matrix for `solve`, `inv`, `det`, `chol`, `eigvals`, `eig` and `eigh`, the right-hand side's
+rows — a mismatch is a compile error; otherwise the call traps (*"inv: the matrix is not square"*).
+Static extents carry into the results.
+
+**What each result is**, where the table leaves a choice:
+
+- `lu(A)` of an m × n `A`, with k = min(m, n): `L` is m × k with a unit diagonal, `U` is k × n, and
+  `p` is an `[integer]` permutation of `1..m` with `A[p[i], :] == (L @ U)[i, :]` — the row
+  interchanges applied in order, not LAPACK's `ipiv`.
+- `qr(A)` is the thin factorization: `Q` is m × k with orthonormal columns, `R` is k × n.
+- `svd(A)` is thin: `U` is m × k, `s` has k values, `V` is n × k.
+- `chol` reads one triangle only, the lower, or the upper with `upper = true`, and does not check
+  that `A` is symmetric; the result's other triangle is zero. `eigh` reads the lower triangle.
+- `eigvals` and `eig` give the values in LAPACK's order, unsorted, a conjugate pair adjacent with
+  its positive imaginary part first; each vector has unit 2-norm and its largest component real.
+- `lstsq` is the minimum-norm solution, singular values below machine precision taken as zero
+  (`?gelsd` with `rcond = -1`), so a rank-deficient `A` does not fail.
+- `det` is the product of `U`'s diagonal, its sign flipped once per row interchange: exactly `0.0`
+  where `?getrf` finds a zero pivot.
+
 **The value forms** take and return values, copying their inputs because LAPACK overwrites them,
 and **trap** when LAPACK's `info` reports failure, with a message naming the routine and the cause
 in the user's terms: *"solve: matrix is singular (U[3,3] = 0)"*, *"chol: matrix is not positive
 definite (leading minor 4)"*, *"svd: did not converge"*. The indices in a message are 1-based, as
-LAPACK's `info` already is. Only the solvers (`solve`, `inv`, …) trap on a singular matrix.
+LAPACK's `info` already is. Only the solvers (`solve`, `inv`, …) trap on a singular matrix. An
+`info` below zero names an argument LAPACK refused, which no well-typed call makes: *"solve:
+LAPACK's dgesv refused its argument 4"*.
 
-**The `inout` forms** factor in place without the copy — `lu_inplace(A, ipiv)`,
-`chol_inplace(A)`, `qr_inplace(A, tau)`, … — and do **not** trap: they return LAPACK's `info` as an
-`integer`, for the code that wants to handle a singular matrix itself.
+**The `inout` forms** factor in place without the copy and do **not** trap on what LAPACK reports:
+they return LAPACK's `info` as an `integer`, for the code that wants to handle a singular matrix
+itself. There are four:
 
-Column-major storage means no transposes, and the leading-dimension rules are §10.3's.
+| Function | LAPACK | Writes |
+|---|---|---|
+| `solve_inplace(A, ipiv, B)` | `?gesv` | `A` with its LU factors, `ipiv` with the pivots, `B` with the solution |
+| `lu_inplace(A, ipiv)` | `?getrf` | `A` with L below the diagonal and U on and above it, `ipiv` |
+| `chol_inplace(A, upper = false)` | `?potrf` | the triangle it reads with the factor; the other is untouched |
+| `qr_inplace(A, tau)` | `?geqrf` | `A` with R and the reflectors, `tau` with their scales |
+
+Their arrays are borrowed as they are, so each is of one of the four types exactly (`ipiv` is
+`[int32]`, `tau` and `B` are of `A`'s element type), and carries no unit: the factors written over a
+measured matrix would not share its unit (§13.6). A window crosses where it lies (§10.3). An `ipiv`
+or `tau` shorter than min(m, n), or a `B` without `A`'s rows, traps.
+
+Column-major storage means no transposes, and the leading-dimension rules are §10.3's. **LAPACK is
+called as Fortran**: every argument by reference, and each `character` argument's length (1) passed
+after the others, as gfortran's convention has it and as an f2c-built LAPACK ignores.
 
 ### 10.6 Calling Fortran
 
@@ -1883,10 +1929,11 @@ The products and solvers carry units through:
 | `dot(x, y)` | the product of the operands' units |
 | `sum(a)`, `norm2(a)` | `a`'s unit |
 | `solve(A, b)`, `lstsq(A, b)` | `b`'s unit divided by `A`'s |
-| `inv(A)` | the reciprocal of `A`'s unit (**PROPOSED**) |
-| `det(A)` | `A`'s unit to the power n; `A` carrying a unit needs a static extent n (**PROPOSED**) |
-| `eigvals`, `eigh`, `svdvals`; the `R` of `qr`, the `U` of `lu`, the `s` of `svd` | `A`'s unit; the other factors are dimensionless (**PROPOSED**) |
-| `chol(A)` | the square root of `A`'s unit (**PROPOSED**) |
+| `inv(A)` | the reciprocal of `A`'s unit |
+| `det(A)` | `A`'s unit to the power n; `A` carrying a unit needs a static extent n |
+| `eigvals`, `svdvals`; the values of `eig` and `eigh`, the `R` of `qr`, the `U` of `lu`, the `s` of `svd` | `A`'s unit; the other factors — the vectors, `Q`, `L`, `p`, `svd`'s `U` and `V` — are dimensionless |
+| `chol(A)` | the square root of `A`'s unit, whose scale must have an exact root |
+| `solve_inplace`, `lu_inplace`, `chol_inplace`, `qr_inplace` | none: they take arrays without a unit |
 
 ### 13.7 C and Fortran
 

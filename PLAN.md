@@ -422,6 +422,14 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     the emitted MLIR; `solve` on a stiffness matrix in `real<N/m>` and loads in `real<N>` returns
     `real<m>`, and `strip` of an array passed to `cblas_ddot` emits no copy; and the BLAS gemm kernel
     below meets its bar.
+
+    *Measured* (BLAS gemm, `bench/blas-gemm.nex` against `bench/blas-gemm.c`: 1000 × 1000, ms per
+    product over 20, best of 5; Apple M5 Pro, LLVM 23.1.4, a shared machine at load 13–16): through
+    Accelerate, nex 4.39 against C's 6.53 — nex's `c = a @ b` writes a fresh 64-byte-aligned buffer
+    each time, C one `malloc`ed buffer, and nex is not the slower; through OpenBLAS 0.3.34
+    (`NEX_BLAS`), nex 5.61 against C's 4.92 (1.14×) in the one quiet stretch, and every later run at
+    that load spread 5–15 ms on both sides, too wide to read a 10% bar. The OpenBLAS comparison is
+    to be taken again on a quiet machine.
 11. **M11 — modules and `nex test`.** The module loader, the source prelude found by
     `--prelude-path` / `NEX_HOME`, `@test` discovery; `nex test` prints a line per failure and a
     summary, filters by a name substring, and keeps running after a test traps. *Exit*: the reference's module loader,

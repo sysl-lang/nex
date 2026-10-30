@@ -31,7 +31,9 @@ lapack_units()
     assert_eq(first("def f(k: [real<N/m>; 2, 2], m: [real<N/m>; :, :]) = (det(k), chol(k, upper = true), inv(m), solve(m, [1.0<N>, 2.0<N>]))"),
         "(def f ((k#0 [real64<N/m>; 2, 2]) (m#1 [real64<N/m>; :, :])) (real64<N^2/m^2>, [real64<N^(1/2)/m^(1/2)>; 2, 2], [real64<m/N>; :, :], [real64<m>]) (tuple:(real64<N^2/m^2>, [real64<N^(1/2)/m^(1/2)>; 2, 2], [real64<m/N>; :, :], [real64<m>]) (det:real64<N^2/m^2> k#0) (chol:[real64<N^(1/2)/m^(1/2)>; 2, 2] k#0 true) (inv:[real64<m/N>; :, :] m#1) (solve:[real64<m>] m#1 (array:[real64<N>] 1.0<N> 2.0<N>))))")
     assert_eq(first("def f(k: [real<Pa>; :, :]) = (lu(k), qr(k), svd(k), eigh(k), eig(k), lstsq(k, [1.0<N>]))"),
-        "(def f ((k#0 [real64<Pa>; :, :])) (([real64; :, :], [real64<Pa>; :, :], [int64; :]), ([real64; :, :], [real64<Pa>; :, :]), ([real64; :, :], [real64<Pa>], [real64; :, :]), ([real64<Pa>], [real64; :, :]), ([complex[real64]<Pa>], [complex[real64]; :, :]), [real64<m^2>]) (tuple:(([real64; :, :], [real64<Pa>; :, :], [int64; :]), ([real64; :, :], [real64<Pa>; :, :]), ([real64; :, :], [real64<Pa>], [real64; :, :]), ([real64<Pa>], [real64; :, :]), ([complex[real64]<Pa>], [complex[real64]; :, :]), [real64<m^2>]) (lu:([real64; :, :], [real64<Pa>; :, :], [int64; :]) k#0) (qr:([real64; :, :], [real64<Pa>; :, :]) k#0) (svd:([real64; :, :], [real64<Pa>], [real64; :, :]) k#0) (eigh:([real64<Pa>], [real64; :, :]) k#0) (eig:([complex[real64]<Pa>], [complex[real64]; :, :]) k#0) (lstsq:[real64<m^2>] k#0 (array:[real64<N>] 1.0<N>))))")
+        "(def f ((k#0 [real64<Pa>; :, :])) (([real64; :, :], [real64<Pa>; :, :], [int64]), ([real64; :, :], [real64<Pa>; :, :]), ([real64; :, :], [real64<Pa>], [real64; :, :]), ([real64<Pa>], [real64; :, :]), ([complex[real64]<Pa>], [complex[real64]; :, :]), [real64<N/Pa>]) (tuple:(([real64; :, :], [real64<Pa>; :, :], [int64]), ([real64; :, :], [real64<Pa>; :, :]), ([real64; :, :], [real64<Pa>], [real64; :, :]), ([real64<Pa>], [real64; :, :]), ([complex[real64]<Pa>], [complex[real64]; :, :]), [real64<N/Pa>]) (lu:([real64; :, :], [real64<Pa>; :, :], [int64]) k#0) (qr:([real64; :, :], [real64<Pa>; :, :]) k#0) (svd:([real64; :, :], [real64<Pa>], [real64; :, :]) k#0) (eigh:([real64<Pa>], [real64; :, :]) k#0) (eig:([complex[real64]<Pa>], [complex[real64]; :, :]) k#0) (lstsq:[real64<N/Pa>] k#0 (array:[real64<N>] 1.0<N>))))")
+    // N/Pa is m²: the unit is one, whatever its spelling.
+    assert_eq(refused("def f(k: [real<Pa>; :, :]): [real<m^2>] = lstsq(k, [1.0<N>])\n" + M), "ok")
     assert_eq(refused("def f(a: [real<m>; :, :]) = det(a)\n" + M), "error: `det` of a matrix in m is in m to the power of the matrix's order, so the order must be static, and this one's is not; take `det(strip(A))` @1:29")
     assert_eq(refused("def f(a: [real<mm>; 2, 2]) = chol(a)\n" + M), "error: the scale of this unit has no exact value: it is too large to hold, or the root of a scale that is not a perfect power @1:30")
     assert_eq(refused("def f(a: [real<m>; 2, 2]) = det(a)\n" + M), "ok")
@@ -67,7 +69,7 @@ lapack_inout_refusals()
     assert_eq(refused("def f(a: inout [real; 2, 3]) = chol_inplace(a)\n" + M), "error: `chol_inplace` takes a square matrix; this is 2 × 3 @1:45")
     assert_eq(refused("def f(a: inout [real; :, :], t: inout [real32]) = qr_inplace(a, t)\n" + M), "error: `qr_inplace` takes `tau` as a vector of real64, borrowed as it is; this is [real32] @1:65")
     assert_eq(refused("def f(a: inout [real; :, :], p: inout [int32]) = solve_inplace(a, p)\n" + M), "error: `solve_inplace` takes a matrix, its pivots `ipiv` and the right-hand sides @1:50")
-    assert_eq(refused("def f(a: inout [real; :, :], p: inout [int32], b: inout [real; :, :, :]) = solve_inplace(a, p, b)\n" + M), "error: `solve_inplace` takes the right-hand side as a vector or a matrix of real64, borrowed as it is; this is [real; :, :, :] @1:100")
+    assert_eq(refused("def f(a: inout [real; :, :], p: inout [int32], b: inout [real; :, :, :]) = solve_inplace(a, p, b)\n" + M), "error: `solve_inplace` takes the right-hand side as a vector or a matrix of real64, borrowed as it is; this is [real; :, :, :] @1:96")
 
 // -- emission ---------------------------------------------------------------------------------------
 
@@ -195,7 +197,7 @@ run_blas_link()
     val plain = s"${b.work}/plain.nex"
 
     write_text(src, "def main() = print(det([[2.0, 1.0], [1.0, 3.0]]))\n").unwrap()
-    write_text(plain, "def main() = print([[2.0, 1.0]] @ [[1.0], [3.0]])\n").unwrap()
+    write_text(plain, "def main() = print(sum([[2.0, 1.0]] * 2.0))\n").unwrap()
 
     val env = [Var("NEX_RUNTIME", b.tc.runtime)]
     val default = capture(nex, ["build", src, "-o", s"${b.work}/la"], env = env, stderr = true).unwrap()
