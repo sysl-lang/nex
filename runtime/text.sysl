@@ -15,6 +15,11 @@
 // threads never touch the table of builders or a standard stream together. A program with a
 // `parallel` construct gathers each `print` line in a sink of its own, which `nex_line_end` writes
 // out whole under the lock: lines from different threads never interleave.
+//
+// **A trap gives back the sinks it abandons.** The sinks a thread has open form a stack, the newest
+// on top (an interpolation inside a `print` opens and closes its own while the line's is open), so a
+// catch notes the top as it begins and a trap that ends it closes everything opened since
+// (`unwind.sysl`).
 
 import sysl.buf.{Buf, buf}
 import sysl.fmt.{format_int, format_real, format_str}
@@ -41,6 +46,11 @@ c_string(s: string) -> *u8
 private var builders: Buf[StrBuilder] = buf()
 private var free_sinks: Buf[long] = buf()
 
+// By sink number less 3, the sink its thread had on top when it was opened; and each thread's top,
+// 0 for none.
+private var below: Buf[long] = buf()
+@thread_local private var top_sink: long = 0
+
 // The lock every sink entry holds while it touches the builders or a standard stream.
 private var io = SpinLock(0)
 
@@ -49,9 +59,15 @@ sink_new() -> long
     io.lock()
     defer io.unlock()
 
-    if free_sinks.len() > 0 then return free_sinks.pop().unwrap()
+    val sink = if free_sinks.len() > 0 then free_sinks.pop().unwrap() else new_sink()
 
+    below.set(usize(sink - 3), top_sink)
+    top_sink = sink
+    sink
+
+private new_sink() -> long
     builders.push(str_builder())
+    below.push(0)
     long(builders.len()) + 2
 
 // The text sink `sink` gathered, and the sink free for reuse.
@@ -61,7 +77,40 @@ private taken(sink: long) -> string
 
     builders[k].clear()
     free_sinks.push(sink)
+    closed(sink)
     s
+
+// `sink` off its thread's stack: the top, unless a sink opened above it is still open.
+private closed(sink: long)
+    if top_sink == sink
+        top_sink = below[usize(sink - 3)]
+        return
+
+    var s = top_sink
+
+    while s != 0
+        val k = usize(s - 3)
+
+        if below[k] == sink
+            below.set(k, below[usize(sink - 3)])
+            return
+
+        s = below[k]
+
+// The sink on top of this thread's stack, which a catch notes as it begins.
+open_sinks() -> long = top_sink
+
+// Every sink this thread opened above `mark`, its text dropped and the sink free for reuse.
+close_sinks(mark: long)
+    io.lock()
+    defer io.unlock()
+
+    while top_sink != mark && top_sink != 0
+        val k = usize(top_sink - 3)
+
+        builders[k].clear()
+        free_sinks.push(top_sink)
+        top_sink = below[k]
 
 @export("nex_sink_finish")
 sink_finish(sink: long) -> *u8

@@ -309,7 +309,7 @@ impl Emitter
             self.op(s"scf.if ${self.def(s"arith.xori ${c.ok}, ${self.def("arith.constant true")} : i1")} {")
 
             if c.writes then self.always("nex_c_scatter", s"${self.elem_const(c.t)}, ${self.def(s"arith.constant ${rank_of(c.t)} : i64")}, ${c.desc}, ${c.ptr}", "i64, i64, !llvm.ptr, !llvm.ptr", "")
-            else self.always("nex_storage_free", c.ptr, "!llvm.ptr", "")
+            else self.always("nex_c_free", c.ptr, "!llvm.ptr", "")
 
             self.op("}")
 

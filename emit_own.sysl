@@ -18,9 +18,10 @@
 // it yields and releases what it made, since an SSA value defined inside a region cannot be released
 // outside it; the value it yields is the enclosing statement's temporary.
 //
-// Two things are not reclaimed: a cycle through captured cells (a lambda stored into a `var` that it
-// captures itself; a local `def` that calls itself does so through its own environment and holds no
-// cycle), and what the frames a caught trap abandons held.
+// **A trap's catch releases what the frames it abandons hold**, through the frame records below.
+//
+// A cycle through captured cells is not reclaimed (a lambda stored into a `var` that it captures
+// itself; a local `def` that calls itself does so through its own environment and holds no cycle).
 
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
@@ -28,6 +29,22 @@ import sh.sysl.parsing.Span
 struct Temp
     v: string
     t: Ty
+    // The frame slot that holds it too, for a trap's catch to release, and the slot's MLIR type.
+    slot: string
+    mem: string
+
+// A slot the current function's frame record lists, and the function releasing what it holds.
+struct Guard
+    slot: string
+    drop: string
+
+// A slot for the temporaries at one depth of the statement's stack that are stored as `mem` and
+// released by `drop`; one temporary at a time holds it.
+struct TempSlot
+    depth: usize
+    mem: string
+    drop: string
+    slot: string
 
 impl Emitter
     // Whether a value of `t` holds a count on something.
@@ -68,23 +85,110 @@ impl Emitter
 
     // A new value the statement being emitted owns, released where the statement ends.
     own(*self, v: string, t: Ty) -> string
-        if v != "" && self.managed(t) then self.temps.push(Temp(v, t))
+        if v != "" && self.managed(t) then self.hold_temp(v, t)
         v
 
     mark(*self) -> usize = self.temps.len()
 
     // A new object of the counted heap the statement owns, whatever it holds.
     own_ref(*self, h: string) -> string
-        self.temps.push(Temp(h, Str))
+        self.hold_temp(h, Str)
         h
 
-    // The temporaries made since `m`, released; a temporary of an array-of-numbers type is a pin on
-    // a stored array (`emit_array.sysl`).
+    // `v`, of type `t`, a temporary of the statement: on its stack, and in a slot of the frame record
+    // until it is released. A temporary of an array-of-numbers type is a pinned stored array.
+    hold_temp(*self, v: string, t: Ty)
+        val mem = if is_arr(t) then "!llvm.ptr" else self.mem_ty(Span(0, 0), t)
+        val slot = self.temp_slot(mem, if is_arr(t) then self.unpin_helper(t) else self.drop_for(t))
+
+        self.op(s"llvm.store $v, $slot : $mem, !llvm.ptr")
+        self.temps.push(Temp(v, t, slot, mem))
+
+    // The slot for a temporary at the current depth stored as `mem` and released by `drop`.
+    temp_slot(*self, mem: string, drop: string) -> string
+        val depth = self.temps.len()
+
+        for s in self.temp_slots
+            if s.depth == depth && s.mem == mem && s.drop == drop then return s.slot
+
+        val slot = self.zeroed_alloca(mem)
+
+        self.temp_slots.push(TempSlot(depth, mem, drop, slot))
+        self.guards.push(Guard(slot, drop))
+        slot
+
+    // The temporaries made since `m`, released, each one's slot cleared first; a temporary of an
+    // array-of-numbers type is a pin on a stored array (`emit_array.sysl`).
     release_from(*self, m: usize)
         while self.temps.len() > m
             val t = self.temps.pop().unwrap()
 
+            self.op(s"llvm.store ${self.def(s"llvm.mlir.zero : ${t.mem}")}, ${t.slot} : ${t.mem}, !llvm.ptr")
+
             if is_arr(t.t) then self.pin(t.v, t.t, -1) else self.release(t.v, t.t)
+
+    // -- what a trap's catch releases -------------------------------------------------------------
+    //
+    // A function that owns counted values lists the slots holding them in a frame record, registered
+    // with the runtime from its entry block to its return (`runtime/unwind.sysl`): its owned locals,
+    // the slot a `return` stores into, and one slot per depth and type of its statements' temporaries.
+    // A trap's catch releases what each record above it lists, so a frame the trap abandons gives
+    // back its counts as returning would have.
+
+    // The function releasing a value of `t` held in a slot: one reference, or each part.
+    drop_for(*self, t: Ty) -> string = t match
+        Str -> "nex_release_slot"
+        Array(_, _) -> "nex_release_slot"
+        _ -> s"cell.${self.helper_index(t)}"
+
+    // The function releasing a pinned stored array of `t`'s rank held in a slot: the pin given back,
+    // then the count.
+    unpin_helper(*self, t: Ty) -> string
+        val r = rank_of(t)
+        val name = s"unpin.$r"
+
+        self.external("nex_release", "!llvm.ptr", "")
+        self.declare(name, s"func.func private @\"$name\"(%p: !llvm.ptr) {\n    %h = llvm.load %p : !llvm.ptr -> !llvm.ptr\n    %z = llvm.mlir.zero : !llvm.ptr\n    %held = llvm.icmp \"ne\" %h, %z : !llvm.ptr\n    scf.if %held {\n      %w = llvm.getelementptr %h[${3 + 2 * r}] : (!llvm.ptr) -> !llvm.ptr, i64\n      %n = llvm.load %w : !llvm.ptr -> i64\n      %less = arith.constant -1 : i64\n      %m = arith.addi %n, %less : i64\n      llvm.store %m, %w : i64, !llvm.ptr\n      func.call @nex_release(%h) : (!llvm.ptr) -> ()\n    }\n    func.return\n  }")
+        name
+
+    // The current function's frame record, where it lists any slot: built and registered at the end
+    // of its entry block, and taken off at `func.return`.
+    frame_record(*self)
+        for id in self.owned
+            self.guards.push(Guard(self.slot[id], if self.boxed[id] then "nex_release_slot" else self.drop_for(self.prog.locals[id].ty)))
+
+        if self.ret_slot != "" && self.managed(self.ret) then self.guards.push(Guard(self.ret_slot, self.drop_for(self.ret)))
+
+        val n = self.guards.len()
+
+        if n == 0 then return
+
+        val rt = s"!llvm.struct<(ptr, i64, array<$n x struct<(ptr, ptr)>>)>"
+        val fty = "(!llvm.ptr) -> ()"
+        val rec = self.alloca(rt)
+
+        self.external("nex_frame_enter", "!llvm.ptr", "")
+        self.external("nex_frame_leave", "!llvm.ptr", "")
+        self.external("nex_release_slot", "!llvm.ptr", "")
+
+        val count = self.fresh()
+        val at = self.fresh()
+
+        self.entry.push(s"    $count = arith.constant $n : i64\n    $at = llvm.getelementptr $rec[0, 1] : (!llvm.ptr) -> !llvm.ptr, $rt\n    llvm.store $count, $at : i64, !llvm.ptr\n")
+
+        for k in 0..<n
+            val g = self.guards[k]
+            val slot_at = self.fresh()
+            val f = self.fresh()
+            val fp = self.fresh()
+            val f_at = self.fresh()
+
+            self.entry.push(s"    $slot_at = llvm.getelementptr $rec[0, 2, $k, 0] : (!llvm.ptr) -> !llvm.ptr, $rt\n    llvm.store ${g.slot}, $slot_at : !llvm.ptr, !llvm.ptr\n")
+            self.entry.push(s"    $f = func.constant @\"${g.drop}\" : $fty\n    $fp = builtin.unrealized_conversion_cast $f : $fty to !llvm.ptr\n")
+            self.entry.push(s"    $f_at = llvm.getelementptr $rec[0, 2, $k, 1] : (!llvm.ptr) -> !llvm.ptr, $rt\n    llvm.store $fp, $f_at : !llvm.ptr, !llvm.ptr\n")
+
+        self.entry.push(s"    func.call @nex_frame_enter($rec) : (!llvm.ptr) -> ()\n")
+        self.op(s"func.call @nex_frame_leave($rec) : (!llvm.ptr) -> ()")
 
     // Everything the function still holds: its temporaries and its own locals.
     release_all(*self)

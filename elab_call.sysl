@@ -50,11 +50,13 @@ impl Elab
                             None -> return self.call_value(span, self.local_ref(callee.span, id, None), args)
                     None -> ()
 
-                self.find_generic_fun(n) match
-                    Some(g) -> return self.generic_call(span, callee.span, n, g, args)
+                val q = self.global(callee.span, n)
+
+                self.find_generic_fun(q) match
+                    Some(g) -> return self.generic_call(span, callee.span, q, g, args)
                     None -> ()
 
-                self.find_top(n) match
+                self.find_top(q) match
                     Some(TopFun(k)) -> return self.call_fun(span, callee.span, k, args)
                     Some(TopValue(_)) -> return self.call_value(span, self.name(callee.span, n, None), args)
                     Some(TopExtern(k)) -> return self.call_extern(span, callee.span, k, args)
@@ -66,7 +68,7 @@ impl Elab
                     self.fail(callee.span, "`to` names the unit it converts to: `to<mm>(x)`")
                     return self.invalid(span)
 
-                self.construct(span, callee.span, n, args, want) match
+                self.construct(span, callee.span, q, args, want) match
                     Some(v) -> return v
                     None -> ()
 
@@ -83,7 +85,7 @@ impl Elab
                 // `complex[real32](z)`: the type name of a complex kind, called.
                 *target.kind match
                     Name(n) ->
-                        if n == "complex" && indices.len() == 1 && self.lookup_local(n).is_none() && self.find_top(n).is_none()
+                        if n == "complex" && indices.len() == 1 && self.lookup_local(n).is_none() && self.find_top(self.global(target.span, n)).is_none()
                             val part = *indices[0].kind match
                                 Name(p) -> scalar_named(p)
                                 _ -> None
@@ -100,7 +102,7 @@ impl Elab
                 // `to<mm>(x)`, unless `to` is a binding of the program.
                 *target.kind match
                     Name(n) ->
-                        if n == "to" && self.lookup_local(n).is_none() && self.find_top(n).is_none() then return self.to_call(span, unit, args)
+                        if n == "to" && self.lookup_local(n).is_none() && self.find_top(self.global(target.span, n)).is_none() then return self.to_call(span, unit, args)
                     _ -> ()
 
                 self.call_value(span, self.infer(callee), args)

@@ -737,3 +737,7 @@ unit_errors()
     assert_eq(parsed("val g = 1<(m>"), "error: expected ')', found '>' @1:13")
     assert_eq(parsed("unit N ="), "error: expected a unit, found the end of the line @1:9")
     assert_eq(parsed("unit N = 2"), "error: the only number in a unit expression is `1`, the dimensionless unit; a scale factor belongs in a `unit` declaration @1:10")
+
+@test("an arrow after a `for` header is refused with the idiom for building an array")
+for_arrow_is_refused()
+    assert_eq(parsed("val x = [for k in 1..n -> k]"), "error: a `for` body follows `do`, and a `for` has no value: nex has no array comprehensions; write `map(1..n, k -> e)` @1:24")

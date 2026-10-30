@@ -271,6 +271,15 @@ impl Elab
                     Some(t) -> Some(elem_of(t))
                     None -> None)
 
+                if is_void(v.ty)
+                    val message = *leaf.kind match
+                        ExprKind.For(_, _, _, _) -> "an array element holds a value, and a `for` has none: nex has no array comprehensions; write `map(1..n, k -> e)`"
+                        _ -> "an array element holds a value, and this is void"
+
+                    self.fail(leaf.span, message)
+
+                    return self.invalid(span)
+
                 if wanted.is_none() then shared = self.element_join(leaf.span, shared, elem_of(v.ty))
 
                 vals.push(Some(v))

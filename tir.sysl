@@ -287,5 +287,9 @@ struct TProgram
     locals: Buf[LocalInfo]
     lambdas: Buf[TLambda]
     loops: Buf[TLoop]
+    // The `@test` functions, in source order, and whether this is `nex test`'s build, whose entry
+    // runs the test its first argument numbers instead of `main`.
+    tests: Buf[string]
+    test_build: bool
 
 texpr(span: Span, ty: Ty, kind: TKind) -> TExpr = TExpr(span, ty, kind)

@@ -77,7 +77,7 @@ end show_tprogram
 private show_extern_attrs(x: TExtern) -> string
     var out = ""
 
-    if x.symbol != x.name then out += s" @symbol(\"${x.symbol}\")"
+    if x.symbol != display_name(x.name) then out += s" @symbol(\"${x.symbol}\")"
 
     for l in x.links
         out += s" @link(\"$l\")"

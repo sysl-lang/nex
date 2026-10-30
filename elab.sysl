@@ -24,8 +24,11 @@ import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.{Diagnostic, Span, error, nearest_name}
 
 // The whole program, or every diagnostic it earned.
-elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
-    var e = elab(p)
+elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]] = elaborate_modules(p, single_module())
+
+// A program of several modules, `mods` saying which module each span is in (`modules.sysl`).
+elaborate_modules(p: Program, mods: Modules) -> Result[TProgram, Buf[Diagnostic]]
+    var e = elab(p, mods)
 
     e.run()
     e.finish_views()
@@ -34,8 +37,8 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
 
     Ok(e.program())
 
-private elab(p: Program) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false)
+private elab(p: Program, mods: Modules) -> Elab =
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf())
 
 // How far a declaration has got.
 enum Progress
@@ -168,6 +171,10 @@ struct Elab
     // Whether an `extern`'s signature is being resolved, where `c_ptr` names a type.
     in_extern: bool
 
+    // The modules, and the `@test` functions, by internal name, in source order (`elab_module.sysl`).
+    mods: Modules
+    tests: Buf[string]
+
     // -- diagnostics ------------------------------------------------------------------------------
 
     fail(*self, span: Span, message: string)
@@ -220,6 +227,7 @@ struct Elab
         self.check_parallel(p, fx)
         self.check_inout(p, fx)
         self.check_main()
+        self.check_tests()
     end run
 
     find_top(self, name: string) -> Option[TopKind]
@@ -236,41 +244,71 @@ struct Elab
             *d.kind match
                 Bind(kind, pat, typ, init) ->
                     *pat.kind match
-                        Name(name) ->
+                        Name(n) ->
+                            val name = self.own_name(d, n)
+
                             if self.declare(d.span, name)
                                 self.tops.push(Top(name, TopValue(self.globals.len())))
                                 self.globals.push(GlobalSrc(d, name, kind, typ, init))
                                 self.gstate.push(Waiting)
                                 self.gty.push(Error)
+                                self.note_private(d, name)
                         _ -> self.collect_group(d, kind, pat, typ, init)
-                Fun(name, tparams, params, ret, body) ->
+                Fun(n, tparams, params, ret, body) ->
+                    val name = self.own_name(d, n)
+
                     // A function generic only over units is checked once, its units held abstract; one
                     // with a type or rank parameter is instantiated per use.
                     val uparams = unit_params(tparams)
+                    val test = has_test(d.attrs)
 
-                    if uparams.len() < tparams.len() then
+                    self.note_private(d, name)
+
+                    if test && (tparams.len() > 0 || params.len() > 0) then
+                        self.fail(d.span, s"a test takes no parameters: `@test def ${n}()`")
+                    elif test && !self.mods.test_build then
+                        // A test exists only in `nex test`'s build.
+                        ()
+                    elif uparams.len() < tparams.len() then
                         self.collect_generic_fun(d, name, tparams, params, ret, body)
-                    elif d.attrs.len() > 0 && !only_elemental(d.attrs) then
+                    elif !only_elemental(without_test(d.attrs)) then
                         self.later(d.span, s"the attribute `@${d.attrs[0].name}`")
                     else
                         body match
                             Some(b) ->
                                 if self.declare_fun(d.span, name)
+                                    if test then self.tests.push(name)
+
                                     self.tops.push(Top(name, TopFun(self.funs.len())))
                                     self.funs.push(FunSrc(d, name, params, ret, b, uparams))
                                     self.fret.push(Error)
                                     self.fret_known.push(false)
                                     self.fstate.push(Waiting)
-                            None -> self.fail(d.span, s"`${name}` has no body")
-                Extern(name, params, ret) ->
+                            None -> self.fail(d.span, s"`${n}` has no body")
+                Extern(n, params, ret) ->
+                    val name = self.own_name(d, n)
+
                     if self.declare(d.span, name)
                         self.tops.push(Top(name, TopExtern(self.externs.len())))
                         self.externs.push(ExternSrc(d, name, params, ret))
-                Struct(name, tparams, fields) -> self.collect_struct(d, name, tparams, fields)
-                Enum(name, tparams, variants) -> self.collect_enum(d, name, tparams, variants)
-                Module(_) -> self.later(d.span, "a module declaration")
-                Import(_, _, _) -> self.later(d.span, "an import")
+                        self.note_private(d, name)
+                Struct(n, tparams, fields) ->
+                    self.note_private(d, self.own_name(d, n))
+                    self.collect_struct(d, self.own_name(d, n), tparams, fields)
+                Enum(n, tparams, variants) ->
+                    self.note_private(d, self.own_name(d, n))
+
+                    for v in variants
+                        self.note_private(d, self.own_name(d, v.name))
+
+                    self.collect_enum(d, self.own_name(d, n), tparams, variants)
+                // The loader has checked a module's declaration, and what an import binds is resolved
+                // once every name is collected.
+                Module(_) -> ()
+                Import(_, _, _) -> ()
                 UnitDecl(name, factor, body) -> self.declare_unit(d.span, name, factor, body)
+
+        self.resolve_imports()
     end collect
 
     // Whether `name` is free at the top level; if not, says so.
@@ -293,7 +331,8 @@ struct Elab
                 self.fail(self.externs[k].decl.span, "`main` is the program's own function, not an `extern`: `def main()` or `def main(args: [string])`")
                 return
             None ->
-                self.fail(Span(0, 0), "a program needs a `def main()` or a `def main(args: [string])`")
+                // The test build's entry runs the tests; a program being tested need not have one.
+                if !self.mods.test_build then self.fail(Span(0, 0), "a program needs a `def main()` or a `def main(args: [string])`")
                 return
 
         val sig = self.fsig[k]
@@ -601,19 +640,24 @@ struct Elab
     end note_capture
 
     // Every name in scope, for a suggestion beside an unknown one.
-    visible_names(self) -> Buf[string]
+    visible_names(self, span: Span) -> Buf[string]
         var out: Buf[string] = buf()
 
         for s in self.fx.scope
             out.push(s.name)
 
         for t in self.tops
-            out.push(t.name)
+            self.seen_as(span, t.name) match
+                Some(n) -> out.push(n)
+                None -> ()
 
         out
 
     unknown_name(*self, span: Span, name: string)
-        nearest_name(name, self.visible_names()) match
+        // An import that named nothing has been reported where it stands.
+        if self.refused_import(span, name) then return
+
+        nearest_name(name, self.visible_names(span)) match
             Some(near) -> self.fail(span, s"unknown name `${name}`; did you mean `${near}`?")
             None -> self.fail(span, s"unknown name `${name}`")
 
@@ -629,7 +673,7 @@ struct Elab
                 scalar_named(name) match
                     Some(ty) -> ty
                     None ->
-                        self.nominal_named(name) match
+                        self.nominal_named(self.global(t.span, name)) match
                             Some(ty) -> return ty
                             None -> ()
 
@@ -639,7 +683,7 @@ struct Elab
                             self.fail(t.span, "`c_ptr` is C's `void *`, and only an `extern` declaration names it")
                         elif name == "byte"
                             self.fail(t.span, "there is no `byte` type; raw bytes are `uint8`")
-                        else
+                        elif !self.refused_import(t.span, name)
                             self.fail(t.span, s"unknown type `${name}`")
                         Error
             Applied(name, args) ->
@@ -652,7 +696,7 @@ struct Elab
                             if !is_error(part) then self.fail(args[0].span, s"a complex type names a real part type, `complex[real32]`; found ${show_ty(part)}")
                             return Error
 
-                self.applied_type(t.span, name, args)
+                self.applied_type(t.span, self.global(t.span, name), args)
             Array(elem, axes) ->
                 val e = self.resolve_type(elem)
 
@@ -727,7 +771,7 @@ struct Elab
 
             lambdas.push(TLambda(x.name, x.params, x.ret, caps, x.body, x.escapes, copies))
 
-        TProgram(decls, self.locals, lambdas, self.loops)
+        TProgram(decls, self.locals, lambdas, self.loops, self.tests, self.mods.test_build)
     end program
 end Elab
 

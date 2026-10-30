@@ -2,16 +2,19 @@
 // `elaborate` the typed IR, or every diagnostic the elaborator gives; `emit` the MLIR module.
 // `build` (or `compile`) makes a native program, beside the source or at `-o`, and `run` makes one in
 // a temporary directory, runs it with the
-// arguments after `--` and exits with its status. `--fpe-trap`, before the file, makes real division
-// by zero, invalid operations and overflow trap (DESIGN §2.5). `-L dir` and `-l lib`, anywhere
-// before `--`, add a library search directory and a library to the link (DESIGN §10.1).
+// arguments after `--` and exits with its status. `test` runs the project's `@test` functions, those
+// whose names contain the substring after the file where one is given (`test_runner.sysl`).
+// `--fpe-trap` makes real division by zero, invalid operations and overflow trap (DESIGN §2.5);
+// `--prelude-path <dir>` names the source prelude's directory (`modules.sysl`); `-L dir` and
+// `-l lib` add a library search directory and a library to the link (DESIGN §10.1). Options may
+// stand anywhere before `--`.
 
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, read_bytes, remove_dir_all}
 import sysl.process.run
-import sh.sysl.parsing.{Source, full_report, source}
+import sh.sysl.parsing.source
 
-private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run> [--fpe-trap] [-L dir] [-l lib] <file.nex> [-o out] [-- args]"
+private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run | test> [--fpe-trap] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
 
 main(args: []string)
     if args.len < 3
@@ -20,7 +23,10 @@ main(args: []string)
 
     val command = args[1]
     var fpe_trap = false
+    var prelude_flag: Option[string] = None
     var file = ""
+    // The substring `test` selects by.
+    var filter = ""
     var out = ""
     var links: Buf[string] = buf()
     var program_args: Buf[string] = buf()
@@ -35,16 +41,20 @@ main(args: []string)
             break
         elif a == "--fpe-trap"
             fpe_trap = true
-        elif a == "-o" || a == "-L" || a == "-l"
+        elif a == "-o" || a == "-L" || a == "-l" || a == "--prelude-path"
             if k + 1 >= args.len then fail(s"nex: `$a` needs a value\n$usage")
 
             k += 1
 
-            if a == "-o" then out = args[k] else links.push(a + args[k])
+            if a == "-o" then out = args[k]
+            elif a == "--prelude-path" then prelude_flag = Some(args[k])
+            else links.push(a + args[k])
         elif a.starts_with("-L") || a.starts_with("-l")
             links.push(a)
         elif file == ""
             file = a
+        elif command == "test" && filter == ""
+            filter = a
         else
             fail(s"nex: unexpected `$a`\n$usage")
 
@@ -54,11 +64,31 @@ main(args: []string)
         print(usage)
         exit(2)
 
+    val prelude = find_prelude(prelude_flag) match
+        Ok(p) -> p
+        Err(m) -> fail(m)
+
+    val opts = LoadOptions(prelude, false)
+
     if command == "emit"
-        mlir_of(file, fpe_trap) match
+        mlir_of(file, fpe_trap, opts) match
             Ok(text) -> prints(text)
             Err(m) -> fail(m)
         return
+
+    if command == "test"
+        val tc = find_toolchain(args[0]) match
+            Ok(t) -> t
+            Err(m) -> fail(m)
+
+        val r = run_tests(file, prelude, filter, tc, fpe_trap) match
+            Ok(r) -> r
+            Err(m) -> fail(m)
+
+        for line in r.lines
+            print(line)
+
+        exit(if r.failed > 0 then 1 else 0)
 
     val build = command == "build" || command == "compile"
 
@@ -68,10 +98,10 @@ main(args: []string)
             Err(m) -> fail(m)
 
         if build
-            compile_file_here(file, if out == "" then default_output(file) else out, tc, fpe_trap, links.view())
+            compile_file_here(file, if out == "" then default_output(file) else out, tc, fpe_trap, opts, links.view())
             return
 
-        val (work, exe) = compile_temp(file, tc, fpe_trap, links.view()) match
+        val (work, exe) = compile_temp(file, tc, fpe_trap, opts, links.view()) match
             Ok(p) -> p
             Err(m) -> fail(m)
 
@@ -88,6 +118,16 @@ main(args: []string)
     if command != "tokens" && command != "parse" && command != "elaborate"
         print(s"nex: '${command}' is not a command\n$usage")
         exit(2)
+
+    if command == "elaborate"
+        val project = load_project(file, opts) match
+            Ok(p) -> p
+            Err(m) -> fail(m)
+
+        elaborate_project(project) match
+            Ok(t) -> print(show_tprogram(t))
+            Err(m) -> fail(m)
+        return
 
     val bytes = read_bytes(file) match
         Ok(b) -> b
@@ -108,31 +148,19 @@ main(args: []string)
         Ok(p) -> p
         Err(d) -> fail(d.render(src))
 
-    if command == "parse"
-        print(show_program(p))
-        return
-
-    elaborate(p) match
-        Ok(t) -> print(show_tprogram(t))
-        Err(ds) ->
-            var r = full_report()
-
-            for d in ds
-                r.add(d)
-
-            fail(r.render(src))
+    print(show_program(p))
 end main
 
 // `program.nex` compiles to `program`.
 private default_output(file: string) -> string =
     if file.ends_with(".nex") then file[0..<file.len - 4] elif file.ends_with(".lnex") then file[0..<file.len - 5] else file + ".out"
 
-private compile_file_here(file: string, out: string, tc: Toolchain, fpe_trap: bool, links: []const string)
+private compile_file_here(file: string, out: string, tc: Toolchain, fpe_trap: bool, opts: LoadOptions, links: []const string)
     val work = make_temp_dir("nex") match
         Ok(w) -> w
         Err(e) -> fail(s"nex: cannot make a temporary directory: $e")
 
-    val done = compile_file(file, out, work, tc, fpe_trap, links)
+    val done = compile_file(file, out, work, tc, fpe_trap, opts, links)
 
     _ = remove_dir_all(work)
 

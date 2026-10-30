@@ -22,6 +22,12 @@ parse_program(src: Source) -> Result[Program, Diagnostic]
 
     p.program()
 
+// One file of a project, its text between `from` and `to` in the project's text `src`.
+parse_file(src: Source, from: usize, to: usize) -> Result[Program, Diagnostic]
+    var p = parser(src, lex_file(src, from, to)?)
+
+    p.program()
+
 // One expression standing alone, as a `${...}` hole holds and as tests write them.
 parse_expression(src: Source) -> Result[Expr, Diagnostic]
     var p = parser(src, lex(src)?)
@@ -1368,6 +1374,9 @@ struct Parser
 
             return self.statement(false)
         end if
+
+        if self.at("->")
+            return Err(error(self.toks.here(), "a `for` body follows `do`, and a `for` has no value: nex has no array comprehensions; write `map(1..n, k -> e)`"))
 
         self.block_or("'do' or an indented block")
     end loop_body

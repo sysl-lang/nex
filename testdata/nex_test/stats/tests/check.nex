@@ -1,0 +1,12 @@
+@test module stats.tests
+
+import stats.{mean}
+
+// Support code, not a test.
+def constant_mean(c: integer) = mean(c, c)
+
+@test
+def test_constant_mean() = assert_eq(constant_mean(5), 5)
+
+@test
+def test_mean_rounds_down() = assert_eq(mean(1, 2), 1)

@@ -407,7 +407,7 @@ impl Elab
                     self.fail(span, s"`${name}` is a rank, not a type; it is the shape of an array: `[T; ${name}]`")
                     return Some(Error)
 
-        self.find_generic_agg(name) match
+        self.find_generic_agg(self.global(span, name)) match
             Some(g) ->
                 val n = self.gen.aggs[g].tparams.len()
 

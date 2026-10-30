@@ -61,7 +61,8 @@ impl Elab
 
         self.in_extern = false
 
-        var symbol = x.name
+        // A module's extern is the C function of its own name, without the module's path.
+        var symbol = display_name(x.name)
         var links: Buf[string] = buf()
         var frameworks: Buf[string] = buf()
         var pure = false
@@ -93,7 +94,7 @@ impl Elab
                 self.fail(x.decl.span, s"`@${a.name}` is not an attribute of an `extern def`, which takes `@link`, `@symbol`, `@pure` and `@fortran`")
 
         for j in 0..<k
-            if self.xout[j].symbol == symbol then self.fail(x.decl.span, s"`${x.name}` and `${self.xout[j].name}` both name the C symbol `${symbol}`")
+            if self.xout[j].symbol == symbol then self.fail(x.decl.span, s"`${display_name(x.name)}` and `${display_name(self.xout[j].name)}` both name the C symbol `${symbol}`")
 
         self.xout.push(TExtern(x.decl.span, x.name, tys, modes, ret, symbol, links, frameworks, pure, strided, partner))
     end resolve_extern

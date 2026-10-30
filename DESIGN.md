@@ -1598,9 +1598,70 @@ with these rules (**PROPOSED** where marked).
   it has built. **A cycle is not reclaimed**: a lambda stored into a `var` it captures itself, local
   `def`s that call one another, and a local `def` that calls itself and is captured by another
   lambda too keep themselves alive for the rest of the run. A local `def` that calls itself and is
-  captured by nothing else makes no cycle. Neither is what the frames a caught trap (`assert_traps`)
-  abandons held. Both are bounded by the program's shape, not by how long it runs, except where the
-  cycle is made inside a loop.
+  captured by nothing else makes no cycle. A cycle is bounded by the program's shape, not by how long
+  it runs, except where it is made inside a loop.
+- **A caught trap gives back everything the frames it abandons held**: their strings, function
+  values, cells, aggregates and arrays, and the storage of every array they computed, as returning
+  would have, on every thread a `parallel` construct runs. What the trapping code already stored
+  outside those frames stays stored (§8.4). So a program that catches a trap any number of times
+  (`assert_traps` in a loop, a parallel loop that traps in every round) holds no more afterwards than
+  before. The cost falls on the path that does not trap only where something is owned: a function
+  holding a counted value registers its slots with the runtime on entry and takes them off on
+  return (two calls and a store per slot), each temporary is also written to a slot of the frame
+  and cleared when released, and each array buffer carries two links on a per-thread list. A
+  function of numbers and arrays alone registers nothing. A trap releases what it abandons before
+  it returns to the catch, while those frames are still on the stack.
+
+### 11.5 Modules
+
+The reference's folder-as-module system (ref §9) stands — a module is a directory, its path is the
+directory's below the project's root with `/` read as `.`, every `.nex` file in it belongs to it, a
+`module a.b` declaration is optional and must match the directory, `private` keeps a declaration to
+its module, and a `@test module` exists only in a test build — with these rules:
+
+- **The root module is the program's own file, alone.** `nex run prog.nex` reads `prog.nex` and the
+  modules it imports, which are the directories beside it; the other files beside it are not read,
+  so a directory of independent programs stays one. The root module declares no `module`.
+- **An import names what it takes**: `import a.b.{x, y as z}`, or every public name of the module
+  with `import a.b.*`, as Fortran's `use a_b` does. `import a.b` alone names nothing and is a compile
+  error. An import names a module, not a declaration inside one.
+- **A `module` declaration is the first line of its file, and imports come before every other
+  declaration.**
+- **A module sees its own declarations, in every one of its files, `private` ones included, and what
+  it imports; nothing else.** No module sees the root module's names, and an importer sees only the
+  public ones: importing a private name is "the module `a` has no public member `x`".
+- **An imported name may not be one the module declares itself**, nor may two imports bind one name
+  to two declarations; importing the same declaration twice is harmless. Two modules may each declare
+  a name, each seeing its own.
+- **Imports may not form a cycle**: the cycle is reported at the `import` that closes it, naming
+  every module on it. The modules are elaborated with each after the modules it imports.
+- **A module-level binding belongs to its module and exists once in the program.** Every module's
+  bindings are initialized before `main` runs, each after the bindings its initializer reads. An
+  importer reads a public `var` and may assign it, as a Fortran program may a module variable.
+- **A struct's or an enum's value prints by its own name**, without its module's path.
+- **Patterns need no import**: a `match` arm names a variant of the scrutinee's enum, wherever that
+  enum is declared.
+- **Units have one namespace across the program**: a `unit` declared in any module is the program's,
+  since a dimension is the same quantity in every module (§13.1).
+- **The source prelude** is the directory `--prelude-path <dir>` names, else `$NEX_HOME/lib/prelude`
+  where that exists; with neither, the built-in prelude stands alone. A `--prelude-path` that names no
+  directory is an error rather than a silent fall-back. Its files are the module `prelude`, may say
+  `module prelude`, import nothing, and are seen by every module without an import. A module's own
+  declarations and its imports shadow the source prelude's names, which shadow the built-in prelude's;
+  the source prelude's `private` names are its own. What the built-in prelude provides is unchanged.
+- **Tests.** `@test def name()` takes no parameters and returns nothing; anything else is a compile
+  error. A test, like a `@test module`, exists only in `nex test`'s build: `nex run` and `nex build`
+  neither elaborate nor emit it, and an ordinary module importing a `@test module` is a compile error
+  there. A program built for testing needs no `main`. `nex test <file> [substring]` builds the root
+  module `<file>`, every module it imports and every module directory beneath it, imported or not,
+  and runs the tests whose names — `stats.tests.test_mean`, a test of the root module by its own name
+  — hold the substring, in source order with each module after those it imports.
+- **Each test runs in a process of its own**, from the module-level bindings' initial values, so no
+  test sees what another changed and a trap ends only its own test. A test passes when it returns.
+  It fails on a trap, reported by the trap's message (`FAIL test_fails: assert_eq failed`), and on
+  `stop n` with `n` not 0 (`stopped with status 3`). What a passing test prints is not shown. The last
+  line is the summary, `6 passed, 3 failed`, with `, 2 filtered out` where a substring left tests out;
+  the exit status is 1 when any test failed and 0 otherwise.
 
 ---
 
@@ -1896,6 +1957,7 @@ is in `K` until the affine units of §15 arrive.
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
 | Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; variant fields of any type; no type contains itself by value |
 | Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
+| Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed and a bare `import m` is not; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |
 | Field places, `x.f(args)` | §4.16 | §11.4 | fields, tuple elements and `z.re`/`z.im` are assignable and passable `inout`; a function field is called |
 | `match` | §7.5 | §11.4 | a fielded variant is matched with its fields; coverage, repeats and unreachable arms are compile errors |
 | Escaping lambdas | §4.11 | §8.3, §11.4 | only a lambda written as an argument does not escape; an escaping one may not capture `inout` |

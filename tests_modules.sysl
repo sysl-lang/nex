@@ -1,0 +1,368 @@
+@tests
+
+// Modules (DESIGN §11.5) and `nex test` (DESIGN §11.2): projects of several files written to a
+// scratch directory, loaded, elaborated and, where the output is the point, compiled and run; and the
+// test runner driven on the fixture project in `testdata/nex_test/`. The cases of the reference's
+// module loader, sysroot, prelude integration and test runner tests are here in nex's own terms.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{make_dir_all, make_temp_dir, remove_dir_all, write_text}
+import sysl.process.capture
+import sysl.text.{join, replace_all}
+
+// A project written to a fresh directory, each file at its path; its entry is `main.nex`.
+private project(files: []const (string, string)) -> string
+    val dir = make_temp_dir("nex-modules").unwrap()
+
+    for (rel, text) in files
+        val path = s"${dir}/${rel}"
+
+        make_dir_all(parent_dir(path)).unwrap()
+        write_text(path, text).unwrap()
+
+    dir
+
+// The typed IR of a project, or every diagnostic the loader and the elaborator give, one to a line
+// with its file, relative to the project, and position; the project is removed.
+private elab_project(dir: string, test_build: bool = false, prelude: Option[string] = None) -> string
+    val out = elab_at(dir, test_build, prelude)
+
+    remove_dir_all(dir).unwrap()
+    replace_all(out, s"${dir}/", "")
+
+private elab_at(dir: string, test_build: bool, prelude: Option[string]) -> string
+    val p = load_project(s"${dir}/main.nex", LoadOptions(prelude, test_build)) match
+        Ok(p) -> p
+        Err(m) -> return m
+
+    var ds = p.diags
+
+    if ds.len() == 0
+        elaborate_modules(p.program, p.mods) match
+            Ok(t) -> return show_tprogram(t)
+            Err(e) -> ds = e
+
+    var out: Buf[string] = buf()
+
+    for d in ds
+        out.push(s"error: ${d.message} @${p.locate(d.span.start)}")
+
+    join(out.view(), "\n")
+
+// `ok` where the project elaborates, its diagnostics where it does not.
+private project_refused(files: []const (string, string), test_build: bool = false) -> string
+    val out = elab_project(project(files), test_build)
+
+    if out.starts_with("error: ") then out else "ok"
+
+// What the project printed, compiled and run.
+private run_project(b: Bench, files: []const (string, string), prelude: Option[string] = None) -> string
+    val dir = project(files)
+
+    val m = mlir_of(s"${dir}/main.nex", false, LoadOptions(prelude, false)) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+
+    val exe = s"${b.work}/program"
+
+    lower_module(m, exe, b.work, b.tc) match
+        Ok(_) -> ()
+        Err(e) -> fail_with(e)
+
+    remove_dir_all(dir).unwrap()
+    capture(exe, [], stderr = true).unwrap().text
+
+// -- loading and resolving ---------------------------------------------------------------------------
+
+@test("an extern declared in a module is the C function of its own name, imported and called like a def")
+mod_extern()
+    val b = bench()
+    val out = run_project(b, [("main.nex", "import cmath.{cbrt}\ndef main() = print(cbrt(27.0))\n"), ("cmath/libm.nex", "module cmath\n@link(\"m\")\nextern def cbrt(x: real): real\n")])
+
+    finish(b)
+    assert_eq(out, "3.0\n")
+    assert_eq(project_refused([("main.nex", "import cmath.{cbrt}\nextern def cbrt2(x: real): real\n@symbol(\"cbrt\")\nextern def mine(x: real): real\ndef main() = print(cbrt(27.0))\n"), ("cmath/libm.nex", "module cmath\nextern def cbrt(x: real): real\n")]),
+        "error: `mine` and `cbrt` both name the C symbol `cbrt` @main.nex:3:1")
+
+@test("a program of one file is the root module, its names its own")
+mod_single_file()
+    assert_eq(elab_project(project([("main.nex", "def main() = print(42)\n")])), "(def main () void (print 42))")
+
+@test("an import reads the module's directory, and the module's names are internal to it")
+mod_sibling_directory()
+    assert_eq(elab_project(project([("main.nex", "import helpers.{square}\ndef main() = print(square(7))\n"), ("helpers/ops.nex", "module helpers\ndef square(x: integer) = x * x\n")])),
+        "(def helpers.square ((x#0 int64)) int64 (*:int64 x#0 x#0))\n(def main () void (print (call:int64 helpers.square 7)))")
+
+@test("every file of a module's directory is the module, and a private name is the whole module's")
+mod_files_merge()
+    assert_eq(project_refused([("main.nex", "import helpers.{square, twice}\ndef main() = print(twice(square(3)))\n"),
+        ("helpers/sq.nex", "module helpers\ndef square(x: integer) = x * x\n"),
+        ("helpers/twice.nex", "module helpers\ndef twice(x: integer) = double(x)\nprivate def double(x: integer) = x + x\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import helpers.{f}\ndef main() = print(f(1))\n"),
+        ("helpers/a.nex", "module helpers\ndef f(x: integer) = g(x)\n"),
+        ("helpers/b.nex", "module helpers\nprivate def g(x: integer) = x\n")]), "ok")
+
+@test("a module declaration is optional, and one that names another module is refused")
+mod_declaration()
+    assert_eq(project_refused([("main.nex", "import helpers.{f}\ndef main() = print(f(1))\n"), ("helpers/ops.nex", "def f(x: integer) = x\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import helpers.{f}\ndef main() = print(f(1))\n"), ("helpers/ops.nex", "module wrong_name\ndef f(x: integer) = x\n")]),
+        "error: `module wrong_name` does not match the directory, which is the module `helpers` @helpers/ops.nex:1:1")
+    assert_eq(project_refused([("main.nex", "module app\ndef main() = ()\n")]),
+        "error: the program's own file is the root module and declares none; `module app` belongs to a file in the directory `app` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import helpers.{f}\ndef main() = print(f(1))\n"), ("helpers/ops.nex", "def f(x: integer) = x\nmodule helpers\n")]),
+        "error: a `module` declaration is the first line of its file @helpers/ops.nex:2:1")
+
+@test("an import stands at the top of its file and names what it takes")
+mod_import_placement()
+    assert_eq(project_refused([("main.nex", "def main() = print(f(1))\nimport helpers.{f}\n"), ("helpers/ops.nex", "def f(x: integer) = x\n")]),
+        "error: an `import` stands at the top of its file, before every other declaration @main.nex:2:1")
+    assert_eq(project_refused([("main.nex", "import helpers\ndef main() = ()\n"), ("helpers/ops.nex", "def f(x: integer) = x\n")]),
+        "error: `import helpers` names nothing to import: name the members, `import helpers.{x, y}`, or take every public one, `import helpers.*` @main.nex:1:1")
+
+@test("`as` renames what an import binds, and the original name is then not bound")
+mod_alias()
+    assert_eq(project_refused([("main.nex", "import helpers.{square as sq}\ndef main() = print(sq(8))\n"), ("helpers/ops.nex", "def square(x: integer) = x * x\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import helpers.{square as sq}\ndef main() = print(square(8))\n"), ("helpers/ops.nex", "def square(x: integer) = x * x\n")]),
+        "error: unknown name `square` @main.nex:2:20")
+
+@test("imports chain through modules, and a nested module's directory is its path")
+mod_chain()
+    assert_eq(project_refused([("main.nex", "import b.{step2}\ndef main() = print(step2(5))\n"),
+        ("a/a.nex", "module a\ndef step1(x: integer) = x + 10\n"),
+        ("b/b.nex", "module b\nimport a.{step1}\ndef step2(x: integer) = step1(x) * 2\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import linalg.dense.{add}\ndef main() = print(add(1, 2))\n"),
+        ("linalg/dense/ops.nex", "module linalg.dense\ndef add(a: integer, b: integer) = a + b\n")]), "ok")
+
+@test("a module sees only what it declares and imports, not the program's own names")
+mod_no_leak()
+    assert_eq(project_refused([("main.nex", "import helpers.{f}\ndef gauge(x: integer) = x\ndef main() = print(f(1))\n"), ("helpers/ops.nex", "def f(x: integer) = gauge(x)\n")]),
+        "error: unknown name `gauge` @helpers/ops.nex:1:21")
+    assert_eq(project_refused([("main.nex", "import helpers.{f}\ndef main() = print(f(1) + gauge(2))\n"),
+        ("helpers/ops.nex", "def f(x: integer) = x\ndef gauge(x: integer) = x\n")]),
+        "error: unknown name `gauge` @main.nex:2:27")
+    assert_eq(project_refused([("main.nex", "import helpers.{square}\ndef main() = print(squre(2))\n"), ("helpers/ops.nex", "def square(x: integer) = x * x\n")]),
+        "error: unknown name `squre`; did you mean `square`? @main.nex:2:20")
+
+@test("two modules may declare one name, each using its own")
+mod_same_name_twice()
+    assert_eq(project_refused([("main.nex", "import a.{fa}\nimport b.{fb}\ndef helper() = 0\ndef main() = print(fa() + fb() + helper())\n"),
+        ("a/a.nex", "def helper() = 1\ndef fa() = helper()\n"),
+        ("b/b.nex", "def helper() = 2\ndef fb() = helper()\n")]), "ok")
+
+@test("an import of a module that does not exist, or of a name it does not have, is reported")
+mod_missing()
+    assert_eq(project_refused([("main.nex", "import does_not_exist.{x}\ndef main() = print(0)\n")]),
+        "error: no module `does_not_exist`: there is no directory `does_not_exist` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import helpers.{nope}\ndef main() = print(0)\n"), ("helpers/ops.nex", "def square(x: integer) = x * x\n")]),
+        "error: the module `helpers` has no public member `nope` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import helpers.{nope, Shape}\ndef area(s: Shape) = 0\ndef main() = print(nope(1))\n"), ("helpers/ops.nex", "def square(x: integer) = x * x\n")]),
+        "error: the module `helpers` has no public member `nope` @main.nex:1:1\nerror: the module `helpers` has no public member `Shape` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import empty.{x}\ndef main() = print(0)\n"), ("empty/readme.txt", "nothing\n")]),
+        "error: the module `empty` has no `.nex` files in `empty` @main.nex:1:1")
+
+@test("an import cycle is reported at the import that closes it")
+mod_cycle()
+    assert_eq(project_refused([("main.nex", "import a.{f}\ndef main() = print(f())\n"),
+        ("a/a.nex", "import b.{g}\ndef f() = g()\n"),
+        ("b/b.nex", "import a.{f}\ndef g() = 1\n")]),
+        "error: an import cycle: `a` imports `b` imports `a` @b/b.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import a.{f}\ndef main() = print(f())\n"), ("a/a.nex", "import a.{f}\ndef f() = 1\n")]),
+        "error: an import cycle: `a` imports `a` @a/a.nex:1:1")
+
+// -- visibility -------------------------------------------------------------------------------------
+
+@test("a struct and its constructor are imported by its name; a private one is not visible")
+mod_struct_visibility()
+    assert_eq(project_refused([("main.nex", "import geom.{Point}\ndef main() = print(Point(3.0, 4.0).x)\n"), ("geom/types.nex", "struct Point\n  x: real\n  y: real\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import geom.{Hidden}\ndef main() = print(0)\n"), ("geom/types.nex", "private struct Hidden\n  x: real\n")]),
+        "error: the module `geom` has no public member `Hidden` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import geom.{origin}\ndef main() = print(origin().x)\n"),
+        ("geom/types.nex", "private struct Hidden\n  x: real\ndef origin() = Hidden(0.0)\n")]), "ok")
+
+@test("a public val and const are visible to an importer, a private one is not")
+mod_binding_visibility()
+    assert_eq(project_refused([("main.nex", "import lib.{answer, LIMIT}\ndef main() = print(answer + LIMIT)\n"), ("lib/c.nex", "val answer = 42\nconst LIMIT = 8\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import lib.{secret}\ndef main() = print(secret)\n"), ("lib/c.nex", "private val secret = 42\n")]),
+        "error: the module `lib` has no public member `secret` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import lib.{MAGIC}\ndef main() = print(MAGIC)\n"), ("lib/c.nex", "private const MAGIC = 99\n")]),
+        "error: the module `lib` has no public member `MAGIC` @main.nex:1:1")
+
+@test("a module-level var of another module is read and assigned through its import")
+mod_var_across()
+    assert_eq(project_refused([("main.nex", "import lib.{count, bump}\ndef main() =\n  bump()\n  count = count + 1\n  print(count)\n"),
+        ("lib/c.nex", "var count = 0\ndef bump() =\n  count += 1\n")]), "ok")
+
+@test("`import m.*` binds every public name of the module, and none of its private ones")
+mod_wildcard()
+    assert_eq(project_refused([("main.nex", "import helpers.*\ndef main() = print(square(twice(3)))\n"), ("helpers/ops.nex", "def square(x: integer) = x * x\ndef twice(x: integer) = x + x\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import lib.*\ndef main() = print(visible + hidden)\n"), ("lib/c.nex", "val visible = 11\nprivate val hidden = 99\n")]),
+        "error: unknown name `hidden` @main.nex:2:30")
+    assert_eq(project_refused([("main.nex", "import lib.*\ndef main() = print(Some(1))\n"), ("lib/c.nex", "enum Opt =\n  Some(v: integer)\n  Empty\n")]), "ok")
+
+@test("an imported name may not clash with the module's own, nor two imports bind one name")
+mod_import_clash()
+    assert_eq(project_refused([("main.nex", "import lib.*\nval x = 1\ndef main() = print(x)\n"), ("lib/c.nex", "val x = 99\n")]),
+        "error: the imported `x` clashes with this module's own `x` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import lib.{x}\nval x = 1\ndef main() = print(x)\n"), ("lib/c.nex", "val x = 99\n")]),
+        "error: the imported `x` clashes with this module's own `x` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import a.{x}\nimport b.{x}\ndef main() = print(x)\n"), ("a/c.nex", "val x = 1\n"), ("b/c.nex", "val x = 2\n")]),
+        "error: `x` is imported twice, as `a.x` and as `b.x` @main.nex:2:1")
+    assert_eq(project_refused([("main.nex", "import a.{x}\nimport a.{x}\ndef main() = print(x)\n"), ("a/c.nex", "val x = 1\n")]), "ok")
+
+// -- the source prelude ------------------------------------------------------------------------------
+
+// A prelude directory holding `files`, beside the project.
+private prelude_dir(files: []const (string, string)) -> string = project(files)
+
+@test("the source prelude's names are seen in every module without an import")
+mod_prelude_auto_import()
+    val pre = prelude_dir([("scalar.nex", "module prelude\ndef triple(x: integer) = x * 3\ndef quadruple(x: integer) = double(double(x))\nprivate def double(x: integer) = x + x\n")])
+
+    assert_eq(elab_project(project([("main.nex", "import lib.{f}\ndef main() = print(triple(7) + quadruple(f()))\n"), ("lib/c.nex", "def f() = triple(1)\n")]), prelude = Some(pre)).starts_with("error"), false)
+    assert_eq(elab_project(project([("main.nex", "def main() = print(double(2))\n")]), prelude = Some(pre)),
+        "error: unknown name `double` @main.nex:1:20")
+
+    remove_dir_all(pre).unwrap()
+
+@test("a module's own declaration and its imports shadow the source prelude's")
+mod_prelude_shadowed()
+    val pre = prelude_dir([("scalar.nex", "def triple(x: integer) = x * 3\n")])
+
+    assert_eq(elab_project(project([("main.nex", "def triple(x: integer) = x\ndef main() = print(triple(7))\n")]), prelude = Some(pre)),
+        "(def prelude.triple ((x#0 int64)) int64 (*:int64 x#0 3))\n(def triple ((x#1 int64)) int64 x#1)\n(def main () void (print (call:int64 triple 7)))")
+
+    remove_dir_all(pre).unwrap()
+
+@test("an empty source prelude changes nothing, and the prelude imports nothing")
+mod_prelude_empty()
+    val empty = prelude_dir([("scalar.nex", "module prelude\n")])
+
+    assert_eq(elab_project(project([("main.nex", "def main() = print(42)\n")]), prelude = Some(empty)), "(def main () void (print 42))")
+
+    val importing = prelude_dir([("scalar.nex", "import lib.{x}\n")])
+
+    assert_eq(elab_project(project([("main.nex", "def main() = print(42)\n")]), prelude = Some(importing)).starts_with("error: the prelude imports nothing"), true)
+
+    remove_dir_all(empty).unwrap()
+    remove_dir_all(importing).unwrap()
+
+private found(r: Result[Option[string], string]) -> string = r match
+    Ok(Some(d)) -> d
+    Ok(None) -> "none"
+    Err(m) -> m
+
+@test("--prelude-path must name a directory")
+mod_find_prelude()
+    val dir = make_temp_dir("nex-prelude").unwrap()
+
+    assert_eq(found(find_prelude(Some(dir))), dir)
+    assert_eq(found(find_prelude(Some("/this/path/does/not/exist"))), "nex: --prelude-path names no directory: /this/path/does/not/exist")
+
+    remove_dir_all(dir).unwrap()
+
+// -- tests and test modules --------------------------------------------------------------------------
+
+@test("a `@test def` exists only in the test build, where `main` is not required")
+mod_test_functions()
+    val files = [("main.nex", "def f() = 1\n@test\ndef test_f() = assert_eq(f(), 1)\ndef main() = print(f())\n")]
+
+    assert_eq(elab_project(project(files)), "(def f () int64 1)\n(def main () void (print (call:int64 f)))")
+    assert_eq(elab_project(project(files), test_build = true).contains("(def test_f () void"), true)
+    assert_eq(project_refused([("main.nex", "@test\ndef test_a() = assert(true)\n")], test_build = true), "ok")
+    assert_eq(project_refused([("main.nex", "@test\ndef test_a() = assert(true)\n")]),
+        "error: a program needs a `def main()` or a `def main(args: [string])` @main.nex:1:1")
+
+@test("a test takes no parameters and returns nothing")
+mod_test_shape()
+    assert_eq(project_refused([("main.nex", "@test\ndef test_with_arg(x: integer) = ()\n")], test_build = true),
+        "error: a test takes no parameters: `@test def test_with_arg()` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "@test\ndef test_value() = 42\n")], test_build = true),
+        "error: a test returns nothing, but this one returns int64 @main.nex:1:1")
+
+@test("a `@test module` is built only by `nex test`, and no other module may import it")
+mod_test_module()
+    val files = [("main.nex", "import test_fixtures.{helper}\ndef main() = print(helper())\n"), ("test_fixtures/fix.nex", "@test module test_fixtures\ndef helper() = 42\n")]
+
+    assert_eq(project_refused(files),
+        "error: `test_fixtures` is a test module (`@test module`), which only `nex test` builds @main.nex:1:1")
+    assert_eq(project_refused(files, test_build = true), "ok")
+    assert_eq(project_refused([("main.nex", "def main() = ()\n"), ("t/t.nex", "@test module t\n@test\ndef test_x() = assert(true)\n")], test_build = true), "ok")
+
+// -- programs of several modules, run ----------------------------------------------------------------
+
+@test("a program of several modules runs: imports, aliases, chains, structs, module-level state")
+mod_run()
+    val b = bench()
+
+    assert_eq(run_project(b, [("main.nex", "import helpers.{square, twice as tw}\ndef main() = print(tw(square(3)))\n"),
+        ("helpers/sq.nex", "module helpers\ndef square(x: integer) = x * x\n"), ("helpers/twice.nex", "def twice(x: integer) = x + x\n")]), "18\n")
+    assert_eq(run_project(b, [("main.nex", "import b.{step2}\ndef main() = print(step2(5))\n"),
+        ("a/a.nex", "def step1(x: integer) = x + 10\n"), ("b/b.nex", "import a.{step1}\ndef step2(x: integer) = step1(x) * 2\n")]), "30\n")
+    assert_eq(run_project(b, [("main.nex", "import geom.{Point}\ndef main() =\n  val p = Point(3.0, 4.0)\n  print(p.x)\n  print(p)\n"),
+        ("geom/types.nex", "struct Point\n  x: real\n  y: real\n")]), "3.0\nPoint { x=3.0, y=4.0 }\n")
+    assert_eq(run_project(b, [("main.nex", "import lib.{count, bump}\nval start = count\ndef main() =\n  bump()\n  bump()\n  print(start)\n  print(count)\n"),
+        ("lib/c.nex", "var count = 10\ndef bump() =\n  count += 1\n")]), "10\n12\n")
+    assert_eq(run_project(b, [("main.nex", "import a.{fa}\nimport b.{fb}\ndef helper() = 0\ndef main() = print(fa() + fb() + helper())\n"),
+        ("a/a.nex", "def helper() = 1\ndef fa() = helper()\n"), ("b/b.nex", "def helper() = 2\ndef fb() = helper()\n")]), "3\n")
+
+    finish(b)
+
+@test("an imported generic function, struct and enum are instantiated where they are used")
+mod_run_generic()
+    val b = bench()
+
+    assert_eq(run_project(b, [("main.nex", "import helpers.{pick_max, same}\ndef main() =\n  print(pick_max(3, 7))\n  print(pick_max(2.5, 1.5))\n  print(same(\"hi\", \"hi\"))\n"),
+        ("helpers/gen.nex", "def pick_max[T: Ord](a: T, b: T): T = if a < b then b else a\ndef same[T: Eq](a: T, b: T): bool = a == b\n")]), "7\n2.5\ntrue\n")
+    assert_eq(run_project(b, [("main.nex", "import shapes.{Pair}\ndef main() =\n  val a = Pair(1, 2)\n  val b = Pair(\"hi\", 3)\n  print(a.fst)\n  print(b.fst)\n  print(b.snd)\n"),
+        ("shapes/p.nex", "struct Pair[A, B]\n  fst: A\n  snd: B\n")]), "1\nhi\n3\n")
+    assert_eq(run_project(b, [("main.nex", "import opt.{Opt, Some, Empty}\ndef main() =\n  val x = Some(42)\n  val y: Opt[integer] = Empty\n  val ms = x match\n    Some(v) -> \"got\"\n    Empty -> \"nothing\"\n  val ns = y match\n    Some(v) -> \"got\"\n    Empty -> \"nothing\"\n  print(ms)\n  print(ns)\n  print(x)\n"),
+        ("opt/o.nex", "enum Opt[T] =\n  Some(value: T)\n  Empty\n")]), "got\nnothing\nSome(42)\n")
+
+    finish(b)
+
+@test("the source prelude's functions run, called from every module")
+mod_run_prelude()
+    val b = bench()
+    val pre = prelude_dir([("scalar.nex", "module prelude\ndef triple(x: integer) = x * 3\n")])
+
+    assert_eq(run_project(b, [("main.nex", "import lib.{f}\ndef main() = print(triple(7) + f())\n"), ("lib/c.nex", "def f() = triple(1)\n")], Some(pre)), "24\n")
+
+    remove_dir_all(pre).unwrap()
+    finish(b)
+
+// -- nex test ----------------------------------------------------------------------------------------
+
+@test("nex test runs every test in every module, one line per failure, a trap failing only its test")
+mod_nex_test()
+    val b = bench()
+    val r = run_tests("testdata/nex_test/main.nex", None, "", b.tc, false).unwrap()
+
+    assert_eq(join(r.lines.view(), "\n"), "FAIL test_fails: assert_eq failed\nFAIL test_traps: index out of bounds\nFAIL test_stops: stopped with status 3\n6 passed, 3 failed")
+    assert_eq(r.failed, 3)
+    finish(b)
+
+@test("nex test runs only the tests whose names hold its substring, and passes when they all do")
+mod_nex_test_filter()
+    val b = bench()
+    val stats = run_tests("testdata/nex_test/main.nex", None, "stats", b.tc, false).unwrap()
+
+    assert_eq(join(stats.lines.view(), "\n"), "3 passed, 0 failed, 6 filtered out")
+    assert_eq(stats.failed, 0)
+
+    val fails = run_tests("testdata/nex_test/main.nex", None, "fails", b.tc, false).unwrap()
+
+    assert_eq(join(fails.lines.view(), "\n"), "FAIL test_fails: assert_eq failed\n0 passed, 1 failed, 8 filtered out")
+    finish(b)
+
+@test("nex test reports a project that does not compile, and runs nothing")
+mod_nex_test_refused()
+    val b = bench()
+    val dir = project([("main.nex", "@test\ndef test_a() = assert_eq(missing(), 1)\n")])
+
+    val e = run_tests(s"${dir}/main.nex", None, "", b.tc, false) match
+        Ok(_) -> "ran"
+        Err(m) -> m
+
+    assert_eq(e.contains("unknown name `missing`"), true)
+    remove_dir_all(dir).unwrap()
+    finish(b)

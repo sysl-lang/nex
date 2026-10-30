@@ -1,0 +1,189 @@
+// Modules in the elaborator (DESIGN §11.5): which declaration a top-level name written in a module
+// denotes, what an `import` binds, and the `@test` functions.
+//
+// **Every top-level declaration is collected under its internal name**, `a.b.x` for module `a.b`'s
+// `x` and `x` for the root module's (`modules.sysl`). A name the source writes is turned into an
+// internal one where it is resolved, after the locals: the module's own declaration, then what its
+// imports bind, then the source prelude's, and otherwise the name itself, which the built-in prelude
+// answers. A program of one module and no source prelude skips all of it: every name is its own.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// Whether a declaration is a test: `@test def name()`.
+has_test(attrs: Buf[Attribute]) -> bool
+    for a in attrs
+        if a.name == "test" && a.args.len() == 0 then return true
+
+    false
+
+// The attributes besides `@test`.
+without_test(attrs: Buf[Attribute]) -> Buf[Attribute]
+    var out: Buf[Attribute] = buf()
+
+    for a in attrs
+        if a.name != "test" || a.args.len() > 0 then out.push(a)
+
+    out
+
+impl Elab
+    // The internal name of `name` declared by `d`.
+    own_name(self, d: Decl, name: string) -> string = self.mods.qualify(self.mods.module_at(d.span.start), name)
+
+    note_private(*self, d: Decl, internal: string)
+        if d.private_ then self.mods.privates.push(internal)
+
+    // Whether some declaration has this internal name.
+    top_exists(self, internal: string) -> bool =
+        self.find_top(internal).is_some() || self.is_aggregate_name(internal) || self.find_generic_fun(internal).is_some()
+
+    // The internal name the top-level name `n`, written at `span`, denotes; a name nothing declares
+    // where it is written comes back as one no declaration has.
+    global(self, span: Span, n: string) -> string
+        if self.mods.single() then return n
+
+        val m = self.mods.module_at(span.start)
+        val own = self.mods.qualify(m, n)
+
+        if self.top_exists(own) then return own
+
+        for i in self.mods.imports
+            if i.owner == m && i.alias == n then return i.target
+
+        self.mods.prelude match
+            Some(p) ->
+                val q = self.mods.qualify(p, n)
+
+                if m != p && self.top_exists(q) && !self.mods.is_private(q) then return q
+            None -> ()
+
+        // The root module's names are their own, and no other module sees them.
+        if m != 0 && self.top_exists(n) then own else n
+
+    // The name the top-level declaration `internal` is written with at `span`, where it is seen there.
+    seen_as(self, span: Span, internal: string) -> Option[string]
+        if self.mods.single() then return Some(internal)
+
+        val m = self.mods.module_at(span.start)
+        val prefix = if self.mods.names[m] == "" then "" else s"${self.mods.names[m]}."
+
+        if internal.starts_with(prefix) && !internal[prefix.len..].contains(".") then return Some(internal[prefix.len..])
+
+        for i in self.mods.imports
+            if i.owner == m && i.target == internal then return Some(i.alias)
+
+        None
+
+    // Whether `n` at `span` is a name an import of its module meant to bind and could not.
+    refused_import(self, span: Span, n: string) -> bool
+        if self.mods.single() then return false
+
+        val m = self.mods.module_at(span.start)
+
+        for i in self.mods.refused
+            if i.owner == m && i.alias == n then return true
+
+        false
+
+    // What every `import` binds, checked: each name a public declaration of the module, and none
+    // the importing module declares itself or imports from elsewhere.
+    resolve_imports(*self)
+        for d in self.prog.decls
+            val (segs, selectors, wildcard) = *d.kind match
+                Import(segs, selectors, wildcard) -> (segs, selectors, wildcard)
+                _ -> continue
+
+            val m = self.mods.module_at(d.span.start)
+            val path = dotted(segs)
+
+            val target = self.mods.find(path) match
+                Some(t) -> t
+                // The loader has said why.
+                None -> continue
+
+            if !wildcard && selectors.len() == 0
+                self.fail(d.span, s"`import ${path}` names nothing to import: name the members, `import ${path}.{x, y}`, or take every public one, `import ${path}.*`")
+                continue
+
+            if wildcard
+                for internal in self.public_names(target)
+                    self.bind_import(d.span, m, target, internal[self.mods.names[target].len + 1..], internal)
+            else
+                for s in selectors
+                    val internal = self.mods.qualify(target, s.name)
+
+                    if !self.top_exists(internal) || self.mods.is_private(internal)
+                        self.fail(d.span, s"the module `${path}` has no public member `${s.name}`")
+                        self.mods.refused.push(ImportName(m, s.alias.unwrap_or(s.name), internal))
+                        continue
+
+                    self.bind_import(d.span, m, target, s.alias.unwrap_or(s.name), internal)
+    end resolve_imports
+
+    private bind_import(*self, span: Span, m: usize, from: usize, alias: string, internal: string)
+        if self.top_exists(self.mods.qualify(m, alias))
+            self.fail(span, s"the imported `${alias}` clashes with this module's own `${alias}`")
+            return
+
+        for i in self.mods.imports
+            if i.owner == m && i.alias == alias
+                if i.target != internal then self.fail(span, s"`${alias}` is imported twice, as `${i.target}` and as `${internal}`")
+                return
+
+        self.mods.imports.push(ImportName(m, alias, internal))
+
+    // Every public top-level name module `m` declares, internal, in the order they were collected.
+    private public_names(self, m: usize) -> Buf[string]
+        var all: Buf[string] = buf()
+
+        for t in self.tops
+            all.push(t.name)
+
+        for s in self.agg.structs
+            all.push(s.name)
+
+        for e in self.agg.enums
+            all.push(e.name)
+
+        for v in self.agg.variants
+            all.push(v.name)
+
+        for g in self.gen.funs
+            all.push(g.name)
+
+        val prefix = s"${self.mods.names[m]}."
+        var out: Buf[string] = buf()
+
+        for n in all
+            if !n.starts_with(prefix) || self.mods.is_private(n) then continue
+
+            // `a.b.x` is module `a.b`'s, not module `a`'s.
+            if n[prefix.len..].contains(".") then continue
+
+            var seen = false
+
+            for o in out
+                if o == n then seen = true
+
+            if !seen then out.push(n)
+
+        out
+    end public_names
+
+    // Each test returns nothing, which is what its call in the test build expects.
+    check_tests(*self)
+        for name in self.tests
+            self.find_top(name) match
+                Some(TopFun(k)) ->
+                    if self.fret_known[k] && !is_void(self.fret[k]) && !is_wild(self.fret[k])
+                        self.fail(self.funs[k].decl.span, s"a test returns nothing, but this one returns ${show_ty(self.fret[k])}")
+                _ -> ()
+
+private dotted(segs: Buf[string]) -> string
+    var out = ""
+
+    for k in 0..<segs.len()
+        if k > 0 then out += "."
+        out += segs[k]
+
+    out

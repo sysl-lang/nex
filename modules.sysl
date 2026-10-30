@@ -1,0 +1,494 @@
+// Modules (ref §9, DESIGN §11.5): a program's files, read and put in one text, and the table the
+// elaborator resolves names through.
+//
+// **A module is a directory.** The program's own file is the root module, on its own; `import a.b`
+// reads every `.nex` file in the directory `a/b` beside it, all of them one module. `nex test` also
+// reads every module directory under the root, imported or not, since a test module is what nothing
+// imports. A source prelude, when one is found, is the module `prelude`, which every other module
+// sees without an import.
+//
+// **Every file is placed in one text**, one after another, and parsed where it stands in it, so a
+// span is a span of the project: which file, and so which module, a declaration belongs to is read
+// off its span. A diagnostic is rendered against its own file by subtracting where that file begins.
+//
+// **A top-level name of module `a.b` is `a.b.x` inside the compiler**; the root module's are their
+// own names. The elaborator turns a name the source writes into that internal one: the module's own
+// declaration first, then what the module imports, then the source prelude's, then the built-in
+// prelude's.
+
+import sysl.buf.{Buf, buf}
+import sysl.env.get
+import sysl.fs.{entries, is_dir, read_bytes}
+import sysl.slices.sort
+import sysl.text.{join, split}
+import sh.sysl.parsing.{Diagnostic, Source, Span, error, full_report, source}
+
+// Where one file's text stands in the project's text, and its module.
+struct FileRange
+    start: usize
+    end: usize
+    owner: usize
+
+// A name an `import` binds in module `owner`: `alias` there denotes the internal name `target`.
+struct ImportName
+    owner: usize
+    alias: string
+    target: string
+
+// The modules of a program, as the elaborator sees them.
+struct Modules
+    // Each module's dotted path, `""` for the root module, which is the first.
+    names: Buf[string]
+    test_only: Buf[bool]
+    files: Buf[FileRange]
+    // The source prelude's module, if there is one.
+    prelude: Option[usize]
+    // Whether this is `nex test`'s build, which keeps the `@test` functions and modules.
+    test_build: bool
+    // What each module's imports bind, filled in by the elaborator, and the names they could not.
+    imports: Buf[ImportName]
+    refused: Buf[ImportName]
+    // The internal names of the `private` declarations.
+    privates: Buf[string]
+
+    // Whether there is one module and no source prelude, where every name is its own.
+    single(self) -> bool = self.names.len() == 1 && self.prelude.is_none()
+
+    // The module the text at `offset` belongs to.
+    module_at(self, offset: usize) -> usize
+        for f in self.files
+            if offset >= f.start && offset <= f.end then return f.owner
+
+        0
+
+    // The internal name of module `m`'s top-level `name`.
+    qualify(self, m: usize, name: string) -> string = if self.names[m] == "" then name else s"${self.names[m]}.${name}"
+
+    find(self, path: string) -> Option[usize]
+        for k in 0..<self.names.len()
+            if self.names[k] == path then return Some(k)
+
+        None
+
+    is_private(self, internal: string) -> bool
+        for p in self.privates
+            if p == internal then return true
+
+        false
+
+    // A module as a diagnostic names it.
+    shown(self, m: usize) -> string = if self.names[m] == "" then "the program's own file" else s"`${self.names[m]}`"
+end Modules
+
+// A program of one file: one module, the root.
+single_module() -> Modules
+    var names: Buf[string] = buf()
+    var test_only: Buf[bool] = buf()
+
+    names.push("")
+    test_only.push(false)
+
+    Modules(names, test_only, buf(), None, false, buf(), buf(), buf())
+
+// The name a value of a struct or an enum is printed with: its own, without its module's path.
+display_name(internal: string) -> string
+    val head = split(internal, "[")[0]
+    val parts = split(head, ".")
+
+    parts[parts.len - 1]
+
+// -- loading ----------------------------------------------------------------------------------------
+
+// One file read: its name, its program text (tangled where it is literate) and its module.
+struct ReadFile
+    name: string
+    bytes: []const u8
+    owner: usize
+
+// A complaint the loader makes about a file before the project's text exists, at a span of the file's
+// own text.
+struct Deferred
+    file: usize
+    span: Span
+    message: string
+
+// An `import` of module `from` naming module `to`, at `span` of file `file`.
+struct Edge
+    from: usize
+    to: usize
+    file: usize
+    span: Span
+
+// A whole program: its text, its files, its modules, its declarations in an order that has each
+// module's after those of the modules it imports, and what the loader found wrong.
+struct Project
+    text: Buf[u8]
+    file_names: Buf[string]
+    mods: Modules
+    program: Program
+    diags: Buf[Diagnostic]
+
+    // Every diagnostic, each rendered against the file it is in.
+    render(self, ds: Buf[Diagnostic]) -> string
+        var out: Buf[string] = buf()
+
+        for k in 0..<self.mods.files.len()
+            val f = self.mods.files[k]
+            var r = full_report()
+
+            for d in ds
+                if self.file_of(d.span.start) == k then r.add(Diagnostic(d.severity, Span(d.span.start - f.start, d.span.end - f.start), d.message, d.label, d.note))
+
+            if !r.is_empty() then out.push(r.render(source(self.file_names[k], self.text.view()[f.start..<f.end])))
+
+        join(out.view(), "\n")
+
+    // Where `offset` is: its file's name, a colon, and its line and column there.
+    locate(self, offset: usize) -> string
+        val k = self.file_of(offset)
+        val f = self.mods.files[k]
+
+        s"${self.file_names[k]}:${source(self.file_names[k], self.text.view()[f.start..<f.end]).locate(offset - f.start)}"
+
+    private file_of(self, offset: usize) -> usize
+        for k in 0..<self.mods.files.len()
+            val f = self.mods.files[k]
+
+            if offset >= f.start && offset <= f.end then return k
+
+        0
+end Project
+
+// How a project is loaded: its prelude directory, if any, and whether for `nex test`.
+struct LoadOptions
+    prelude: Option[string]
+    test_build: bool
+
+// The source prelude's directory: the one `--prelude-path` names, which must exist, else
+// `$NEX_HOME/lib/prelude` where that exists, else none, and the built-in prelude alone.
+find_prelude(flag: Option[string]) -> Result[Option[string], string]
+    flag match
+        Some(dir) -> return if is_dir(dir) then Ok(Some(dir)) else Err(s"nex: --prelude-path names no directory: ${dir}")
+        None -> ()
+
+    get("NEX_HOME") match
+        Some(home) ->
+            val dir = s"${home}/lib/prelude"
+
+            if is_dir(dir) then Ok(Some(dir)) else Ok(None)
+        None -> Ok(None)
+
+// The project's program elaborated, or every diagnostic, the loader's or the elaborator's, rendered.
+elaborate_project(p: Project) -> Result[TProgram, string]
+    if p.diags.len() > 0 then return Err(p.render(p.diags))
+
+    elaborate_modules(p.program, p.mods) match
+        Ok(t) -> Ok(t)
+        Err(ds) -> Err(p.render(ds))
+
+// The program whose root module is the file `entry`, every module it imports, and under
+// `test_build` every module directory beneath it; or why the entry itself could not be read.
+load_project(entry: string, opts: LoadOptions) -> Result[Project, string]
+    var l = Loader(parent_dir(entry), opts, buf(), buf(), buf(), buf(), buf(), buf())
+
+    l.add_module("")
+    l.read_file(entry, 0)?
+
+    opts.prelude match
+        Some(dir) ->
+            val m = l.add_module("prelude")
+
+            l.read_dir(dir, m, 0, Span(0, 0))
+        None -> ()
+
+    // The imports of each module read so far, which may add modules, until none is left.
+    var k = 0
+
+    while k < l.files.len()
+        l.follow_imports(k)
+        k += 1
+
+    if opts.test_build then l.discover(l.root, "")
+
+    var j = k
+
+    while j < l.files.len()
+        l.follow_imports(j)
+        j += 1
+
+    Ok(l.finish())
+
+// A path's directory: `a/b.nex` is in `a`, `b.nex` in `.`.
+parent_dir(file: string) -> string
+    val parts = split(file, "/")
+
+    if parts.len <= 1 then return "."
+
+    val dir = join(parts[0..<parts.len - 1], "/")
+
+    if dir == "" then "/" else dir
+
+private is_source_name(name: string) -> bool = name.ends_with(".nex") || name.ends_with(".lnex")
+
+// Whether a directory's name can be a module path's segment: a nex name.
+private is_module_segment(name: string) -> bool
+    if name.len == 0 || is_reserved(name) then return false
+
+    for k in 0..<name.len
+        val c = name.bytes[k]
+        val letter = (c >= u8('a') && c <= u8('z')) || (c >= u8('A') && c <= u8('Z')) || c == u8('_')
+
+        if !letter && !(k > 0 && c >= u8('0') && c <= u8('9')) then return false
+
+    true
+
+private struct Loader
+    root: string
+    opts: LoadOptions
+    names: Buf[string]
+    test_only: Buf[bool]
+    files: Buf[ReadFile]
+    // The local parse of each file, from which its imports and its module declaration are read.
+    parsed: Buf[Option[Program]]
+    deferred: Buf[Deferred]
+    edges: Buf[Edge]
+
+    add_module(*self, path: string) -> usize
+        self.names.push(path)
+        self.test_only.push(false)
+        self.names.len() - 1
+
+    find_module(self, path: string) -> Option[usize]
+        for k in 0..<self.names.len()
+            if self.names[k] == path then return Some(k)
+
+        None
+
+    read_file(*self, name: string, m: usize) -> Result[unit, string]
+        val bytes = read_bytes(name) match
+            Ok(b) -> b
+            Err(e) -> return Err(s"nex: cannot read ${name}: ${e}")
+
+        val doc = source(name, bytes)
+        val src = program_text(doc) match
+            Ok(s) -> s
+            Err(d) -> return Err(d.render(doc))
+
+        self.files.push(ReadFile(name, src.bytes, m))
+        self.parsed.push(parse_program(src).ok())
+        Ok(())
+
+    // Every source file directly in `dir`, as module `m`; a complaint at `span` of file `file`
+    // where there is none.
+    read_dir(*self, dir: string, m: usize, file: usize, span: Span)
+        var found: Buf[string] = buf()
+
+        entries(dir) match
+            Ok(names) ->
+                for n in names
+                    if is_source_name(n) then found.push(n)
+            Err(_) -> ()
+
+        if found.len() == 0
+            self.deferred.push(Deferred(file, span, s"the module `${self.names[m]}` has no `.nex` files in `${dir}`"))
+            return
+
+        sort(found.view())
+
+        for n in found
+            self.read_file(s"${dir}/${n}", m) match
+                Ok(_) -> ()
+                Err(e) -> self.deferred.push(Deferred(file, span, e))
+
+    // The module `path` names, read from its directory if it has not been.
+    module_named(*self, path: string, file: usize, span: Span) -> Option[usize]
+        self.find_module(path) match
+            Some(m) -> return Some(m)
+            None -> ()
+
+        val dir = s"${self.root}/${join(split(path, "."), "/")}"
+
+        if !is_dir(dir)
+            self.deferred.push(Deferred(file, span, s"no module `${path}`: there is no directory `${dir}`"))
+            return None
+
+        val m = self.add_module(path)
+
+        self.read_dir(dir, m, file, span)
+        Some(m)
+
+    // The module declaration and the imports of file `k`, checked where they stand.
+    follow_imports(*self, k: usize)
+        val p = self.parsed[k] match
+            Some(p) -> p
+            None -> return
+
+        val m = self.files[k].owner
+        val path = self.names[m]
+        var seen_other = false
+
+        for j in 0..<p.decls.len()
+            val d = p.decls[j]
+
+            *d.kind match
+                Module(segs) ->
+                    val declared = join(segs.view(), ".")
+
+                    if j > 0
+                        self.deferred.push(Deferred(k, d.span, "a `module` declaration is the first line of its file"))
+                    elif path == ""
+                        self.deferred.push(Deferred(k, d.span, s"the program's own file is the root module and declares none; `module ${declared}` belongs to a file in the directory `${join(segs.view(), "/")}`"))
+                    elif declared != path
+                        self.deferred.push(Deferred(k, d.span, s"`module ${declared}` does not match the directory, which is the module `${path}`"))
+
+                    if d.private_ then self.deferred.push(Deferred(k, d.span, "a module is not `private`; its declarations are"))
+
+                    for a in d.attrs
+                        if a.name == "test" then self.test_only.set(m, true) else self.deferred.push(Deferred(k, d.span, s"a module takes only the attribute `@test`, not `@${a.name}`"))
+                Import(segs, _, _) ->
+                    if seen_other then self.deferred.push(Deferred(k, d.span, "an `import` stands at the top of its file, before every other declaration"))
+
+                    if path == "prelude" && self.opts.prelude.is_some()
+                        self.deferred.push(Deferred(k, d.span, "the prelude imports nothing"))
+                        continue
+
+                    self.module_named(join(segs.view(), "."), k, d.span) match
+                        Some(to) -> self.edges.push(Edge(m, to, k, d.span))
+                        None -> ()
+                _ -> seen_other = true
+    end follow_imports
+
+    // Every module directory under `dir`, whose module path is `path`, read as a module.
+    discover(*self, dir: string, path: string)
+        val names = entries(dir) match
+            Ok(ns) -> ns
+            Err(_) -> return
+
+        sort(names.view())
+
+        for n in names
+            val sub = s"${dir}/${n}"
+
+            if !is_module_segment(n) || !is_dir(sub) then continue
+
+            val mpath = if path == "" then n else s"${path}.${n}"
+            var has_source = false
+
+            entries(sub) match
+                Ok(inner) ->
+                    for f in inner
+                        if is_source_name(f) then has_source = true
+                Err(_) -> ()
+
+            if has_source && self.find_module(mpath).is_none()
+                val m = self.add_module(mpath)
+
+                self.read_dir(sub, m, 0, Span(0, 0))
+
+            self.discover(sub, mpath)
+    end discover
+
+    // The project: every file's text placed, every file parsed where it stands, and the
+    // declarations of the modules in an order that puts each after what it imports.
+    finish(*self) -> Project
+        var text: Buf[u8] = buf()
+        var ranges: Buf[FileRange] = buf()
+        var file_names: Buf[string] = buf()
+
+        for f in self.files
+            val start = text.len()
+
+            text.extend(f.bytes)
+            ranges.push(FileRange(start, text.len(), f.owner))
+            text.push(u8('\n'))
+            file_names.push(f.name)
+
+        var diags: Buf[Diagnostic] = buf()
+
+        for d in self.deferred
+            val base = ranges[d.file].start
+
+            diags.push(error(Span(d.span.start + base, d.span.end + base), d.message))
+
+        val all = source(file_names[0], text.view())
+        var per_file: Buf[Program] = buf()
+
+        for r in ranges
+            parse_file(all, r.start, r.end) match
+                Ok(p) -> per_file.push(p)
+                Err(d) ->
+                    diags.push(d)
+                    per_file.push(Program(buf()))
+
+        val order = self.module_order(&diags, ranges)
+        var decls: Buf[Decl] = buf()
+
+        for m in order
+            for k in 0..<self.files.len()
+                if self.files[k].owner == m then decls.extend(per_file[k].decls.view())
+
+        if !self.opts.test_build
+            for e in self.edges
+                if self.test_only[e.to] && !self.test_only[e.from]
+                    val base = ranges[e.file].start
+
+                    diags.push(error(Span(e.span.start + base, e.span.end + base), s"`${self.names[e.to]}` is a test module (`@test module`), which only `nex test` builds"))
+
+        val prelude = if self.opts.prelude.is_some() then self.find_module("prelude") else None
+        val mods = Modules(self.names, self.test_only, ranges, prelude, self.opts.test_build, buf(), buf(), buf())
+
+        Project(text, file_names, mods, Program(decls), diags)
+    end finish
+
+    // The modules, each after every module it imports; an import that closes a cycle is reported at
+    // the `import` that closes it.
+    private module_order(self, diags: *Buf[Diagnostic], ranges: Buf[FileRange]) -> Buf[usize]
+        var state: Buf[u8] = buf()
+        var order: Buf[usize] = buf()
+        var stack: Buf[usize] = buf()
+
+        for _ in 0..<self.names.len()
+            state.push(0)
+
+        // The prelude first: every module sees it.
+        self.find_module("prelude") match
+            Some(p) -> if self.opts.prelude.is_some() then self.visit(p, &state, &order, &stack, diags, ranges)
+            None -> ()
+
+        for m in 0..<self.names.len()
+            self.visit(m, &state, &order, &stack, diags, ranges)
+
+        order
+
+    private visit(self, m: usize, state: *Buf[u8], order: *Buf[usize], stack: *Buf[usize], diags: *Buf[Diagnostic], ranges: Buf[FileRange])
+        if state[m] != 0 then return
+
+        state.set(m, 1)
+        stack.push(m)
+
+        for e in self.edges
+            if e.from != m then continue
+
+            if state[e.to] == 1
+                var cycle: Buf[string] = buf()
+                var on = false
+
+                for s in *stack
+                    if s == e.to then on = true
+                    if on then cycle.push(self.label(s))
+
+                cycle.push(self.label(e.to))
+
+                val base = ranges[e.file].start
+
+                diags.push(error(Span(e.span.start + base, e.span.end + base), s"an import cycle: ${join(cycle.view(), " imports ")}"))
+            else
+                self.visit(e.to, state, order, stack, diags, ranges)
+
+        _ = stack.pop()
+        state.set(m, 2)
+        order.push(m)
+    end visit
+
+    private label(self, m: usize) -> string = if self.names[m] == "" then "the program" else s"`${self.names[m]}`"
+end Loader

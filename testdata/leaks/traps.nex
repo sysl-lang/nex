@@ -1,0 +1,61 @@
+// Traps caught by `assert_traps` many times over, each abandoning frames that hold counted values
+// and array storage: everything those frames held is given back, so the program ends holding
+// nothing it built.
+
+struct Grid
+  cells: [real]
+  name: string
+
+def deepest(n: integer, ys: [real], f: (integer) -> string) =
+  val t = s"tag$n"
+  val zs = ys * 2.0
+  val label = f(n)
+  print(zs[n + 5] + 1.0)
+  print(t + label)
+
+def middle(n: integer) =
+  val xs = fill(n, 1.0) + 1.0
+  val names = [s"a$n", s"b$n"]
+  val f = (k: integer) -> s"$k:${names[1]}"
+  val g = Grid(xs * 3.0, s"grid$n")
+  deepest(n, g.cells, f)
+  print(names[2])
+
+def down(k: integer, n: integer): void =
+  val s = s"level$k"
+  val a = fill(k + 1, real(k))
+  if k == 0 then middle(n) else down(k - 1, n)
+  print(s + s"${sum(a)}")
+
+def consume(a: string, b: string, c: [real]) =
+  assert(size(c) > 100, s"short $a$b")
+  print(a)
+
+def interp(k: integer) = s"before ${fill(k, 1.0)[k + 1]} after"
+
+def grid_at(g: Grid, k: integer) = g.cells[k]
+
+def counter() =
+  var seen = [s"start"]
+  def add(s: string) =
+    seen[1] = seen[1] + s
+    assert(seen[1] == "", seen[1])
+  add
+
+def main() =
+  val held = Grid(fill(3, 2.0), s"held${3}")
+  val add = counter()
+  for k in 1..200
+    assert_traps(() -> middle(4), "out of bounds")
+    assert_traps(() -> down(3, 4), "out of bounds")
+    assert_traps(() -> consume(s"x$k", s"y$k", fill(k % 50 + 1, 1.0)), "short")
+    assert_traps(() -> print(grid_at(Grid(fill(2, 1.0), s"g$k"), 5)), "out of bounds")
+    assert_traps(() -> print(held.cells[k + 3]), "out of bounds")
+    assert_traps(() -> add(s"$k"))
+    assert_traps(() -> print(interp(k)), "out of bounds")
+    assert_traps(() -> assert_approx(fill(2, 1.0), fill(2, 1.5), 0.1))
+    assert_traps(() -> assert_traps(() -> middle(2), "nothing like this"))
+    assert_traps(() -> assert_traps(() -> print(s"fine$k")))
+  print(held.name)
+  print(sum(held.cells))
+  print("done")

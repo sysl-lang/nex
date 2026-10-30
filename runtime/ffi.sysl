@@ -6,14 +6,19 @@
 
 import sysl.raw.ptr_cast
 
-// A dense copy of the array `d` of `size`-byte elements, which `nex_c_scatter` or `nex_storage_free`
-// gives back.
+// A dense copy of the array `d` of `size`-byte elements, which `nex_c_scatter` or `nex_c_free` gives
+// back.
 @export("nex_c_gather")
 c_gather(size: long, rank: long, d: *long) -> *u8
     val dense = array_alloc(elements(rank, d) * size)
 
     walk(size, rank, d, dense, true)
     dense
+
+// A dense copy C only read, given back.
+@export("nex_c_free")
+c_free(dense: *u8)
+    free(dense)
 
 // The dense copy `dense` of the array `d` written back over it, and freed.
 @export("nex_c_scatter")

@@ -138,7 +138,7 @@ impl Elab
                 ty = self.locals[id].ty
                 target = texpr(span, ty, TLocal(id))
             None ->
-                self.find_top(r.name) match
+                self.find_top(self.global(span, r.name)) match
                     Some(TopValue(k)) ->
                         ty = self.global_type(k, span)
 
@@ -146,7 +146,7 @@ impl Elab
                             self.fail(span, s"a reduction variable is an outer `var`, and `${r.name}` is not one")
                             return None
 
-                        target = texpr(span, ty, TGlobalRef(r.name))
+                        target = texpr(span, ty, TGlobalRef(self.globals[k].name))
                     _ ->
                         self.unknown_name(span, r.name)
                         return None

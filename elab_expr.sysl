@@ -148,8 +148,8 @@ impl Elab
     // -- literals ---------------------------------------------------------------------------------
 
     // Whether `name` here is the prelude constant rather than a binding of the program.
-    is_prelude_constant(self, name: string) -> bool
-        if self.lookup_local(name).is_some() || self.find_top(name).is_some() then return false
+    is_prelude_constant(self, span: Span, name: string) -> bool
+        if self.lookup_local(name).is_some() || self.find_top(self.global(span, name)).is_some() then return false
 
         for c in PRELUDE_CONSTANTS
             if c == name then return true
@@ -163,7 +163,7 @@ impl Elab
             RealLit(_) -> REAL_LITERAL
             Unary(op, x) -> if op == "-" then self.literal_class(x) else NOT_LITERAL
             Name(n) ->
-                if !self.is_prelude_constant(n) then NOT_LITERAL elif n == "i" then COMPLEX_LITERAL else REAL_LITERAL
+                if !self.is_prelude_constant(e.span, n) then NOT_LITERAL elif n == "i" then COMPLEX_LITERAL else REAL_LITERAL
             Juxtapose(c, b) -> self.literal_pair(c, b, false)
             Measured(v, _) -> self.literal_class(v)
             BinOp(op, l, r) ->
@@ -270,27 +270,29 @@ impl Elab
             Some(id) -> return self.local_ref(span, id, want)
             None -> ()
 
-        self.find_top(n) match
+        val g = self.global(span, n)
+
+        self.find_top(g) match
             Some(TopValue(k)) ->
                 val ty = self.global_type(k, span)
 
                 if self.fx.in_const && self.globals[k].kind == Var
                     self.fail(span, s"a `const` cannot read the `var` `${n}`")
 
-                return texpr(span, ty, TGlobalRef(n))
-            Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(n))
-            Some(TopExtern(k)) -> return texpr(span, self.extern_type(k), TFnRef(n))
+                return texpr(span, ty, TGlobalRef(g))
+            Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(g))
+            Some(TopExtern(k)) -> return texpr(span, self.extern_type(k), TFnRef(g))
             None -> ()
 
-        self.find_generic_fun(n) match
-            Some(g) -> return self.generic_value(span, g, want)
+        self.find_generic_fun(g) match
+            Some(gf) -> return self.generic_value(span, gf, want)
             None -> ()
 
-        self.type_or_variant(span, n, want) match
+        self.type_or_variant(span, g, want) match
             Some(v) -> return v
             None -> ()
 
-        if self.is_prelude_constant(n) then return self.constant(span, n, want)
+        if self.is_prelude_constant(span, n) then return self.constant(span, n, want)
 
         if is_builtin(n) || is_array_builtin(n)
             self.later(span, s"the prelude function `${n}` as a value")
@@ -987,13 +989,15 @@ impl Elab
                 return texpr(span, self.locals[id].ty, TLocal(id))
             None -> ()
 
-        self.find_top(n) match
+        val g = self.global(span, n)
+
+        self.find_top(g) match
             Some(TopValue(k)) ->
                 val ty = self.global_type(k, span)
 
                 if self.globals[k].kind != Var then self.fail(span, s"`${n}` cannot be assigned: it is a `${if self.globals[k].kind == Val then "val" else "const"}`")
 
-                texpr(span, ty, TGlobalRef(n))
+                texpr(span, ty, TGlobalRef(g))
             Some(TopFun(_)) ->
                 self.fail(span, s"`${n}` is a function and cannot be assigned")
                 self.invalid(span)
