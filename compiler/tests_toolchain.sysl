@@ -236,7 +236,7 @@ large_text()
 
 // -- the embedding example --------------------------------------------------------------------------
 
-@test("the embedding example builds, runs its model through a host's functions and types, and reloads it 50 times on a counted heap with nothing left over")
+@test("the embedding example builds, runs its model through a host's functions and types, and reloads it 50 times on a counted heap with nothing left over, a trapping call among them")
 embed_example_reloads_without_leaking()
     val work = make_temp_dir("nex-embed").unwrap()
     val bin = s"$work/embed"
@@ -245,14 +245,15 @@ embed_example_reloads_without_leaking()
 
     assert(built.status.ok(), built.err.unwrap_or(""))
 
-    val once = capture(bin, [repo("examples/embed/model.nex")], stderr = true).unwrap()
+    val model = repo("examples/embed/model.nex")
+    val once = capture(bin, [model], stderr = true).unwrap()
 
-    assert_eq(once.text, "build(1.5 in, 3) = 2285.9999999999995 mm^3\n1 load, 6 solids made, 0 alive\n")
+    assert_eq(once.text, s"build(1.5 in, 3) = 2285.9999999999995 mm^3\nbuild(1.5 in, 0): trap: assertion failed: a model needs at least one block\n  in build at ${model}:13:3\n1 load, 6 solids made, 0 alive\n")
     assert_eq(once.err.unwrap_or(""), "")
 
-    val reloaded = capture(bin, [repo("examples/embed/model.nex"), "--reload", "50"], stderr = true).unwrap()
+    val reloaded = capture(bin, [model, "--reload", "50"], stderr = true).unwrap()
 
-    assert_eq(reloaded.text, "build(1.5 in, 3) = 2285.9999999999995 mm^3\n50 loads, 300 solids made, 0 alive\n")
+    assert_eq(reloaded.text, s"build(1.5 in, 3) = 2285.9999999999995 mm^3\nbuild(1.5 in, 0): trap: assertion failed: a model needs at least one block\n  in build at ${model}:13:3\n50 loads, 300 solids made, 0 alive\n")
     // The counted heap reports allocations still live at exit on standard error.
     assert_eq(reloaded.err.unwrap_or(""), "")
     remove_dir_all(work).unwrap()

@@ -524,3 +524,30 @@ emb_reload_loop()
 
     assert_eq(k.made, 200)
     assert_eq(k.released.len(), 200)
+
+@test("a host function takes and answers aggregates by their declared types, and may be @pure, which a parallel loop calls")
+emb_host_aggregates()
+    var h = new_host()
+
+    h.give("span", (args) -> args[0] match
+        NStruct(_, _) ->
+            val lo = field_of(args[0], "lo")
+            val hi = field_of(args[0], "hi")
+            var both: Buf[NexValue] = buf()
+
+            both.push(hi)
+            both.push(lo)
+            Ok(NTuple(both))
+        _ -> Err("not a range")
+    )
+    h.give("sq", (args) -> args[0] match
+        NInt(n, _, _) -> Ok(int_value(n * n, 32))
+        _ -> Err("not an integer")
+    )
+
+    val o: &Out = Out(str_builder())
+    val s = loaded("struct Range\n  lo: integer\n  hi: real<mm>\nend Range\n\n@host extern def span(r: Range): (real<mm>, integer)\n@host @pure extern def sq(n: int32): int32\n\n" +
+                   "def main() =\n  print(span(Range(1, 2.0<in>)))\n  var t = 0\n  parallel for k in 1..4 reduce t: +\n    t += sq(int32(k))\n  print(t)\n", h, kept(o))
+
+    assert_eq(ran(s), "exit 0")
+    assert_eq(o.text.finish(), "(50.8 mm, 1)\n30\n")

@@ -10,8 +10,9 @@
 var wall = 2.0<mm>
 
 def build(width: real<in>, count: integer): real<mm^3> =
+  assert(count > 0, "a model needs at least one block")
+  val placed = (k: integer) -> moved(box(width, 10.0<mm>, wall), [k * 1.0<in>, 0.0<mm>, 0.0<mm>])
   var total = 0.0<mm^3>
   for k in 1..count
-    val b = moved(box(width, 10.0<mm>, wall), [k * 1.0<in>, 0.0<mm>, 0.0<mm>])
-    total += volume(b)
+    total += volume(placed(k))
   total

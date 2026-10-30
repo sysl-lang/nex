@@ -91,4 +91,11 @@ main(args: []string)
                 eprints(e.text() + "\n")
                 exit(1)
 
+        // A model that traps comes back as an error, with where it trapped.
+        given.set(1, int_value(0))
+
+        script.call("build", given) match
+            Ok(_) -> print("build(1.5 in, 0) did not trap")
+            Err(e) -> if round + 1 == rounds then print(s"build(1.5 in, 0): ${e.text()}")
+
     print(s"$rounds load${if rounds == 1 then "" else "s"}, ${k.solids.len()} solids made, ${k.live} alive")

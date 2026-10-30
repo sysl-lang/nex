@@ -296,7 +296,7 @@ impl Elab
             if host && has_attr(s.decl.attrs, "c") then self.fail(s.decl.span, s"`${s.name}` is a host type, which the host lays out, so it is not `@c` too")
             elif host && s.generic then self.fail(s.decl.span, s"a host type is the host's own, so `${s.name}` is not generic")
             elif host && s.fields.len() > 0 then self.fail(s.decl.span, s"a host type has no fields: nex holds `${s.name}` and passes it back, and only the host looks inside")
-            elif !host && s.fields.len() == 0 then self.fail(s.decl.span, s"a struct has fields; one with none is a type the host owns, declared `@host struct ${s.name}`")
+            elif !host && !s.generic && s.fields.len() == 0 then self.fail(s.decl.span, s"a struct has fields; one with none is a type the host owns, declared `@host struct ${s.name}`")
 
 
             if !has_attr(s.decl.attrs, "c") then continue
