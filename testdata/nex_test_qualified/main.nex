@@ -1,0 +1,32 @@
+// The project `nex test` is run on in tests_modules.sysl to check qualified access: tests in the
+// root module and in the test module `geom.tests` reach `geom` and `linalg.dense` through bare imports.
+
+import geom
+import linalg.dense
+
+@test
+def test_call() = assert_eq(geom.dist2(geom.origin, geom.Point(3.0, 4.0)), 25.0)
+
+@test
+def test_annotation() =
+    val p: geom.Point = geom.Point(1.0, 2.0)
+    assert_eq(p.y, 2.0)
+
+@test
+def test_var() =
+    geom.count = 5
+    geom.count += 1
+    assert_eq(geom.count, 6)
+
+@test
+def test_variant() =
+    val s: geom.Shape = geom.Circle(2.0)
+    val r = s match
+        Circle(r) -> r
+        Empty -> 0.0
+    assert_eq(r, 2.0)
+
+@test
+def test_dotted() = assert_eq(linalg.dense.dot(2, 21), 42)
+
+def main() = print(geom.dist2(geom.origin, geom.Point(1.0, 1.0)))

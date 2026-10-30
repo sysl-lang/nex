@@ -12,7 +12,7 @@ import sysl.buf.{Buf, buf}
 import sysl.fs.{exists, read_text}
 import sysl.process.{Output, Var, capture}
 import sysl.testing.skip
-import sysl.text.{from_utf8, join, split}
+import sysl.text.{from_utf8, join, replace_all, split}
 
 private val V2_PARALLEL_INDEX = from_utf8(embed("testdata/v2/index.tsv")).unwrap()
 
@@ -229,15 +229,105 @@ par_traps_leak_nothing()
     assert_eq(guarded.text, expected)
     assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
 
-@test("a parallel body writing a module-level array or an array a lambda inside it captures, or reducing a counted value, is refused by the emitter")
+@test("a parallel body writing a module-level array or reducing a counted value is refused by the emitter")
 par_emit_refusals()
     assert_eq(emitted("var g: [real] = zeros(4)\ndef main() =\n  parallel for i in 1..4\n    g[i] = 1.0\n").err().unwrap_or(""),
         "error: a parallel body writing a module-level array is not compiled yet @3:3")
     assert_eq(emitted("def join2(a: string, b: string): string = a + b\ndef main() =\n  var s = \"\"\n  parallel for i in 1..4 reduce s: join2\n    s = join2(s, \"x\")\n  print(s)\n").err().unwrap_or(""),
         "error: a reduction over string, which holds a count, is not compiled yet @4:3")
     assert(emitted("var g: [real] = zeros(4)\ndef main() =\n  var h = g\n  parallel for i in 1..4\n    h[i] = g[i] + 1.0\n  print(h)\n").is_ok())
-    assert_eq(emitted("def main() =\n  var m = fill((2, 3), 0)\n  parallel for j in 1..3\n    m[1, j] = j\n    val f = () -> m[2, j]\n    print(f())\n").err().unwrap_or(""),
-        "error: a parallel body writing an array a lambda inside it captures is not compiled yet @3:3")
+    assert(emitted("def main() =\n  var m = fill((2, 3), 0)\n  parallel for j in 1..3\n    m[1, j] = j\n    val f = () -> m[2, j]\n    print(f())\n").is_ok())
+
+// A lambda made in a parallel body that captures the array the body writes: it captures the
+// array's cell, so it reads what its iteration has written (DESIGN §9.5), and with a string
+// captured too its counts change on several threads at once.
+private val LAMBDA_IN_PARALLEL = "def main() =\n  var m = fill((3, 400), 0)\n  parallel for j in 1..400\n    m[1, j] = j\n    m[3, j] = 2 * j\n    val f = () -> m[1, j] + m[2, j] + m[3, j]\n    m[2, j] = f()\n  print(sum(m))\n  print(m[2, 7])\n  var w: [real] = zeros(1000)\n  val s = \"x\"\n  parallel for i in 1..1000\n    w[i] = real(i) / 4.0\n    val g = (k: integer) -> w[i] * real(k) + (if s + \"y\" == \"xy\" then 1.0 else 0.0)\n    w[i] = g(3)\n  print(sum(w))\n  print(w[999])\n"
+
+@test("a lambda in a parallel body reads what its iteration wrote to the array it captures, as the sequential loop does, leaking nothing")
+par_lambda_captures_written_array()
+    val b = bench()
+    val exe = s"${b.work}/lambda"
+    val seq = s"${b.work}/lambda-seq"
+    val expected = "481200\n21\n376375.0\n750.25\n"
+
+    build(b, LAMBDA_IN_PARALLEL, exe)
+    build(b, replace_all(LAMBDA_IN_PARALLEL, "parallel ", ""), seq)
+
+    var outs: Buf[string] = buf()
+
+    for t in THREADS
+        outs.push(run_with(exe, t).text)
+
+    val sequential = run_with(seq, "1").text
+    val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
+    val leaks = if exists("/usr/bin/leaks") then capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap().text
+                else ": 0 leaks for 0 total leaked bytes."
+
+    finish(b)
+    assert_eq(sequential, expected)
+
+    for o in outs
+        assert_eq(o, expected)
+
+    assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
+    assert_eq(guarded.text, expected)
+    assert(leaks.contains(": 0 leaks for 0 total leaked bytes."), leaks)
+
+@test("a lambda in a parallel body may not read another iteration's element of the array the body writes")
+par_lambda_reads_only_own_element()
+    assert_eq(emitted("def main() =\n  var m = fill((3, 400), 0)\n  parallel for j in 1..400\n    m[1, j] = j\n    val f = () -> m[1, 1]\n    print(f())\n").err().unwrap_or(""),
+        "error: `m` is written by every iteration at its own element, so the body reads it only there, not at another iteration's @5:19")
+
+// Element-wise expressions and reductions under `parallel`, fused: the in-place assignment through an
+// `inout` parameter and of a local inside a loop, one whose old value a `val` still holds, a
+// reduction of a fused product at ranks 1 and 2, complex `dot`, integers, a widening, and the shape
+// check across a fused operand.
+private val FUSED = "def axpy(a: real, x: [real], y: inout [real]) =\n  y = parallel a * x + y\n\ndef main() =\n  val n = 100003\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = linspace(2.0, -1.0, n)\n  for s in 1..3\n    y = parallel 0.5 * x + y\n  axpy(0.25, x, y)\n  print(y[n])\n  print(sum(y))\n  val keep = y\n  y = parallel exp(-y * y) + y / 3.0\n  print(keep[2])\n  print(y[2])\n  print(parallel sum(x * y))\n  print(parallel dot(x, y))\n  print(parallel minval(x - 2.0 * y))\n  print(parallel maxval(abs(x - y)))\n  val a: [real; :, :] = reshape(linspace(1.0, 12.0, 12), (3, 4))\n  print(parallel sum(2.0 * a * a))\n  var b = a\n  b = parallel sqrt(b) * 2.0 + b\n  print(b)\n  val k: [integer] = [5, -2, 9, 4]\n  print(parallel sum(k * k + 1))\n  print(parallel product(k - 1))\n  val c: [complex] = [complex(1.0, 2.0), complex(-0.5, 3.0)]\n  print(parallel dot(c, c * 2.0))\n  val i32s: [int32] = [1, 2, 3]\n  print(parallel sum(real(i32s) * 0.5))\n  val short: [real] = zeros(5)\n  assert_traps(() -> print(parallel sum(x * short)), \"shape mismatch\")\n  print(\"trapped\")\n"
+
+@test("fused parallel element-wise expressions and reductions print the sequential program's bits on 1, 2 and 7 threads")
+par_fused_bits()
+    val b = bench()
+    val exe = s"${b.work}/fused"
+    val seq = s"${b.work}/fused-seq"
+
+    build(b, FUSED, exe)
+    build(b, replace_all(FUSED, "parallel ", ""), seq)
+
+    val sequential = run_with(seq, "1").text
+    var outs: Buf[string] = buf()
+
+    for t in THREADS
+        outs.push(run_with(exe, t).text)
+
+    val leaks = if exists("/usr/bin/leaks") then capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap().text
+                else ": 0 leaks for 0 total leaked bytes."
+
+    finish(b)
+    assert_eq(split(sequential, "\n")[0], "0.75")
+    assert(sequential.ends_with("28.5+0.0i\n3.0\ntrapped\n"), sequential)
+
+    for o in outs
+        assert_eq(o, sequential)
+
+    assert(leaks.contains(": 0 leaks for 0 total leaked bytes."), leaks)
+
+// `y = parallel a * x + y` on an `inout` array, and a `dot` and a `sum` of a product.
+private val FUSED_SHAPES = "def axpy(a: real, x: [real], y: inout [real]) =\n  y = parallel a * x + y\n\ndef dots(x: [real], y: [real]): real = (parallel dot(x, y)) + (parallel sum(x * y))\n\ndef main() =\n  val x: [real] = linspace(0.0, 1.0, 10001)\n  var y: [real] = ones(10001)\n  axpy(0.5, x, y)\n  print(dots(x, y))\n"
+
+@test("a parallel element-wise expression is one region writing its destination in place, and a reduction never builds its operand")
+par_fused_one_region_no_temporary()
+    val m = emitted(FUSED_SHAPES).unwrap()
+    val b = bench()
+    val buffers = lowered_until(b, m, "buffer-deallocation-pipeline")
+
+    finish(b)
+    // One region per construct: the axpy, the dot and the sum.
+    assert_eq(occurrences(m, "omp.parallel {"), 3)
+    assert_eq(occurrences(m, "func.func private @\"p."), 3)
+    // `x` and `y` of `main`, and nothing else: no product, no result of the axpy, no copy of `y`.
+    assert_eq(occurrences(buffers, "memref.alloc"), 2)
+    assert_eq(occurrences(buffers, "memref.copy"), 0)
+    assert_eq(occurrences(buffers, "bufferization.clone"), 0)
 
 // The program of `testdata/v2/064-…` in small: windows of an array `main` allocates, passed `inout`
 // in a parallel body and through a local `def` and a function value.

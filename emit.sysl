@@ -109,6 +109,8 @@ struct Emitter
     threaded: bool
     // Inside a `parallel for`'s code, the word a trap in the region sets.
     par_stop: string
+    // For the `parallel` expression being emitted, the operand whose buffer it writes in place.
+    par_dest: Option[usize]
     // The slots the current function's frame record lists, and those its temporaries use
     // (`emit_own.sysl`).
     guards: Buf[Guard]
@@ -826,7 +828,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
                     buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf(),
-                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", buf(), buf())
+                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf())
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)

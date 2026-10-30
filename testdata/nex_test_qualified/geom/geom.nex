@@ -1,0 +1,15 @@
+module geom
+
+struct Point
+    x: real
+    y: real
+
+enum Shape =
+    Circle(r: real)
+    Empty
+
+var count = 0
+
+val origin = Point(0.0, 0.0)
+
+def dist2(p: Point, q: Point): real = (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y)
