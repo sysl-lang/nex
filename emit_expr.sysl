@@ -23,10 +23,12 @@ impl Emitter
                 self.later(e.span, "`args` other than `args[k]`, `length(args)` and `for a in args`")
                 return ""
 
+            if self.in_ssa(id) then return self.read_array(e.span, id)
+
             self.load(e.span, self.local_ptr(e.span, id), e.ty)
         TGlobalRef(_) -> self.load(e.span, self.place_ptr(e), e.ty)
         TFnRef(name) -> self.fn_value(e.span, name)
-        TPromote(v) -> self.convert(e.span, self.ex(v), v.ty, e.ty, false)
+        TPromote(v) -> if is_arr(e.ty) then self.promoted(e, v) else self.convert(e.span, self.ex(v), v.ty, e.ty, false)
         TConvert(v, traps) -> self.convert(e.span, self.ex(v), v.ty, e.ty, traps)
         TMakeComplex(re, im) ->
             val r = self.ex(re)
@@ -58,6 +60,10 @@ impl Emitter
         TFor(id, v, lo, hi, inclusive, step, body) -> self.for_loop(e.span, id, v, lo, hi, inclusive, step, body)
         TBlock(items, result) -> self.block_from(items, 0, result, e.ty)
         TLet(id, init) ->
+            if self.in_ssa(id)
+                self.arr.set(id, self.ex(init))
+                return ""
+
             // Bound first, so a local `def` that calls itself captures its own cell.
             self.bind_local(e.span, id)
 
@@ -66,6 +72,19 @@ impl Emitter
             self.store(e.span, self.local_ptr(e.span, id), v, self.prog.locals[id].ty)
             ""
         TAssign(op, target, value) ->
+            *target.kind match
+                TArray(a) ->
+                    *a match
+                        TIndex(base, subs) ->
+                            self.assign_index(e.span, op, base, subs, value)
+                            return ""
+                        _ -> ()
+                _ -> ()
+
+            if is_arr(target.ty)
+                self.assign_array(e.span, op, target, value)
+                return ""
+
             val v = self.ex(value)
             val p = self.place_ptr(target)
 
@@ -85,7 +104,8 @@ impl Emitter
                 Some(x) ->
                     val r = self.ex(x)
 
-                    if self.ret_slot != "" && r != "" then self.store(x.span, self.ret_slot, r, self.ret)
+                    if is_arr(self.ret) then self.arr.set(self.ret_id(), r)
+                    elif self.ret_slot != "" && r != "" then self.store(x.span, self.ret_slot, r, self.ret)
                 None -> ()
 
             self.leave(1)
@@ -140,24 +160,13 @@ impl Emitter
                 // The rest runs only where the control word is 0, its value yielded out, a zero where
                 // it did not run. Inside, nothing has left yet.
                 val ok = self.flowing()
-                val ty = self.ty(result.span, t)
 
                 self.dirty = false
 
-                if ty == ""
-                    self.op(s"scf.if $ok {")
-                    self.block_from(items, k, result, t)
-                    self.op("}")
-                    return ""
+                var f = self.fork()
 
-                val r = self.fresh()
-
-                self.op(s"$r = scf.if $ok -> ($ty) {")
-                self.yield_value(self.block_from(items, k, result, t), t)
-                self.op("} else {")
-                self.yield_value("", t)
-                self.op("}")
-                return r
+                f = self.fork_else(f, self.block_from(items, k, result, t), t)
+                return self.join(f, ok, "", t)
 
         self.dirty = entry
         self.ex(result)
@@ -514,41 +523,24 @@ impl Emitter
 
     if_expr(*self, e: TExpr, c: TExpr, a: TExpr, b: Option[TExpr]) -> string
         val cond = self.ex(c)
-        val t = self.ty(e.span, e.ty)
         // Each branch starts as the `if` did: a `return` in one does not run in the other.
         val entry = self.dirty
+        var f = self.fork()
 
-        if t == ""
-            self.op(s"scf.if $cond {")
-            self.ex(a)
-
-            b match
-                Some(x) ->
-                    self.op("} else {")
-                    self.dirty = entry
-                    self.ex(x)
-                None -> ()
-
-            self.op("}")
-            return ""
-
-        val v = self.fresh()
-
-        self.op(s"$v = scf.if $cond -> ($t) {")
-        self.yield_value(self.ex(a), e.ty)
-        self.op("} else {")
+        f = self.fork_else(f, self.ex(a), e.ty)
         self.dirty = entry
-        self.yield_value(b match
+
+        val v = b match
             Some(x) -> self.ex(x)
-            None -> "", e.ty)
-        self.op("}")
-        v
+            None -> ""
+
+        self.join(f, cond, v, e.ty)
 
     // The condition of a loop's next pass: `go`, and no `exit`, `cycle` or `return` under way.
-    loop_condition(*self, go: string)
+    loop_condition(*self, l: Loop, go: string)
         val c = if self.ctl == "" then go else self.def(s"arith.andi $go, ${self.flowing()} : i1")
 
-        self.op(s"scf.condition($c)")
+        self.loop_test(l, c)
 
     // The end of a pass of loop `id`: its `cycle` is done with.
     end_pass(*self, id: usize)
@@ -559,13 +551,12 @@ impl Emitter
         if self.ctl != "" then self.clear_ctl(2 * id + 2)
 
     while_loop(*self, id: usize, c: TExpr, body: TExpr) -> string
-        self.op("scf.while : () -> () {")
-        self.loop_condition(self.ex(c))
-        self.op("} do {")
+        val l = self.loop_open()
+
+        self.loop_condition(l, self.ex(c))
         self.ex(body)
         self.end_pass(id)
-        self.op("scf.yield")
-        self.op("}")
+        self.loop_close(l)
         self.after_loop(id)
         ""
 
@@ -605,9 +596,9 @@ impl Emitter
 
         self.op(s"llvm.store $lo, $counter : $t, !llvm.ptr")
         self.op(s"llvm.store $empty, $done : i1, !llvm.ptr")
-        self.op("scf.while : () -> () {")
-        self.loop_condition(self.not(self.def(s"llvm.load $done : !llvm.ptr -> i1")))
-        self.op("} do {")
+        val l = self.loop_open()
+
+        self.loop_condition(l, self.not(self.def(s"llvm.load $done : !llvm.ptr -> i1")))
 
         val k = self.def(s"llvm.load $counter : !llvm.ptr -> $t")
 
@@ -622,8 +613,7 @@ impl Emitter
 
         self.op(s"llvm.store $hit, $done : i1, !llvm.ptr")
         self.op(s"llvm.store ${self.def(s"arith.select $hit, $k, $stepped : $t")}, $counter : $t, !llvm.ptr")
-        self.op("scf.yield")
-        self.op("}")
+        self.loop_close(l)
         self.after_loop(id)
         ""
     end for_loop
@@ -633,14 +623,30 @@ impl Emitter
     call_value(*self, span: Span, callee: TExpr, args: Buf[TExpr], ret: Ty) -> string
         var vals = ""
         var tys = ""
+        // The `inout` array arguments, which the call hands back.
+        var back: Buf[TExpr] = buf()
 
         for a in args
-            val v = *a.kind match
-                TBorrow(place) -> self.place_ptr(place)
-                _ -> self.ex(a)
-            val t = *a.kind match
-                TBorrow(_) -> "!llvm.ptr"
-                _ -> self.ty(a.span, a.ty)
+            var v = ""
+            var t = ""
+
+            *a.kind match
+                TBorrow(place) ->
+                    if is_arr(place.ty)
+                        v = self.place_value(place)
+                        t = self.ty(a.span, place.ty)
+                        back.push(place)
+                    else
+                        v = self.place_ptr(place)
+                        t = "!llvm.ptr"
+                _ ->
+                    v = self.ex(a)
+                    t = self.ty(a.span, a.ty)
+
+                    // Through a function value an array crosses as a buffer.
+                    if is_arr(a.ty) && !is_fn_ref(callee)
+                        v = self.crossing(a.span, v, a.ty)
+                        t = self.boundary_ty(a.span, a.ty)
 
             if vals != ""
                 vals += ", "
@@ -651,6 +657,11 @@ impl Emitter
 
         val r = self.ty(span, ret)
 
+        if back.len() > 0
+            *callee.kind match
+                TFnRef(name) -> return self.call_handing_back(span, s"@\"n.$name\"($vals) : ($tys)", ret, back)
+                _ -> return self.unsupported(span, "an `inout` array passed through a function value")
+
         *callee.kind match
             TFnRef(name) -> self.effect(s"func.call @\"n.$name\"($vals) : ($tys) -> ${result_text(r)}", r)
             _ ->
@@ -658,13 +669,19 @@ impl Emitter
                 val code = self.def(s"llvm.extractvalue $c[0] : $CLOSURE")
                 val env = self.def(s"llvm.extractvalue $c[1] : $CLOSURE")
                 val all = if tys == "" then "!llvm.ptr" else s"!llvm.ptr, $tys"
-                val fty = s"($all) -> ${result_text(r)}"
+                val rb = if is_arr(ret) then self.memref_ty(span, ret) else r
+                val fty = s"($all) -> ${result_text(rb)}"
                 val f = self.def(s"builtin.unrealized_conversion_cast $code : !llvm.ptr to $fty")
                 val with_env = if vals == "" then env else s"$env, $vals"
+                val v = self.effect(s"func.call_indirect $f($with_env) : $fty", rb)
 
-                self.effect(s"func.call_indirect $f($with_env) : $fty", r)
+                if is_arr(ret) then self.def(s"bufferization.to_tensor $v restrict : $rb to $r") else v
     end call_value
 end Emitter
+
+private is_fn_ref(e: TExpr) -> bool = *e.kind match
+    TFnRef(_) -> true
+    _ -> false
 
 private int_name(bits: int, signed: bool) -> string = if signed then s"int$bits" else s"uint$bits"
 

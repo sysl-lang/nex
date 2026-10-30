@@ -72,6 +72,14 @@ struct Emitter
     // Whether an `exit`, `cycle` or `return` may already have run in the statement being emitted, so
     // that what the rest of it does — a call, a store, a trap — runs only where none did.
     dirty: bool
+    // By local number, the tensor each array local held as an SSA value holds now, `""` where it is
+    // not bound here; one more entry is the value a `return` has given (`emit_array.sysl`).
+    arr: Buf[string]
+    // The targets of the index lists around the cursor, innermost last, which `end` reads.
+    ends: Buf[string]
+    end_tys: Buf[Ty]
+    // The current function's `inout` array parameters, which it returns after its value.
+    inout_arrays: Buf[usize]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -108,6 +116,7 @@ struct Emitter
         Real(b) -> self.real_const(0.0, b)
         Complex(b) -> self.complex_const(self.real_const(0.0, b), self.real_const(0.0, b), b)
         Bool -> self.def("arith.constant false")
+        Array(_, _) -> self.zero_array(span, t)
         _ -> self.def(s"llvm.mlir.zero : ${self.ty(span, t)}")
 
     // The control word is 0: no `exit`, `cycle` or `return` is under way.
@@ -186,6 +195,7 @@ struct Emitter
             val z = self.def(s"arith.constant 0.0 : $part")
 
             self.def(s"complex.create $z, $z : $t")
+        elif t.starts_with("tensor<") then self.zero_tensor_text(t)
         else self.def(s"llvm.mlir.zero : $t")
 
     // The address of a string constant.
@@ -224,6 +234,7 @@ struct Emitter
         Bool -> "i1"
         Str -> "!llvm.ptr"
         Fn(_) -> CLOSURE
+        Array(_, _) -> self.tensor_ty(span, t)
         Void -> ""
         Never -> ""
         _ ->
@@ -233,9 +244,12 @@ struct Emitter
     // The type a value of `t` is stored as: a complex as a struct of its parts.
     mem_ty(*self, span: Span, t: Ty) -> string = t match
         Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
+        Array(_, _) -> self.desc_ty(rank_of(t))
         _ -> self.ty(span, t)
 
     load(*self, span: Span, ptr: string, t: Ty) -> string
+        if is_arr(t) then return self.load_array(span, ptr, t)
+
         val m = self.mem_ty(span, t)
         val v = self.def(s"llvm.load $ptr : !llvm.ptr -> $m")
 
@@ -248,6 +262,10 @@ struct Emitter
             _ -> v
 
     store(*self, span: Span, ptr: string, v: string, t: Ty)
+        if is_arr(t)
+            self.store_array(span, ptr, v, t)
+            return
+
         val m = self.mem_ty(span, t)
         var w = v
 
@@ -326,6 +344,12 @@ struct Emitter
         for k in 0..<self.slot.len()
             self.slot.set(k, "")
 
+        self.arr = buf()
+        self.inout_arrays = buf()
+
+        for _ in 0..<self.prog.locals.len() + 1
+            self.arr.push("")
+
         self.entry.push("    %one = arith.constant 1 : i64\n")
 
         if may_leave(body)
@@ -334,7 +358,9 @@ struct Emitter
 
             val r = self.ty(body.span, ret)
 
-            if r != "" then self.ret_slot = self.alloca(self.mem_ty(body.span, ret))
+            // An array a `return` gives is carried as a value; any other in a slot.
+            if is_arr(ret) then self.arr.set(self.ret_id(), self.zero_array(body.span, ret))
+            elif r != "" then self.ret_slot = self.alloca(self.mem_ty(body.span, ret))
 
     // The current function, finished, under `header`.
     end(*self, header: string)
@@ -345,35 +371,67 @@ struct Emitter
         self.funcs.push("  }\n\n")
 
     // The end of a body whose value is `v`.
+    // The end of a body whose value is `v`: it returns that value, then each `inout` array parameter
+    // as the body left it.
     finish_body(*self, span: Span, v: string)
         val r = self.ty(span, self.ret)
+        var vals: Buf[string] = buf()
+        var tys: Buf[string] = buf()
 
-        if r == ""
-            self.op("func.return")
-            return
+        if r != ""
+            var value = if v == "" then self.zero_of(span, self.ret) else v
 
-        val value = if v == "" then self.zero_of(span, self.ret) else v
+            if self.ctl != ""
+                // A body that ran to its end gives its value; one that returned set it aside already.
+                if is_arr(self.ret)
+                    value = self.def(s"arith.select ${self.flowing()}, $value, ${self.arr[self.ret_id()]} : $r")
+                else
+                    self.op(s"scf.if ${self.flowing()} {")
+                    self.store(span, self.ret_slot, value, self.ret)
+                    self.op("}")
+                    value = self.load(span, self.ret_slot, self.ret)
 
-        if self.ctl == ""
-            self.op(s"func.return $value : $r")
-            return
+            vals.push(value)
+            tys.push(r)
 
-        // A body that ran to its end gives its value; one that returned stored it already.
-        self.op(s"scf.if ${self.flowing()} {")
-        self.store(span, self.ret_slot, value, self.ret)
-        self.op("}")
-        self.op(s"func.return ${self.load(span, self.ret_slot, self.ret)} : $r")
+        for id in self.inout_arrays
+            vals.push(self.read_array(span, id))
+            tys.push(self.ty(span, self.prog.locals[id].ty))
 
-    // A parameter's MLIR type: an `inout` one is its caller's place.
+        if vals.len() == 0 then self.op("func.return")
+        else self.op(s"func.return ${joined(vals)} : ${joined(tys)}")
+
+    // A function's results: its value, then each `inout` array parameter.
+    results_text(*self, span: Span, params: Buf[usize], ret: Ty) -> string
+        var tys: Buf[string] = buf()
+        val r = self.ty(span, ret)
+
+        if r != "" then tys.push(r)
+
+        for id in params
+            if self.inout_array(id) then tys.push(self.ty(span, self.prog.locals[id].ty))
+
+        if tys.len() == 1 then tys[0] elif tys.len() == 0 then "" else s"(${joined(tys)})"
+
+    // Whether parameter `id` is an `inout` array, passed in and handed back as a value.
+    inout_array(*self, id: usize) -> bool = is_inout(self.prog.locals[id].kind) && is_arr(self.prog.locals[id].ty)
+
+    // A parameter's MLIR type: an `inout` one is its caller's place, but for an array, which is
+    // passed and returned.
     param_ty(*self, span: Span, id: usize) -> string =
-        if is_inout(self.prog.locals[id].kind) then "!llvm.ptr" else self.ty(span, self.prog.locals[id].ty)
+        if is_inout(self.prog.locals[id].kind) && !is_arr(self.prog.locals[id].ty) then "!llvm.ptr" else self.ty(span, self.prog.locals[id].ty)
 
     // The parameters bound in the prologue, from block arguments `%a0`, `%a1`, ...
     bind_params(*self, span: Span, params: Buf[usize])
         for k in 0..<params.len()
             val id = params[k]
 
-            if is_inout(self.prog.locals[id].kind)
+            if self.in_ssa(id)
+                self.arr.set(id, s"%a$k")
+                if self.inout_array(id) then self.inout_arrays.push(id)
+            elif self.inout_array(id)
+                self.later(span, "an `inout` array a lambda captures")
+            elif is_inout(self.prog.locals[id].kind)
                 self.bind_borrowed(id, s"%a$k")
             else
                 self.bind_local(span, id)
@@ -399,7 +457,7 @@ struct Emitter
 
         self.bind_params(f.span, params)
         self.finish_body(f.span, self.ex(f.body))
-        self.end(s"  func.func private @\"n.${f.name}\"(${self.params_text(f.span, params, false)})${arrow(self.ty(f.span, f.ret))}")
+        self.end(s"  func.func private @\"n.${f.name}\"(${self.params_text(f.span, params, false)})${arrow(self.results_text(f.span, params, f.ret))}")
 
     lambda(*self, id: usize)
         val l = self.prog.lambdas[id]
@@ -413,16 +471,18 @@ struct Emitter
 
         self.bind_params(l.body.span, l.params)
         self.finish_body(l.body.span, self.ex(l.body))
-        self.end(s"  func.func private @\"l.$id\"(${self.params_text(l.body.span, l.params, true)})${arrow(self.ty(l.body.span, l.ret))}")
+        self.end(s"  func.func private @\"l.$id\"(${self.params_text(l.body.span, l.params, true)})${arrow(self.results_text(l.body.span, l.params, l.ret))}")
 
     // The function type of code taking an environment and `params`.
     code_type(*self, span: Span, params: Buf[usize], ret: Ty) -> string
         var out = "!llvm.ptr"
 
         for id in params
-            out += s", ${self.param_ty(span, id)}"
+            val t = self.prog.locals[id].ty
 
-        s"($out) -> ${result_text(self.ty(span, ret))}"
+            out += s", ${if is_arr(t) then self.boundary_ty(span, t) else self.param_ty(span, id)}"
+
+        s"($out) -> ${result_text(if is_arr(ret) then self.memref_ty(span, ret) else self.results_text(span, params, ret))}"
 
     // A function value: `code` and the environment `env`.
     closure(*self, code: string, ty: string, env: string) -> string
@@ -457,7 +517,7 @@ struct Emitter
 
                 self.op(s"llvm.store $cell, $p : !llvm.ptr, !llvm.ptr")
 
-        self.closure(s"l.$id", self.code_type(span, l.params, l.ret), env)
+        self.closure(self.adapted(span, s"l.$id", l.params, l.ret), self.code_type(span, l.params, l.ret), env)
 
     // A top-level `def` as a value, through a wrapper that takes and ignores an environment.
     fn_value(*self, span: Span, name: string) -> string
@@ -497,7 +557,7 @@ struct Emitter
 
             self.funcs.push(text)
 
-        self.closure(s"r.$name", ty, self.def("llvm.mlir.zero : !llvm.ptr"))
+        self.closure(self.adapted(span, s"r.$name", g.params, g.ret), ty, self.def("llvm.mlir.zero : !llvm.ptr"))
 
     find_fun(*self, name: string) -> Option[TFun]
         for d in self.prog.decls
@@ -591,7 +651,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
             boxed.set(c, true)
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
-                    buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false)
+                    buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf())
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)
@@ -632,6 +692,7 @@ private size_of(t: Ty) -> int = t match
     Complex(b) -> b / 4
     Bool -> 1
     Fn(_) -> 16
+    Array(_, axes) -> 8 * (3 + 2 * int(axes.len()))
     _ -> 8
 
 // A string's bytes as an MLIR string attribute spells them: printable ASCII as itself, the rest, a

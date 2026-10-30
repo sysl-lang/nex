@@ -31,6 +31,8 @@ impl Emitter
             self.call("nex_put_newline", sink, "i64", "")
             return ""
 
+        if is_arr(t) || (args.len() > 0 && is_arr(args[0].ty) && !self.is_args(args[0])) then return self.array_builtin(span, name, args, t)
+
         if name == "length" || name == "size" || name == "rank"
             if self.is_args(args[0])
                 return if name == "rank" then self.int_const("1", 64) else self.call("nex_arg_count", "", "", "i64")
@@ -234,6 +236,7 @@ impl Emitter
                 self.call(s"nex_put_complex${if bits == 64 then "" else s"$bits"}", s"$sink, $re, $im", s"i64, f$at, f$at", "")
             Bool -> self.call("nex_put_bool", s"$sink, $v", "i64, i1", "")
             Str -> self.call("nex_put_str", s"$sink, $v", "i64, !llvm.ptr", "")
+            Array(_, _) -> self.put_array(span, sink, v, t)
             _ -> self.later(span, s"printing ${show_ty(t)}")
 
     // A value under an `f"..."` specifier, which the elaborator has checked against its type.
@@ -270,36 +273,17 @@ impl Emitter
         TLocal(id) -> self.args_local == Some(id)
         _ -> false
 
-    // An array node: `args[k]` and `for a in args` on the arguments `main` takes; every other array
-    // is not compiled yet.
-    array(*self, e: TExpr, op: TArr) -> string
-        op match
-            TIndex(target, subs) ->
-                if self.is_args(target) && subs.len() == 1
-                    subs[0] match
-                        TSubAt(k) ->
-                            val i = self.ex(k)
-
-                            return self.call("nex_arg", self.widen64(i, bits_of(k.ty), is_signed(k.ty)), "i64", "!llvm.ptr")
-                        _ -> ()
-            TForEach(id, var_id, a, body) ->
-                if self.is_args(a) then return self.for_args(e.span, id, var_id, body)
-            _ -> ()
-
-        self.unsupported(e.span, "an array")
-
     // `for a in args`: the arguments from the first.
     for_args(*self, span: Span, id: usize, var_id: usize, body: TExpr) -> string
         val n = self.call("nex_arg_count", "", "", "i64")
         val counter = self.alloca("i64")
 
         self.op(s"llvm.store %one, $counter : i64, !llvm.ptr")
-        self.op("scf.while : () -> () {")
 
+        val l = self.loop_open()
         val more = self.def(s"arith.cmpi sle, ${self.def(s"llvm.load $counter : !llvm.ptr -> i64")}, $n : i64")
 
-        self.loop_condition(more)
-        self.op("} do {")
+        self.loop_condition(l, more)
 
         val k = self.def(s"llvm.load $counter : !llvm.ptr -> i64")
 
@@ -308,8 +292,7 @@ impl Emitter
         self.ex(body)
         self.end_pass(id)
         self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
-        self.op("scf.yield")
-        self.op("}")
+        self.loop_close(l)
         self.after_loop(id)
         ""
 end Emitter

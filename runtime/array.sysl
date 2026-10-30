@@ -1,0 +1,64 @@
+// Array storage the generated code cannot make on its own.
+//
+// A memref descriptor, as MLIR lays it out, is words: the allocation, the aligned base the elements
+// are addressed from, the offset, then `rank` sizes and `rank` strides, the last three counted in
+// elements.
+
+import sysl.raw.ptr_cast
+
+// What MLIR passes for a memref of unknown rank: its rank and its ranked descriptor.
+struct Unranked
+    rank: long
+    descriptor: *long
+
+// Every element of `src` copied to the same position of `dst`, both of one shape and `size`-byte
+// elements, at whatever offsets and strides each has. MLIR's `memref.copy` calls it for a copy
+// between strided memrefs; it is the C runner utility of the same name, which the program does not
+// link.
+@export("memrefCopy")
+memref_copy(size: long, src: *Unranked, dst: *Unranked)
+    val rank = usize(src[0].rank)
+    val s = src[0].descriptor
+    val d = dst[0].descriptor
+    var count: long = 1
+
+    for k in 0..<rank
+        count *= s[3 + k]
+
+    if count == 0 then return
+
+    var index: [16]long = [0; 16]
+    val from: *u8 = ptr_cast(usize(s[1]))
+    val to: *u8 = ptr_cast(usize(d[1]))
+
+    loop
+        var a = s[2]
+        var b = d[2]
+
+        for k in 0..<rank
+            a += index[k] * s[3 + rank + k]
+            b += index[k] * d[3 + rank + k]
+
+        for j in 0..<size
+            to[b * size + j] = from[a * size + j]
+
+        // The next index, the last axis fastest, as the identity layout stores it.
+        var k = rank
+
+        loop
+            if k == 0 then return
+
+            k -= 1
+            index[k] += 1
+
+            if index[k] < s[3 + k] then break
+
+            index[k] = 0
+
+// `bytes` of storage that nothing frees: an array a lambda captures or a module-level binding holds,
+// which may outlive every frame that reads it.
+@export("nex_array_alloc")
+array_alloc(bytes: long) -> *u8
+    val n = if bytes > 0 then bytes else 1
+
+    malloc(usize(n))

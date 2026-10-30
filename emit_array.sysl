@@ -1,0 +1,1358 @@
+// Emission of arrays: `tensor` values and `linalg` operations, which one-shot bufferization turns
+// into buffers (PLAN.md, "The pipeline, revised").
+//
+// **An array is a tensor with its axes reversed** (DESIGN §3.2): a nex array of shape `(d1, …, dk)`
+// is a `tensor<dk × … × d1 × T>`, so MLIR's row-major identity layout is nex's column-major storage,
+// and nex index `[i, j, k]` is tensor index `[k−1, j−1, i−1]`. A static extent is a static dimension.
+//
+// **An array local is an SSA value, not a slot.** The emitter keeps, by local number, the tensor each
+// array local holds now (`arr`); a write makes a new tensor and rebinds it, and bufferization makes
+// the write in place where no other reader needs the old value. A structured region that may rebind
+// one carries it out: an `scf.if` yields every array local either branch changed, and an
+// `scf.while` carries every array local live at the loop as an iteration argument. The value a
+// `return` gives is carried the same way, as one more entry past the locals.
+//
+// **An array that must live in memory** — one a lambda captures, which both the lambda and its
+// maker read and write, or a module-level binding — is a memref descriptor stored in its cell. Its
+// elements are storage the runtime allocates and nothing frees; reading it is a `to_tensor` of the
+// stored memref, and writing it materializes the new value into that storage (or, for a value of
+// another shape, into fresh storage whose descriptor replaces the old).
+//
+// **Element-wise work is one `linalg.generic` per operation**, its body the scalar operation the
+// emitter already writes, over block arguments. Fusion is `linalg-fuse-elementwise-ops`' job, never
+// the emitter's. The scalar body reaches its operands through a frame of the chain stack, so the
+// scalar emitter runs unchanged inside a region.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.{StrBuilder, str_builder}
+import sh.sysl.parsing.Span
+
+// An `scf.if` being emitted: the body around it, the array values before it, and its finished
+// `then` branch.
+struct Fork
+    outer: StrBuilder
+    before: Buf[string]
+    then_text: string
+    then_arr: Buf[string]
+    then_value: string
+
+// An `scf.while` being emitted: the array locals it carries and the name of its results.
+struct Loop
+    ids: Buf[usize]
+    result: string
+
+// Nested `scf.for` loops being emitted: their induction variables, outermost first, the tensor each
+// level carries, and each level's result.
+struct Nest
+    ivs: Buf[string]
+    accs: Buf[string]
+    results: Buf[string]
+    carried: string
+
+is_arr(t: Ty) -> bool = t match
+    Array(_, _) -> true
+    _ -> false
+
+copy_strings(xs: Buf[string]) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for x in xs
+        out.push(x)
+
+    out
+
+// `affine_map<(d0, …) -> (d0, …)>` at `rank`.
+identity_map(rank: usize) -> string
+    var ds = ""
+
+    for k in 0..<rank
+        if k > 0 then ds += ", "
+        ds += s"d$k"
+
+    s"affine_map<($ds) -> ($ds)>"
+
+parallel_iterators(rank: usize) -> string
+    var out = ""
+
+    for k in 0..<rank
+        if k > 0 then out += ", "
+        out += "\"parallel\""
+
+    out
+
+// The results of a region with types `tys`, named `r`: `%r` for one, `%r#k` for several.
+result_name(r: string, k: usize, count: usize) -> string = if count == 1 then r else s"$r#$k"
+
+result_def(r: string, count: usize) -> string =
+    if count == 0 then "" elif count == 1 then s"$r = " else s"$r:$count = "
+
+arrow_text(result: string) -> string = if result == "" then "" else s" -> $result"
+
+joined(xs: Buf[string]) -> string
+    var out = ""
+
+    for x in xs
+        if out != "" then out += ", "
+        out += x
+
+    out
+
+impl Emitter
+    // -- types ------------------------------------------------------------------------------------
+
+    // The MLIR type of an array of type `t`: its axes reversed.
+    tensor_ty(*self, span: Span, t: Ty) -> string = s"tensor<${self.shape_text(t)}${self.elem_ty(span, elem_of(t))}>"
+
+    memref_ty(*self, span: Span, t: Ty) -> string = s"memref<${self.shape_text(t)}${self.elem_ty(span, elem_of(t))}>"
+
+    shape_text(*self, t: Ty) -> string
+        val axes = axes_of(t)
+        var out = ""
+        var k = axes.len()
+
+        while k > 0
+            k -= 1
+            out += axes[k] match
+                Fixed(n) -> s"${n}x"
+                _ -> "?x"
+
+        out
+
+    // The MLIR type of an array's element.
+    elem_ty(*self, span: Span, t: Ty) -> string = t match
+        Int(b, _) -> s"i$b"
+        Real(b) -> s"f$b"
+        Complex(b) -> s"complex<f$b>"
+        Bool -> "i1"
+        _ ->
+            self.later(span, s"an array of ${show_ty(t)}")
+            "i64"
+
+    // The bytes an element of `t` takes in storage.
+    elem_bytes(*self, t: Ty) -> int = t match
+        Int(b, _) -> if b < 8 then 1 else b / 8
+        Real(b) -> b / 8
+        Complex(b) -> b / 4
+        _ -> 1
+
+    // The LLVM struct a memref descriptor of `rank` lowers to.
+    desc_ty(*self, rank: usize) -> string = s"!llvm.struct<(ptr, ptr, i64, array<$rank x i64>, array<$rank x i64>)>"
+
+    // The empty array of `t`: what a branch that yields none stands in with.
+    zero_array(*self, span: Span, t: Ty) -> string
+        val tt = self.tensor_ty(span, t)
+        var dims: Buf[string] = buf()
+
+        for x in axes_of(t)
+            if is_dynamic(x) then dims.push(self.index_const(0))
+
+        self.def(s"tensor.empty(${joined(dims)}) : $tt")
+
+    // The zero of a tensor type given by its text: an empty tensor, each dynamic axis 0.
+    zero_tensor_text(*self, t: string) -> string
+        var dims: Buf[string] = buf()
+
+        for k in 0..<t.len
+            if t[k..<k + 1] == "?" then dims.push(self.index_const(0))
+
+        self.def(s"tensor.empty(${joined(dims)}) : $t")
+
+    // -- index arithmetic -------------------------------------------------------------------------
+
+    index_const(*self, n: usize) -> string = self.def(s"arith.constant $n : index")
+
+    // The extent of nex axis `axis` (from 1) of the tensor `v` of array type `t`, as an `index`.
+    dim(*self, span: Span, v: string, t: Ty, axis: usize) -> string
+        val r = rank_of(t)
+
+        self.def(s"tensor.dim $v, ${self.index_const(r - axis)} : ${self.tensor_ty(span, t)}")
+
+    // Every extent of `v`, tensor order (nex's last axis first).
+    dims(*self, span: Span, v: string, t: Ty) -> Buf[string]
+        var out: Buf[string] = buf()
+        val r = rank_of(t)
+
+        for k in 0..<r
+            out.push(self.dim(span, v, t, r - k))
+
+        out
+
+    // The dynamic extents of `v`, tensor order, as `tensor.empty` of the same type wants them.
+    dynamic_dims(*self, span: Span, v: string, t: Ty, out_t: Ty) -> Buf[string]
+        var out: Buf[string] = buf()
+        val axes = axes_of(out_t)
+        val r = axes.len()
+
+        for k in 0..<r
+            if is_dynamic(axes[r - 1 - k]) then out.push(self.dim(span, v, t, r - k))
+
+        out
+
+    to_i64(*self, i: string) -> string = self.def(s"arith.index_cast $i : index to i64")
+
+    // An integer of type `t` as an `index`.
+    to_index(*self, v: string, t: Ty) -> string =
+        self.def(s"arith.index_cast ${self.widen64(v, bits_of(t), is_signed(t))} : i64 to index")
+
+    // The 0-based tensor index of 1-based nex index `v` (of integer type `t`) on an axis of extent
+    // `n`, trapping `out of bounds` outside `1..n`.
+    checked_index(*self, v: string, t: Ty, n: string) -> string
+        val w = self.widen64(v, bits_of(t), is_signed(t))
+        val z = self.def(s"arith.subi $w, %one : i64")
+        val outside = self.def(s"arith.cmpi uge, $z, ${self.to_i64(n)} : i64")
+
+        self.trap_if(outside, "index out of bounds")
+
+        // 0 where the trap is taken, so no folding meets an index outside the tensor.
+        self.def(s"arith.index_cast ${self.def(s"arith.select $outside, ${self.def("arith.constant 0 : i64")}, $z : i64")} : i64 to index")
+
+    // -- carrying array values through regions ----------------------------------------------------
+
+    ret_id(*self) -> usize = self.prog.locals.len()
+
+    // Whether local `id` is an array held as an SSA value.
+    in_ssa(*self, id: usize) -> bool = is_arr(self.prog.locals[id].ty) && !self.boxed[id]
+
+    // The type of the array value carried as entry `id`: a local's, or the function's result.
+    carried_ty(*self, id: usize) -> Ty = if id == self.ret_id() then self.ret else self.prog.locals[id].ty
+
+    // The `then` branch of an `scf.if` starts.
+    fork(*self) -> Fork
+        val f = Fork(self.body, copy_strings(self.arr), "", buf(), "")
+
+        self.body = str_builder()
+        f
+
+    // The `then` branch, whose value is `v`, is done; the `else` branch starts from the arrays as they
+    // were before the `if`.
+    fork_else(*self, f: Fork, v: string, t: Ty) -> Fork
+        var value = v
+
+        if value == "" && self.ty(Span(0, 0), t) != "" then value = self.zero_of(Span(0, 0), t)
+
+        val g = Fork(f.outer, f.before, self.body.finish(), copy_strings(self.arr), value)
+
+        self.arr = copy_strings(f.before)
+        self.body = str_builder()
+        g
+
+    // The `scf.if` on `cond`, its `else` branch's value `v`, written out: it yields its value of type
+    // `t` and every array either branch changed; the value is answered.
+    join(*self, f: Fork, cond: string, v: string, t: Ty) -> string
+        val vt = self.ty(Span(0, 0), t)
+        var value = v
+
+        if value == "" && vt != "" then value = self.zero_of(Span(0, 0), t)
+
+        val else_text = self.body.finish()
+        val else_arr = copy_strings(self.arr)
+        var ids: Buf[usize] = buf()
+
+        for k in 0..<f.before.len()
+            if f.before[k] != "" && (f.then_arr[k] != f.before[k] || else_arr[k] != f.before[k]) then ids.push(k)
+
+        var tys: Buf[string] = buf()
+        var then_vals: Buf[string] = buf()
+        var else_vals: Buf[string] = buf()
+
+        for id in ids
+            tys.push(self.tensor_ty(Span(0, 0), self.carried_ty(id)))
+            then_vals.push(f.then_arr[id])
+            else_vals.push(else_arr[id])
+
+        if vt != ""
+            tys.push(vt)
+            then_vals.push(f.then_value)
+            else_vals.push(value)
+
+        self.body = f.outer
+
+        val r = self.fresh()
+        val n = tys.len()
+        val ty_text = joined(tys)
+
+        self.op(s"${result_def(r, n)}scf.if $cond${if n == 0 then "" else s" -> ($ty_text)"} {")
+        self.body.push(f.then_text)
+        if n > 0 then self.op(s"scf.yield ${joined(then_vals)} : $ty_text")
+        self.op("} else {")
+        self.body.push(else_text)
+        if n > 0 then self.op(s"scf.yield ${joined(else_vals)} : $ty_text")
+        self.op("}")
+
+        // Arrays bound inside a branch are out of scope after it.
+        self.arr = f.before
+
+        for k in 0..<ids.len()
+            self.arr.set(ids[k], result_name(r, k, n))
+
+        if vt == "" then "" else result_name(r, n - 1, n)
+    end join
+
+    // An `scf.while` opens, carrying every array value live here.
+    loop_open(*self) -> Loop
+        var ids: Buf[usize] = buf()
+
+        for k in 0..<self.arr.len()
+            if self.arr[k] != "" then ids.push(k)
+
+        val r = self.fresh()
+
+        if ids.len() == 0
+            self.op("scf.while : () -> () {")
+            return Loop(ids, r)
+
+        var inits: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+
+        for id in ids
+            val b = self.fresh()
+
+            inits.push(s"$b = ${self.arr[id]}")
+            tys.push(self.tensor_ty(Span(0, 0), self.carried_ty(id)))
+            self.arr.set(id, b)
+
+        val ty_text = joined(tys)
+
+        self.op(s"${result_def(r, ids.len())}scf.while (${joined(inits)}) : ($ty_text) -> ($ty_text) {")
+        Loop(ids, r)
+
+    loop_types(*self, l: Loop) -> string
+        var tys: Buf[string] = buf()
+
+        for id in l.ids
+            tys.push(self.tensor_ty(Span(0, 0), self.carried_ty(id)))
+
+        joined(tys)
+
+    loop_values(*self, l: Loop) -> string
+        var vals: Buf[string] = buf()
+
+        for id in l.ids
+            vals.push(self.arr[id])
+
+        joined(vals)
+
+    // The loop's condition, then its body's block.
+    loop_test(*self, l: Loop, c: string)
+        if l.ids.len() == 0
+            self.op(s"scf.condition($c)")
+            self.op("} do {")
+            return
+
+        self.op(s"scf.condition($c) ${self.loop_values(l)} : ${self.loop_types(l)}")
+        self.op("} do {")
+
+        var args: Buf[string] = buf()
+
+        for id in l.ids
+            val b = self.fresh()
+
+            args.push(s"$b: ${self.tensor_ty(Span(0, 0), self.carried_ty(id))}")
+            self.arr.set(id, b)
+
+        self.op(s"^bb0(${joined(args)}):")
+
+    // The body's end: what it carries round, and after the loop the results.
+    loop_close(*self, l: Loop)
+        if l.ids.len() == 0 then self.op("scf.yield")
+        else self.op(s"scf.yield ${self.loop_values(l)} : ${self.loop_types(l)}")
+        self.op("}")
+
+        for k in 0..<self.arr.len()
+            self.arr.set(k, "")
+
+        for k in 0..<l.ids.len()
+            self.arr.set(l.ids[k], result_name(l.result, k, l.ids.len()))
+
+    // Loops over `extents` (`index` values, outermost first), carrying the tensor `init` of type
+    // `ty` (`""` for none).
+    nest_open(*self, extents: Buf[string], init: string, ty: string) -> Nest
+        var n = Nest(buf(), buf(), buf(), ty)
+        var acc = init
+        val zero = self.index_const(0)
+        val one = self.index_const(1)
+
+        for d in extents
+            val iv = self.fresh()
+            val r = self.fresh()
+
+            if ty == ""
+                self.op(s"scf.for $iv = $zero to $d step $one {")
+            else
+                val a = self.fresh()
+
+                self.op(s"$r = scf.for $iv = $zero to $d step $one iter_args($a = $acc) -> ($ty) {")
+                acc = a
+
+            n.ivs.push(iv)
+            n.accs.push(acc)
+            n.results.push(r)
+
+        n
+
+    // The innermost body's value `v` carried out; the outermost loop's result answered.
+    nest_close(*self, n: Nest, v: string) -> string
+        var k = n.ivs.len()
+        var value = v
+
+        while k > 0
+            k -= 1
+
+            if n.carried != "" then self.op(s"scf.yield $value : ${n.carried}")
+            self.op("}")
+            value = n.results[k]
+
+        if n.carried == "" then "" else value
+
+    // -- locals -----------------------------------------------------------------------------------
+
+    // Array local `id` read.
+    read_array(*self, span: Span, id: usize) -> string
+        val v = self.arr[id]
+
+        if v == ""
+            self.later(span, s"`${self.prog.locals[id].name}` here")
+            return self.zero_array(span, self.prog.locals[id].ty)
+
+        v
+
+    // The tensor a stored array holds: its descriptor at `ptr` read as a memref.
+    load_array(*self, span: Span, ptr: string, t: Ty) -> string
+        val d = self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")
+        val m = self.def(s"builtin.unrealized_conversion_cast $d : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
+
+        self.def(s"bufferization.to_tensor $m restrict : ${self.memref_ty(span, t)} to ${self.tensor_ty(span, t)}")
+
+    // The tensor `v` stored at `ptr` in fresh storage.
+    store_array(*self, span: Span, ptr: string, v: string, t: Ty)
+        val r = rank_of(t)
+        val d = self.desc_ty(r)
+        val sizes = self.dims(span, v, t)
+        var count = self.def(s"arith.constant ${self.elem_bytes(elem_of(t))} : i64")
+        var u = self.def(s"llvm.mlir.undef : $d")
+
+        for k in 0..<r
+            val s = self.to_i64(sizes[k])
+
+            count = self.def(s"arith.muli $count, $s : i64")
+            u = self.def(s"llvm.insertvalue $s, $u[3, $k] : $d")
+
+        // The identity layout's strides: the last tensor axis is contiguous.
+        var stride = self.def("arith.constant 1 : i64")
+        var k = r
+
+        while k > 0
+            k -= 1
+            u = self.def(s"llvm.insertvalue $stride, $u[4, $k] : $d")
+            stride = self.def(s"arith.muli $stride, ${self.to_i64(sizes[k])} : i64")
+
+        val p = self.call("nex_array_alloc", count, "i64", "!llvm.ptr")
+
+        u = self.def(s"llvm.insertvalue $p, $u[0] : $d")
+        u = self.def(s"llvm.insertvalue $p, $u[1] : $d")
+        u = self.def(s"llvm.insertvalue ${self.def("arith.constant 0 : i64")}, $u[2] : $d")
+
+        val m = self.def(s"builtin.unrealized_conversion_cast $u : $d to ${self.memref_ty(span, t)}")
+
+        self.op(s"bufferization.materialize_in_destination $v in restrict writable $m : (${self.tensor_ty(span, t)}, ${self.memref_ty(span, t)}) -> ()")
+        self.effect(s"llvm.store $u, $ptr : $d, !llvm.ptr", "")
+
+    // The tensor `v`, of the shape the array stored at `ptr` has, written over its elements.
+    write_back(*self, span: Span, ptr: string, v: string, t: Ty)
+        val d = self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")
+        val m = self.def(s"builtin.unrealized_conversion_cast $d : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
+
+        self.op(s"bufferization.materialize_in_destination $v in restrict writable $m : (${self.tensor_ty(span, t)}, ${self.memref_ty(span, t)}) -> ()")
+
+    // The array a place holds now.
+    place_value(*self, e: TExpr) -> string = *e.kind match
+        TLocal(id) -> if self.in_ssa(id) then self.read_array(e.span, id) else self.load(e.span, self.local_ptr(e.span, id), e.ty)
+        TGlobalRef(_) -> self.load(e.span, self.place_ptr(e), e.ty)
+        _ ->
+            self.later(e.span, "this place")
+            self.zero_array(e.span, e.ty)
+
+    // The array place `e` rebound to `v`; `same_shape` where `v` has the shape it held, so stored
+    // storage is written over rather than replaced.
+    set_place(*self, e: TExpr, v: string, same_shape: bool)
+        *e.kind match
+            TLocal(id) ->
+                if self.in_ssa(id)
+                    self.arr.set(id, v)
+                    return
+            _ -> ()
+
+        val p = self.place_ptr(e)
+
+        if same_shape then self.write_back(e.span, p, v, e.ty) else self.store_array(e.span, p, v, e.ty)
+
+    // -- array nodes ------------------------------------------------------------------------------
+
+    // An array node's value.
+    array(*self, e: TExpr, op: TArr) -> string
+        op match
+            TIndex(target, subs) ->
+                if self.is_args(target) && subs.len() == 1
+                    subs[0] match
+                        TSubAt(k) ->
+                            val i = self.ex(k)
+
+                            return self.call("nex_arg", self.widen64(i, bits_of(k.ty), is_signed(k.ty)), "i64", "!llvm.ptr")
+                        _ -> ()
+
+                self.element(e, target, subs)
+            TForEach(id, var_id, a, body) ->
+                if self.is_args(a) then return self.for_args(e.span, id, var_id, body)
+
+                self.for_each(e.span, id, var_id, a, body)
+            TArrayLit(items) -> self.literal_array(e, items)
+            TRangeValue(lo, hi, inclusive, step) -> self.range_value(e, lo, hi, inclusive, step)
+            TView(target, subs) -> self.view(e, target, subs)
+            TCopy(v, _) -> self.copied(e.span, self.ex(v), v.ty)
+            TTransfer(v, d) ->
+                val x = self.ex(v)
+
+                if d.clones then self.copied(e.span, x, v.ty) else x
+            TEnd(axis) ->
+                val k = self.ends.len() - 1
+                val n = self.to_i64(self.dim(e.span, self.ends[k], self.end_tys[k], axis))
+
+                self.convert(e.span, n, INTEGER, e.ty, false)
+            TElementwise(o, l, r) ->
+                var operands: Buf[TExpr] = buf()
+
+                operands.push(l)
+                operands.push(r)
+                self.mapped(e, operands, texpr(e.span, elem_of(e.ty), self.scalar_op(o, chain_leaf(l, 0), chain_leaf(r, 1))))
+            TElementwiseUnary(o, v) ->
+                var operands: Buf[TExpr] = buf()
+
+                operands.push(v)
+                self.mapped(e, operands, texpr(e.span, elem_of(e.ty), TUnary(o, chain_leaf(v, 0))))
+            TElemental(name, args) ->
+                var leaves: Buf[TExpr] = buf()
+
+                for k in 0..<args.len()
+                    leaves.push(chain_leaf(args[k], k))
+
+                self.mapped(e, args, texpr(e.span, elem_of(e.ty), TBuiltin(name, leaves)))
+            TElementalConvert(v, traps) ->
+                var operands: Buf[TExpr] = buf()
+
+                operands.push(v)
+                self.mapped(e, operands, texpr(e.span, elem_of(e.ty), TConvert(chain_leaf(v, 0), traps)))
+            TElementalCall(callee, args) ->
+                var leaves: Buf[TExpr] = buf()
+
+                for k in 0..<args.len()
+                    leaves.push(chain_leaf(args[k], k))
+
+                self.mapped(e, args, texpr(e.span, elem_of(e.ty), TCall(callee, leaves)))
+            TShapeCheck(v) -> self.shape_checked(e.span, self.ex(v), v.ty, e.ty)
+            TMatMul(l, r) -> self.matmul(e, l, r)
+            TReduction(name, args, dim) -> self.reduction(e, name, args, dim)
+            TBroadcast(v) -> self.unsupported(e.span, "a broadcast outside a slice assignment")
+            TOrigin(_, _) -> self.unsupported(e.span, "`origin`")
+    end array
+
+    // The scalar operation an element-wise operator applies.
+    scalar_op(*self, o: string, l: TExpr, r: TExpr) -> TKind =
+        if o == "and" || o == "or" then TLogical(o, l, r) else TBinary(o, l, r)
+
+    // A dense, owned copy of the array `v`.
+    copied(*self, span: Span, v: string, t: Ty) -> string =
+        self.def(s"bufferization.alloc_tensor() copy($v) : ${self.tensor_ty(span, t)}")
+
+    // `v` of array type `from` seen as type `to`, where only static extents differ.
+    cast(*self, span: Span, v: string, from: Ty, to: Ty) -> string
+        val a = self.tensor_ty(span, from)
+        val b = self.tensor_ty(span, to)
+
+        if a == b then v else self.def(s"tensor.cast $v : $a to $b")
+
+    // `v` of type `from` given the static shape of `to`, trapping `shape mismatch` where it differs.
+    shape_checked(*self, span: Span, v: string, from: Ty, to: Ty) -> string
+        val axes = axes_of(to)
+
+        for k in 0..<axes.len()
+            axes[k] match
+                Fixed(n) ->
+                    val d = self.to_i64(self.dim(span, v, from, k + 1))
+
+                    self.trap_if(self.def(s"arith.cmpi ne, $d, ${self.def(s"arith.constant $n : i64")} : i64"), "shape mismatch")
+                _ -> ()
+
+        self.cast(span, v, from, to)
+
+    // A widened array: its elements converted, or only its static extents forgotten.
+    promoted(*self, e: TExpr, v: TExpr) -> string
+        if ty_eq(elem_of(v.ty), elem_of(e.ty)) then return self.cast(e.span, self.ex(v), v.ty, e.ty)
+
+        var operands: Buf[TExpr] = buf()
+
+        operands.push(v)
+        self.mapped(e, operands, texpr(e.span, elem_of(e.ty), TPromote(chain_leaf(v, 0))))
+
+    // -- element-wise -----------------------------------------------------------------------------
+
+    // The array `e` whose every element is `scalar` over the elements of `operands`: each operand an
+    // array of `e`'s shape, or a scalar broadcast. `scalar` reaches operand `k` as `TChainOperand(k)`.
+    mapped(*self, e: TExpr, operands: Buf[TExpr], scalar: TExpr) -> string
+        var vals: Buf[string] = buf()
+
+        for o in operands
+            vals.push(self.ex(o))
+
+        self.mapped_values(e.span, e.ty, operands, vals, scalar)
+
+    mapped_values(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], scalar: TExpr) -> string
+        val r = rank_of(out)
+        val ot = self.tensor_ty(span, out)
+        var first = ""
+        var first_ty = out
+        var ins: Buf[string] = buf()
+        var in_tys: Buf[string] = buf()
+
+        for k in 0..<operands.len()
+            if !is_arr(operands[k].ty) then continue
+
+            if first == ""
+                first = vals[k]
+                first_ty = operands[k].ty
+            else
+                // Two arrays of dynamic shape must agree at run time.
+                for a in 1..r
+                    val x = self.dim(span, first, first_ty, a)
+                    val y = self.dim(span, vals[k], operands[k].ty, a)
+
+                    self.trap_if(self.def(s"arith.cmpi ne, $x, $y : index"), "shape mismatch")
+
+            ins.push(vals[k])
+            in_tys.push(self.tensor_ty(span, operands[k].ty))
+
+        val empty = self.def(s"tensor.empty(${joined(self.dynamic_dims(span, first, first_ty, out))}) : $ot")
+        val m = identity_map(r)
+        var maps = m
+
+        for _ in ins
+            maps += s", $m"
+
+        // The block's arguments: one per array operand, then the output element.
+        var args: Buf[string] = buf()
+        var frame: Buf[string] = buf()
+
+        for k in 0..<operands.len()
+            if is_arr(operands[k].ty)
+                val b = self.fresh()
+
+                args.push(s"$b: ${self.elem_ty(span, elem_of(operands[k].ty))}")
+                frame.push(b)
+            else
+                frame.push(vals[k])
+
+        args.push(s"${self.fresh()}: ${self.elem_ty(span, elem_of(out))}")
+
+        val v = self.fresh()
+        val ins_text = if ins.len() == 0 then "" else s"ins(${joined(ins)} : ${joined(in_tys)}) "
+
+        self.op(s"$v = linalg.generic {indexing_maps = [$maps], iterator_types = [${parallel_iterators(r)}]} ${ins_text}outs($empty : $ot) {")
+        self.op(s"^bb0(${joined(args)}):")
+
+        val y = self.in_frame(frame, scalar)
+
+        self.op(s"linalg.yield $y : ${self.elem_ty(span, elem_of(out))}")
+        self.op(s"} -> $ot")
+        v
+    end mapped_values
+
+    // `scalar` emitted with `frame` as the operands its `TChainOperand` leaves read, nothing having
+    // left the statement yet.
+    in_frame(*self, frame: Buf[string], scalar: TExpr) -> string
+        val dirty = self.dirty
+
+        self.dirty = false
+        self.chains.push(frame)
+
+        val y = self.ex(scalar)
+
+        self.chains.pop()
+        self.dirty = dirty
+        y
+
+    // -- literals and ranges ----------------------------------------------------------------------
+
+    // `[a, b, c]` at any rank: every scalar in source order, laid out in tensor order.
+    literal_array(*self, e: TExpr, items: Buf[TExpr]) -> string
+        var scalars: Buf[TExpr] = buf()
+
+        if !self.gather(e, &scalars)
+            return self.stacked(e, items)
+
+        var values: Buf[string] = buf()
+
+        for s in scalars
+            values.push(self.ex(s))
+
+        if values.len() == 0 then return self.zero_array(e.span, e.ty)
+
+        // The extents along each nex axis, from the first item at each depth.
+        var extents: Buf[usize] = buf()
+        var at = e
+
+        loop
+            *at.kind match
+                TArray(op) ->
+                    *op match
+                        TArrayLit(xs) ->
+                            extents.push(xs.len())
+                            if xs.len() == 0 then break
+                            at = xs[0]
+                        _ -> break
+                _ -> break
+
+        // Source order runs the last nex axis fastest; tensor order the first.
+        val r = extents.len()
+        var ordered: Buf[string] = buf()
+        var total: usize = 1
+
+        for x in extents
+            total *= x
+
+        for t in 0..<total
+            // `t` counts in tensor order: nex axis 1 fastest.
+            var rest = t
+            var source: usize = 0
+            var digits: Buf[usize] = buf()
+
+            for a in 0..<r
+                digits.push(rest % extents[a])
+                rest /= extents[a]
+
+            for a in 0..<r
+                source = source * extents[a] + digits[a]
+
+            ordered.push(values[source])
+
+        var shape = ""
+        var k = r
+
+        while k > 0
+            k -= 1
+            shape += s"${extents[k]}x"
+
+        val st = s"tensor<$shape${self.elem_ty(e.span, elem_of(e.ty))}>"
+        val v = self.def(s"tensor.from_elements ${joined(ordered)} : $st")
+
+        if st == self.tensor_ty(e.span, e.ty) then v else self.def(s"tensor.cast $v : $st to ${self.tensor_ty(e.span, e.ty)}")
+    end literal_array
+
+    // Every scalar of a literal nested only of literals, in source order; false where an item is an
+    // array expression or the nesting is ragged.
+    gather(*self, e: TExpr, out: *Buf[TExpr]) -> bool
+        *e.kind match
+            TArray(op) ->
+                *op match
+                    TArrayLit(items) ->
+                        if rank_of(e.ty) == 1
+                            for x in items
+                                out.push(x)
+                            return true
+
+                        var n: Option[usize] = None
+
+                        for x in items
+                            *x.kind match
+                                TArray(inner) ->
+                                    *inner match
+                                        TArrayLit(ys) ->
+                                            if n.is_some() && n != Some(ys.len()) then return false
+                                            n = Some(ys.len())
+                                        _ -> return false
+                                _ -> return false
+
+                            if !self.gather(x, out) then return false
+
+                        return true
+                    _ -> return false
+            _ -> return false
+
+    // A literal whose items are arrays of rank R − 1: each placed along nex axis 1, the tensor's last.
+    stacked(*self, e: TExpr, items: Buf[TExpr]) -> string
+        var vals: Buf[string] = buf()
+
+        for x in items
+            vals.push(self.ex(x))
+
+        val t = e.ty
+        val r = rank_of(t)
+        val it = items[0].ty
+        val n = self.index_const(items.len())
+        var sizes: Buf[string] = buf()
+        val inner = self.dims(e.span, vals[0], it)
+
+        for d in inner
+            sizes.push(d)
+
+        sizes.push(n)
+
+        // The empty result's dynamic extents, tensor order.
+        var dyn: Buf[string] = buf()
+        val axes = axes_of(t)
+
+        for k in 0..<r
+            if is_dynamic(axes[r - 1 - k]) then dyn.push(sizes[k])
+
+        val tt = self.tensor_ty(e.span, t)
+        var acc = self.def(s"tensor.empty(${joined(dyn)}) : $tt")
+
+        for j in 0..<items.len()
+            // Every item has the first one's shape.
+            for a in 1..r - 1
+                val x = self.dim(e.span, vals[0], it, a)
+                val y = self.dim(e.span, vals[j], items[j].ty, a)
+
+                self.trap_if(self.def(s"arith.cmpi ne, $x, $y : index"), "shape mismatch")
+
+            var offs: Buf[string] = buf()
+            var szs: Buf[string] = buf()
+            var strides: Buf[string] = buf()
+
+            for k in 0..<r - 1
+                offs.push("0")
+                szs.push(inner[k])
+                strides.push("1")
+
+            offs.push(s"$j")
+            szs.push("1")
+            strides.push("1")
+            acc = self.def(s"tensor.insert_slice ${vals[j]} into $acc[${joined(offs)}] [${joined(szs)}] [${joined(strides)}] : ${self.tensor_ty(e.span, items[j].ty)} into $tt")
+
+        acc
+    end stacked
+
+    // `lo..hi by step` as a rank-1 array of the integers it counts.
+    range_value(*self, e: TExpr, lo_e: TExpr, hi_e: TExpr, inclusive: bool, step_e: Option[TExpr]) -> string
+        val it = elem_of(e.ty)
+        val bits = bits_of(it)
+        val t = s"i$bits"
+        val lo = self.ex(lo_e)
+        val hi = self.ex(hi_e)
+        val zero = self.int_const("0", bits)
+        val step = step_e match
+            Some(s) -> self.ex(s)
+            None -> self.int_const("1", bits)
+
+        if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), "a range step of 0")
+
+        val n = self.count(lo, hi, step, inclusive, it)
+        val tt = self.tensor_ty(e.span, e.ty)
+        val empty = self.def(s"tensor.empty($n) : $tt")
+        val v = self.fresh()
+        val o = self.fresh()
+
+        self.op(s"$v = linalg.generic {indexing_maps = [${identity_map(1)}], iterator_types = [\"parallel\"]} outs($empty : $tt) {")
+        self.op(s"^bb0($o: $t):")
+
+        val i = self.def(s"arith.index_cast ${self.def("linalg.index 0 : index")} : index to $t")
+        val x = self.def(s"arith.addi $lo, ${self.def(s"arith.muli $i, $step : $t")} : $t")
+
+        self.op(s"linalg.yield $x : $t")
+        self.op(s"} -> $tt")
+        v
+
+    // How many values `lo..hi by step` (or `..<`) counts, as an `index`; the step is not 0.
+    count(*self, lo: string, hi: string, step: string, inclusive: bool, it: Ty) -> string
+        val bits = bits_of(it)
+        val t = s"i$bits"
+        val signed = is_signed(it)
+        val zero = self.int_const("0", bits)
+        val up = if signed then self.def(s"arith.cmpi sgt, $step, $zero : $t") else self.def("arith.constant true")
+        val lt = if signed then "slt" else "ult"
+        val le = if signed then "sle" else "ule"
+        val empty_up = self.def(s"arith.cmpi ${if inclusive then lt else le}, $hi, $lo : $t")
+        val empty_down = self.def(s"arith.cmpi ${if inclusive then lt else le}, $lo, $hi : $t")
+        val empty = self.def(s"arith.select $up, $empty_up, $empty_down : i1")
+        val span_up = self.def(s"arith.subi $hi, $lo : $t")
+        val span_down = self.def(s"arith.subi $lo, $hi : $t")
+        var distance = self.def(s"arith.select $up, $span_up, $span_down : $t")
+
+        if !inclusive then distance = self.def(s"arith.subi $distance, ${self.int_const("1", bits)} : $t")
+
+        val magnitude = self.def(s"arith.select $up, $step, ${self.def(s"arith.subi $zero, $step : $t")} : $t")
+        val passes = self.def(s"arith.divui $distance, $magnitude : $t")
+        val n = self.def(s"arith.addi $passes, ${self.int_const("1", bits)} : $t")
+        val w = self.def(s"arith.select $empty, $zero, $n : $t")
+
+        self.def(s"arith.index_cast ${self.widen64(w, bits, false)} : i64 to index")
+
+    // -- indexing ---------------------------------------------------------------------------------
+
+    // `a[i, j]` read: one element.
+    element(*self, e: TExpr, target: TExpr, subs: Buf[TSub]) -> string
+        val tv = self.ex(target)
+        val idx = self.indices(e.span, tv, target.ty, subs)
+
+        if idx.len() == 0 then return self.zero_of(e.span, e.ty)
+
+        self.def(s"tensor.extract $tv[${joined(idx)}] : ${self.tensor_ty(e.span, target.ty)}")
+
+    // The checked tensor indices of an index list whose every subscript is an integer, tensor order;
+    // none where one is not.
+    indices(*self, span: Span, tv: string, t: Ty, subs: Buf[TSub]) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        self.ends.push(tv)
+        self.end_tys.push(t)
+
+        for k in 0..<subs.len()
+            subs[k] match
+                TSubAt(i) -> out.push(self.checked_index(self.ex(i), i.ty, self.dim(span, tv, t, k + 1)))
+                _ ->
+                    self.later(span, "a slice here")
+                    out.push(self.index_const(0))
+
+        self.ends.pop()
+        self.end_tys.pop()
+
+        // Tensor order is nex's reversed.
+        var rev: Buf[string] = buf()
+        var k = out.len()
+
+        while k > 0
+            k -= 1
+            rev.push(out[k])
+
+        rev
+
+    // The window an index list takes, per nex axis: its offset, its extent and its stride as
+    // `index` values, the integer subscripts with extent 1; all bounds checked.
+    window(*self, span: Span, tv: string, t: Ty, subs: Buf[TSub]) -> (Buf[string], Buf[string], Buf[string])
+        var offs: Buf[string] = buf()
+        var sizes: Buf[string] = buf()
+        var strides: Buf[string] = buf()
+
+        self.ends.push(tv)
+        self.end_tys.push(t)
+
+        for k in 0..<subs.len()
+            val n = self.dim(span, tv, t, k + 1)
+
+            subs[k] match
+                TSubAt(i) ->
+                    offs.push(self.checked_index(self.ex(i), i.ty, n))
+                    sizes.push(self.index_const(1))
+                    strides.push(self.index_const(1))
+                TSubAll ->
+                    offs.push(self.index_const(0))
+                    sizes.push(n)
+                    strides.push(self.index_const(1))
+                TSubWindow(lo_e, hi_e, inclusive, step_e) ->
+                    val n64 = self.to_i64(n)
+                    val lo = lo_e match
+                        Some(x) -> self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
+                        None -> self.def("arith.constant 1 : i64")
+                    var hi = hi_e match
+                        Some(x) -> self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
+                        None -> n64
+
+                    if !inclusive && hi_e.is_some() then hi = self.def(s"arith.subi $hi, %one : i64")
+
+                    val step = step_e match
+                        Some(x) -> self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
+                        None -> self.def("arith.constant 1 : i64")
+                    val zero = self.def("arith.constant 0 : i64")
+
+                    if step_e.is_some()
+                        self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : i64"), "a slice stride of 0")
+                        self.trap_if(self.def(s"arith.cmpi slt, $step, $zero : i64"), "a negative slice stride is not compiled yet")
+
+                    // Empty where `hi` is `lo − 1`; a window running further backward, or past
+                    // either end of the axis, is out of bounds.
+                    val before = self.def(s"arith.subi $lo, %one : i64")
+                    val empty = self.def(s"arith.cmpi eq, $hi, $before : i64")
+                    val backward = self.def(s"arith.cmpi slt, $hi, $before : i64")
+                    val low = self.def(s"arith.cmpi slt, $lo, %one : i64")
+                    val high = self.def(s"arith.cmpi sgt, $hi, $n64 : i64")
+                    val outside = self.def(s"arith.ori $low, $high : i1")
+                    val bad = self.def(s"arith.ori $backward, ${self.def(s"arith.andi $outside, ${self.not(empty)} : i1")} : i1")
+
+                    self.trap_if(bad, "slice out of bounds")
+
+                    // Past the traps every value below is in range; the selects keep them so where
+                    // the traps are taken too, so no folding of them meets an invalid slice.
+                    val skip = self.def(s"arith.ori $bad, $empty : i1")
+                    val stride = self.def(s"arith.select ${self.def(s"arith.cmpi sle, $step, $zero : i64")}, %one, $step : i64")
+                    val passes = self.def(s"arith.divsi ${self.def(s"arith.subi $hi, $lo : i64")}, $stride : i64")
+                    val cnt = self.def(s"arith.select $skip, $zero, ${self.def(s"arith.addi $passes, %one : i64")} : i64")
+                    val first = self.def(s"arith.select $skip, $zero, $before : i64")
+
+                    offs.push(self.def(s"arith.index_cast $first : i64 to index"))
+                    sizes.push(self.def(s"arith.index_cast $cnt : i64 to index"))
+                    strides.push(self.def(s"arith.index_cast $stride : i64 to index"))
+
+        self.ends.pop()
+        self.end_tys.pop()
+        (offs, sizes, strides)
+    end window
+
+    // `tensor.extract_slice` (or `insert_slice`) operands for a window, tensor order: an integer
+    // subscript's extent is the literal 1, so the axis drops.
+    slice_text(*self, subs: Buf[TSub], offs: Buf[string], sizes: Buf[string], strides: Buf[string]) -> string
+        var o: Buf[string] = buf()
+        var s: Buf[string] = buf()
+        var t: Buf[string] = buf()
+        var k = subs.len()
+
+        while k > 0
+            k -= 1
+            o.push(offs[k])
+            t.push(strides[k])
+
+            subs[k] match
+                TSubAt(_) -> s.push("1")
+                _ -> s.push(sizes[k])
+
+        s"[${joined(o)}] [${joined(s)}] [${joined(t)}]"
+
+    // A slice read as a value.
+    view(*self, e: TExpr, target: TExpr, subs: Buf[TSub]) -> string
+        val tv = self.ex(target)
+        val (offs, sizes, strides) = self.window(e.span, tv, target.ty, subs)
+        val dynamic = self.view_ty(e.ty)
+        val v = self.def(s"tensor.extract_slice $tv${self.slice_text(subs, offs, sizes, strides)} : ${self.tensor_ty(e.span, target.ty)} to ${self.tensor_ty(e.span, dynamic)}")
+
+        self.shape_checked(e.span, v, dynamic, e.ty)
+
+    // An array type with every axis dynamic, as an `extract_slice` with dynamic extents gives.
+    view_ty(*self, t: Ty) -> Ty = Ty.Array(elem_of(t), dynamic_axes(rank_of(t)))
+
+    // -- element and slice assignment -------------------------------------------------------------
+
+    // `a[…] op= value`: one element or a window of the array place `target`, written in place.
+    assign_index(*self, span: Span, op: string, target: TExpr, subs: Buf[TSub], value: TExpr)
+        val v = self.ex(value)
+        val cur = self.place_value(target)
+        val tt = self.tensor_ty(span, target.ty)
+        var whole = true
+
+        for s in subs
+            s match
+                TSubAt(_) -> ()
+                _ -> whole = false
+
+        if whole
+            val idx = self.indices(span, cur, target.ty, subs)
+            var x = v
+
+            if op != "="
+                val old = self.def(s"tensor.extract $cur[${joined(idx)}] : $tt")
+
+                x = self.binary(span, op[0..<op.len - 1], old, v, elem_of(target.ty))
+
+            self.set_place(target, self.def(s"tensor.insert $x into $cur[${joined(idx)}] : $tt"), true)
+            return
+
+        val (offs, window_sizes, strides) = self.window(span, cur, target.ty, subs)
+        var sizes = window_sizes
+        var kept: Buf[string] = buf()
+
+        for k in 0..<subs.len()
+            subs[k] match
+                TSubAt(_) -> ()
+                _ -> kept.push(sizes[k])
+
+        val st = self.view_ty(Ty.Array(elem_of(target.ty), dynamic_axes(kept.len())))
+        val stt = self.tensor_ty(span, st)
+        var dyn: Buf[string] = buf()
+        var k = kept.len()
+
+        while k > 0
+            k -= 1
+            dyn.push(kept[k])
+
+        // The new window: the value, filled from a scalar, combined with the old one for `op=`.
+        var x = ""
+        var rhs_ty = value.ty
+        var rhs = v
+
+        *value.kind match
+            TArray(a) ->
+                *a match
+                    TBroadcast(_) ->
+                        val empty = self.def(s"tensor.empty(${joined(dyn)}) : $stt")
+
+                        rhs = self.def(s"linalg.fill ins($v : ${self.elem_ty(span, elem_of(st))}) outs($empty : $stt) -> $stt")
+                        rhs_ty = st
+                    _ -> ()
+            _ -> ()
+
+        if !is_arr(rhs_ty)
+            val empty = self.def(s"tensor.empty(${joined(dyn)}) : $stt")
+
+            rhs = self.def(s"linalg.fill ins($v : ${self.elem_ty(span, elem_of(st))}) outs($empty : $stt) -> $stt")
+            rhs_ty = st
+
+        // The value must have the window's shape. Past the trap the two agree; the extents written
+        // are the smaller of each, so where the trap is taken no folding meets a mismatched copy.
+        var fit: Buf[string] = buf()
+
+        for a in 0..<kept.len()
+            val d = self.dim(span, rhs, rhs_ty, a + 1)
+
+            self.trap_if(self.def(s"arith.cmpi ne, $d, ${kept[a]} : index"), "slice assignment length mismatch")
+            fit.push(self.def(s"arith.minui $d, ${kept[a]} : index"))
+
+        var a = 0
+
+        for k in 0..<subs.len()
+            subs[k] match
+                TSubAt(_) -> ()
+                _ ->
+                    sizes.set(k, fit[a])
+                    a += 1
+
+        var zeros: Buf[string] = buf()
+        var ones: Buf[string] = buf()
+        var rfit: Buf[string] = buf()
+        var j = fit.len()
+
+        while j > 0
+            j -= 1
+            zeros.push("0")
+            ones.push("1")
+            rfit.push(fit[j])
+
+        x = self.def(s"tensor.extract_slice ${self.cast(span, rhs, rhs_ty, st)}[${joined(zeros)}] [${joined(rfit)}] [${joined(ones)}] : $stt to $stt")
+
+        val slice = self.slice_text(subs, offs, sizes, strides)
+
+        if op != "="
+            val old = self.def(s"tensor.extract_slice $cur$slice : $tt to $stt")
+            var operands: Buf[TExpr] = buf()
+            var vals: Buf[string] = buf()
+            val oe = texpr(span, st, TLiteral(VoidVal, false))
+
+            operands.push(oe)
+            operands.push(oe)
+            vals.push(old)
+            vals.push(x)
+
+            val bop = op[0..<op.len - 1]
+
+            x = self.mapped_values(span, st, operands, vals, texpr(span, elem_of(st), self.scalar_op(bop, chain_leaf(oe, 0), chain_leaf(oe, 1))))
+
+        self.set_place(target, self.def(s"tensor.insert_slice $x into $cur$slice : $stt into $tt"), true)
+    end assign_index
+
+    // `a = v` or `a op= v` on a whole array place.
+    assign_array(*self, span: Span, op: string, target: TExpr, value: TExpr)
+        if op == "="
+            self.set_place(target, self.ex(value), false)
+            return
+
+        var operands: Buf[TExpr] = buf()
+
+        operands.push(target)
+        operands.push(value)
+
+        val bop = op[0..<op.len - 1]
+        val r = self.mapped(texpr(span, target.ty, TLiteral(VoidVal, false)), operands, texpr(span, elem_of(target.ty), self.scalar_op(bop, chain_leaf(target, 0), chain_leaf(value, 1))))
+
+        self.set_place(target, r, true)
+
+    // -- calls ------------------------------------------------------------------------------------
+
+    // The memref an array argument crosses a function value's call as: any offset and strides, as
+    // bufferization lays out a function's tensor parameter. A result crosses at the identity
+    // layout, which is what bufferization gives a function returning a fresh buffer.
+    boundary_ty(*self, span: Span, t: Ty) -> string
+        var strides = ""
+
+        for k in 0..<rank_of(t)
+            if k > 0 then strides += ", "
+            strides += "?"
+
+        s"memref<${self.shape_text(t)}${self.elem_ty(span, elem_of(t))}, strided<[$strides], offset: ?>>"
+
+    // The code a function value holds for `code`: `code` itself, or where an array crosses the call,
+    // an adapter taking and giving buffers, since a call through a pointer cannot be bufferized.
+    adapted(*self, span: Span, code: string, params: Buf[usize], ret: Ty) -> string
+        var arrays = is_arr(ret)
+
+        for id in params
+            if is_arr(self.prog.locals[id].ty) then arrays = true
+            if self.inout_array(id)
+                self.later(span, "a function value with an `inout` array parameter")
+                return code
+
+        if !arrays then return code
+
+        val name = s"a.$code"
+
+        for w in self.wrappers
+            if w == name then return name
+
+        self.wrappers.push(name)
+
+        var head: Buf[string] = buf()
+        var args: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+        var text = ""
+
+        head.push("%env: !llvm.ptr")
+        args.push("%env")
+        tys.push("!llvm.ptr")
+
+        for k in 0..<params.len()
+            val t = self.prog.locals[params[k]].ty
+
+            if is_arr(t)
+                head.push(s"%a$k: ${self.boundary_ty(span, t)}")
+                text += s"    %t$k = bufferization.to_tensor %a$k restrict : ${self.boundary_ty(span, t)} to ${self.tensor_ty(span, t)}\n"
+                args.push(s"%t$k")
+                tys.push(self.tensor_ty(span, t))
+            else
+                head.push(s"%a$k: ${self.param_ty(span, params[k])}")
+                args.push(s"%a$k")
+                tys.push(self.param_ty(span, params[k]))
+
+        val r = self.ty(span, ret)
+        val call = s"func.call @\"$code\"(${joined(args)}) : (${joined(tys)}) -> ${result_text(r)}"
+
+        if r == ""
+            text += s"    $call\n    func.return\n"
+        elif is_arr(ret)
+            val b = self.memref_ty(span, ret)
+
+            text += s"    %r = $call\n    %m = bufferization.to_buffer %r : $r to $b\n    func.return %m : $b\n"
+        else
+            text += s"    %r = $call\n    func.return %r : $r\n"
+
+        self.funcs.push(s"  func.func private @\"$name\"(${joined(head)})${arrow_text(if is_arr(ret) then self.memref_ty(span, ret) else r)} {\n$text  }\n\n")
+        name
+    end adapted
+
+    // An argument to a call through a function value: an array as the buffer it crosses as.
+    crossing(*self, span: Span, v: string, t: Ty) -> string =
+        if is_arr(t) then self.def(s"bufferization.to_buffer $v read_only : ${self.tensor_ty(span, t)} to ${self.boundary_ty(span, t)}") else v
+
+    // `call` (`@f(args) : (types)`) of a function that hands back the `inout` arrays `back` after
+    // its value: each place rebound to what the callee left in it. The value is answered.
+    call_handing_back(*self, span: Span, call: string, ret: Ty, back: Buf[TExpr]) -> string
+        if self.dirty
+            val ok = self.flowing()
+
+            self.dirty = false
+
+            var f = self.fork()
+
+            f = self.fork_else(f, self.call_handing_back(span, call, ret, back), ret)
+            self.dirty = true
+            return self.join(f, ok, "", ret)
+
+        val r = self.ty(span, ret)
+        var tys: Buf[string] = buf()
+
+        if r != "" then tys.push(r)
+
+        for p in back
+            tys.push(self.ty(span, p.ty))
+
+        val v = self.fresh()
+        val n = tys.len()
+
+        self.op(s"${result_def(v, n)}func.call $call -> ${if n == 1 then tys[0] else s"(${joined(tys)})"}")
+
+        val first: usize = if r == "" then 0 else 1
+
+        for k in 0..<back.len()
+            self.set_place(back[k], result_name(v, first + k, n), false)
+
+        if r == "" then "" else result_name(v, 0, n)
+
+    // -- loops ------------------------------------------------------------------------------------
+
+    // `for x in a`: every element in storage order.
+    for_each(*self, span: Span, id: usize, var_id: usize, a: TExpr, body: TExpr) -> string
+        val av = self.flat(span, self.ex(a), a.ty)
+        val ft = self.view_ty(Ty.Array(elem_of(a.ty), dynamic_axes(1)))
+        val n = self.to_i64(self.dim(span, av, ft, 1))
+        val counter = self.alloca("i64")
+
+        self.op(s"llvm.store ${self.def("arith.constant 0 : i64")}, $counter : i64, !llvm.ptr")
+
+        val l = self.loop_open()
+        self.loop_condition(l, self.def(s"arith.cmpi slt, ${self.def(s"llvm.load $counter : !llvm.ptr -> i64")}, $n : i64"))
+
+        val k = self.def(s"llvm.load $counter : !llvm.ptr -> i64")
+        val x = self.def(s"tensor.extract $av[${self.def(s"arith.index_cast $k : i64 to index")}] : ${self.tensor_ty(span, ft)}")
+
+        self.bind_local(span, var_id)
+        self.store(span, self.local_ptr(span, var_id), x, self.prog.locals[var_id].ty)
+        self.ex(body)
+        self.end_pass(id)
+        self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
+        self.loop_close(l)
+        self.after_loop(id)
+        ""
+
+    // The elements of `v` in storage order, as a rank-1 tensor of dynamic extent.
+    flat(*self, span: Span, v: string, t: Ty) -> string
+        val r = rank_of(t)
+        val ft = self.tensor_ty(span, self.view_ty(Ty.Array(elem_of(t), dynamic_axes(1))))
+
+        if r == 1 then return self.cast(span, v, t, self.view_ty(t))
+
+        var group = ""
+
+        for k in 0..<r
+            if k > 0 then group += ", "
+            group += s"$k"
+
+        self.def(s"tensor.collapse_shape $v [[$group]] : ${self.tensor_ty(span, t)} into $ft")
+
+    // -- printing ---------------------------------------------------------------------------------
+
+    // An array written to a sink as nex prints it: `[1, 2, 3]`, a matrix as its rows,
+    // `[[1, 2], [3, 4]]`, and so on at every rank, nex axis 1 outermost.
+    put_array(*self, span: Span, sink: string, v: string, t: Ty)
+        var at: Buf[string] = buf()
+
+        self.put_level(span, sink, v, t, 1, &at)
+
+    put_level(*self, span: Span, sink: string, v: string, t: Ty, axis: usize, at: *Buf[string])
+        val r = rank_of(t)
+
+        self.put_text(sink, "[")
+
+        val n = self.dim(span, v, t, axis)
+        val iv = self.fresh()
+
+        self.op(s"scf.for $iv = ${self.index_const(0)} to $n step ${self.index_const(1)} {")
+        self.op(s"scf.if ${self.def(s"arith.cmpi ne, $iv, ${self.index_const(0)} : index")} {")
+        self.put_text(sink, ", ")
+        self.op("}")
+        at.push(iv)
+
+        if axis == r
+            var idx: Buf[string] = buf()
+            var k = at.len()
+
+            while k > 0
+                k -= 1
+                idx.push(at[k])
+
+            self.put_value(span, sink, self.def(s"tensor.extract $v[${joined(idx)}] : ${self.tensor_ty(span, t)}"), elem_of(t))
+        else
+            self.put_level(span, sink, v, t, axis + 1, at)
+
+        at.pop()
+        self.op("}")
+        self.put_text(sink, "]")
+
+    put_text(*self, sink: string, text: string)
+        self.call("nex_put_str", s"$sink, ${self.string_ref(text)}", "i64, !llvm.ptr", "")
+end Emitter
+
+// An operand of a scalar body: the `k`th value of the innermost chain frame, of `e`'s element type.
+chain_leaf(e: TExpr, k: usize) -> TExpr = texpr(e.span, elem_of(e.ty), TChainOperand(k))

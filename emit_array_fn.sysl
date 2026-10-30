@@ -1,0 +1,754 @@
+// Emission of the array prelude: the constructors and shape functions of DESIGN §4.2–§4.3, the
+// higher-order functions, the reductions of §7.4 and `@` (§7.2).
+//
+// **A reduction is reproducible** (DESIGN §9.2.1): `sum`, `product`, `dot` and `norm2` cut the
+// elements, in storage order, into blocks of 4096, reduce each block sequentially from the
+// operator's identity, and combine the block partials in the fixed pairwise tree of §9.2.1. The
+// other reductions are exact, so they run once along the elements.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The block a reproducible reduction reduces sequentially (DESIGN §9.2.1).
+private val BLOCK: usize = 4096
+
+// Whether a reduction combines its blocks in the pairwise tree.
+private tree_reduction(name: string) -> bool = name == "sum" || name == "product" || name == "dot" || name == "norm2"
+
+impl Emitter
+    // -- the prelude ------------------------------------------------------------------------------
+
+    // A prelude function taking or making an array.
+    array_builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        if name == "length" || name == "rows" then return self.extent_of(span, self.ex(args[0]), args[0].ty, 1, t)
+        if name == "cols" then return self.extent_of(span, self.ex(args[0]), args[0].ty, 2, t)
+        if name == "rank" then return self.int_const(s"${rank_of(args[0].ty)}", bits_of(t))
+        if name == "shape" && rank_of(args[0].ty) == 1 then return self.extent_of(span, self.ex(args[0]), args[0].ty, 1, t)
+
+        if name == "size"
+            val v = self.ex(args[0])
+            var n = self.index_const(1)
+
+            for d in self.dims(span, v, args[0].ty)
+                n = self.def(s"arith.muli $n, $d : index")
+
+            return self.convert(span, self.to_i64(n), INTEGER, t, false)
+
+        if name == "extent" then return self.extent(span, args, t)
+
+        if name == "extents"
+            val v = self.ex(args[0])
+            var xs: Buf[string] = buf()
+            val r = rank_of(args[0].ty)
+
+            for a in 1..r
+                xs.push(self.to_i64(self.dim(span, v, args[0].ty, a)))
+
+            val st = s"tensor<${r}xi64>"
+            val x = self.def(s"tensor.from_elements ${joined(xs)} : $st")
+
+            return if st == self.tensor_ty(span, t) then x else self.def(s"tensor.cast $x : $st to ${self.tensor_ty(span, t)}")
+
+        if name == "zeros" || name == "ones" then return self.filled(span, t, self.shape_args(span, args, 0, args.len()), self.one_or_zero(span, elem_of(t), name == "ones"))
+
+        if name == "fill"
+            val dims = self.shape_args(span, args, 0, args.len() - 1)
+
+            return self.filled(span, t, dims, self.ex(args[args.len() - 1]))
+
+        if name == "identity" then return self.identity(span, args, t)
+        if name == "diag" then return self.diag(span, args[0], t)
+        if name == "linspace" then return self.linspace(span, args, t)
+        if name == "flatten" then return self.cast(span, self.flat(span, self.ex(args[0]), args[0].ty), self.view_ty(t), t)
+        if name == "reshape" then return self.reshape(span, args, t)
+        if name == "transpose" then return self.transposed(span, self.ex(args[0]), args[0].ty, t)
+        if name == "to_integers" || name == "to_bytes"
+            var operands: Buf[TExpr] = buf()
+
+            operands.push(args[0])
+            return self.mapped(texpr(span, t, TLiteral(VoidVal, false)), operands, texpr(span, elem_of(t), TConvert(chain_leaf(args[0], 0), name == "to_bytes")))
+
+        if name == "map"
+            var operands: Buf[TExpr] = buf()
+            var leaves: Buf[TExpr] = buf()
+
+            operands.push(args[0])
+            operands.push(args[1])
+            leaves.push(chain_leaf(args[0], 0))
+            return self.mapped(texpr(span, t, TLiteral(VoidVal, false)), operands, texpr(span, elem_of(t), TCall(chain_leaf(args[1], 1), leaves)))
+
+        if name == "reduce" then return self.fold(span, args, t)
+        if name == "filter" then return self.filtered(span, args, t)
+        if name == "flatMap" then return self.flat_mapped(span, args, t)
+
+        self.unsupported(span, s"`$name` on an array")
+    end array_builtin
+
+    // The extent of nex axis `axis` of `v`, as an integer of type `t`.
+    extent_of(*self, span: Span, v: string, at: Ty, axis: usize, t: Ty) -> string =
+        self.convert(span, self.to_i64(self.dim(span, v, at, axis)), INTEGER, t, false)
+
+    // `extent(a, k)`: a computed `k` that is not an axis traps.
+    extent(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val v = self.ex(args[0])
+        val at = args[0].ty
+        val k = self.widen64(self.ex(args[1]), bits_of(args[1].ty), is_signed(args[1].ty))
+        val r = rank_of(at)
+
+        self.trap_if(self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64"), "not an axis of the array")
+
+        var n = self.def("arith.constant 0 : i64")
+
+        for a in 1..r
+            val hit = self.def(s"arith.cmpi eq, $k, ${self.def(s"arith.constant $a : i64")} : i64")
+
+            n = self.def(s"arith.select $hit, ${self.to_i64(self.dim(span, v, at, a))}, $n : i64")
+
+        self.convert(span, n, INTEGER, t, false)
+
+    // The extents arguments `k` to `upto − 1` name: one integer per axis (`reshape(a, m, n)`), or
+    // one tuple of them; `index` values, nex order.
+    shape_args(*self, span: Span, args: Buf[TExpr], k: usize, upto: usize) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for j in k..<upto
+            *args[j].kind match
+                TTuple(elems) ->
+                    for x in elems
+                        out.push(self.extent_arg(x))
+                _ ->
+                    if is_integer(args[j].ty) then out.push(self.extent_arg(args[j]))
+                    else self.later(span, "a shape that is not a tuple written out")
+
+        out
+
+    // An extent argument as an `index`, a negative one trapping.
+    extent_arg(*self, x: TExpr) -> string
+        val w = self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
+
+        self.trap_if(self.def(s"arith.cmpi slt, $w, ${self.def("arith.constant 0 : i64")} : i64"), "a negative extent")
+        self.def(s"arith.index_cast $w : i64 to index")
+
+    one_or_zero(*self, span: Span, t: Ty, one: bool) -> string = t match
+        Int(b, _) -> self.int_const(if one then "1" else "0", b)
+        Real(b) -> self.real_const(if one then 1.0 else 0.0, b)
+        Complex(b) -> self.complex_const(self.real_const(if one then 1.0 else 0.0, b), self.real_const(0.0, b), b)
+        Bool -> self.def(s"arith.constant $one")
+        _ -> self.zero_of(span, t)
+
+    // An array of type `t` and extents `dims` (nex order), every element `x`.
+    filled(*self, span: Span, t: Ty, dims: Buf[string], x: string) -> string
+        val tt = self.tensor_ty(span, t)
+        val empty = self.def(s"tensor.empty(${joined(self.dynamic_of(t, dims))}) : $tt")
+
+        self.def(s"linalg.fill ins($x : ${self.elem_ty(span, elem_of(t))}) outs($empty : $tt) -> $tt")
+
+    // Of extents `dims` (nex order), those `tensor.empty` of type `t` wants: the dynamic ones,
+    // tensor order.
+    dynamic_of(*self, t: Ty, dims: Buf[string]) -> Buf[string]
+        val axes = axes_of(t)
+        var out: Buf[string] = buf()
+        var k = axes.len()
+
+        while k > 0
+            k -= 1
+            if k < dims.len() && is_dynamic(axes[k]) then out.push(dims[k])
+
+        out
+
+    // A `linalg.generic` writing every element of a new array of type `t` and extents `dims` from
+    // its indices: the block is open on return, its tensor indices `linalg.index` 0, 1, ….
+    generate_open(*self, span: Span, t: Ty, dims: Buf[string]) -> string
+        val tt = self.tensor_ty(span, t)
+        val empty = self.def(s"tensor.empty(${joined(self.dynamic_of(t, dims))}) : $tt")
+        val v = self.fresh()
+        val r = rank_of(t)
+
+        self.op(s"$v = linalg.generic {indexing_maps = [${identity_map(r)}], iterator_types = [${parallel_iterators(r)}]} outs($empty : $tt) {")
+        self.op(s"^bb0(${self.fresh()}: ${self.elem_ty(span, elem_of(t))}):")
+        v
+
+    generate_close(*self, span: Span, t: Ty, y: string)
+        self.op(s"linalg.yield $y : ${self.elem_ty(span, elem_of(t))}")
+        self.op(s"} -> ${self.tensor_ty(span, t)}")
+
+    // `identity(n)`: 1 on the diagonal, 0 elsewhere.
+    identity(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val n = self.extent_arg(args[0])
+        var dims: Buf[string] = buf()
+
+        dims.push(n)
+        dims.push(n)
+
+        val v = self.generate_open(span, t, dims)
+        val on = self.def(s"arith.cmpi eq, ${self.def("linalg.index 0 : index")}, ${self.def("linalg.index 1 : index")} : index")
+        val y = self.def(s"arith.select $on, ${self.one_or_zero(span, elem_of(t), true)}, ${self.one_or_zero(span, elem_of(t), false)} : ${self.elem_ty(span, elem_of(t))}")
+
+        self.generate_close(span, t, y)
+        v
+
+    // `diag(v)`, the square matrix with `v` on its diagonal; `diag(m)`, the diagonal of `m`.
+    diag(*self, span: Span, a: TExpr, t: Ty) -> string
+        val v = self.ex(a)
+        val at = self.tensor_ty(span, a.ty)
+        var dims: Buf[string] = buf()
+
+        if rank_of(a.ty) == 1
+            val n = self.dim(span, v, a.ty, 1)
+
+            dims.push(n)
+            dims.push(n)
+
+            val g = self.generate_open(span, t, dims)
+            val i = self.def("linalg.index 0 : index")
+            val on = self.def(s"arith.cmpi eq, $i, ${self.def("linalg.index 1 : index")} : index")
+            val x = self.def(s"tensor.extract $v[$i] : $at")
+            val y = self.def(s"arith.select $on, $x, ${self.one_or_zero(span, elem_of(t), false)} : ${self.elem_ty(span, elem_of(t))}")
+
+            self.generate_close(span, t, y)
+            return g
+
+        val a1 = self.dim(span, v, a.ty, 1)
+        val a2 = self.dim(span, v, a.ty, 2)
+
+        dims.push(self.def(s"arith.minui $a1, $a2 : index"))
+
+        val g = self.generate_open(span, t, dims)
+        val i = self.def("linalg.index 0 : index")
+
+        self.generate_close(span, t, self.def(s"tensor.extract $v[$i, $i] : $at"))
+        g
+
+    // `linspace(lo, hi, n)`: `n` reals from `lo` to `hi` inclusive.
+    linspace(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val e = elem_of(t)
+        val b = bits_of(e)
+        val ft = s"f$b"
+        val lo = self.ex(args[0])
+        val hi = self.ex(args[1])
+        val n = self.extent_arg(args[2])
+        var dims: Buf[string] = buf()
+
+        dims.push(n)
+
+        val g = self.generate_open(span, t, dims)
+        val i = self.def(s"arith.uitofp ${self.to_i64(self.def("linalg.index 0 : index"))} : i64 to $ft")
+        val last = self.def(s"arith.uitofp ${self.def(s"arith.subi ${self.to_i64(n)}, %one : i64")} : i64 to $ft")
+        val width = self.def(s"arith.subf $hi, $lo : $ft")
+        val x = self.def(s"arith.addf $lo, ${self.def(s"arith.divf ${self.def(s"arith.mulf $width, $i : $ft")}, $last : $ft")} : $ft")
+        // One point is `lo`, where the step would divide by zero.
+        val single = self.def(s"arith.cmpi eq, ${self.to_i64(n)}, %one : i64")
+
+        self.generate_close(span, t, self.def(s"arith.select $single, $lo, $x : $ft"))
+        g
+
+    // `reshape(a, (d1, …, dk))`: the elements of `a` in storage order, laid out column-major.
+    reshape(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val f = self.flat(span, self.ex(args[0]), args[0].ty)
+        val ft = self.view_ty(Ty.Array(elem_of(t), dynamic_axes(1)))
+        val dims = self.shape_args(span, args, 1, args.len())
+        var total = self.index_const(1)
+
+        for d in dims
+            total = self.def(s"arith.muli $total, $d : index")
+
+        self.trap_if(self.def(s"arith.cmpi ne, $total, ${self.dim(span, f, ft, 1)} : index"), "reshape to a different size")
+
+        val r = dims.len()
+        val dt = self.view_ty(Ty.Array(elem_of(t), dynamic_axes(r)))
+
+        if r == 1 then return self.cast(span, f, ft, t)
+
+        var group = ""
+        var sizes: Buf[string] = buf()
+        var k = r
+
+        while k > 0
+            k -= 1
+            sizes.push(dims[k])
+
+        for j in 0..<r
+            if j > 0 then group += ", "
+            group += s"$j"
+
+        val v = self.def(s"tensor.expand_shape $f [[$group]] output_shape [${joined(sizes)}] : ${self.tensor_ty(span, ft)} into ${self.tensor_ty(span, dt)}")
+
+        self.cast(span, v, dt, t)
+
+    // `transpose(m)`.
+    transposed(*self, span: Span, v: string, at: Ty, t: Ty) -> string
+        var dims: Buf[string] = buf()
+
+        dims.push(self.dim(span, v, at, 2))
+        dims.push(self.dim(span, v, at, 1))
+
+        val tt = self.tensor_ty(span, t)
+        val empty = self.def(s"tensor.empty(${joined(self.dynamic_of(t, dims))}) : $tt")
+
+        self.def(s"linalg.transpose ins($v : ${self.tensor_ty(span, at)}) outs($empty : $tt) permutation = [1, 0]")
+
+    // `reduce(a, init, f)`: `f(…f(f(init, a₁), a₂)…)`, in storage order.
+    fold(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val a = args[0]
+        val ft = self.view_ty(Ty.Array(elem_of(a.ty), dynamic_axes(1)))
+        val f = self.flat(span, self.ex(a), a.ty)
+        val init = self.ex(args[1])
+        val fv = self.ex(args[2])
+        var extents: Buf[string] = buf()
+
+        extents.push(self.dim(span, f, ft, 1))
+
+        val n = self.nest_open(extents, init, self.ty(span, t))
+        val x = self.def(s"tensor.extract $f[${n.ivs[0]}] : ${self.tensor_ty(span, ft)}")
+        var frame: Buf[string] = buf()
+        var leaves: Buf[TExpr] = buf()
+
+        frame.push(fv)
+        frame.push(n.accs[0])
+        frame.push(x)
+        leaves.push(texpr(span, t, TChainOperand(1)))
+        leaves.push(texpr(span, elem_of(a.ty), TChainOperand(2)))
+
+        val y = self.in_frame(frame, texpr(span, t, TCall(texpr(span, args[2].ty, TChainOperand(0)), leaves)))
+
+        self.nest_close(n, y)
+
+    // `filter(a, p)`: the elements, in storage order, for which `p` holds.
+    filtered(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val a = args[0]
+        val ft = self.view_ty(Ty.Array(elem_of(a.ty), dynamic_axes(1)))
+        val ftt = self.tensor_ty(span, ft)
+        val f = self.flat(span, self.ex(a), a.ty)
+        var operands: Buf[TExpr] = buf()
+        var vals: Buf[string] = buf()
+        var leaves: Buf[TExpr] = buf()
+        val fe = texpr(span, ft, TLiteral(VoidVal, false))
+
+        operands.push(fe)
+        operands.push(args[1])
+        vals.push(f)
+        vals.push(self.ex(args[1]))
+        leaves.push(chain_leaf(fe, 0))
+
+        // Which elements are kept: the predicate is called once per element, in order.
+        val bt = Ty.Array(Bool, dynamic_axes(1))
+        val keep = self.mapped_values(span, bt, operands, vals, texpr(span, Bool, TCall(chain_leaf(args[1], 1), leaves)))
+        var extents: Buf[string] = buf()
+
+        extents.push(self.dim(span, f, ft, 1))
+
+        val c = self.nest_open(extents, self.index_const(0), "index")
+        val kept = self.def(s"tensor.extract $keep[${c.ivs[0]}] : tensor<?xi1>")
+        val more = self.def(s"arith.addi ${c.accs[0]}, ${self.index_const(1)} : index")
+        val count = self.nest_close(c, self.def(s"arith.select $kept, $more, ${c.accs[0]} : index"))
+        val tt = self.tensor_ty(span, t)
+        val empty = self.def(s"tensor.empty($count) : $tt")
+        val zero = self.index_const(0)
+        val one = self.index_const(1)
+        val iv = self.fresh()
+        val out = self.fresh()
+        val j = self.fresh()
+        val r = self.fresh()
+
+        self.op(s"$r:2 = scf.for $iv = $zero to ${extents[0]} step $one iter_args($out = $empty, $j = $zero) -> ($tt, index) {")
+
+        val k = self.def(s"tensor.extract $keep[$iv] : tensor<?xi1>")
+        val x = self.def(s"tensor.extract $f[$iv] : $ftt")
+        val w = self.fresh()
+
+        self.op(s"$w:2 = scf.if $k -> ($tt, index) {")
+        self.op(s"scf.yield ${self.def(s"tensor.insert $x into $out[$j] : $tt")}, ${self.def(s"arith.addi $j, $one : index")} : $tt, index")
+        self.op("} else {")
+        self.op(s"scf.yield $out, $j : $tt, index")
+        self.op("}")
+        self.op(s"scf.yield $w#0, $w#1 : $tt, index")
+        self.op("}")
+        s"$r#0"
+
+    // `flatMap(a, f)`: the arrays `f` gives for each element, in storage order, end to end.
+    flat_mapped(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val a = args[0]
+        val ft = self.view_ty(Ty.Array(elem_of(a.ty), dynamic_axes(1)))
+        val f = self.flat(span, self.ex(a), a.ty)
+        val code = self.direct_code(span, args[1])
+
+        if code == "" then return self.unsupported(span, "`flatMap` of a function value")
+
+        val env = self.ex(args[1])
+        val tt = self.tensor_ty(span, t)
+        val inner = self.fresh_ty_of(span, args[1].ty)
+        val n = self.dim(span, f, ft, 1)
+        val zero = self.index_const(0)
+        val start = self.zero_array(span, t)
+        // An `scf.while`, not an `scf.for`: canonicalize folds a `scf.for` whose carried tensor
+        // starts empty and grows into one that stays empty.
+        val r = self.fresh()
+        val i = self.fresh()
+        val acc = self.fresh()
+
+        self.op(s"$r:2 = scf.while ($i = $zero, $acc = $start) : (index, $tt) -> (index, $tt) {")
+        self.op(s"scf.condition(${self.def(s"arith.cmpi ult, $i, $n : index")}) $i, $acc : index, $tt")
+        self.op("} do {")
+
+        val j = self.fresh()
+        val have_acc = self.fresh()
+
+        self.op(s"^bb0($j: index, $have_acc: $tt):")
+
+        val x = self.def(s"tensor.extract $f[$j] : ${self.tensor_ty(span, ft)}")
+        val e = self.def(s"llvm.extractvalue $env[1] : $CLOSURE")
+        val piece = self.def(s"func.call @\"$code\"($e, $x) : (!llvm.ptr, ${self.elem_ty(span, elem_of(a.ty))}) -> $inner")
+        val have = self.dim(span, have_acc, t, 1)
+        val more = self.def(s"tensor.dim $piece, $zero : $inner")
+        val grown = self.def(s"tensor.empty(${self.def(s"arith.addi $have, $more : index")}) : $tt")
+        val kept = self.def(s"tensor.insert_slice $have_acc into $grown[0] [$have] [1] : $tt into $tt")
+        val y = self.def(s"tensor.insert_slice $piece into $kept[$have] [$more] [1] : $inner into $tt")
+
+        self.op(s"scf.yield ${self.def(s"arith.addi $j, ${self.index_const(1)} : index")}, $y : index, $tt")
+        self.op("}")
+        s"$r#1"
+
+    // The symbol a function argument written as a lambda or a function's name calls directly, `""`
+    // for any other function value.
+    direct_code(*self, span: Span, f: TExpr) -> string = *f.kind match
+        TLambdaRef(id) -> s"l.$id"
+        TFnRef(name) -> s"r.$name"
+        _ -> ""
+
+    // The MLIR type of what a function of type `t` returns.
+    fresh_ty_of(*self, span: Span, t: Ty) -> string = t match
+        Fn(sig) -> self.ty(span, sig.ret)
+        _ -> ""
+
+    // -- reductions -------------------------------------------------------------------------------
+
+    reduction(*self, e: TExpr, name: string, args: Buf[TExpr], dim: Option[TExpr]) -> string
+        val a = args[0]
+
+        if name == "minloc" || name == "maxloc"
+            if dim.is_some() || rank_of(a.ty) != 1 then return self.unsupported(e.span, s"`$name` of rank ${rank_of(a.ty)}")
+
+            return self.location(e.span, name, self.flat(e.span, self.ex(a), a.ty), elem_of(a.ty), e.ty)
+
+        var v = self.ex(a)
+        var vt = a.ty
+
+        if name == "dot"
+            // `dot` conjugates its first operand, then sums the products.
+            var operands: Buf[TExpr] = buf()
+
+            operands.push(args[0])
+            operands.push(args[1])
+
+            var vals: Buf[string] = buf()
+
+            vals.push(v)
+            vals.push(self.ex(args[1]))
+
+            var x = chain_leaf(args[0], 0)
+
+            if is_complex(elem_of(a.ty)) then x = texpr(e.span, elem_of(a.ty), TBuiltin("conj", single(x)))
+
+            vt = Ty.Array(elem_of(e.ty), dynamic_axes(1))
+            v = self.mapped_values(e.span, vt, operands, vals, texpr(e.span, elem_of(e.ty), TBinary("*", x, chain_leaf(args[1], 1))))
+            return self.reduce_flat(e.span, "sum", self.flat(e.span, v, vt), elem_of(vt), e.ty)
+
+        dim match
+            None -> self.reduce_flat(e.span, name, self.flat(e.span, v, vt), elem_of(vt), e.ty)
+            Some(d) -> self.reduce_along(e, name, v, vt, d)
+
+    // `name` over a rank-1 tensor `f` of elements of type `et`, giving a `t`.
+    reduce_flat(*self, span: Span, name: string, f: string, et: Ty, t: Ty) -> string
+        val ft = Ty.Array(et, dynamic_axes(1))
+        val ftt = self.tensor_ty(span, ft)
+        val n = self.dim(span, f, ft, 1)
+        val rt = self.ty(span, t)
+
+        if !tree_reduction(name) then return self.reduce_range(span, name, f, et, t, self.index_const(0), n)
+
+        // The block partials, then rounds of the pairwise tree: each pairs neighbours, an odd last
+        // one carried up as it is.
+        val block = self.index_const(BLOCK)
+        val nb = self.def(s"arith.ceildivui $n, $block : index")
+        val pt = s"tensor<?x$rt>"
+        val pe = self.def(s"tensor.empty($nb) : $pt")
+        var extents: Buf[string] = buf()
+
+        extents.push(nb)
+
+        val blocks = self.nest_open(extents, pe, pt)
+        val lo = self.def(s"arith.muli ${blocks.ivs[0]}, $block : index")
+        val hi = self.def(s"arith.minui ${self.def(s"arith.addi $lo, $block : index")}, $n : index")
+        val partial = self.reduce_range(span, name, f, et, t, lo, hi)
+        val partials = self.nest_close(blocks, self.def(s"tensor.insert $partial into ${blocks.accs[0]}[${blocks.ivs[0]}] : $pt"))
+        val one = self.index_const(1)
+        val two = self.index_const(2)
+        val w = self.fresh()
+        val p = self.fresh()
+        val m = self.fresh()
+
+        self.op(s"$w:2 = scf.while ($p = $partials, $m = $nb) : ($pt, index) -> ($pt, index) {")
+        self.op(s"scf.condition(${self.def(s"arith.cmpi ugt, $m, $one : index")}) $p, $m : $pt, index")
+        self.op("} do {")
+
+        val q = self.fresh()
+        val c = self.fresh()
+
+        self.op(s"^bb0($q: $pt, $c: index):")
+
+        val half = self.def(s"arith.divui $c, $two : index")
+        var pairs: Buf[string] = buf()
+
+        pairs.push(half)
+
+        val round = self.nest_open(pairs, q, pt)
+        val i = round.ivs[0]
+        val l = self.def(s"arith.muli $i, $two : index")
+        val x = self.def(s"tensor.extract ${round.accs[0]}[$l] : $pt")
+        val y = self.def(s"tensor.extract ${round.accs[0]}[${self.def(s"arith.addi $l, $one : index")}] : $pt")
+        val combined = self.nest_close(round, self.def(s"tensor.insert ${self.combine(span, name, x, y, t)} into ${round.accs[0]}[$i] : $pt"))
+        val odd = self.def(s"arith.remui $c, $two : index")
+        val has_odd = self.def(s"arith.cmpi ne, $odd, ${self.index_const(0)} : index")
+        val carried = self.fresh()
+
+        self.op(s"$carried = scf.if $has_odd -> ($pt) {")
+
+        val last = self.def(s"tensor.extract $combined[${self.def(s"arith.subi $c, $one : index")}] : $pt")
+
+        self.op(s"scf.yield ${self.def(s"tensor.insert $last into $combined[$half] : $pt")} : $pt")
+        self.op("} else {")
+        self.op(s"scf.yield $combined : $pt")
+        self.op("}")
+        self.op(s"scf.yield $carried, ${self.def(s"arith.addi $half, $odd : index")} : $pt, index")
+        self.op("}")
+
+        val none = self.def(s"arith.cmpi eq, $nb, ${self.index_const(0)} : index")
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if $none -> ($rt) {")
+        self.op(s"scf.yield ${self.identity_of(span, name, t)} : $rt")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.def(s"tensor.extract $w#0[${self.index_const(0)}] : $pt")} : $rt")
+        self.op("}")
+
+        if name == "norm2" then self.def(s"math.sqrt $r : $rt") else r
+    end reduce_flat
+
+    // `name` over elements `lo` to `hi − 1` of `f`, sequentially from the identity.
+    reduce_range(*self, span: Span, name: string, f: string, et: Ty, t: Ty, lo: string, hi: string) -> string
+        val ftt = self.tensor_ty(span, Ty.Array(et, dynamic_axes(1)))
+        val rt = self.ty(span, t)
+        val iv = self.fresh()
+        val acc = self.fresh()
+        val r = self.fresh()
+
+        self.op(s"$r = scf.for $iv = $lo to $hi step ${self.index_const(1)} iter_args($acc = ${self.identity_of(span, name, t)}) -> ($rt) {")
+
+        val x = self.def(s"tensor.extract $f[$iv] : $ftt")
+
+        self.op(s"scf.yield ${self.step(span, name, acc, x, et, t)} : $rt")
+        self.op("}")
+
+        if name == "norm2" && !tree_reduction(name) then self.def(s"math.sqrt $r : $rt") else r
+
+    // The accumulator after element `x`.
+    step(*self, span: Span, name: string, acc: string, x: string, et: Ty, t: Ty) -> string
+        if name == "count" then return self.def(s"arith.addi $acc, ${self.def(s"arith.extui $x : i1 to i64")} : i64")
+
+        if name == "norm2"
+            val b = bits_of(t)
+            var sq = ""
+
+            et match
+                Complex(_) ->
+                    val re = self.def(s"complex.re $x : complex<f$b>")
+                    val im = self.def(s"complex.im $x : complex<f$b>")
+
+                    sq = self.def(s"arith.addf ${self.def(s"arith.mulf $re, $re : f$b")}, ${self.def(s"arith.mulf $im, $im : f$b")} : f$b")
+                Real(_) -> sq = self.def(s"arith.mulf $x, $x : f$b")
+                _ ->
+                    val y = self.convert(span, x, et, t, false)
+
+                    sq = self.def(s"arith.mulf $y, $y : f$b")
+
+            return self.def(s"arith.addf $acc, $sq : f$b")
+
+        self.combine(span, name, acc, x, t)
+
+    // Two partial results of `name` combined.
+    combine(*self, span: Span, name: string, a: string, b: string, t: Ty) -> string
+        if name == "sum" || name == "dot" || name == "count" || name == "norm2" then return self.binary(span, "+", a, b, t)
+        if name == "product" then return self.binary(span, "*", a, b, t)
+        if name == "minval" then return self.min_max("min", a, b, t)
+        if name == "maxval" then return self.min_max("max", a, b, t)
+        if name == "any" then return self.def(s"arith.ori $a, $b : i1")
+        if name == "all" then return self.def(s"arith.andi $a, $b : i1")
+
+        self.unsupported(span, s"the reduction `$name`")
+
+    // The value `name` starts from (DESIGN §9.2).
+    identity_of(*self, span: Span, name: string, t: Ty) -> string
+        if name == "product" then return self.one_or_zero(span, t, true)
+        if name == "all" then return self.def("arith.constant true")
+        if name == "any" then return self.def("arith.constant false")
+
+        if name == "minval" || name == "maxval"
+            val low = name == "maxval"
+
+            return t match
+                Int(b, signed) ->
+                    if signed then self.def(s"arith.constant ${if low then int_min_text(b) else int_max_text(b)} : i$b")
+                    else self.def(s"arith.constant ${if low then "0" else "-1"} : i$b")
+                Real(b) -> self.real_const(if low then -infinity else infinity, b)
+                _ -> self.zero_of(span, t)
+
+        self.one_or_zero(span, t, false)
+
+    // `minloc(a)` or `maxloc(a)` on a rank-1 `f`: the first index of the extreme element, 0 when
+    // there is none.
+    location(*self, span: Span, name: string, f: string, et: Ty, t: Ty) -> string
+        val ft = Ty.Array(et, dynamic_axes(1))
+        val ftt = self.tensor_ty(span, ft)
+        val n = self.dim(span, f, ft, 1)
+        val e = self.elem_ty(span, et)
+        val iv = self.fresh()
+        val best = self.fresh()
+        val at = self.fresh()
+        val r = self.fresh()
+        val start = self.identity_of(span, if name == "minloc" then "minval" else "maxval", et)
+
+        self.op(s"$r:2 = scf.for $iv = ${self.index_const(0)} to $n step ${self.index_const(1)} iter_args($best = $start, $at = ${self.def("arith.constant 0 : i64")}) -> ($e, i64) {")
+
+        val x = self.def(s"tensor.extract $f[$iv] : $ftt")
+        val better = self.binary(span, if name == "minloc" then "<" else ">", x, best, et)
+        // The first element is taken whatever it is, so an array of only `nan` still has a location.
+        val first = self.def(s"arith.cmpi eq, $at, ${self.def("arith.constant 0 : i64")} : i64")
+        val take = self.def(s"arith.ori $better, $first : i1")
+        val k = self.def(s"arith.addi ${self.to_i64(iv)}, %one : i64")
+
+        self.op(s"scf.yield ${self.def(s"arith.select $take, $x, $best : $e")}, ${self.def(s"arith.select $take, $k, $at : i64")} : $e, i64")
+        self.op("}")
+        self.convert(span, s"$r#1", INTEGER, t, false)
+
+    // `sum(a, dim = k)` and the like: each lane along axis `k` reduced.
+    reduce_along(*self, e: TExpr, name: string, v: string, vt: Ty, d: TExpr) -> string
+        val k = *d.kind match
+            TLiteral(IntVal(x), _) -> usize(x)
+            _ -> 0
+
+        val r = rank_of(vt)
+
+        if k == 0 || k > r then return self.unsupported(e.span, "a computed `dim =`")
+
+        // The result's extents: every axis but `k`, nex order.
+        var out_dims: Buf[string] = buf()
+        var axis_of: Buf[usize] = buf()
+
+        for a in 1..r
+            if a != k
+                out_dims.push(self.dim(e.span, v, vt, a))
+                axis_of.push(a)
+
+        val t = e.ty
+        val tt = self.tensor_ty(e.span, t)
+        val empty = self.def(s"tensor.empty(${joined(self.dynamic_of(t, out_dims))}) : $tt")
+        // Loops in tensor order, the result's last axis outermost.
+        var loops: Buf[string] = buf()
+        var j = out_dims.len()
+
+        while j > 0
+            j -= 1
+            loops.push(out_dims[j])
+
+        val nest = self.nest_open(loops, empty, tt)
+        // The nex index of each result axis.
+        var at: Buf[string] = buf()
+
+        j = nest.ivs.len()
+
+        while j > 0
+            j -= 1
+            at.push(nest.ivs[j])
+
+        // The lane: one position on every axis but `k`, all of axis `k`.
+        var offs: Buf[string] = buf()
+        var sizes: Buf[string] = buf()
+        var strides: Buf[string] = buf()
+        var subs: Buf[TSub] = buf()
+        var p = 0
+
+        for a in 1..r
+            strides.push("1")
+
+            if a == k
+                offs.push("0")
+                sizes.push(self.dim(e.span, v, vt, a))
+                subs.push(TSubAll)
+            else
+                offs.push(at[p])
+                sizes.push("1")
+                subs.push(TSubAt(d))
+                p += 1
+
+        val lt = Ty.Array(elem_of(vt), dynamic_axes(1))
+        val lane = self.def(s"tensor.extract_slice $v${self.slice_text(subs, offs, sizes, strides)} : ${self.tensor_ty(e.span, vt)} to ${self.tensor_ty(e.span, lt)}")
+        val x = self.reduce_flat(e.span, name, lane, elem_of(vt), elem_of(t))
+        var idx: Buf[string] = buf()
+
+        for iv in nest.ivs
+            idx.push(iv)
+
+        self.nest_close(nest, self.def(s"tensor.insert $x into ${nest.accs[0]}[${joined(idx)}] : $tt"))
+    end reduce_along
+
+    // -- `@` --------------------------------------------------------------------------------------
+
+    // `a @ b`. With the axes reversed, nex's `A @ B` is storage's `Bᵀ Aᵀ`, so the operands swap.
+    matmul(*self, e: TExpr, l: TExpr, r: TExpr) -> string
+        val a = self.ex(l)
+        val b = self.ex(r)
+        val ra = rank_of(l.ty)
+        val rb = rank_of(r.ty)
+        val inner_a = self.dim(e.span, a, l.ty, ra)
+        val inner_b = self.dim(e.span, b, r.ty, 1)
+
+        self.trap_if(self.def(s"arith.cmpi ne, $inner_a, $inner_b : index"), "shape mismatch")
+
+        val at = self.tensor_ty(e.span, l.ty)
+        val bt = self.tensor_ty(e.span, r.ty)
+        val et = elem_of(e.ty)
+        val zero = self.one_or_zero(e.span, et, false)
+        val ez = self.elem_ty(e.span, et)
+
+        if ra == 1 && rb == 1
+            val acc = self.def(s"linalg.fill ins($zero : $ez) outs(${self.def(s"tensor.empty() : tensor<$ez>")} : tensor<$ez>) -> tensor<$ez>")
+            val d = self.def(s"linalg.dot ins($a, $b : $at, $bt) outs($acc : tensor<$ez>) -> tensor<$ez>")
+
+            return self.def(s"tensor.extract $d[] : tensor<$ez>")
+
+        var dims: Buf[string] = buf()
+
+        if ra == 2 then dims.push(self.dim(e.span, a, l.ty, 1))
+        if rb == 2 then dims.push(self.dim(e.span, b, r.ty, 2))
+
+        val c = self.filled(e.span, e.ty, dims, zero)
+        val ct = self.tensor_ty(e.span, e.ty)
+
+        if ra == 2 && rb == 2 then self.def(s"linalg.matmul ins($b, $a : $bt, $at) outs($c : $ct) -> $ct")
+        elif ra == 2 then self.def(s"linalg.vecmat ins($b, $a : $bt, $at) outs($c : $ct) -> $ct")
+        else self.def(s"linalg.matvec ins($b, $a : $bt, $at) outs($c : $ct) -> $ct")
+end Emitter
+
+private single(x: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    out.push(x)
+    out
+
+private is_integer(t: Ty) -> bool = t match
+    Int(_, _) -> true
+    _ -> false
+
+private int_min_text(bits: int) -> string = s"${-(i128(1) << (bits - 1))}"
+
+private int_max_text(bits: int) -> string = s"${(i128(1) << (bits - 1)) - 1}"
