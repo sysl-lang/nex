@@ -134,6 +134,7 @@ private var region_lock = SpinLock(0)
 @export("nex_par_begin")
 par_begin()
     stopped.store(0, Release)
+    regions_begin()
 
 // One thread's share of a region: `code(env, worker, workers)` under a catch.
 @export("nex_par_run")
@@ -166,6 +167,8 @@ par_stop_word() -> *i32 = &stopped.v
 // The region is over: its trap, if one ended it, is raised in the thread that started it.
 @export("nex_par_end")
 par_end()
+    regions_end()
+
     if stopped.load(Acquire) == 0 then return
 
     stopped.store(0, Release)
