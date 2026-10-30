@@ -163,7 +163,7 @@ struct Elab
     // -- diagnostics ------------------------------------------------------------------------------
 
     fail(*self, span: Span, message: string)
-        self.diags.push(error(span, message))
+        if self.reporting() then self.diags.push(error(span, message))
 
     // A construct whose elaboration belongs to a part of the language the elaborator does not
     // handle yet: units, parallelism.
@@ -185,6 +185,10 @@ struct Elab
 
         for k in 0..<count
             self.ensure_sig(k)
+
+        // Each generic's body once, against its constraints, whether or not anything uses it.
+        for g in 0..<self.gen.funs.len()
+            self.check_generic(g)
 
         for top in self.tops
             top.kind match
