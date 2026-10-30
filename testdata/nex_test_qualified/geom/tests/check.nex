@@ -1,0 +1,12 @@
+@test module geom.tests
+
+import geom
+
+@test
+def test_origin() = assert_eq(geom.dist2(geom.origin, geom.origin), 0.0)
+
+// Each test starts from the module-level bindings' initial values, `geom.count` among them.
+@test
+def test_fresh_count() =
+    geom.count += 1
+    assert_eq(geom.count, 1)

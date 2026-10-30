@@ -277,7 +277,7 @@ impl Elab
             TFnRef(n) ->
                 fx.of_fun(n) match
                     Some(s) -> self.callee_ok(p, s"`${n}`", s, e.span, *b)
-                    None -> ()
+                    None -> if fx.is_impure_extern(n) then self.fail(e.span, s"`${n}` is an `extern` not declared `@pure`, and a parallel body calls only `@pure` externs")
             TLambdaRef(l) ->
                 self.walk(p, fx, p.lambdas[l].body, b)
                 return
@@ -437,6 +437,7 @@ end Elab
 private callee_problem(p: TProgram, s: Summary, b: Body) -> string
     if s.writes.len() > 0 then return s"assigns the module variable `${s.writes[0]}`, and nothing a parallel body calls may change a module variable"
     if s.io.len > 0 then return s"does I/O with `${s.io}`, and a parallel body does no I/O but `print` and `eprint`"
+    if s.impure.len > 0 then return s"calls `${s.impure}`, an `extern` not declared `@pure`, and a parallel body calls only `@pure` externs"
     if s.parallel then return "runs a `parallel` construct, and a parallel body cannot start another"
     if s.opaque.len > 0 then return s"calls ${s.opaque}, which the checker cannot see into, so a parallel body cannot call it"
 

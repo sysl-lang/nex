@@ -38,7 +38,7 @@ elaborate_modules(p: Program, mods: Modules) -> Result[TProgram, Buf[Diagnostic]
     Ok(e.program())
 
 private elab(p: Program, mods: Modules) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), mods, buf())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf())
 
 // How far a declaration has got.
 enum Progress
@@ -168,6 +168,8 @@ struct Elab
     externs: Buf[ExternSrc]
     xout: Buf[TExtern]
     units: Units
+    // Whether an `extern`'s signature is being resolved, where `c_ptr` names a type.
+    in_extern: bool
 
     // The modules, and the `@test` functions, by internal name, in source order (`elab_module.sysl`).
     mods: Modules
@@ -192,6 +194,7 @@ struct Elab
         self.collect()
         self.resolve_units()
         self.resolve_aggregates()
+        self.check_c_structs()
         self.resolve_generics()
 
         for k in 0..<self.externs.len()
@@ -285,9 +288,7 @@ struct Elab
                 Extern(n, params, ret) ->
                     val name = self.own_name(d, n)
 
-                    if d.attrs.len() > 0
-                        self.later(d.span, s"the attribute `@${d.attrs[0].name}`")
-                    elif self.declare(d.span, name)
+                    if self.declare(d.span, name)
                         self.tops.push(Top(name, TopExtern(self.externs.len())))
                         self.externs.push(ExternSrc(d, name, params, ret))
                         self.note_private(d, name)
@@ -676,7 +677,11 @@ struct Elab
                             Some(ty) -> return ty
                             None -> ()
 
-                        if name == "byte"
+                        if name == "c_ptr"
+                            if self.in_extern then return CPtr
+
+                            self.fail(t.span, "`c_ptr` is C's `void *`, and only an `extern` declaration names it")
+                        elif name == "byte"
                             self.fail(t.span, "there is no `byte` type; raw bytes are `uint8`")
                         elif !self.refused_import(t.span, name)
                             self.fail(t.span, s"unknown type `${name}`")

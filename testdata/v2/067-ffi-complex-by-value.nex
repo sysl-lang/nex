@@ -1,0 +1,32 @@
+// Complex scalars crossing to C by value, as clang passes `_Complex` on this target (DESIGN §10.2):
+// libm's `cexp` taking and returning a `complex[real64]`, a product, a `complex[real32]`, and six
+// complex arguments — more than the eight floating-point registers hold, so the last ones go on the
+// stack whole — beside a real.
+
+@link("m")
+extern def cexp(z: complex): complex
+
+@link("m")
+extern def cabs(z: complex): real
+
+@link("nexffi")
+extern def nf_cmul(a: complex, b: complex): complex
+
+@link("nexffi")
+extern def nf_cconj32(z: complex[real32]): complex[real32]
+
+@link("nexffi")
+extern def nf_cpoly(a: complex, b: complex, c: complex, d: complex, e: complex, x: real): complex
+
+def main() =
+  val pi = 3.141592653589793
+  val half_turn = cexp(0 + pi * 1i)
+  print(abs(half_turn.re + 1.0) < 1e-15)
+  print(abs(half_turn.im) < 1e-15)
+  print(cexp(1 + 0i))
+  print(cexp(0 + 0i))
+  print(cabs(3 + 4i))
+  print(nf_cmul(1 + 2i, 3 + 4i))
+  val z: complex[real32] = 1.5 - 2i
+  print(nf_cconj32(z))
+  print(nf_cpoly(1 + 1i, 1 + 0i, 0 + 1i, 2 + 0i, 0 - 1i, 0.5))

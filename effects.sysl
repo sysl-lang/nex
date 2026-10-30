@@ -30,8 +30,10 @@ struct Summary
     // For a lambda: the locals of enclosing functions it assigns, and those it reads.
     cap_writes: Buf[usize]
     cap_reads: Buf[usize]
+    // The first `extern` called that is not declared `@pure`; `""` for none.
+    impure: string
 
-private empty_summary() -> Summary = Summary(buf(), buf(), "", false, "", buf(), buf())
+private empty_summary() -> Summary = Summary(buf(), buf(), "", false, "", buf(), buf(), "")
 
 struct Effects
     // The top-level functions, by name: function `k` is node `k`, and lambda `l` is node
@@ -41,8 +43,12 @@ struct Effects
     // The `val` locals bound to a function or a lambda, and the node each holds.
     held_local: Buf[usize]
     held_node: Buf[usize]
+    // The `extern`s not declared `@pure`, which may do anything C can.
+    impure_externs: Buf[string]
 
 impl Effects
+    is_impure_extern(self, name: string) -> bool = contains(self.impure_externs, name)
+
     of_fun(self, name: string) -> Option[Summary]
         for k in 0..<self.funs.len()
             if self.funs[k] == name then return Some(self.nodes[k])
@@ -69,6 +75,7 @@ summarize(p: TProgram) -> Effects
     var vars: Buf[string] = buf()
     var funs: Buf[string] = buf()
     var bodies: Buf[TExpr] = buf()
+    var impure: Buf[string] = buf()
 
     for d in p.decls
         d match
@@ -85,9 +92,10 @@ summarize(p: TProgram) -> Effects
                         None -> ()
 
                 bodies.push(texpr(f.span, f.ret, TBlock(items, f.body)))
+            ExternDecl(x) -> if !x.pure then impure.push(x.name)
             _ -> ()
 
-    var fx = Effects(funs, buf(), buf(), buf())
+    var fx = Effects(funs, buf(), buf(), buf(), impure)
 
     // The locals bound to a function: a local `def`, or a `val` whose value is a function's name.
     for b in bodies
@@ -176,6 +184,10 @@ private merge(sc: *Scan, c: Summary) -> bool
         sc.s.opaque = c.opaque
         changed = true
 
+    if sc.s.impure.len == 0 && c.impure.len > 0
+        sc.s.impure = c.impure
+        changed = true
+
     if sc.lambda
         for id in c.cap_writes
             if !has_id(sc.own, id) then add_id(&sc.s.cap_writes, id)
@@ -235,7 +247,7 @@ private scan(p: TProgram, fx: Effects, vars: Buf[string], e: TExpr, sc: *Scan)
         TFnRef(n) ->
             fun_node(fx, n) match
                 Some(k) -> add_id(&sc.edges, k)
-                None -> ()
+                None -> if sc.s.impure.len == 0 && fx.is_impure_extern(n) then sc.s.impure = n
         TLambdaRef(l) -> add_id(&sc.edges, fx.funs.len() + l)
         TAssign(_, target, _) -> written(fx, vars, target, sc)
         TBorrow(place) -> written(fx, vars, place, sc)

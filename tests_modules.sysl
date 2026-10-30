@@ -74,6 +74,16 @@ private run_project(b: Bench, files: []const (string, string), prelude: Option[s
 
 // -- loading and resolving ---------------------------------------------------------------------------
 
+@test("an extern declared in a module is the C function of its own name, imported and called like a def")
+mod_extern()
+    val b = bench()
+    val out = run_project(b, [("main.nex", "import cmath.{cbrt}\ndef main() = print(cbrt(27.0))\n"), ("cmath/libm.nex", "module cmath\n@link(\"m\")\nextern def cbrt(x: real): real\n")])
+
+    finish(b)
+    assert_eq(out, "3.0\n")
+    assert_eq(project_refused([("main.nex", "import cmath.{cbrt}\nextern def cbrt2(x: real): real\n@symbol(\"cbrt\")\nextern def mine(x: real): real\ndef main() = print(cbrt(27.0))\n"), ("cmath/libm.nex", "module cmath\nextern def cbrt(x: real): real\n")]),
+        "error: `mine` and `cbrt` both name the C symbol `cbrt` @main.nex:3:1")
+
 @test("a program of one file is the root module, its names its own")
 mod_single_file()
     assert_eq(elab_project(project([("main.nex", "def main() = print(42)\n")])), "(def main () void (print 42))")
@@ -106,8 +116,61 @@ mod_declaration()
 mod_import_placement()
     assert_eq(project_refused([("main.nex", "def main() = print(f(1))\nimport helpers.{f}\n"), ("helpers/ops.nex", "def f(x: integer) = x\n")]),
         "error: an `import` stands at the top of its file, before every other declaration @main.nex:2:1")
-    assert_eq(project_refused([("main.nex", "import helpers\ndef main() = ()\n"), ("helpers/ops.nex", "def f(x: integer) = x\n")]),
-        "error: `import helpers` names nothing to import: name the members, `import helpers.{x, y}`, or take every public one, `import helpers.*` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import helpers.{}\ndef main() = ()\n"), ("helpers/ops.nex", "def f(x: integer) = x\n")]),
+        "error: expected a name to import, found '}' @main.nex:1:17")
+
+// The module `geom` of the qualified-access tests: a struct, a generic struct, an enum, a public
+// `var`, a function, and private names.
+private geom_file() -> (string, string) = ("geom/geom.nex","module geom\nstruct Point\n  x: real\n  y: real\nstruct Pair[A, B]\n  fst: A\n  snd: B\nenum Shape =\n  Circle(r: real)\n  Empty\nvar count = 0\nval origin = Point(0.0, 0.0)\ndef dist2(p: Point, q: Point): real = (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y)\ndef twice(x: integer) = x + x\nprivate def secret() = 1\nprivate struct Hidden\n  x: real\n")
+
+// A project of `main` and the module `geom`.
+private with_geom(main: string) -> string = project_refused([("main.nex", main), geom_file()])
+
+@test("a bare `import m` reaches every kind of public name as `m.x`")
+mod_qualified()
+    assert_eq(with_geom("import geom\ndef main() = print(geom.dist2(geom.origin, geom.Point(3.0, 4.0)))\n"), "ok")
+    assert_eq(with_geom("import geom\ndef main() =\n  val p: geom.Point = geom.Point(1.0, 2.0)\n  val pr: geom.Pair[integer, real] = geom.Pair(1, 2.0)\n  print(p.x + pr.snd)\n"), "ok")
+    assert_eq(with_geom("import geom\ndef area(s: geom.Shape): real = s match\n  Circle(r) -> r * r\n  Empty -> 0.0\ndef main() = print(area(geom.Circle(2.0)) + area(geom.Empty))\n"), "ok")
+    assert_eq(with_geom("import geom\ndef main() =\n  geom.count = 3\n  geom.count += 1\n  print(geom.count)\n"), "ok")
+    assert_eq(with_geom("import geom\ndef main() =\n  val f = geom.twice\n  print(f(2))\n"), "ok")
+    assert_eq(with_geom("import geom\nimport geom.{twice}\nimport geom.*\ndef main() = print(geom.twice(twice(1)) + count)\n"), "ok")
+    assert_eq(elab_project(project([("main.nex", "import geom\ndef main() = print(geom.twice(4))\n"), geom_file()])).contains("(def main () void (print (call:int64 geom.twice 4)))"), true)
+
+@test("`import a.b` reaches `a.b.x`; `import a` does not")
+mod_qualified_dotted()
+    val files = [("a/a.nex", "val top = 1\n"), ("a/b/b.nex", "def f(x: integer) = x + 1\nval v = 2\n")]
+
+    assert_eq(project_refused([("main.nex", "import a.b\ndef main() = print(a.b.f(a.b.v))\n"), files[0], files[1]]), "ok")
+    assert_eq(project_refused([("main.nex", "import a\ndef main() = print(a.b.v + a.top)\n"), files[0], files[1]]),
+        "error: the module `a` has no public member `b` @main.nex:2:20")
+    assert_eq(project_refused([("main.nex", "import a.b\ndef main() = print(b.v)\n"), files[0], files[1]]),
+        "error: unknown name `b` @main.nex:2:20")
+
+@test("a local shadows a module, and `m.x` is then the local's field")
+mod_qualified_shadow()
+    val lib = ("lib/c.nex", "val x = 99\n")
+
+    assert_eq(elab_project(project([("main.nex", "import lib\nstruct Box\n  x: integer\ndef main() =\n  val lib = Box(7)\n  print(lib.x)\n"), lib])),
+        "(struct Box (x int64))\n(val lib.x int64 99)\n(def main () void (block (val lib#0:Box (new:Box 7)) (print (.x:int64 lib#0))))")
+    assert_eq(project_refused([("main.nex", "import lib\nstruct Box\n  x: integer\ndef get(lib: Box) = lib.x\ndef main() = print(get(Box(1)) + lib.x)\n"), lib]), "ok")
+    assert_eq(project_refused([("main.nex", "import lib\nstruct Box\n  y: integer\ndef get(lib: Box) = lib.x\ndef main() = print(get(Box(1)))\n"), lib]),
+        "error: `Box` has no field `x`; did you mean `y`? @main.nex:4:21")
+
+@test("a private or missing member is not reached through `m.x`")
+mod_qualified_private()
+    assert_eq(with_geom("import geom\ndef main() = print(geom.secret())\n"), "error: the module `geom` has no public member `secret` @main.nex:2:20")
+    assert_eq(with_geom("import geom\ndef main() = print(geom.nope)\n"), "error: the module `geom` has no public member `nope` @main.nex:2:20")
+    assert_eq(with_geom("import geom\ndef f(h: geom.Hidden) = 0\ndef main() = ()\n"), "error: the module `geom` has no public member `Hidden` @main.nex:2:10")
+    assert_eq(with_geom("import geom\ndef main() =\n  geom.nope = 1\n"), "error: the module `geom` has no public member `nope` @main.nex:3:3")
+    assert_eq(with_geom("import geom.{count}\ndef main() = print(geom.count)\n"), "error: unknown name `geom` @main.nex:2:20")
+
+@test("a bare import's first word may not be the module's own name nor one another import binds")
+mod_qualified_clash()
+    assert_eq(with_geom("import geom\ndef geom() = 1\ndef main() = print(geom())\n"), "error: the imported module `geom` clashes with this module's own `geom` @main.nex:1:1")
+    assert_eq(project_refused([("main.nex", "import other.{geom}\nimport geom\ndef main() = ()\n"), ("other/o.nex", "val geom = 1\n"), geom_file()]),
+        "error: `geom` is imported twice, as `other.geom` and as the module `geom` @main.nex:2:1")
+    assert_eq(project_refused([("main.nex", "import geom\nimport other.{geom}\ndef main() = ()\n"), ("other/o.nex", "val geom = 1\n"), geom_file()]),
+        "error: `geom` is imported twice, as the module `geom` and as `other.geom` @main.nex:2:1")
 
 @test("`as` renames what an import binds, and the original name is then not bound")
 mod_alias()
@@ -297,6 +360,17 @@ mod_run()
 
     finish(b)
 
+@test("a program reaching its modules through bare imports runs, and a local shadowing a module reads its own field")
+mod_run_qualified()
+    val b = bench()
+
+    assert_eq(run_project(b, [("main.nex", "import geom\ndef main() =\n  val p: geom.Point = geom.Point(3.0, 4.0)\n  geom.count = 2\n  geom.count += 1\n  print(geom.dist2(geom.origin, p))\n  print(geom.count)\n  print(geom.Circle(1.5))\n  print(geom.Pair(1, \"a\").snd)\n"), geom_file()]),
+        "25.0\n3\nCircle(1.5)\na\n")
+    assert_eq(run_project(b, [("main.nex", "import lib\nstruct Box\n  x: integer\ndef main() =\n  val lib = Box(7)\n  print(lib.x)\n"), ("lib/c.nex", "val x = 99\n")]), "7\n")
+    assert_eq(run_project(b, [("main.nex", "import a.b\ndef main() = print(a.b.f(a.b.v))\n"), ("a/a.nex", "val top = 1\n"), ("a/b/b.nex", "def f(x: integer) = x + 1\nval v = 2\n")]), "3\n")
+
+    finish(b)
+
 @test("an imported generic function, struct and enum are instantiated where they are used")
 mod_run_generic()
     val b = bench()
@@ -342,6 +416,15 @@ mod_nex_test_filter()
     val fails = run_tests("testdata/nex_test/main.nex", None, "fails", b.tc, false).unwrap()
 
     assert_eq(join(fails.lines.view(), "\n"), "FAIL test_fails: assert_eq failed\n0 passed, 1 failed, 8 filtered out")
+    finish(b)
+
+@test("nex test builds and runs tests that reach their modules through bare imports")
+mod_nex_test_qualified()
+    val b = bench()
+    val r = run_tests("testdata/nex_test_qualified/main.nex", None, "", b.tc, false).unwrap()
+
+    assert_eq(join(r.lines.view(), "\n"), "7 passed, 0 failed")
+    assert_eq(r.failed, 0)
     finish(b)
 
 @test("nex test reports a project that does not compile, and runs nothing")

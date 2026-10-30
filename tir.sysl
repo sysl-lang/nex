@@ -227,12 +227,21 @@ struct TFun
     body: TExpr
 
 // `extern def name(params): ret`: a C function, its parameter types and modes and its result.
+// `symbol` is the C name (`@symbol`, else `name`); `links` the libraries its `@link`s name and
+// `frameworks` the frameworks; `pure` whether it is declared `@pure`. By parameter: whether it is
+// `@strided`, and the function parameter a `@data(f)` one partners.
 struct TExtern
     span: Span
     name: string
     params: Buf[Ty]
     modes: Buf[Mode]
     ret: Ty
+    symbol: string
+    links: Buf[string]
+    frameworks: Buf[string]
+    pure: bool
+    strided: Buf[bool]
+    partner: Buf[Option[usize]]
 
 // `val a, b = 1, 2` at module level: one initializer, its tuple taken apart into the module-level
 // bindings `pat` names.

@@ -1,0 +1,474 @@
+// Emission of a call of an `extern def`: a C function, declared by its C symbol and called with the
+// arguments C's ABI on this target wants (DESIGN §10.2, §10.3).
+//
+// **A scalar crosses as itself**, with the extension clang gives it: an 8- or 16-bit integer or a
+// `bool`, as argument or result, is marked `signext` or `zeroext`, since Apple's arm64 ABI has the
+// caller widen it. **A complex crosses by value as clang passes `_Complex`**: an argument is an array
+// of its two parts, `[2 x double]`, which arm64 passes as a homogeneous floating-point aggregate in
+// two consecutive FP registers, and a result comes back as the struct `{double, double}`.
+//
+// **Everything else crosses by pointer.** An `inout` scalar or struct is the address of its place; a
+// `@c` struct in read mode is the address of a copy; a `string` is its own NUL-terminated bytes.
+//
+// **An array crosses as the address of its first element in its buffer.** A read-mode array is its
+// value's buffer, read only. **An `inout` window is a subview of its root's buffer**, so C writes
+// where the window lies and its leading dimension is the root's. A call with one is made through a
+// wrapper function, as a call through a function value is (`through_value`): it takes each root, the
+// outermost array of the place, as a tensor, makes its buffer writable, takes the subview through
+// every slice opened on the way to the window, calls C, and hands the root back written in place.
+// Bufferization sees an ordinary call writing an `inout` argument, so where the root is a constant
+// or something else still reads it, the whole root is copied first — every stride kept, and the
+// value semantics with it.
+//
+// **A parameter not marked `@strided` needs the layout §10.3 gives C**: unit stride along nex's
+// first axis at rank 1 and 2, a dense column-major block from rank 3. The buffer's strides are read
+// at run time, and an array laid out otherwise is gathered into a dense block by the runtime
+// (`nex_c_gather`) under an `scf.if` that canonicalization folds where the strides are known; after
+// the call the block is scattered back over an `inout` window (`nex_c_scatter`) or freed. A
+// `@strided` parameter is never copied.
+//
+// The libraries and frameworks the externs `@link` are written as `// nex.link` lines before the
+// module, which the driver reads (`driver.sysl`).
+
+import sysl.buf.{Buf, buf}
+import sysl.text.str_builder
+import sh.sysl.parsing.Span
+
+// An array argument as C receives it: its buffer `m` (array type `t`), the address C gets, and where
+// it may have been copied, the condition that it was not (`""` where it never is) and the slot
+// holding its descriptor.
+struct CArray
+    m: string
+    t: Ty
+    ptr: string
+    ok: string
+    desc: string
+    writes: bool
+
+// The root of an `inout` array argument: its place, the array it holds before the call and its array
+// type.
+struct CRoot
+    place: TExpr
+    value: string
+    t: Ty
+
+// An `inout` array argument: its root, by number, each slice opened from the root to the window, and
+// whether its parameter is `@strided`.
+struct CWindow
+    root: usize
+    frames: Buf[Opened]
+    strided: bool
+
+impl Emitter
+    find_extern(*self, name: string) -> Option[TExtern]
+        for d in self.prog.decls
+            d match
+                ExternDecl(x) -> if x.name == name then return Some(x)
+                _ -> ()
+
+        None
+
+    // The `// nex.link` lines for every extern's `@link`, each once.
+    link_lines(*self) -> string
+        var seen: Buf[string] = buf()
+
+        for d in self.prog.decls
+            d match
+                ExternDecl(x) ->
+                    for l in x.links
+                        if !contains_text(seen, s"-l$l") then seen.push(s"-l$l")
+
+                    for f in x.frameworks
+                        if !contains_text(seen, s"-framework $f") then seen.push(s"-framework $f")
+                _ -> ()
+
+        var out = ""
+
+        for s in seen
+            out += s"// nex.link $s\n"
+
+        out
+
+    // The call of the extern `x` with `args`, its value of type `ret` answered.
+    extern_call(*self, span: Span, x: TExtern, args: Buf[TExpr], ret: Ty) -> string
+        var vals: Buf[string] = buf()
+        var arrays: Buf[CArray] = buf()
+        var roots: Buf[CRoot] = buf()
+        var windows: Buf[CWindow] = buf()
+
+        for j in 0..<args.len()
+            val a = args[j]
+
+            *a.kind match
+                TBorrow(place) ->
+                    if is_arr(place.ty)
+                        windows.push(self.open_window(place, x.strided[j], &roots))
+                        vals.push("")
+                    else
+                        vals.push(self.place_ptr(place))
+                _ ->
+                    val v = self.ex(a)
+
+                    vals.push(base_of(x.params[j]) match
+                        Array(_, _) ->
+                            val m = self.def(s"bufferization.to_buffer $v read_only : ${self.tensor_ty(a.span, a.ty)} to ${self.boundary_ty(a.span, a.ty)}")
+                            val c = self.c_pointer(a.span, m, a.ty, x.strided[j], false)
+
+                            arrays.push(c)
+                            c.ptr
+                        Nominal(_, _) ->
+                            val ty = self.ty(a.span, a.ty)
+                            val slot = self.alloca(ty)
+
+                            self.op(s"llvm.store $v, $slot : $ty, !llvm.ptr")
+                            slot
+                        Complex(b) -> self.c_complex(v, b)
+                        _ -> v)
+
+        var tys: Buf[string] = buf()
+        var decl: Buf[string] = buf()
+
+        for j in 0..<x.params.len()
+            val t = self.c_param_ty(span, x.params[j], x.modes[j])
+
+            tys.push(t)
+            decl.push(t + c_ext(x.params[j], x.modes[j]))
+
+        val rt = self.c_result_ty(span, ret)
+
+        self.declare(s"c.${x.symbol}", s"func.func private @\"${x.symbol}\"(${joined(decl)})${if rt == "" then "" else s" -> ($rt${c_ext(ret, Mode.Read)})"}")
+
+        val value = if windows.len() == 0
+            self.c_value(self.effect(s"func.call @\"${x.symbol}\"(${joined(vals)}) : (${joined(tys)}) -> ${result_text(rt)}", rt), rt, ret)
+        else
+            self.c_wrapped(span, self.c_wrapper(span, x, vals, tys, rt, roots, windows), rt, ret, roots)
+
+        self.give_back(arrays)
+        value
+    end extern_call
+
+    // The `inout` array place `place` opened: its root, numbered in `roots`, which gains it unless an
+    // earlier argument of the call holds the same one, and the slices opened from it to the window.
+    private open_window(*self, place: TExpr, strided: bool, roots: *Buf[CRoot]) -> CWindow
+        var frames: Buf[Opened] = buf()
+        val v = self.open_place(place, &frames)
+        val root = if frames.len() > 0 then frames[0].src else place
+
+        for k in 0..<roots.len()
+            if same_root(roots[k].place, root) then return CWindow(k, frames, strided)
+
+        roots.push(CRoot(root, if frames.len() > 0 then frames[0].cur else v, root.ty))
+        CWindow(roots.len() - 1, frames, strided)
+
+    // The function through which a call of `x` writes its `inout` arrays, and the operands and their
+    // types of a call of it: the C arguments `vals` of types `tys` made by the caller (`""` for each
+    // `inout` array), each root of `roots` as a tensor, and every operand of the windows' slices.
+    private c_wrapper(*self, span: Span, x: TExtern, vals: Buf[string], tys: Buf[string], rt: string, roots: Buf[CRoot], windows: Buf[CWindow]) -> string
+        var head: Buf[string] = buf()
+        var ops: Buf[string] = buf()
+        var optys: Buf[string] = buf()
+        var inner: Buf[string] = buf()
+
+        for j in 0..<vals.len()
+            if vals[j] == ""
+                inner.push("")
+                continue
+
+            inner.push(wrapper_param(&head, &ops, &optys, vals[j], tys[j]))
+
+        var params: Buf[string] = buf()
+
+        for r in roots
+            params.push(wrapper_param(&head, &ops, &optys, r.value, self.tensor_ty(span, r.t)))
+
+        // Each window's slice operands, renamed to the wrapper's parameters.
+        var offs: Buf[Buf[Buf[string]]] = buf()
+        var sizes: Buf[Buf[Buf[string]]] = buf()
+        var strides: Buf[Buf[Buf[string]]] = buf()
+
+        for w in windows
+            var o: Buf[Buf[string]] = buf()
+            var s: Buf[Buf[string]] = buf()
+            var t: Buf[Buf[string]] = buf()
+
+            for f in w.frames
+                o.push(wrapper_params(&head, &ops, &optys, f.offs))
+                s.push(wrapper_params(&head, &ops, &optys, f.sizes))
+                t.push(wrapper_params(&head, &ops, &optys, f.strides))
+
+            offs.push(o)
+            sizes.push(s)
+            strides.push(t)
+
+        val outer_entry = self.entry
+        val outer_body = self.body
+        val outer_dirty = self.dirty
+
+        self.entry = str_builder()
+        self.entry.push("    %one = arith.constant 1 : i64\n")
+        self.body = str_builder()
+        self.dirty = false
+
+        var ms: Buf[string] = buf()
+
+        for k in 0..<roots.len()
+            ms.push(self.def(s"bufferization.to_buffer ${params[k]} : ${self.tensor_ty(span, roots[k].t)} to ${self.boundary_ty(span, roots[k].t)}"))
+
+        var copies: Buf[CArray] = buf()
+        var next = 0
+
+        for j in 0..<inner.len()
+            if inner[j] != "" then continue
+
+            val w = windows[next]
+            var m = ms[w.root]
+            var mt = roots[w.root].t
+
+            for i in 0..<w.frames.len()
+                val nt = self.view_ty(w.frames[i].slot.ty)
+
+                m = self.def(s"memref.subview $m${self.slice_text(w.frames[i].subs, offs[next][i], sizes[next][i], strides[next][i])} : ${self.boundary_ty(span, mt)} to ${self.boundary_ty(span, nt)}")
+                mt = nt
+
+            val c = self.c_pointer(span, m, mt, w.strided, true)
+
+            copies.push(c)
+            inner.set(j, c.ptr)
+            next += 1
+
+        val call = s"func.call @\"${x.symbol}\"(${joined(inner)}) : (${joined(tys)}) -> ${result_text(rt)}"
+        var outs: Buf[string] = buf()
+        var out_tys: Buf[string] = buf()
+
+        if rt == "" then self.op(call)
+        else
+            outs.push(self.def(call))
+            out_tys.push(rt)
+
+        self.give_back(copies)
+
+        for k in 0..<roots.len()
+            val tt = self.tensor_ty(span, roots[k].t)
+            val now = self.def(s"bufferization.to_tensor ${ms[k]} restrict : ${self.boundary_ty(span, roots[k].t)} to $tt")
+
+            outs.push(self.def(s"bufferization.materialize_in_destination $now in ${params[k]} : ($tt, $tt) -> $tt"))
+            out_tys.push(tt)
+
+        self.op(s"func.return ${joined(outs)} : ${joined(out_tys)}")
+
+        val name = s"x.${self.wrappers.len()}"
+
+        self.wrappers.push(name)
+        self.funcs.push(s"  func.func private @\"$name\"(${joined(head)}) -> (${joined(out_tys)}) {\n${self.entry.finish()}${self.body.finish()}  }\n\n")
+        self.entry = outer_entry
+        self.body = outer_body
+        self.dirty = outer_dirty
+
+        s"@\"$name\"(${joined(ops)}) : (${joined(optys)})"
+    end c_wrapper
+
+    // The wrapper call `call` made, each root of `roots` rebound to what it hands back, and its value
+    // of C type `rt` read as a value of `ret`. Where an `exit`, `cycle` or `return` may already have
+    // run in the statement, it runs only where none did.
+    private c_wrapped(*self, span: Span, call: string, rt: string, ret: Ty, roots: Buf[CRoot]) -> string
+        if self.dirty
+            val ok = self.flowing()
+
+            self.dirty = false
+
+            var f = self.fork()
+
+            f = self.fork_else(f, self.c_wrapped(span, call, rt, ret, roots), ret)
+            self.dirty = true
+            return self.join(f, ok, "", ret)
+
+        var tys: Buf[string] = buf()
+
+        if rt != "" then tys.push(rt)
+
+        for r in roots
+            tys.push(self.tensor_ty(span, r.t))
+
+        val v = self.fresh()
+        val n = tys.len()
+        val first: usize = if rt == "" then 0 else 1
+
+        self.op(s"${result_def(v, n)}func.call $call -> ${if n == 1 then tys[0] else s"(${joined(tys)})"}")
+
+        for k in 0..<roots.len()
+            self.set_place(roots[k].place, result_name(v, first + k, n), true)
+
+        if rt == "" then "" else self.c_value(result_name(v, 0, n), rt, ret)
+
+    // Each copy of `copies` scattered back over its window or freed, whether or not the call ran: the
+    // window holds what it did.
+    private give_back(*self, copies: Buf[CArray])
+        for c in copies
+            if c.ok == "" then continue
+
+            self.op(s"scf.if ${self.def(s"arith.xori ${c.ok}, ${self.def("arith.constant true")} : i1")} {")
+
+            if c.writes then self.always("nex_c_scatter", s"${self.elem_const(c.t)}, ${self.def(s"arith.constant ${rank_of(c.t)} : i64")}, ${c.desc}, ${c.ptr}", "i64, i64, !llvm.ptr, !llvm.ptr", "")
+            else self.always("nex_c_free", c.ptr, "!llvm.ptr", "")
+
+            self.op("}")
+
+    // A C result `r` of type `rt` as a value of `ret`: a complex from the struct of its parts.
+    private c_value(*self, r: string, rt: string, ret: Ty) -> string = base_of(ret) match
+        Complex(b) ->
+            val re = self.def(s"llvm.extractvalue $r[0] : $rt")
+            val im = self.def(s"llvm.extractvalue $r[1] : $rt")
+
+            self.def(s"complex.create $re, $im : complex<f$b>")
+        _ -> r
+
+    // The array buffer `m` of type `t` as C receives it. Unless the parameter is `strided`, a buffer
+    // C cannot address as §10.3 says is gathered into a dense copy first; one C `writes` is scattered
+    // back after.
+    private c_pointer(*self, span: Span, m: string, t: Ty, strided: bool, writes: bool) -> CArray
+        val direct = self.first_element(span, m, t)
+
+        if strided then return CArray(m, t, direct, "", "", writes)
+
+        val ok = self.c_layout(m, t)
+        val r = rank_of(t)
+        val dt = self.desc_ty(r)
+        val desc = self.alloca(dt)
+        val p = self.fresh()
+
+        self.op(s"$p = scf.if $ok -> (!llvm.ptr) {")
+        self.op(s"scf.yield $direct : !llvm.ptr")
+        self.op("} else {")
+        self.op(s"llvm.store ${self.def(s"builtin.unrealized_conversion_cast $m : ${self.boundary_ty(span, t)} to $dt")}, $desc : $dt, !llvm.ptr")
+        self.op(s"scf.yield ${self.always("nex_c_gather",s"${self.elem_const(t)}, ${self.def(s"arith.constant $r : i64")}, $desc", "i64, i64, !llvm.ptr", "!llvm.ptr")} : !llvm.ptr")
+        self.op("}")
+
+        CArray(m, t, p, ok, desc, writes)
+
+    // A call of the runtime's `name` that runs whether or not an `exit`, `cycle` or `return` has run
+    // in the statement: a copy is made and given back either way.
+    private always(*self, name: string, args: string, params: string, result: string) -> string
+        self.external(name, params, result)
+
+        val text = s"func.call @$name($args) : ($params) -> ${result_text(result)}"
+
+        if result == ""
+            self.op(text)
+            return ""
+
+        self.def(text)
+
+    // The bytes of an element of the array type `t`, as an `i64` constant.
+    private elem_const(*self, t: Ty) -> string = self.def(s"arith.constant ${self.elem_bytes(elem_of(t))} : i64")
+
+    // The address of the first element of the buffer `m` of the array type `t`.
+    private first_element(*self, span: Span, m: string, t: Ty) -> string
+        val b = self.boundary_ty(span, t)
+        val md = self.metadata(m, t)
+        val base = self.def(s"arith.index_cast ${self.def(s"memref.extract_aligned_pointer_as_index $m : $b -> index")} : index to i64")
+        val off = self.def(s"arith.index_cast $md#1 : index to i64")
+        val p = self.def(s"llvm.inttoptr $base : i64 to !llvm.ptr")
+
+        self.def(s"llvm.getelementptr $p[$off] : (!llvm.ptr, i64) -> !llvm.ptr, ${self.mem_ty(span, elem_of(t))}")
+
+    // `memref.extract_strided_metadata` of the buffer `m` of an array of type `t`: `#1` is the
+    // offset, then the sizes and the strides, buffer order (nex's last axis first).
+    private metadata(*self, m: string, t: Ty) -> string
+        val r = rank_of(t)
+        val v = self.fresh()
+        var tys = s"memref<${self.elem_ty(Span(0, 0), elem_of(t))}>, index"
+
+        for _ in 0..<2 * r
+            tys += ", index"
+
+        self.op(s"$v:${2 + 2 * r} = memref.extract_strided_metadata $m : ${self.boundary_ty(Span(0, 0), t)} -> $tys")
+        v
+
+    // Whether the buffer `m` of an array of type `t` is laid out as C may address it without a copy:
+    // nex's first axis at unit stride, and from rank 3 every axis dense after it.
+    private c_layout(*self, m: string, t: Ty) -> string
+        val r = rank_of(t)
+        val md = self.metadata(m, t)
+        var ok = self.def(s"arith.cmpi eq, $md#${2 + 2 * r - 1}, ${self.index_const(1)} : index")
+
+        if r >= 3
+            var k = r - 1
+
+            while k > 0
+                k -= 1
+
+                val want = self.def(s"arith.muli $md#${2 + r + k + 1}, $md#${2 + k + 1} : index")
+
+                ok = self.def(s"arith.andi $ok, ${self.def(s"arith.cmpi eq, $md#${2 + r + k}, $want : index")} : i1")
+
+        ok
+
+    // The MLIR type of a parameter of type `t` in mode `mode` as C takes it.
+    private c_param_ty(*self, span: Span, t: Ty, mode: Mode) -> string
+        if mode == Inout then return "!llvm.ptr"
+
+        base_of(t) match
+            Complex(b) -> s"!llvm.array<2 x f$b>"
+            Array(_, _) -> "!llvm.ptr"
+            Nominal(_, _) -> "!llvm.ptr"
+            Str -> "!llvm.ptr"
+            _ -> self.ty(span, t)
+
+    // The MLIR type of a result of type `t` as C gives it, `""` for none.
+    private c_result_ty(*self, span: Span, t: Ty) -> string = base_of(t) match
+        Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
+        _ -> self.ty(span, t)
+
+    // The complex `v` with parts of `b` bits as the array of its parts C takes.
+    private c_complex(*self, v: string, b: int) -> string
+        val at = s"!llvm.array<2 x f$b>"
+        val re = self.def(s"complex.re $v : complex<f$b>")
+        val im = self.def(s"complex.im $v : complex<f$b>")
+        val u = self.def(s"llvm.mlir.undef : $at")
+
+        self.def(s"llvm.insertvalue $im, ${self.def(s"llvm.insertvalue $re, $u[0] : $at")}[1] : $at")
+end Emitter
+
+// A parameter of a wrapper, `%pN` of type `ty`, which the call passes `value` for.
+private wrapper_param(head: *Buf[string], ops: *Buf[string], tys: *Buf[string], value: string, ty: string) -> string
+    val p = s"%p${head.len()}"
+
+    head.push(s"$p: $ty")
+    ops.push(value)
+    tys.push(ty)
+    p
+
+// An `index` parameter of a wrapper for each of `values`.
+private wrapper_params(head: *Buf[string], ops: *Buf[string], tys: *Buf[string], values: Buf[string]) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for v in values
+        out.push(wrapper_param(head, ops, tys, v, "index"))
+
+    out
+
+// Whether two root places are one: the same local or the same module-level binding.
+private same_root(a: TExpr, b: TExpr) -> bool = *a.kind match
+    TLocal(x) -> *b.kind match
+        TLocal(y) -> x == y
+        _ -> false
+    TGlobalRef(x) -> *b.kind match
+        TGlobalRef(y) -> x == y
+        _ -> false
+    _ -> false
+
+// The extension clang gives a C argument or result of type `t`: 8- and 16-bit integers and `bool`
+// are widened by the caller on arm64.
+private c_ext(t: Ty, mode: Mode) -> string
+    if mode == Inout then return ""
+
+    base_of(t) match
+        Int(b, signed) -> if b < 32 then (if signed then " {llvm.signext}" else " {llvm.zeroext}") else ""
+        Bool -> " {llvm.zeroext}"
+        _ -> ""
+
+private contains_text(xs: Buf[string], x: string) -> bool
+    for y in xs
+        if y == x then return true
+
+    false

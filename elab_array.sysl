@@ -764,6 +764,8 @@ impl Elab
                     s"write the module variable `${s.writes[0]}`"
                 elif s.io.len > 0
                     s"do I/O with `${s.io}`"
+                elif s.impure.len > 0
+                    s"call `${s.impure}`, an `extern` not declared `@pure`"
                 elif s.parallel
                     "run a `parallel` construct"
                 elif s.opaque.len > 0
