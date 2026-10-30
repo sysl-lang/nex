@@ -86,7 +86,7 @@ private[nex] reduce_all(r: Red, xs: Buf[Value]) -> Answer
 
 // The first position (from 1) of the extreme element of `xs`, `better` saying which of two is; 0
 // where there is none. The first element is taken whatever it is, so an array of only `nan` still
-// has a location.
+// has a location, and the first number after a leading run of `nan` replaces it.
 private[nex] location(better: Op2, start: Value, xs: Buf[Value]) -> Result[long, Signal]
     var best = start
     var at: long = 0
@@ -94,11 +94,16 @@ private[nex] location(better: Op2, start: Value, xs: Buf[Value]) -> Result[long,
     for k in 0..<xs.len()
         val x = xs[k]
 
-        if bool_of(better(x, best)?) || at == 0
+        if at == 0 || bool_of(better(x, best)?) || nan_value(best) && !nan_value(x)
             best = x
             at = long(k) + 1
 
     Ok(at)
+
+// Whether `v` is a real `nan`.
+private[nex] nan_value(v: Value) -> bool = v match
+    VReal(x) -> x.is_nan()
+    _ -> false
 
 // The 1-based index on each axis of extents `ext` of the element at 1-based storage position `k`, a
 // tuple of integers; every index 0 where `k` is.

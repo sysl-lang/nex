@@ -1017,7 +1017,12 @@ function `reduce` keeps its name.
   val (largest, where) = worst
   ```
 
-  Ties go to the lowest index, as in Fortran, whatever the thread count. The three-argument
+  Ties go to the lowest index, as in Fortran, whatever the thread count. As in §7.4 a `nan` is
+  never the extreme while any candidate is a number: a number beats a `nan` and two `nan`s tie, so
+  the variable's starting value counts as one more candidate, and only when every candidate is a
+  `nan` is the result a `nan`, the one at the lowest index. A block of a real location starts from
+  a `nan` at the largest index, which every candidate beats or ties; an integer one from the type's
+  worst value there. The three-argument
   `maxloc(v, x, i)` exists only as this contribution; anywhere else it is a compile error.
 
 #### 9.2.1 Reproducible reductions

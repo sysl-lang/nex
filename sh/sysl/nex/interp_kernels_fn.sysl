@@ -605,7 +605,7 @@ private complex_reals[F: Float + Elem](x: Value, f: CxReal) -> Answer
 
 // `minloc` or `maxloc` of an array of element type `et` over machine numbers: the 1-based storage
 // position of the first element strictly lower (higher) than every one before it, the first element
-// taken whatever it is; 0 for an empty array. `None` where no loop computes it.
+// taken whatever it is and the first number replacing a leading `nan`; 0 for an empty array. `None` where no loop computes it.
 private[nex] loc_kernel(name: string, et: Ty) -> Option[&Fn(&Arr) -> long]
     val low = name == "minloc"
 
@@ -647,7 +647,7 @@ private real_location[T: Elem](a: &Arr, low: bool) -> long
     for k in 0..<usize(count_of(a))
         val x = real(xs[at + k])
 
-        if loc == 0 || (if low then x < best else x > best)
+        if loc == 0 || (if low then x < best else x > best) || best.is_nan() && !x.is_nan()
             best = x
             loc = long(k) + 1
 

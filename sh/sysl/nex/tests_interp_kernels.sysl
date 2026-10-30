@@ -147,6 +147,39 @@ itk_locations()
 
         assert_eq(interpreted(text), "(2, 3, 3, 2)\n((2, 1), (1, 2))\n([2, 2, 2], [2, 3])\n0\nexit 0")
 
+@test("minloc and maxloc at every real width pass over a nan wherever it stands, a leading one included; every element nan gives the first")
+itk_locations_nan()
+    for t in ["real16", "real32", "real64"]
+        val text = main_of([s"val a: [$t] = [nan, 4.0, nan, 1.0, 9.0, 1.0, 9.0]", "print((minloc(a), maxloc(a), minloc(a[.. by -1]), maxloc(a[3..4])))",
+                            "val m = reshape(a[1..6], (2, 3))", "print((minloc(m), maxloc(m)))", "print((minloc(m, dim = 1), maxloc(m, dim = 2)))",
+                            s"val n: [$t] = [nan, nan, nan]", "print((minloc(n), maxloc(n[2..3]), maxloc(n[1..0])))", s"val z: [$t] = [0.0, -0.0]",
+                            "print((minloc(z), maxloc(z), minloc(z[.. by -1])))"])
+
+        assert_eq(interpreted(text), "(4, 5, 2, 2)\n((2, 2), (1, 3))\n([2, 2, 2], [3, 1])\n(1, 1, 0)\n(1, 1, 1)\nexit 0")
+
+@test("a location over values passes over a nan wherever it stands; every element nan gives the first; none gives 0")
+itk_location_values()
+    val nan = real.nan
+
+    assert_eq(located([nan, 1.0, 0.5]), 3)
+    assert_eq(located([nan, nan, 2.0]), 3)
+    assert_eq(located([1.0, nan, 0.5]), 3)
+    assert_eq(located([0.5, nan, 1.0]), 1)
+    assert_eq(located([nan, nan]), 1)
+    assert_eq(located([-0.0, 0.0]), 1)
+    assert_eq(located([]), 0)
+    assert(nan_value(VReal(nan)) && !nan_value(VReal(1.0)) && !nan_value(VInt(0)))
+
+// `minloc` of `xs` through the value path's `location`.
+private located(xs: []const real) -> long
+    val lower: Op2 = (x, y) -> Ok(VBool(real_of(x) < real_of(y)))
+    var vs: Buf[Value] = buf()
+
+    for x in xs
+        vs.push(VReal(x))
+
+    location(lower, VReal(real.infinity), vs).unwrap()
+
 @test("product and dot of complex numbers at both widths: empty, reversed, along an axis, over more than one block of the tree, and a shape mismatch")
 itk_complex_reductions()
     val widths = ["complex[real32]", "complex[real64]"]

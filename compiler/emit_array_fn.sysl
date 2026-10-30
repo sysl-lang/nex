@@ -713,14 +713,21 @@ impl Emitter
 
         val x = self.def(s"tensor.extract $f[$iv] : $ftt")
         val better = self.binary(span, if name == "minloc" then "<" else ">", x, best, et)
-        // The first element is taken whatever it is, so an array of only `nan` still has a location.
+        // The first element is taken whatever it is, so an array of only `nan` still has a location,
+        // and the first number after a leading run of `nan` replaces it.
         val first = self.def(s"arith.cmpi eq, $at, ${self.def("arith.constant 0 : i64")} : i64")
-        val take = self.def(s"arith.ori $better, $first : i1")
+        val take = self.def(s"arith.ori ${self.def(s"arith.ori $better, $first : i1")}, ${self.nan_displaced(x, best, et)} : i1")
         val k = self.def(s"arith.addi ${self.to_i64(iv)}, %one : i64")
 
         self.op(s"scf.yield ${self.def(s"arith.select $take, $x, $best : $e")}, ${self.def(s"arith.select $take, $k, $at : i64")} : $e, i64")
         self.op("}")
         self.convert(span, s"$r#1", INTEGER, t, false)
+
+    // Whether `x` is a number and `best` a `nan`, of element type `t`: a location's `nan` gives way to
+    // any number (DESIGN §7.4). Always false for a type with no `nan`.
+    nan_displaced(*self, x: string, best: string, t: Ty) -> string = base_of(t) match
+        Real(b) -> self.def(s"arith.andi ${self.def(s"arith.cmpf uno, $best, $best : f$b")}, ${self.def(s"arith.cmpf ord, $x, $x : f$b")} : i1")
+        _ -> self.def("arith.constant false")
 
     // `sum(a, dim = k)` and the like: each lane along axis `k` reduced. A `k` computed at run time
     // that is not an axis traps.

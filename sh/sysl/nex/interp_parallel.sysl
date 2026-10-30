@@ -226,11 +226,12 @@ impl Interp
             elif name == "and" then Some(VBool(true))
             elif name == "or" then Some(VBool(false))
             else
-                // A location: the worst value at the largest index, which every candidate beats.
+                // A location: the worst value at the largest index, which every candidate beats or
+                // ties: a `nan` for a real, which every number beats.
                 val (vt, it) = pair_types(t)
                 var pair: Buf[Value] = buf()
 
-                pair.push(extreme_identity(name == "maxloc", vt))
+                pair.push(if is_real(base_of(vt)) then VReal(real.nan) else extreme_identity(name == "maxloc", vt))
                 pair.push(extreme_identity(false, it))
                 Some(VAgg(0, pair))
         RUser(_) -> None
@@ -249,7 +250,8 @@ impl Interp
                     _ -> (c, a, b) -> Ok(VReal(if low then minimum(real_of(a), real_of(b)) else maximum(real_of(a), real_of(b))))
 
             if name == "minloc" || name == "maxloc"
-                // Of two (value, index) pairs, the better value, and on a tie the lower index.
+                // Of two (value, index) pairs, the better value, and on a tie the lower index. A number
+                // beats a `nan`, and two `nan`s tie.
                 val (vt, it) = pair_types(t)
                 val better = self.op2(span, if name == "minloc" then "<" else ">", vt).unwrap()
                 val same = self.op2(span, "==", vt).unwrap()
@@ -258,7 +260,9 @@ impl Interp
                 return (c, a, b) ->
                     val av = field_at(a, 0)
                     val bv = field_at(b, 0)
-                    val pick = bool_of(better(bv, av)?) || bool_of(same(bv, av)?) && bool_of(lower(field_at(b, 1), field_at(a, 1))?)
+                    val beats = bool_of(better(bv, av)?) || nan_value(av) && !nan_value(bv)
+                    val tied = bool_of(same(bv, av)?) || nan_value(av) && nan_value(bv)
+                    val pick = beats || tied && bool_of(lower(field_at(b, 1), field_at(a, 1))?)
 
                     Ok(if pick then b else a)
 

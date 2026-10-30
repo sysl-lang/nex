@@ -622,9 +622,12 @@ impl Emitter
             elif name == "and" then self.def("arith.constant true")
             elif name == "or" then self.def("arith.constant false")
             else
-                // A location: the worst value at the largest index, which every candidate beats.
+                // A location: the worst value at the largest index, which every candidate beats or
+                // ties: a `nan` for a real, which every number beats.
                 val (vt, it) = pair_types(a.t)
-                val v = self.identity_of(span, if name == "minloc" then "minval" else "maxval", vt)
+                val v = base_of(vt) match
+                    Real(b) -> self.nan_const(b)
+                    _ -> self.identity_of(span, if name == "minloc" then "minval" else "maxval", vt)
                 val i = it match
                     Int(b, signed) -> self.def(s"arith.constant ${if signed then s"${(i128(1) << (b - 1)) - 1}" else "-1"} : i$b")
                     _ -> self.zero_of(span, it)
@@ -652,7 +655,8 @@ impl Emitter
             frame.push(b)
             self.in_frame(frame, texpr(span, t, TCall(f, leaves)))
 
-    // Of two (value, index) pairs, the better value, and on a tie the lower index (DESIGN §9.2).
+    // Of two (value, index) pairs, the better value, and on a tie the lower index (DESIGN §9.2). A
+    // number beats a `nan`, and two `nan`s tie.
     location_pick(*self, span: Span, name: string, t: Ty, a: string, b: string) -> string
         val at = self.ty(span, t)
         val (vt, it) = pair_types(t)
@@ -660,10 +664,16 @@ impl Emitter
         val bv = self.def(s"llvm.extractvalue $b[0] : $at")
         val ai = self.def(s"llvm.extractvalue $a[1] : $at")
         val bi = self.def(s"llvm.extractvalue $b[1] : $at")
-        val better = self.binary(span, if name == "minloc" then "<" else ">", bv, av, vt)
-        val tie = self.def(s"arith.andi ${self.binary(span, "==", bv, av, vt)}, ${self.binary(span, "<", bi, ai, it)} : i1")
+        val better = self.def(s"arith.ori ${self.binary(span, if name == "minloc" then "<" else ">", bv, av, vt)}, ${self.nan_displaced(bv, av, vt)} : i1")
+        val same = self.def(s"arith.ori ${self.binary(span, "==", bv, av, vt)}, ${self.both_nan(av, bv, vt)} : i1")
+        val tie = self.def(s"arith.andi $same, ${self.binary(span, "<", bi, ai, it)} : i1")
 
         self.def(s"arith.select ${self.def(s"arith.ori $better, $tie : i1")}, $b, $a : $at")
+
+    // Whether `x` and `y`, of type `t`, are both `nan`. Always false for a type with no `nan`.
+    both_nan(*self, x: string, y: string, t: Ty) -> string = base_of(t) match
+        Real(b) -> self.def(s"arith.andi ${self.def(s"arith.cmpf uno, $x, $x : f$b")}, ${self.def(s"arith.cmpf uno, $y, $y : f$b")} : i1")
+        _ -> self.def("arith.constant false")
 
     // The block partials at `p`, `nb` of them, combined in place in the fixed pairwise tree: in rounds,
     // each pairing neighbours, an odd last one carried up as it is, until the first holds the result.
