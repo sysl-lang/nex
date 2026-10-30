@@ -65,7 +65,7 @@ impl Elab
                 _ -> pos.push(a)
 
         if is_reduction(name) then return self.reduction(span, name, pos, dim)
-        if name == "origin" || name == "rebase" then return self.not_yet(span, s"the view function `${name}`")
+        if name == "origin" || name == "rebase" then return self.view_function(span, name, pos)
         if name == "zeros" || name == "ones" || name == "fill" || name == "identity" then return self.constructor(span, name, pos, want)
         if name == "map" || name == "filter" || name == "flatMap" || name == "reduce" then return self.higher_order(span, name, pos)
         if name == "assert_approx" || name == "assert_traps" then return self.array_assert(span, name, pos)
@@ -134,7 +134,9 @@ impl Elab
 
             if pos.len() == 2 then out.push(self.axis(pos[1], r, "an axis"))
 
-            return texpr(span, if name == "extent" then INTEGER else a.ty, TBuiltin(name, out))
+            if name == "reverse" then return reversed(span, a, out)
+
+            return texpr(span, INTEGER, TBuiltin(name, out))
 
         if name == "reshape"
             if pos.len() < 2 then return self.arity(span, name, "an array and its new extents, `reshape(a, (2, 3))`")

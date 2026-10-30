@@ -1,0 +1,119 @@
+@tests
+
+// Views, the copies they and `var` arrays need, and `origin` (DESIGN §6, §8.4): each rule with the
+// typed IR that shows its node, and the program it refuses.
+
+private val MAIN = "def main() = ()\n"
+
+// -- what a view is ---------------------------------------------------------------------------------
+
+@test("a slice read as a value is a view; an element and a slice as a place are index nodes")
+view_nodes()
+    assert_eq(elaborated("def z(v: inout [integer], x: inout integer) = v[1] = x\n\ndef main() =\n  var a = [1, 2, 3, 4]\n  z(a[2..3], a[1])\n  a[2..3] = 0\n  print(a[2..3])\n"),
+        "(def z ((v#0 inout [int64]) (x#1 inout int64)) void (= (index:int64 v#0 1) x#1))\n(def main () void (block (var a#2:[int64] (array:[int64] 1 2 3 4)) (call z (inout (index:[int64] a#2 (2 .. 3))) (inout (index:int64 a#2 1))) (= (index:[int64] a#2 (2 .. 3)) (broadcast:[int64] 0)) (print (view:[int64] a#2 (2 .. 3)))))")
+
+@test("a view keeps the value it was taken with, and needs no node for it")
+view_then_write()
+    assert_eq(elaborated("def main() =\n  var a = [10, 20, 30, 40, 50]\n  val v = a[2..4]\n  a[3] = 99\n  print(v[2])\n"),
+        "(def main () void (block (var a#0:[int64] (array:[int64] 10 20 30 40 50)) (val v#1:[int64] (view:[int64] a#0 (2 .. 4))) (= (index:int64 a#0 3) 99) (print (index:int64 v#1 2))))")
+
+@test("reverse is a view with a negative stride on the axis it reverses")
+reverse_is_a_view()
+    assert_eq(elaborated("def f(m: [real; :, :]) =\n  print(reverse(m))\n  print(reverse(m, 2))\n" + MAIN),
+        "(def f ((m#0 [real64; :, :])) void (block (print (view:[real64; :, :] m#0 (_ .. _ by -1) :)) (print (view:[real64; :, :] m#0 : (_ .. _ by -1)))))\n(def main () void ())")
+    assert_eq(refused("def f(m: [real; :, :]) = reverse(m, 3)\n" + MAIN), "error: there is no axis 3: this array has rank 2 @1:37")
+
+@test("nothing writes through a view, and a slice of a val is no place")
+view_is_read_only()
+    assert_eq(refused("def f(a: [integer]) =\n  val v = a[1..2]\n  v[1] = 1\n" + MAIN), "error: `v` is a view, and nothing writes through a view; assign to the window of the array it was taken from @3:3")
+    assert_eq(refused("def z(v: inout [integer]) = v[1] = 0\ndef f() =\n  var a = [1, 2, 3]\n  val v = a[1..2]\n  z(v)\n" + MAIN), "error: `v` is a view, and nothing writes through a view; assign to the window of the array it was taken from @5:5")
+    assert_eq(refused("def f() =\n  val a = [1, 2, 3]\n  a[1..2][1] = 0\n" + MAIN), "error: `a` cannot be assigned: it is a `val` @3:3")
+    assert_eq(refused("def z(v: inout [integer]) = v[1] = 0\ndef f() =\n  val a = [1, 2, 3]\n  z(a[1..2])\n" + MAIN), "error: `a` cannot be assigned: it is a `val` @4:5")
+
+// -- the copies of a view ---------------------------------------------------------------------------
+
+@test("a view bound or assigned to a var is copied into it")
+view_into_var()
+    assert_eq(elaborated("def f(a: [integer]) =\n  var w = a[1..4]\n  val v = a[.. by -1]\n  var u = v\n  u = a[2..3]\n" + MAIN),
+        "(def f ((a#0 [int64])) void (block (var w#1:[int64] (copy-into-var (view:[int64] a#0 (1 .. 4)))) (val v#2:[int64] (view:[int64] a#0 (_ .. _ by -1))) (var u#3:[int64] (copy-into-var v#2)) (= u#3 (copy-into-var (view:[int64] a#0 (2 .. 3))))))\n(def main () void ())")
+
+@test("a view returned, stored or bound at module level is copied where it escapes")
+view_escapes()
+    assert_eq(elaborated("enum E =\n  Box(v: [integer])\n  Nothing\n\nstruct S\n  v: [integer]\n\ndef f(a: [integer], c: bool) =\n  val s = S(a[1..2])\n  val t = (a[1..2], 1)\n  val e = Box(a[2..])\n  return if c then a[1..2] else a\n" + MAIN),
+        "(enum E (Box (v [int64])) Nothing)\n(struct S (v [int64]))\n(def f ((a#0 [int64]) (c#1 bool)) [int64] (block (val s#2:S (new:S (copy-escape (view:[int64] a#0 (1 .. 2))))) (val t#3:([int64], int64) (tuple:([int64], int64) (copy-escape (view:[int64] a#0 (1 .. 2))) 1)) (val e#4:E (variant:E Box (copy-escape (view:[int64] a#0 (2 .. _))))) (return (if:[int64] c#1 (copy-escape (view:[int64] a#0 (1 .. 2))) a#0))))\n(def main () void ())")
+    assert_eq(elaborated("def first(a: [integer]) = a[1..2]\n" + MAIN), "(def first ((a#0 [int64])) [int64] (copy-escape (view:[int64] a#0 (1 .. 2))))\n(def main () void ())")
+    assert_eq(elaborated("val g = [1, 2, 3]\nval h = g[2..]\n" + MAIN), "(val g [int64] (array:[int64] 1 2 3))\n(val h [int64] (copy-escape (view:[int64] g (2 .. _))))\n(def main () void ())")
+
+@test("a view passed as an argument or returned as a parameter is not copied")
+view_borrowed()
+    assert_eq(elaborated("def g(x: [integer]) = x\ndef f(a: [integer]) = print(g(a[2..]))\n" + MAIN),
+        "(def g ((x#0 [int64])) [int64] x#0)\n(def f ((a#1 [int64])) void (print (call:[int64] g (view:[int64] a#1 (2 .. _)))))\n(def main () void ())")
+
+@test("a lambda that escapes copies the views it captures; one passed straight borrows them")
+view_captured()
+    assert_eq(elaborated("def f(a: [integer]) =\n  val v = a[2..]\n  val k = () -> v[1]\n  print(map(a, x -> x + v[1]))\n  k\n" + MAIN),
+        "(def f ((a#0 [int64])) () -> int64 (block:() -> int64 (val v#1:[int64] (view:[int64] a#0 (2 .. _))) (val k#2:() -> int64 (lambda 0)) (print (map:[int64] a#0 (lambda 1))) k#2))\n(def main () void ())\n(lambda 0 _ () int64 (captures v#1) (copies v#1) (index:int64 v#1 1))\n(lambda 1 _ ((x#3 int64)) int64 (captures v#1) passed (+:int64 x#3 (index:int64 v#1 1)))")
+
+// -- auto-clone ---------------------------------------------------------------------------------------
+
+@test("a var array given to another var moves when nothing uses it afterwards, and clones when something does")
+transfer_by_later_use()
+    assert_eq(elaborated("def main() =\n  var a = [10, 20, 30]\n  var b = a\n  b[1] = 999\n  print(b[1])\n"),
+        "(def main () void (block (var a#0:[int64] (array:[int64] 10 20 30)) (var b#1:[int64] (move a#0)) (= (index:int64 b#1 1) 999) (print (index:int64 b#1 1))))")
+    assert_eq(elaborated("def main() =\n  var a = [10, 20, 30]\n  var b = a\n  b[1] = 999\n  print(a[1])\n"),
+        "(def main () void (block (var a#0:[int64] (array:[int64] 10 20 30)) (var b#1:[int64] (clone a#0)) (= (index:int64 b#1 1) 999) (print (index:int64 a#0 1))))")
+    assert_eq(elaborated("def main() =\n  var a = [1, 2, 3]\n  var b = [9, 9, 9]\n  b = a\n  print(a[1])\n"),
+        "(def main () void (block (var a#0:[int64] (array:[int64] 1 2 3)) (var b#1:[int64] (array:[int64] 9 9 9)) (= b#1 (clone a#0)) (print (index:int64 a#0 1))))")
+    assert_eq(elaborated("def main() =\n  var a = [1, 2]\n  var b = a\n  var x = 0\n  var y = 0\n  x, y = a[1], b[1]\n"),
+        "(def main () void (block (var a#0:[int64] (array:[int64] 1 2)) (var b#1:[int64] (clone a#0)) (var x#2:int64 0) (var y#3:int64 0) (= (x#2 y#3) (tuple:(int64, int64) (index:int64 a#0 1) (index:int64 b#1 1)))))")
+
+@test("a transfer clones a parameter, a captured local, a module binding and one a loop comes back to")
+transfer_clones()
+    assert_eq(elaborated("def f(a: [integer], b: inout [integer]) =\n  var x = a\n  var y = b\n  var z = [1, 2]\n  var w = z\n  for i in 1..2\n    var u = w\n    w = u\n  val k = [3]\n  val q = () -> k[1]\n  var r = k\n" + MAIN),
+        "(def f ((a#0 [int64]) (b#1 inout [int64])) void (block (var x#2:[int64] (clone a#0)) (var y#3:[int64] (clone b#1)) (var z#4:[int64] (array:[int64] 1 2)) (var w#5:[int64] (move z#4)) (for L0 i#6:int64 (1 .. 2) (block (var u#7:[int64] (clone w#5)) (= w#5 (move u#7)))) (val k#8:[int64] (array:[int64] 3)) (val q#9:() -> int64 (lambda 0)) (var r#10:[int64] (clone k#8)) ()))\n(def main () void ())\n(lambda 0 _ () int64 (captures k#8) (index:int64 k#8 1))")
+    assert_eq(elaborated("var g = [1, 2]\ndef f() =\n  var a = g\n  val b = [1]\n  var c = b\n  var d: [integer] = [1, 2]\n  var s: [integer; 2] = [1, 2]\n  d = s\n" + MAIN),
+        "(var g [int64] (array:[int64] 1 2))\n(def f () void (block (var a#0:[int64] (clone g)) (val b#1:[int64] (array:[int64] 1)) (var c#2:[int64] (move b#1)) (var d#3:[int64] (array:[int64] 1 2)) (var s#4:[int64; 2] (array:[int64; 2] 1 2)) (= d#3 (promote:[int64] (move s#4)))))\n(def main () void ())")
+
+// -- origin ---------------------------------------------------------------------------------------
+
+@test("origin takes an offset view that indexing, slicing, end and the prelude read")
+origin_views()
+    assert_eq(elaborated("def f(a: [integer]) =\n  val k = origin(a, -1)\n  val m = origin([[1, 2], [3, 4]], 0)\n  print(k[-1] + k[end] + m[0, 1])\n  print(k[0..end])\n  print(sum(k) + sum(k * 2))\n  print(rebase(k))\n  print(origin(k, 5)[5])\n  for x in k\n    print(x)\n" + MAIN),
+        "(def f ((a#0 [int64])) void (block (val k#1:[int64] (origin:[int64] a#0 -1)) (val m#2:[int64; :, :] (origin:[int64; :, :] (array:[int64; :, :] (array:[int64] 1 2) (array:[int64] 3 4)) 0)) (print (+:int64 (+:int64 (index:int64 k#1 -1) (index:int64 k#1 (end 1))) (index:int64 m#2 0 1))) (print (view:[int64] k#1 (0 .. (end 1)))) (print (+:int64 (sum:int64 k#1) (sum:int64 (.*:[int64] k#1 2)))) (print (rebase k#1)) (print (index:int64 (origin:[int64] k#1 5) 5)) (for L0 x#3:int64 (in k#1) (print x#3))))\n(def main () void ())")
+
+@test("an origin view cannot leave the function that took it")
+origin_does_not_escape()
+    assert_eq(refused("def f(a: [integer]) = origin(a, 0)\n" + MAIN), "error: an `origin` view cannot leave this function, and this one is returned; `rebase(...)` makes an ordinary 1-based array @1:23")
+    assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a, 0)\n  return w\n" + MAIN), "error: an `origin` view cannot leave this function, and this one is returned; `rebase(w)` makes an ordinary 1-based array @3:10")
+    assert_eq(refused("def g(x: [integer]) = x[1]\ndef f(a: [integer]) =\n  val w = origin(a, 0)\n  g(w)\n" + MAIN), "error: an `origin` view cannot leave this function, and this one is passed to `g`; `rebase(w)` makes an ordinary 1-based array @4:5")
+    assert_eq(refused("@elemental\ndef h(x: integer) = x + 1\ndef f(a: [integer]) =\n  val w = origin(a, 0)\n  print(h(w))\n" + MAIN), "error: an `origin` view cannot leave this function, and this one is passed to `h`; `rebase(w)` makes an ordinary 1-based array @5:11")
+    assert_eq(refused("struct S\n  v: [integer]\ndef f(a: [integer]) =\n  val w = origin(a, 0)\n  S(w)\n" + MAIN), "error: an `origin` view cannot leave this function, and this one is stored in `S`; `rebase(w)` makes an ordinary 1-based array @5:5")
+    assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a, 0)\n  (w, 1)\n" + MAIN), "error: an `origin` view cannot leave this function, and this one is stored in a tuple; `rebase(w)` makes an ordinary 1-based array @3:4")
+    assert_eq(refused("val a = [1, 2]\nval w = origin(a, 0)\n" + MAIN), "error: an `origin` view cannot leave this function, and this one is bound at module level; `rebase(...)` makes an ordinary 1-based array @2:9")
+    assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a, 0)\n  () -> w[0]\n" + MAIN), "error: an `origin` view cannot leave this function, and this one is captured by this lambda, which may outlive the call; `rebase(w)` makes an ordinary 1-based array @3:3")
+    assert_eq(elaborated("def f(a: [integer]) =\n  val w = origin(a, 0)\n  print(map([1], x -> w[x]))\n" + MAIN),
+        "(def f ((a#0 [int64])) void (block (val w#1:[int64] (origin:[int64] a#0 0)) (print (map:[int64] (array:[int64] 1) (lambda 0)))))\n(def main () void ())\n(lambda 0 _ ((x#2 int64)) int64 (captures w#1) passed (index:int64 w#1 x#2))")
+
+@test("only a val holds an origin view, and nothing writes through one")
+origin_held_by_a_val()
+    assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a, 0)\n  var u = w\n" + MAIN), "error: an `origin` view is held only by a `val` in the function that took it; `rebase(w)` makes an ordinary 1-based array @3:11")
+    assert_eq(refused("def f(a: [integer], b: [integer]) =\n  var u = b\n  u = origin(a, 0)\n" + MAIN), "error: an `origin` view is held only by a `val` in the function that took it; `rebase(...)` makes an ordinary 1-based array @3:7")
+    assert_eq(refused("def f(a: [integer], c: bool) =\n  val w = if c then origin(a, 0) else a\n  print(w)\n" + MAIN), "error: an `origin` view is held only by a `val` in the function that took it; `rebase(...)` makes an ordinary 1-based array @2:21")
+    assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a, 0)\n  w[0] = 1\n" + MAIN), "error: `w` cannot be assigned: an `origin` view is read-only; write the array it was taken from @3:3")
+
+@test("origin takes a first index per axis at most, and rebase one array")
+origin_arguments()
+    assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a, 0, 1)\n" + MAIN), "error: this array has rank 1, and 2 first indices are given @2:24")
+    assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a)\n" + MAIN), "error: `origin` takes an array and the first index of one axis or more, `origin(a, 0)` @2:11")
+    assert_eq(refused("def f(a: [integer]) =\n  val w = origin(a, 1.5)\n" + MAIN), "error: a first index must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @2:21")
+    assert_eq(refused("def f(a: [integer]) =\n  val w = rebase(a, 1)\n" + MAIN), "error: `rebase` takes one array, `rebase(w)` @2:11")
+    assert_eq(refused("def f(x: real) =\n  val w = rebase(x)\n" + MAIN), "error: `rebase` takes an array; this is real64 @2:18")
+
+// -- complex parts --------------------------------------------------------------------------------
+
+@test("complex[realN](re, im) converts each part and works element by element")
+complex_from_arrays()
+    assert_eq(elaborated("def f(re: [real], im: real32) =\n  print(complex[real32](re, im))\n  print(complex(re, 1))\n  print(complex(1, 2))\n" + MAIN),
+        "(def f ((re#0 [real64]) (im#1 real32)) void (block (print (.complex:[complex[real32]] (.convert:[real32] re#0) im#1)) (print (.complex:[complex[real64]] re#0 (adopt:real64 1))) (print (complex:complex[real64] (adopt:real64 1) (adopt:real64 2)))))\n(def main () void ())")
+    assert_eq(refused("def f(z: [complex]) = print(complex(z, 1.0))\n" + MAIN), "error: a complex number does not convert to real64: take `.re` (or `abs`, `arg`) first @1:37")
+    assert_eq(refused("def f(a: [real], b: [real; :, :]) = print(complex(a, b))\n" + MAIN), "error: `complex` combines arrays of one rank; these have rank 1 and rank 2 @1:43")

@@ -1,0 +1,381 @@
+// Views, `origin`, and every copy an array value needs (DESIGN §6, §8.4).
+//
+// **A slice read as a value is a view, and a view is a `TView`**: the same subscripts as a
+// `TIndex`, which is left for an element and for a slice as a place. Nothing about a view is copied
+// until it would stop being one, and each of those points is a `TCopy` that says why: a view bound
+// or assigned to a `var` (rule 2), and a view returned, stored in a struct, tuple or enum payload,
+// or bound at module level (rule 3). A lambda that escapes lists the views it captures as copies.
+// Rule 4 needs no node: a view is a value, and the write that would show through it is what copies.
+//
+// **An array local handed to a `var` is a `TTransfer`**, and whether it moves or clones is decided
+// once its whole body has been seen: it moves only where the body bound the source with `val` or
+// `var`, no lambda captures it, nothing uses it afterwards and no loop comes round to use it again.
+//
+// **An `origin` view stays in the function that took it.** A `val` that holds one is an `LOrigin`
+// local, indexed from its first indices; read as a value, by an operator or the prelude, it is its
+// elements, 1-based like every other value. Returning it, storing it, binding it at module level,
+// passing it to a function or capturing it in a lambda that escapes is refused, and so is anything
+// that would hold it other than a `val`.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+struct Views
+    // The `val` locals bound to a view of storage they do not own.
+    locals: Buf[usize]
+
+empty_views() -> Views = Views(buf())
+
+// A slice read as a value: the `TIndex` the index list made, as the view it is (DESIGN §6.1).
+as_view(e: TExpr) -> TExpr
+    if !is_array(e.ty) then return e
+
+    *e.kind match
+        TArray(op) -> *op match
+            TIndex(target, subs) -> texpr(e.span, e.ty, TArray(TView(target, subs)))
+            _ -> e
+        _ -> e
+
+// `reverse(a)` is `a[.. by -1]` and `reverse(a, k)` the same on axis `k`: a view (DESIGN §5.4). An
+// axis known only at run time leaves the call as the prelude's, which is a view all the same.
+reversed(span: Span, a: TExpr, args: Buf[TExpr]) -> TExpr
+    val rank = rank_of(a.ty)
+    var axis: usize = 1
+
+    if args.len() == 2
+        val k = *args[1].kind match
+            TLiteral(IntVal(k), _) -> k
+            _ -> 0i64
+
+        if k < 1 || k > i64(rank) then return texpr(span, a.ty, TBuiltin("reverse", args))
+
+        axis = usize(k)
+
+    var subs: Buf[TSub] = buf()
+
+    for j in 0..<rank
+        subs.push(if j + 1 == axis then TSubWindow(None, None, true, Some(texpr(span, INTEGER, TLiteral(IntVal(-1), false)))) else TSubAll)
+
+    texpr(span, a.ty, TArray(TView(a, subs)))
+
+origin_leaves(what: string, name: string) -> string =
+    s"an `origin` view cannot leave this function, and this one is ${what}; `rebase(${name})` makes an ordinary 1-based array"
+
+private origin_stays(name: string) -> string =
+    s"an `origin` view is held only by a `val` in the function that took it; `rebase(${name})` makes an ordinary 1-based array"
+
+impl Elab
+    is_view_local(self, id: usize) -> bool
+        for l in self.vw.locals
+            if l == id then return true
+
+        false
+
+    // Whether `e` is an `origin` view, which is indexed from its own first indices.
+    is_origin(self, e: TExpr) -> bool = *e.kind match
+        TLocal(id) -> self.locals[id].kind match
+            LOrigin -> true
+            _ -> false
+        TArray(op) -> *op match
+            TOrigin(_, _) -> true
+            _ -> false
+        _ -> false
+
+    // The name `rebase(...)` is shown with in a diagnostic about the origin view `e`.
+    private origin_name(self, e: TExpr) -> string = *e.kind match
+        TLocal(id) -> self.locals[id].name
+        _ -> "..."
+
+    // Whether the array `e` evaluates to is, or may be, a view of storage it does not own.
+    views_storage(self, e: TExpr) -> bool = *e.kind match
+        TLocal(id) -> self.is_view_local(id) || self.is_origin(e)
+        TArray(op) -> *op match
+            TView(_, _) -> true
+            TOrigin(_, _) -> true
+            TShapeCheck(v) -> self.views_storage(v)
+            _ -> false
+        TBuiltin(name, _) -> name == "reverse"
+        // A static shape relaxed to a dynamic one is the same elements; a widened element type is
+        // a new array.
+        TPromote(v) -> is_array(v.ty) && ty_eq(elem_of(v.ty), elem_of(e.ty)) && self.views_storage(v)
+        TIf(_, a, b) -> self.views_storage(a) || b.is_some() && self.views_storage(b.unwrap())
+        TBlock(_, r) -> self.views_storage(r)
+        TMatch(_, arms) ->
+            for a in arms
+                if self.views_storage(a.body) then return true
+
+            false
+        _ -> false
+
+    // -- binding and storing ----------------------------------------------------------------------
+
+    // `val` or `var` `name` = `v` inside a body. A `val` of an `origin` view is an `LOrigin` local and
+    // a `val` of any other view is noted as one; a `var` owns its elements (DESIGN §6.2 rule 2).
+    bind_local(*self, span: Span, at: Span, name: string, ty: Ty, kind: LocalKind, v: TExpr) -> TExpr
+        val writable = kind match
+            LVar -> true
+            _ -> false
+
+        if writable
+            if self.is_origin(v)
+                self.fail(v.span, origin_stays(self.origin_name(v)))
+                return texpr(span, Void, TLet(self.declare_local(at, name, ty, kind), self.invalid(v.span)))
+
+            return texpr(span, Void, TLet(self.declare_local(at, name, ty, kind), self.into_var(v)))
+
+        val origin = self.is_origin(v)
+        val view = !origin && is_array(v.ty) && self.views_storage(v)
+        val id = self.declare_local(at, name, ty, if origin then LOrigin else kind)
+
+        if view then self.vw.locals.push(id)
+
+        texpr(span, Void, TLet(id, v))
+
+    // `v` stored by `=` into the whole of the place `p`: into a variable it is the variable's own, into
+    // a field it is stored.
+    stored(*self, p: TExpr, v: TExpr) -> TExpr = *p.kind match
+        TLocal(_) -> self.var_value(v)
+        TGlobalRef(_) -> self.var_value(v)
+        TField(_, _, _) -> self.escaping(v, "stored in a struct")
+        TTupleField(_, _) -> self.escaping(v, "stored in a tuple")
+        _ -> v
+
+    private var_value(*self, v: TExpr) -> TExpr
+        if !self.is_origin(v) then return self.into_var(v)
+
+        self.fail(v.span, origin_stays(self.origin_name(v)))
+        self.invalid(v.span)
+
+    // The value a `var` is given: a view copied, an array local transferred, anything else (a value
+    // just computed) as it is.
+    into_var(*self, v: TExpr) -> TExpr
+        if !is_array(v.ty) then return v
+        if self.views_storage(v) then return texpr(v.span, v.ty, TArray(TCopy(v, IntoVar)))
+
+        *v.kind match
+            TLocal(_) -> texpr(v.span, v.ty, TArray(TTransfer(v, Transfer(false))))
+            // A module-level array stays its binding's: the `var` takes a copy.
+            TGlobalRef(_) -> texpr(v.span, v.ty, TArray(TTransfer(v, Transfer(true))))
+            TPromote(x) -> if ty_eq(elem_of(x.ty), elem_of(v.ty)) then texpr(v.span, v.ty, TPromote(self.into_var(x))) else v
+            TArray(op) -> *op match
+                TShapeCheck(x) -> texpr(v.span, v.ty, TArray(TShapeCheck(self.into_var(x))))
+                _ -> v
+            _ -> v
+
+    // `v` where it outlives the expression that made it (DESIGN §6.2 rule 3): a view is copied to a
+    // dense array at each place it could come from, and an `origin` view is refused.
+    escaping(*self, v: TExpr, what: string) -> TExpr
+        if !is_array(v.ty) then return v
+
+        if self.is_origin(v)
+            self.fail(v.span, origin_leaves(what, self.origin_name(v)))
+            return self.invalid(v.span)
+
+        if !self.views_storage(v) then return v
+
+        *v.kind match
+            TBlock(items, r) -> texpr(v.span, v.ty, TBlock(items, self.escaping(r, what)))
+            TIf(c, a, b) -> texpr(v.span, v.ty, TIf(c, self.escaping(a, what), Some(self.escaping(b.unwrap(), what))))
+            TMatch(s, arms) ->
+                var out: Buf[TArm] = buf()
+
+                for a in arms
+                    out.push(TArm(a.pat, self.escaping(a.body, what)))
+
+                texpr(v.span, v.ty, TMatch(s, out))
+            _ -> texpr(v.span, v.ty, TArray(TCopy(v, Escape)))
+
+    // -- `origin` and `rebase` --------------------------------------------------------------------
+
+    // `origin(a, f1, ..., fk)` and `rebase(w)` (DESIGN §6.4).
+    view_function(*self, span: Span, name: string, pos: Buf[Expr]) -> TExpr
+        if name == "rebase"
+            if pos.len() != 1 then return self.arity(span, name, "one array, `rebase(w)`")
+
+            val w = self.array_arg(name, pos[0])
+
+            if is_error(w.ty) then return self.invalid(span)
+
+            return texpr(span, w.ty, TArray(TCopy(w, Rebase)))
+
+        if pos.len() < 2 then return self.arity(span, name, "an array and the first index of one axis or more, `origin(a, 0)`")
+
+        val a = self.array_arg(name, pos[0])
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        val rank = rank_of(a.ty)
+
+        if pos.len() - 1 > rank
+            self.fail(pos[rank + 1].span, s"this array has rank ${rank}, and ${pos.len() - 1} first indices are given")
+            return self.invalid(span)
+
+        var firsts: Buf[TExpr] = buf()
+
+        for k in 1..<pos.len()
+            firsts.push(self.check(pos[k], INTEGER, "a first index"))
+
+        texpr(span, a.ty, TArray(TOrigin(a, firsts)))
+    end view_function
+
+    // -- `complex[realN](re, im)` -----------------------------------------------------------------
+
+    // A complex number from its two parts, or element by element where either part is an array.
+    make_complex(*self, span: Span, target: Ty, re_e: Expr, im_e: Expr) -> TExpr
+        val part = Real(bits_of(target))
+        val re = self.complex_part(re_e, part)
+        val im = self.complex_part(im_e, part)
+
+        if is_error(re.ty) || is_error(im.ty) then return self.invalid(span)
+        if !is_array(re.ty) && !is_array(im.ty) then return texpr(span, target, TMakeComplex(re, im))
+
+        var args: Buf[TExpr] = buf()
+
+        args.push(re)
+        args.push(im)
+        self.elemental(span, "complex", args, target)
+
+    // A part converts as `realN(x)` would: a narrower real rounds, an integer converts, element by
+    // element on an array (DESIGN §2.4).
+    private complex_part(*self, e: Expr, part: Ty) -> TExpr
+        var one: Buf[Expr] = buf()
+
+        one.push(e)
+        self.conversion(e.span, show_ty(part), part, one)
+
+    // -- after the whole program ------------------------------------------------------------------
+
+    // Decides every transfer and refuses an `origin` view wherever a body lets one out.
+    finish_views(*self)
+        for f in self.fout
+            self.decide_transfers(f.body)
+            self.origin_uses(f.body)
+
+        for l in self.lambdas
+            self.decide_transfers(l.body)
+            self.origin_uses(l.body)
+
+        for g in self.gout
+            self.origin_uses(g.init)
+
+    // Every `TTransfer` in one body: a move where the body owns the source and is done with it.
+    private decide_transfers(self, body: TExpr)
+        var w = Lifetimes(0, buf(), buf(), buf(), buf())
+
+        for _ in self.locals
+            w.last.push(0)
+            w.born.push(None)
+
+        w.walk(body)
+
+        for s in w.sites
+            val id = s.source
+            var clones = self.captured(id)
+
+            w.born[id] match
+                Some(b) ->
+                    if w.last[id] > s.time then clones = true
+
+                    for start in s.loops
+                        if b < start then clones = true
+                None -> clones = true
+
+            s.d.clones = clones
+
+    private captured(self, id: usize) -> bool
+        for c in self.captures
+            if c.local == id then return true
+
+        false
+
+    // The places in `e` an `origin` view is let out of: an argument of a function, and a branch or a
+    // block's value, which a binding would hold as an ordinary array.
+    private origin_uses(*self, e: TExpr)
+        *e.kind match
+            TCall(f, args) -> self.origin_args(args, f)
+            TArray(op) -> *op match
+                TElementalCall(f, args) -> self.origin_args(args, f)
+                _ -> ()
+            TIf(_, a, b) ->
+                self.origin_held(a)
+
+                b match
+                    Some(x) -> self.origin_held(x)
+                    None -> ()
+            TBlock(_, r) -> self.origin_held(r)
+            TMatch(_, arms) ->
+                for a in arms
+                    self.origin_held(a.body)
+            _ -> ()
+
+        for c in children(e)
+            self.origin_uses(c)
+
+    private origin_args(*self, args: Buf[TExpr], f: TExpr)
+        val name = *f.kind match
+            TFnRef(n) -> s"passed to `${n}`"
+            _ -> "passed to a function"
+
+        for a in args
+            if self.is_origin(a) then self.fail(a.span, origin_leaves(name, self.origin_name(a)))
+
+    private origin_held(*self, e: TExpr)
+        if self.is_origin(e) then self.fail(e.span, origin_stays(self.origin_name(e)))
+end Elab
+
+// One `TTransfer` of a local, with the time it happens and the start of every loop around it.
+struct Site
+    d: &Transfer
+    source: usize
+    time: usize
+    loops: Buf[usize]
+
+// A walk of one body in evaluation order, each use of a local given a time.
+struct Lifetimes
+    clock: usize
+    // The time of each local's last use, and of its binding by a `val` or `var` in this body.
+    last: Buf[usize]
+    born: Buf[Option[usize]]
+    // The start time of each loop around the cursor.
+    loops: Buf[usize]
+    sites: Buf[Site]
+
+    walk(*self, e: TExpr)
+        *e.kind match
+            TLocal(id) ->
+                self.clock += 1
+                self.last.set(id, self.clock)
+                return
+            TLet(id, init) ->
+                self.walk(init)
+                self.clock += 1
+                self.born.set(id, Some(self.clock))
+                return
+            TWhile(_, _, _) -> return self.walk_loop(e)
+            TFor(_, _, _, _, _, _, _) -> return self.walk_loop(e)
+            TArray(op) -> *op match
+                TTransfer(v, d) -> *v.kind match
+                    TLocal(id) ->
+                        self.clock += 1
+                        self.last.set(id, self.clock)
+                        var around: Buf[usize] = buf()
+
+                        around.extend(self.loops.view())
+                        self.sites.push(Site(d, id, self.clock, around))
+                        return
+                    _ -> ()
+                TForEach(_, _, _, _) -> return self.walk_loop(e)
+                _ -> ()
+            _ -> ()
+
+        for c in children(e)
+            self.walk(c)
+
+    private walk_loop(*self, e: TExpr)
+        self.loops.push(self.clock + 1)
+
+        for c in children(e)
+            self.walk(c)
+
+        self.loops.pop()
+end Lifetimes
