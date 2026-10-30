@@ -1,0 +1,525 @@
+module sh.sysl.nex
+@tests
+
+// The embedding API driven from sysl as a host drives it (DESIGN §16): loading with diagnostics as
+// values, calling by name, values crossing in both directions and refused at the boundary, host
+// functions and host types, traps with their stack, `stop`, the step budget and cancelling, the
+// sandbox, and a script reloaded many times.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{make_dir_all, make_temp_dir, remove_dir_all, write_text}
+import sysl.text.{StrBuilder, join, str_builder}
+
+private struct Out
+    text: StrBuilder
+
+// Options whose `write` keeps what the script prints in `o`.
+private kept(o: &Out, budget: long = 0, sandbox: bool = false) -> ScriptOptions =
+    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, budget, false, None)
+
+private quiet() -> ScriptOptions = ScriptOptions((s, t) -> (), false, 0, false, None)
+
+private loaded(text: string, host: Host = new_host(), opts: ScriptOptions = quiet()) -> &Script = load_script(text, "t.nex", host, opts) match
+    Ok(s) -> s
+    Err(ds) -> panic(ds[0].text)
+
+// The first diagnostic refusing `text`, as `message @line:col`.
+private refusal(text: string, host: Host = new_host(), opts: ScriptOptions = quiet()) -> string = load_script(text, "t.nex", host, opts) match
+    Ok(_) -> "loaded"
+    Err(ds) -> s"${ds[0].message} @${ds[0].line}:${ds[0].col}"
+
+// A value as a line of text, every width and name in it.
+private shown(v: NexValue) -> string = v match
+    NInt(n, b, s) -> s"${if s then "i" else "u"}$b:$n"
+    NReal(x, b) -> s"r$b:$x"
+    NComplex(re, im, b) -> s"c$b:$re,$im"
+    NBool(x) -> s"$x"
+    NStr(x) -> s"\"$x\""
+    NArray(a) -> s"[${join_longs(a.ext)}] " + elems_shown(a.elems)
+    NTuple(xs) -> s"(${shown_all(xs)})"
+    NStruct(n, fields) ->
+        var parts: Buf[string] = buf()
+
+        for f in fields
+            parts.push(s"${f.name}=${shown(f.value)}")
+
+        s"$n{${join(parts.view(), " ")}}"
+    NVariant(n, xs) -> if xs.len() == 0 then n else s"$n(${shown_all(xs)})"
+    NHandle(h) -> s"${h.type_name}#${h.id}"
+    NNothing -> "nothing"
+
+private elems_shown(e: Elements) -> string = e match
+    Ints(xs, b, s) -> s"${if s then "i" else "u"}$b ${join_longs(xs)}"
+    Reals(xs, b) ->
+        var parts: Buf[string] = buf()
+
+        for x in xs
+            parts.push(s"$x")
+
+        s"r$b ${join(parts.view(), " ")}"
+    Complexes(xs, b) ->
+        var parts: Buf[string] = buf()
+
+        for x in xs
+            parts.push(s"$x")
+
+        s"c$b ${join(parts.view(), " ")}"
+    Bools(xs) ->
+        var parts: Buf[string] = buf()
+
+        for x in xs
+            parts.push(s"$x")
+
+        s"b ${join(parts.view(), " ")}"
+    Others(xs) -> shown_all(xs)
+
+private shown_all(xs: Buf[NexValue]) -> string
+    var parts: Buf[string] = buf()
+
+    for x in xs
+        parts.push(shown(x))
+
+    join(parts.view(), " ")
+
+private join_longs(xs: Buf[long]) -> string
+    var parts: Buf[string] = buf()
+
+    for x in xs
+        parts.push(s"$x")
+
+    join(parts.view(), " ")
+
+private one(v: NexValue) -> Buf[NexValue]
+    var out: Buf[NexValue] = buf()
+
+    out.push(v)
+    out
+
+private none() -> Buf[NexValue] = buf()
+
+private longs(xs: []const long) -> Buf[long]
+    var out: Buf[long] = buf()
+
+    for x in xs
+        out.push(x)
+
+    out
+
+private reals(xs: []const real) -> Buf[real]
+    var out: Buf[real] = buf()
+
+    for x in xs
+        out.push(x)
+
+    out
+
+private called(s: &Script, name: string, args: Buf[NexValue]) -> string = s.call(name, args) match
+    Ok(v) -> shown(v)
+    Err(e) -> e.text()
+
+// What `run` gave: `exit N`, or the error's text.
+private ran(s: &Script, args: []const string = []) -> string = s.run(args) match
+    Ok(code) -> s"exit $code"
+    Err(e) -> e.text()
+
+// -- loading -----------------------------------------------------------------------------------------
+
+@test("a script that does not elaborate is refused with its diagnostics as values: file, line, column, span, message and the rendered text")
+emb_load_diagnostics()
+    load_script("def main() =\n  val x: int32 = \"no\"\n", "model.nex", new_host(), quiet()) match
+        Ok(_) -> assert(false, "loaded")
+        Err(ds) ->
+            assert_eq(ds.len(), 1)
+            assert_eq(ds[0].file, "model.nex")
+            assert_eq(ds[0].line, 2)
+            assert_eq(ds[0].col, 18)
+            assert(ds[0].message.contains("int32"), ds[0].message)
+            assert(ds[0].text.contains("model.nex:2:18"), ds[0].text)
+            assert(ds[0].text.contains(ds[0].message), ds[0].text)
+            assert_eq(ds[0].span.start, 30)
+
+    // A parse error is one diagnostic too.
+    assert(refusal("def main( =\n").ends_with("@1:11"), refusal("def main( =\n"))
+
+@test("a script loaded from a file names that file in its diagnostics, and an unreadable entry is one diagnostic")
+emb_load_file()
+    val dir = make_temp_dir("nex-embed").unwrap()
+
+    write_text(s"$dir/main.nex", "import geo.{twice}\n\ndef main() =\n  print(twice(21))\n").unwrap()
+    make_dir_all(s"$dir/geo").unwrap()
+    write_text(s"$dir/geo/geo.nex", "module geo\n\ndef twice(n: integer): integer = 2 * n\n").unwrap()
+
+    val o: &Out = Out(str_builder())
+
+    load_script_file(s"$dir/main.nex", new_host(), kept(o)) match
+        Ok(s) ->
+            assert_eq(s.run().unwrap(), 0)
+            assert_eq(o.text.finish(), "42\n")
+            assert_eq(called(s, "twice", one(int_value(4))), "i64:8")
+        Err(ds) -> assert(false, ds[0].text)
+
+    write_text(s"$dir/geo/geo.nex", "module geo\n\ndef twice(n: integer): integer = 2 * m\n").unwrap()
+
+    load_script_file(s"$dir/main.nex", new_host(), quiet()) match
+        Ok(_) -> assert(false, "loaded")
+        Err(ds) ->
+            assert(ds[0].file.ends_with("geo/geo.nex"), ds[0].file)
+            assert_eq(ds[0].line, 3)
+
+    load_script_file(s"$dir/none.nex", new_host(), quiet()) match
+        Ok(_) -> assert(false, "loaded")
+        Err(ds) -> assert_eq(ds.len(), 1)
+
+    remove_dir_all(dir).unwrap()
+
+// -- running and calling -----------------------------------------------------------------------------
+
+@test("run calls main with the arguments; stop gives its code; the module-level bindings initialize once and keep their values between calls")
+emb_run_and_state()
+    val o: &Out = Out(str_builder())
+    val s = loaded("var count = 0\nval start = report()\n\ndef report(): integer =\n  print(\"init\")\n  0\n\ndef bump(): integer =\n  count += 1\n  count\n\ndef main(args: [string]) =\n  for a in args\n    print(a)\n  if size(args) > 1 then stop 3\n", new_host(), kept(o))
+
+    assert_eq(s.run(["x"]).unwrap(), 0)
+    assert_eq(s.run(["x", "y"]).unwrap(), 3)
+    assert_eq(called(s, "bump", none()), "i64:1")
+    assert_eq(called(s, "bump", none()), "i64:2")
+    assert_eq(o.text.finish(), "init\nx\nx\ny\n")
+
+@test("a call by name checks the argument count, refuses an inout parameter and a name the script lacks, and stop inside a call is an error")
+emb_call_refusals()
+    val s = loaded("def f(a: integer, b: real): real = a * b\ndef g(x: inout real) =\n  x = 1.0\ndef h() =\n  stop 7\n")
+
+    assert_eq(called(s, "f", one(int_value(2))), "`f` takes 2 arguments, and 1 is given")
+    assert_eq(called(s, "nope", none()), "the script declares no function `nope`")
+    assert_eq(called(s, "g", one(real_value(1))), "`g` takes `x` inout, and a host's call passes values")
+    assert_eq(called(s, "h", none()), "stop 7")
+
+    var args: Buf[NexValue] = buf()
+
+    args.push(int_value(2))
+    args.push(real_value(1.5))
+    assert_eq(called(s, "f", args), "r64:3")
+
+    assert_eq(ran(s), "the script declares no function `main`")
+
+@test("module-level bindings are read by name and a var is written, its type checked; a val is not written")
+emb_globals()
+    val s = loaded("var scale: real32 = 2.0\nval name = \"box\"\nval lo, hi = 1, 2.5\n\ndef scaled(x: real32): real32 = x * scale\n")
+
+    assert_eq(shown(s.get("scale").unwrap()), "r32:2")
+    assert_eq(shown(s.get("name").unwrap()), "\"box\"")
+    assert_eq(shown(s.get("hi").unwrap()), "r64:2.5")
+    assert(s.set("scale", real_value(3.0, 32)).is_ok())
+    assert_eq(called(s, "scaled", one(real_value(2, 32))), "r32:6")
+
+    s.set("scale", real_value(3.0)) match
+        Err(e) -> assert_eq(e.text(), "`scale` is real32, and a real64 is given")
+        Ok(_) -> assert(false, "set")
+
+    s.set("name", string_value("x")) match
+        Err(e) -> assert_eq(e.text(), "`name` is not a `var`, so the host does not change it")
+        Ok(_) -> assert(false, "set")
+
+    assert(s.get("nothing").is_err())
+
+// -- values across the boundary ----------------------------------------------------------------------
+
+private val ROUND = "struct P\n  x: real\n  tag: string\nend P\n\nenum Shape =\n  Circle(r: real32)\n  Empty\n\n" +
+                    "def i8(x: int8): int8 = x\ndef u64(x: uint64): uint64 = x\ndef r16(x: real16): real16 = x\ndef r32(x: real32): real32 = x\n" +
+                    "def c32(x: complex[real32]): complex[real32] = x\ndef b(x: bool): bool = x\ndef s(x: string): string = x\n" +
+                    "def t(x: (integer, real, string)): (integer, real, string) = x\ndef p(x: P): P = x\ndef sh(x: Shape): Shape = x\n" +
+                    "def m(x: [real; :, :]): [real; :, :] = x\ndef im(x: [int32]): [int32] = x\ndef cm(x: [complex]): [complex] = x\n" +
+                    "def bm(x: [bool]): [bool] = x\ndef sm(x: [string]): [string] = x\ndef pm(x: [P]): [P] = x\ndef fixed(x: [real; 3]): [real; 3] = x\n" +
+                    "def tr(x: [real; :, :]): [real; :, :] = transpose(x)\ndef sl(x: [real]): [real] = x[3..1 by -1]\n"
+
+@test("every kind of value round-trips through a call: each integer and real width, complex, bool, string, tuple, struct, enum, and arrays of each element kind")
+emb_values_round_trip()
+    val s = loaded(ROUND)
+
+    assert_eq(called(s, "i8", one(int_value(-128, 8))), "i8:-128")
+    assert_eq(called(s, "u64", one(int_value(-1, 64, false))), "u64:-1")
+    assert_eq(called(s, "r16", one(real_value(0.5, 16))), "r16:0.5")
+    assert_eq(called(s, "r32", one(real_value(1.25, 32))), "r32:1.25")
+    assert_eq(called(s, "c32", one(complex_value(1, -2, 32))), "c32:1,-2")
+    assert_eq(called(s, "b", one(bool_value(true))), "true")
+    assert_eq(called(s, "s", one(string_value("héllo"))), "\"héllo\"")
+
+    var tup: Buf[NexValue] = buf()
+
+    tup.push(int_value(1))
+    tup.push(real_value(2.5))
+    tup.push(string_value("z"))
+    assert_eq(called(s, "t", one(NTuple(tup))), "(i64:1 r64:2.5 \"z\")")
+
+    var fields: Buf[NexField] = buf()
+
+    // By name, in any order.
+    fields.push(NexField("tag", string_value("a")))
+    fields.push(NexField("x", real_value(1.5)))
+    assert_eq(called(s, "p", one(NStruct("P", fields))), "P{x=r64:1.5 tag=\"a\"}")
+    assert_eq(called(s, "sh", one(NVariant("Circle", one(real_value(2, 32))))), "Circle(r32:2)")
+    assert_eq(called(s, "sh", one(NVariant("Empty", none()))), "Empty")
+
+    // A 2×3 array, column-major, comes back as it went; transposed, its extents and order change.
+    val grid = real_array(reals([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), longs([2, 3]))
+
+    assert_eq(called(s, "m", one(grid)), "[2 3] r64 1 2 3 4 5 6")
+    assert_eq(called(s, "tr", one(grid)), "[3 2] r64 1 3 5 2 4 6")
+    assert_eq(called(s, "sl", one(real_array(reals([1, 2, 3, 4]), longs([4])))), "[3] r64 3 2 1")
+    assert_eq(called(s, "im", one(int_array(longs([1, -2, 3]), longs([3]), 32))), "[3] i32 1 -2 3")
+    assert_eq(called(s, "cm", one(NArray(NexArray(longs([2]), Complexes(reals([1, 2, 3, 4]), 64))))), "[2] c64 1 2 3 4")
+
+    var bs: Buf[bool] = buf()
+
+    bs.push(true)
+    bs.push(false)
+    assert_eq(called(s, "bm", one(NArray(NexArray(longs([2]), Bools(bs))))), "[2] b true false")
+
+    var strs: Buf[NexValue] = buf()
+
+    strs.push(string_value("a"))
+    strs.push(string_value("b"))
+    assert_eq(called(s, "sm", one(NArray(NexArray(longs([2]), Others(strs))))), "[2] \"a\" \"b\"")
+    assert_eq(called(s, "pm", one(NArray(NexArray(longs([1]), Others(one(NStruct("P", fields))))))), "[1] P{x=r64:1.5 tag=\"a\"}")
+    assert_eq(called(s, "fixed", one(real_array(reals([1, 2, 3]), longs([3])))), "[3] r64 1 2 3")
+
+    // An empty array crosses too.
+    assert_eq(called(s, "m", one(real_array(reals([]), longs([0, 3])))), "[0 3] r64 ")
+
+@test("an integer crosses into any integer type it fits and into a real; a real only into one at least as wide")
+emb_values_widen()
+    val s = loaded(ROUND)
+
+    assert_eq(called(s, "i8", one(int_value(100))), "i8:100")
+    assert_eq(called(s, "r32", one(int_value(3))), "r32:3")
+    assert_eq(called(s, "r32", one(real_value(0.5, 16))), "r32:0.5")
+    assert_eq(called(s, "c32", one(real_value(0.5, 32))), "c32:0.5,0")
+    assert_eq(called(s, "u64", one(int_value(5, 8, false))), "u64:5")
+    assert_eq(called(s, "im", one(int_array(longs([1, 2]), longs([2])))), "[2] i32 1 2")
+
+@test("a value that does not fit its declared type is refused before anything runs, naming where it was going")
+emb_values_refused()
+    val s = loaded(ROUND)
+
+    assert_eq(called(s, "i8", one(int_value(128))), "argument 1 of `i8`, `x`, is int8, and the int64 given, 128, does not fit it")
+    assert_eq(called(s, "u64", one(int_value(-1))), "argument 1 of `u64`, `x`, is uint64, and the int64 given, -1, does not fit it")
+    assert_eq(called(s, "i8", one(int_value(-1, 64, false))), "argument 1 of `i8`, `x`, is int8, and the uint64 given, 18446744073709551615, does not fit it")
+    assert_eq(called(s, "r32", one(real_value(0.1))), "argument 1 of `r32`, `x`, is real32, and a real64 is given")
+    assert_eq(called(s, "b", one(int_value(1))), "argument 1 of `b`, `x`, is bool, and the int64 1 is given")
+    assert_eq(called(s, "t", one(NTuple(one(int_value(1))))), "argument 1 of `t`, `x`, is (int64, real64, string), and a tuple of 1 is given")
+    assert_eq(called(s, "p", one(NStruct("Q", none_fields()))), "argument 1 of `p`, `x`, is P, and a struct `Q` is given")
+    assert_eq(called(s, "p", one(NStruct("P", none_fields()))), "argument 1 of `p`, `x`, is P, and its field `x` is not given")
+
+    var extra = none_fields()
+
+    extra.push(NexField("z", real_value(1.0)))
+    assert_eq(called(s, "p", one(NStruct("P", extra))), "argument 1 of `p`, `x`, is P, which has no field `z`")
+    assert_eq(called(s, "sh", one(NVariant("Square", none()))), "argument 1 of `sh`, `x`, is Shape, which has no variant `Square`")
+    assert_eq(called(s, "sh", one(NVariant("Circle", none()))), "argument 1 of `sh`, `x`, is Shape, whose `Circle` has 1 field, and 0 are given")
+    assert_eq(called(s, "sh", one(NVariant("Circle", one(real_value(1))))), "field 1 of `Circle` in argument 1 of `sh`, `x`, is real32, and a real64 is given")
+    assert_eq(called(s, "m", one(real_array(reals([1]), longs([1])))), "argument 1 of `m`, `x`, is an array of rank 2, and one of rank 1 is given")
+    assert_eq(called(s, "m", one(real_array(reals([1]), longs([2, 3])))), "argument 1 of `m`, `x`, is given extents holding 6 elements, and 1 elements")
+    assert_eq(called(s, "fixed", one(real_array(reals([1, 2]), longs([2])))), "argument 1 of `fixed`, `x`, has 3 elements on axis 1, and the array given has 2")
+    assert_eq(called(s, "im", one(int_array(longs([1, 1 << 40]), longs([2])))), "an element of argument 1 of `im`, `x`, is int32, and the int64 given, 1099511627776, does not fit it")
+    assert_eq(called(s, "im", one(real_array(reals([1]), longs([1])))), "an element of argument 1 of `im`, `x`, is int32, and a real64 is given")
+
+private none_fields() -> Buf[NexField] = buf()
+
+// -- host functions and host types -------------------------------------------------------------------
+
+private struct Kernel
+    made: long
+    released: Buf[long]
+
+private kernel_host(k: &Kernel) -> Host
+    var h = new_host()
+
+    h.give_type("Solid", (id) -> k.released.push(id))
+    h.give("box", (args) ->
+        k.made += 1
+        Ok(h.handle("Solid", k.made))
+    )
+    h.give("volume", (args) -> args[0] match
+        NHandle(s) -> Ok(real_value(real(s.id) * 10.0))
+        _ -> Err("not a solid")
+    )
+    h.give("scale", (args) -> args[0] match
+        NArray(a) -> a.elems match
+            Reals(xs, b) ->
+                var out: Buf[real] = buf()
+
+                for x in xs
+                    out.push(x * real_of_value(args[1]))
+
+                Ok(real_array(out, a.ext, b))
+            _ -> Err("not reals")
+        _ -> Err("not an array")
+    )
+    h.give("fail", (args) -> Err("the kernel refused"))
+    h.give("wrong", (args) -> Ok(string_value("oops")))
+    h
+
+private real_of_value(v: NexValue) -> real = v match
+    NReal(x, _) -> x
+    _ -> 0.0
+
+private val KERNEL = "@host struct Solid\n\n@host extern def box(w: real<mm>): Solid\n@host extern def volume(s: Solid): real\n" +
+                     "@host extern def scale(v: [real<mm>], k: real): [real<mm>]\n@host extern def fail(): real\n@host extern def wrong(): real\n\n"
+
+@test("a host function is called from nex with its arguments in the units its declaration names, an array among them, and its result checked")
+emb_host_functions()
+    val k: &Kernel = Kernel(0, buf())
+    val o: &Out = Out(str_builder())
+    val s = loaded(KERNEL + "def main() =\n  val v = scale([1.0<in>, 2.0<mm>], 2.0)\n  print(v)\n  print(volume(box(1.0<in>)))\n  print(fail())\n", kernel_host(k), kept(o))
+
+    assert_eq(ran(s), "trap: the kernel refused\n  in main at t.nex:13:9")
+    assert_eq(o.text.finish(), "[50.8, 4.0] mm\n10.0\n")
+    assert_eq(called(loaded(KERNEL + "def w(): real = wrong()\n", kernel_host(k)), "w", none()), "trap: the result of host function `wrong` is real64, and a string is given\n  in w at t.nex:9:17")
+
+// The script's part of `emb_host_type_lifetime`: what it releases while it runs, and the host's copy
+// of the binding it held.
+private lifetime_script(k: &Kernel) -> NexValue
+    val s = loaded(KERNEL + "var kept = box(1.0<mm>)\n\ndef temp(): real = volume(box(2.0<mm>))\ndef same(): bool = kept == kept and not (kept == box(1.0<mm>))\n", kernel_host(k))
+
+    assert_eq(called(s, "temp", none()), "r64:20")
+    // `kept` is 1, made when the bindings initialized; the box `temp` made is gone with its call.
+    assert_eq(join_longs(k.released), "2")
+    assert_eq(called(s, "same", none()), "true")
+    assert_eq(join_longs(k.released), "2 3")
+
+    val held = s.get("kept").unwrap()
+
+    assert_eq(shown(held), "Solid#1")
+    assert(s.set("kept", int_value(1)).is_err())
+    assert(s.set("kept", kernel_host(k).handle("Solid", 99)).is_ok())
+    // 1 is still the host's, through `held`.
+    assert_eq(join_longs(k.released), "2 3")
+    held
+
+private lifetime_held(k: &Kernel)
+    val held = lifetime_script(k)
+
+    // The script is gone, and 99 with it; 1 is held here.
+    assert_eq(join_longs(k.released), "2 3 99")
+    assert_eq(shown(held), "Solid#1")
+
+@test("a host type's objects are released when nex and the host let go of them, including those a dropped script held")
+emb_host_type_lifetime()
+    val k: &Kernel = Kernel(0, buf())
+
+    lifetime_held(k)
+    assert_eq(join_longs(k.released), "2 3 99 1")
+
+@test("a host type prints as its name and number, and a script does not make one")
+emb_host_type_rules()
+    val k: &Kernel = Kernel(0, buf())
+    val o: &Out = Out(str_builder())
+    val s = loaded(KERNEL + "def main() =\n  print(box(1.0<mm>))\n  print((box(1.0<mm>), 2))\n", kernel_host(k), kept(o))
+
+    assert_eq(s.run().unwrap(), 0)
+    assert_eq(o.text.finish(), "Solid#1\n(Solid#2, 2)\n")
+    assert_eq(refusal(KERNEL + "def main() =\n  val s = Solid()\n", kernel_host(k)), "`Solid` is a host type: only the host makes one, and nex holds it and passes it back @10:11")
+
+@test("the declarations of host functions and types are checked: no C attributes, no inout, no function values, no fields")
+emb_host_declarations()
+    val k: &Kernel = Kernel(0, buf())
+    val h = kernel_host(k)
+
+    assert_eq(refusal("@host @link(\"m\") extern def box(w: real): real\n", h), "`@link` is not an attribute of a `@host extern def`, which takes `@pure` @1:1")
+    assert_eq(refusal("@host extern def box(w: inout real)\n", h), "a `@host` function takes its arguments by value, so `w` is not `inout`; return the new value instead @1:31")
+    assert_eq(refusal("@host extern def box(f: (real) -> real): real\n", h), "a `@host` function's parameter is a value the host holds, and `f` is a function @1:25")
+    assert_eq(refusal("@host extern def box(w: real): real\ndef main() =\n  val f = box\n", h), "`box` is a `@host` function, which is only called; wrap the call in a `def` to pass it as a value @3:11")
+    assert_eq(refusal("@host struct Solid\n  x: real\n", h), "a host type has no fields: nex holds `Solid` and passes it back, and only the host looks inside @1:1")
+    assert_eq(refusal("struct Solid\n", h), "a struct has fields; one with none is a type the host owns, declared `@host struct Solid` @1:1")
+    assert_eq(refusal("@host extern def sphere(r: real): real\n", h), "`sphere` is a host function, and the program running this script gives none of that name @1:1")
+    assert_eq(refusal("@host struct Mesh\n", h), "`Mesh` is a host type, and the program running this script gives none of that name @1:1")
+    assert_eq(refusal("extern def cbrt(x: real): real\n", h), "a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled @1:1")
+
+// -- traps, the budget, the sandbox ------------------------------------------------------------------
+
+@test("a trap is an Err with its message and the nex frames it left, innermost first, each with its file, line and column")
+emb_trap_stack()
+    val text = "def inner(n: integer): integer =\n  val z = n - n\n  n div z\n\ndef outer(n: integer): integer =\n  print(\"x\")\n  inner(n) + 1\n\ndef main() =\n  print(outer(3))\n"
+
+    loaded(text).call("inner", one(int_value(4))) match
+        Err(ScriptTrap(message, stack)) ->
+            assert_eq(message, "integer division by zero")
+            assert_eq(stack.len(), 1)
+            assert_eq(s"${stack[0].function} ${stack[0].file}:${stack[0].line}:${stack[0].col}", "inner t.nex:3:3")
+        _ -> assert(false, "no trap")
+
+    // The bindings initialize before any call, and `broken` traps there; every later call is refused
+    // with the same trap, the bindings never having been made.
+    val s = loaded(text + "\nval broken: integer = outer(1)\n")
+
+    assert_eq(ran(s), "trap: integer division by zero\n  in inner at t.nex:3:3\n  in outer at t.nex:7:3\n  in module level at t.nex:12:23")
+    assert_eq(called(s, "inner", one(int_value(1))), ran(s))
+
+    val t = loaded("def inner(n: integer): integer =\n  val z = n - n\n  n div z\n\ndef outer(n: integer): integer =\n  inner(n) + 1\n\ndef main() =\n  assert_traps(() -> outer(1))\n  print(outer(3))\n")
+
+    assert_eq(ran(t), "trap: integer division by zero\n  in inner at t.nex:3:3\n  in outer at t.nex:6:3\n  in main at t.nex:10:9")
+
+@test("a step budget stops an infinite loop and runaway recursion, and the next call starts with the budget whole")
+emb_budget()
+    val o: &Out = Out(str_builder())
+    val s = loaded("var n = 0\n\ndef spin() =\n  while true\n    n += 1\n\ndef down(k: integer): integer = down(k + 1)\n\ndef count(k: integer): integer =\n  var t = 0\n  for i in 1..k\n    t += i\n  t\n", new_host(), kept(o, 1000))
+
+    s.call("spin", none()) match
+        Err(e) -> assert_eq(e.text(), "stopped after 1000 steps, the host's budget")
+        Ok(_) -> assert(false, "returned")
+
+    assert_eq(shown(s.get("n").unwrap()), "i64:998")
+    assert(s.call("down", one(int_value(0))).is_err())
+    assert_eq(called(s, "count", one(int_value(100))), "i64:5050")
+    assert_eq(called(s, "count", one(int_value(2000))), "stopped after 1000 steps, the host's budget")
+
+    // `assert_traps` does not catch a halt.
+    val t = loaded("def main() =\n  assert_traps(() ->\n    while true\n      print(1)\n  )\n", new_host(), kept(o, 50))
+
+    assert_eq(ran(t), "stopped after 50 steps, the host's budget")
+
+private struct Holder
+    s: Option[&Script]
+
+@test("a host function may cancel the run in progress, and the next run is not cancelled")
+emb_cancel()
+    val holder: &Holder = Holder(None)
+    var h = new_host()
+    h.give("tick", (args) ->
+        val five = args[0] match
+            NInt(n, _, _) -> n == 5
+            _ -> false
+
+        holder.s match
+            Some(s) -> if five then s.cancel()
+            None -> ()
+
+        Ok(NNothing)
+    )
+
+    val s = loaded("@host extern def tick(n: integer)\n\ndef main() =\n  var k = 0\n  while true\n    k += 1\n    tick(k)\n\ndef once(): integer =\n  tick(1)\n  1\n", h)
+
+    holder.s = Some(s)
+    assert_eq(ran(s), "cancelled by the host")
+    assert_eq(called(s, "once", none()), "i64:1")
+    holder.s = None
+
+@test("a sandboxed script may not stop or call C; the same script loads unsandboxed")
+emb_sandbox()
+    val o: &Out = Out(str_builder())
+
+    assert_eq(refusal("def main() =\n  stop 1\n", new_host(), kept(o, 0, true)), "a sandboxed script does not `stop`: the host that runs it decides when it ends @2:3")
+    assert_eq(refusal("def main() =\n  stop 1\n", new_host(), kept(o)), "loaded")
+    assert_eq(refusal("extern def cbrt(x: real): real\n", new_host(), kept(o, 0, true)), "a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled @1:1")
+
+@test("a script reloaded and rerun many times lets go of each load: every host object it made is released")
+emb_reload_loop()
+    val k: &Kernel = Kernel(0, buf())
+
+    for round in 0..<200
+        val s = loaded(KERNEL + s"val base = box(1.0<mm>)\nvar parts = [volume(base), ${round}.0]\n\ndef main() =\n  val f = (x: real) -> volume(base) + x\n  print(f(1.0))\n", kernel_host(k))
+
+        assert_eq(s.run().unwrap(), 0)
+
+    assert_eq(k.made, 200)
+    assert_eq(k.released.len(), 200)

@@ -369,7 +369,7 @@ impl Elab
                         Some(k) ->
                             val s = self.agg.structs[k]
 
-                            if !s.generic && s.decl.span.start == d.span.start then out.push(StructDecl(TStruct(d.span, name, s.fields)))
+                            if !s.generic && s.decl.span.start == d.span.start then out.push(StructDecl(TStruct(d.span, name, s.fields, has_attr(s.decl.attrs, "host"))))
                         None -> ()
                 Enum(n, _, _) ->
                     val name = self.own_name(d, n)
@@ -535,6 +535,10 @@ impl Elab
                 val s = self.agg.structs[k]
 
                 if s.generic then return Some(self.generic_construct(span, at, n, args, want))
+
+                if has_attr(s.decl.attrs, "host")
+                    self.fail(span, s"`${display_name(n)}` is a host type: only the host makes one, and nex holds it and passes it back")
+                    return Some(self.invalid(span))
 
                 return Some(texpr(span, Nominal(n, buf()), TNew(self.field_args(span, n, s.fields, self.struct_defaults(k), args))))
             None -> ()

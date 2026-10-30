@@ -190,6 +190,9 @@ impl Interp
                 Ok(_) -> trapped(DID_NOT_TRAP)
                 Err(s) -> s match
                     Trapped(message) ->
+                        m.trace = buf()
+                        m.sited = false
+
                         text match
                             Some(t) -> if message.contains(t) then Ok(VVoid) else trapped(NOT_MENTIONED)
                             None -> Ok(VVoid)
@@ -337,6 +340,8 @@ impl Interp
             Nominal(_, _) ->
                 self.struct_of(name) match
                     Some(s) ->
+                        if s.host then return (v) -> handle_text(v)
+
                         val parts = self.printers(field_tys(s.fields))
                         var labels: Buf[string] = buf()
 
@@ -386,6 +391,11 @@ impl Interp
 end Interp
 
 private[nex] type Printer = &Fn(Value) -> string
+
+// A host type's value as `print` writes it: its type and the host's number for it, `Solid#7`.
+private handle_text(v: Value) -> string = v match
+    VHandle(h) -> s"${h.type_name}#${h.id}"
+    _ -> ""
 
 // The printer of a type, once it is made.
 private[nex] struct PrinterSlot

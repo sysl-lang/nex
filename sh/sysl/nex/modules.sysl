@@ -55,6 +55,8 @@ struct Modules
     // Each module's bare `import a.b`, by which `a.b.x` names the module's public `x` there: `alias`
     // and `target` are both the module's path.
     qualified: Buf[ImportName]
+    // Whether this is a script a host loads (DESIGN §16.1), which needs no `main`.
+    script: bool
 
     // Whether there is one module and no source prelude, where every name is its own.
     single(self) -> bool = self.names.len() == 1 && self.prelude.is_none()
@@ -93,7 +95,7 @@ single_module() -> Modules
     names.push("")
     test_only.push(false)
 
-    Modules(names, test_only, buf(), None, false, buf(), buf(), buf(), buf())
+    Modules(names, test_only, buf(), None, false, buf(), buf(), buf(), buf(), false)
 
 // The name a value of a struct or an enum is printed with: its own, without its module's path.
 display_name(internal: string) -> string
@@ -457,7 +459,7 @@ private struct Loader
                     diags.push(error(Span(e.span.start + base, e.span.end + base), s"`${self.names[e.to]}` is a test module (`@test module`), which only `nex test` builds"))
 
         val prelude = if self.opts.prelude.is_some() then self.find_module("prelude") else None
-        val mods = Modules(self.names, self.test_only, ranges, prelude, self.opts.test_build, buf(), buf(), buf(), buf())
+        val mods = Modules(self.names, self.test_only, ranges, prelude, self.opts.test_build, buf(), buf(), buf(), buf(), false)
 
         Project(text, file_names, mods, Program(decls), diags)
     end finish

@@ -246,6 +246,8 @@ struct TExtern
     partner: Buf[Option[usize]]
     // Declared `@fortran`: every argument by reference, a string's length trailing (DESIGN §10.6).
     fortran: bool
+    // Declared `@host`: a function the embedding program gives, not C (DESIGN §16.3).
+    host: bool
 
 // `val a, b = 1, 2` at module level: one initializer, its tuple taken apart into the module-level
 // bindings `pat` names.
@@ -261,10 +263,12 @@ struct FieldInfo
     name: string
     ty: Ty
 
+// A struct, or with `host` a type the embedding program owns (DESIGN §16.3), which has no fields.
 struct TStruct
     span: Span
     name: string
     fields: Buf[FieldInfo]
+    host: bool
 
 struct VariantInfo
     name: string
