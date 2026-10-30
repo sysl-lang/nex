@@ -264,7 +264,7 @@ run_fpe_trap()
 emit_refuses_what_waits()
     assert_eq(emitted("def main() =\n  val xs = [1, 2]\n  print(xs)\n").err().unwrap_or(""), "error: a value of type [int64] is not compiled yet @2:3")
     assert_eq(emitted("struct P\n  x: real\ndef main() = print(P(1.0).x)\n").err().unwrap_or(""), "error: a struct is not compiled yet @1:1\nerror: a struct is not compiled yet @3:20")
-    assert_eq(emitted("def main() =\n  val t = (1, 2)\n  print(t.1)\n").err().unwrap_or(""), "error: a tuple is not compiled yet @2:12")
+    assert_eq(emitted("def main() =\n  val t = (1, 2)\n  print(t.1)\n").err().unwrap_or(""), "error: a value of type (int64, int64) is not compiled yet @2:3")
     assert_eq(emitted("def f(x: integer) = x\ndef main() =\n  val g = f\n  print(g(2))\n  print([f(1)])\n").err().unwrap_or(""), "error: an array is not compiled yet @5:9")
 
 @test("the module names every symbol with a prefix no C name has, and makes main the only public function")
