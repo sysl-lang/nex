@@ -55,9 +55,9 @@ one; `J` and `N m` are one, as in SI, so torque and energy are not told apart. `
 same **dimension**, length, but different factors: they are different units that convert into each
 other (§13.3).
 
-**Unit names have their own namespace.** They appear only inside `<…>` and in `unit` declarations,
-so a variable called `m`, `s` or `g` never clashes with a unit, and `in`, a keyword elsewhere, is an
-ordinary unit name inside the brackets. Spacing matters: `ms` is the millisecond, `m s` the
+**Unit names have their own namespace.** They appear only inside `<…>`, in `unit` declarations and
+directly after a numeric literal (`10mm`, §13.2), so a variable called `m`, `s` or `g` never clashes
+with a unit, and `in`, a keyword elsewhere, is an ordinary unit name there (`2.0<in>`, `2in`). Spacing matters: `ms` is the millisecond, `m s` the
 metre-second.
 
 `unit` is a keyword, so it is no variable's name and no type's: the type whose only value is `()`
@@ -68,6 +68,7 @@ is `void` ([Types](/spec/03-types/)), and `def f(): unit` is an error that sugge
 | Where | Example |
 |---|---|
 | a literal | `9.81<m/s^2>`, `2.0<in>`, `1.0e5<Pa>` |
+| a literal in one unit, shorthand | `10mm`, `2.5in`, `1e5Pa`, `-3mm` |
 | a real type | `real<m>`, `real32<m/s>`, `real16<Pa>` |
 | a complex type | `complex<V>`, `complex[real32]<ohm>` |
 | an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
@@ -101,6 +102,21 @@ left to right with the other postfixes: `x[i]<m>`, `f(x)<m>`, `to<mm>(x)`.
 | `2pi<rad>` | `2 * (pi<rad>)` |
 | `(a + b)<m>`, `strip(y)<m>` | a unit on the parenthesised operand, on the call |
 | `if x<m> then …` | a unit: `then` cannot begin an operand |
+
+**A unit's name written directly against a decimal literal, with no space, is that literal in that
+unit**: `10mm` is `10<mm>`, `2.5in` is `2.5<in>`, and `1e5Pa` — the exponent first, then the unit —
+is `1e5<Pa>`. It is one operand and reads as the bracketed form does: `-10mm` is `-(10mm)`, `10mm^2`
+is `(10mm)^2`, and `0mm < x < 1cm` is a chained comparison.
+
+- **One name is the whole unit.** A compound unit is bracketed, `9.81<m/s^2>`; in `9.81m/s^2` the
+  `s` is a value, divided by. A bracket after the name, `10mm<in>`, is a compile error.
+- **The name is a unit's when the program has one by that name**: the prelude's or one a `unit`
+  declaration makes in any module. Any other name is what the literal multiplies, so `2x`, `2pi` and
+  `2i` are products as before.
+- **The unit wins over a value of the same name**: with a local `m`, `3m` is three metres, and
+  `3 * m` multiplies by the local.
+- **Only a decimal literal takes one**, since a hex literal's digits may be letters (`0x10cd` is one
+  number): write `0x10<mm>`.
 
 An annotation attaches a unit to a **dimensionless** operand. One written on an operand that
 already carries a unit is a compile error, which points to `to<u>(x)`: that is how a value changes
@@ -171,14 +187,25 @@ Conversion at a declared type may change.
 `25.4`, and `strip(to<m>(d))` is a length in metres. On an array, `strip` is a view of the same
 elements and copies nothing. To give a plain number a unit, multiply: `y * 1.0<m>`.
 
+**An angle is a kind of unit.** `rad`, `deg`, `turn`, `arcmin`, `arcsec` and `sr` convert among
+themselves like lengths do (`90.0<deg> + 0.5<rad>` is a `real<deg>`), but a plain number is not an
+angle: `theta + 0.5`, `theta > 0.0` and `rotate(part, 30)` for a parameter `real<rad>` do not
+compile; write `30<deg>` or `0.5<rad>`. Where an angle meets another dimension in `*` or `/` it
+drops out, in radians: `2.0<m> * 30.0<deg>` is a `real<m>`, and `theta / t` a `real<1/s>`. An
+angle times a plain number stays an angle, and an angle over an angle is a plain number. `rad/s`
+and `1/s` are one dimension, so `omega: real<rad/s>` holds `theta / t`, and `omega * t` is an angle.
+
 ## 13.4 Units through the prelude
 
 - `sqrt` halves every power: the square root of a `real<m^2>` is a `real<m>`.
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit. `min`, `max` and `hypot` convert their second argument as `+` does.
-- `atan2(y, x)` takes two values of one dimension and gives a dimensionless angle.
-- `exp`, `log`, `sin`, `cos`, `tan` and the other elementary functions take and return
-  dimensionless values. The radian is dimensionless, so `sin(0.5<rad>)` is fine.
+- `atan2(y, x)` takes two values of one dimension and gives a plain number, in radians.
+- `sin`, `cos` and `tan` take an angle in any angle unit (`sin(30.0<deg>)`), or a plain number,
+  which is radians.
+- `exp`, `log`, `asin`, `acos`, `atan` and the other elementary functions take and return
+  dimensionless values; an angle is not one. The inverse functions return radians as a plain
+  number: `asin(x) * 1.0<rad>` makes it an angle.
 - `product(a)` has `a`'s unit to the power of its length, so an `a` that carries a unit needs a
   static extent.
 - `print` and string interpolation show the unit after the number, separated by a space:
@@ -268,7 +295,8 @@ makes.
 | Units | Definitions |
 |---|---|
 | SI base | `m` `kg` `s` `A` `K` `mol` `cd` |
-| SI derived | `N = kg m / s^2`, `J = N m`, `W = J / s`, `Pa = N / m^2`, `Hz = 1 / s`, `C = A s`, `V = W / A`, `ohm = V / A`, `rad = 1` |
+| SI derived | `N = kg m / s^2`, `J = N m`, `W = J / s`, `Pa = N / m^2`, `Hz = 1 / s`, `C = A s`, `V = W / A`, `ohm = V / A` |
+| Angle | `rad` (a base unit), `sr = rad^2`, `deg = π/180 rad`, `turn = 2π rad`, `arcmin = deg / 60`, `arcsec = arcmin / 60` |
 | SI scaled | `mm = 0.001 m`, `cm = 0.01 m`, `km = 1000 m`, `g = 0.001 kg`, `ms = 0.001 s`, `us = 0.000001 s`, `ns = 0.000000001 s`, `kPa = 1000 Pa`, `MPa = 1000000 Pa`, `GPa = 1000000000 Pa`, `kN = 1000 N`, `kJ = 1000 J`, `kW = 1000 W` |
 | Imperial and US customary | `in = 0.0254 m`, `ft = 12 in`, `yd = 3 ft`, `mi = 5280 ft`, `lb = 0.45359237 kg`, `oz = 0.0625 lb`, `lbf = 4.4482216152605 N`, `slug = lbf s^2 / ft`, `psi = lbf / in^2`, `ksi = 1000 psi`, `BTU = 1055.05585262 J`, `hp = 550 ft lbf / s`, `usgal = 231 in^3`, `ukgal = 0.00454609 m^3` |
 

@@ -52,6 +52,8 @@ impl Elab
                             None -> return self.call_value(span, self.local_ref(callee.span, id, None), args)
                     None -> ()
 
+                if self.names_a_parameter(callee.span, n) then return self.invalid(span)
+
                 val q = self.global(callee.span, n)
 
                 self.find_generic_fun(q) match

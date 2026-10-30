@@ -80,6 +80,14 @@ mod_files_merge()
         ("helpers/a.nex", "module helpers\ndef f(x: integer) = g(x)\n"),
         ("helpers/b.nex", "module helpers\nprivate def g(x: integer) = x\n")]), "ok")
 
+@test("a unit any module declares is written against a literal in every module, as units are the program's")
+mod_unit_shorthand()
+    assert_eq(elab_project(project([("main.nex", "import fruit.{basket}\ndef main() = print(basket() + 2apple)\n"), ("fruit/f.nex", "module fruit\nunit apple\ndef basket() = 3apple\n")])),
+        elab_project(project([("main.nex", "import fruit.{basket}\ndef main() = print(basket() + 2<apple>)\n"), ("fruit/f.nex", "module fruit\nunit apple\ndef basket() = 3<apple>\n")])))
+    assert_eq(project_refused([("main.nex", "import fruit.{basket}\nunit apple\ndef main() = print(basket())\n"), ("fruit/f.nex", "module fruit\ndef basket() = 3apple\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import fruit.{basket}\ndef main() = print(basket())\n"), ("fruit/f.nex", "module fruit\ndef basket() = 3apple\n")]),
+        "error: unknown name `apple` @fruit/f.nex:2:17")
+
 @test("a module declaration is optional, and one that names another module is refused")
 mod_declaration()
     assert_eq(project_refused([("main.nex", "import helpers.{f}\ndef main() = print(f(1))\n"), ("helpers/ops.nex", "def f(x: integer) = x\n")]), "ok")
@@ -133,6 +141,14 @@ mod_qualified_shadow()
     assert_eq(project_refused([("main.nex", "import lib\nstruct Box\n  x: integer\ndef get(lib: Box) = lib.x\ndef main() = print(get(Box(1)) + lib.x)\n"), lib]), "ok")
     assert_eq(project_refused([("main.nex", "import lib\nstruct Box\n  y: integer\ndef get(lib: Box) = lib.x\ndef main() = print(get(Box(1)))\n"), lib]),
         "error: `Box` has no field `x`; did you mean `y`? @main.nex:4:21")
+
+@test("a default is resolved in its declaring module, private names included, wherever it is called")
+mod_default_in_its_module()
+    val lib = ("lib/lib.nex", "private val secret = 41\nprivate def bump(n: integer): integer = n + 1\ndef f(n: integer = bump(secret)) = print(n)\nstruct P\n  n: integer = secret\n")
+
+    assert_eq(elab_project(project([("main.nex", "import lib\ndef main() =\n  lib.f()\n  print(lib.P().n)\n"), lib])),
+        "(struct lib.P (n int64))\n(val lib.secret int64 41)\n(def lib.bump ((n#0 int64)) int64 (+:int64 n#0 1))\n(def lib.f ((n#1 int64 (call:int64 lib.bump lib.secret))) void (print n#1))\n(def main () void (block (call lib.f (call:int64 lib.bump lib.secret)) (print (.n:int64 (new:lib.P lib.secret)))))")
+    assert_eq(project_refused([("main.nex", "import lib\nval secret = 1\ndef main() = print(secret)\n"), lib]), "ok")
 
 @test("a private or missing member is not reached through `m.x`")
 mod_qualified_private()

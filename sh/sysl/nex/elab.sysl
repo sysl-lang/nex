@@ -111,8 +111,11 @@ struct Fx
     // (`elab_generic.sysl`), and which instance that is.
     subst: Buf[Binding]
     instance: Option[usize]
+    // While a default is elaborated, its function's parameter names or its struct's field names,
+    // which a default may not name: it is evaluated at the call, where they are not bound.
+    params: Buf[string]
 
-empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None)
+empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None, buf())
 
 // A lambda bound by `val f = x -> ...` whose parameter types are not written: it is elaborated at
 // the first use that fixes them, inside the copy of the scope it was written in.
@@ -203,10 +206,14 @@ struct Elab
             self.resolve_extern(k)
 
         // Counted first: a default may need a generic instance, whose signature is resolved with it.
+        // Every signature's types come before any default, which may call a function declared later.
         val count = self.funs.len()
 
         for k in 0..<count
-            self.ensure_sig(k)
+            self.sig_types(k)
+
+        for k in 0..<count
+            self.sig_defaults(k)
 
         // Each generic's body once, against its constraints, whether or not anything uses it.
         for g in 0..<self.gen.funs.len()
@@ -217,6 +224,10 @@ struct Elab
                 TopValue(k) -> self.ensure_global(k)
                 TopFun(k) -> self.ensure_body(k)
                 TopExtern(_) -> ()
+
+        // A struct's defaults are checked whether or not anything builds it.
+        for k in 0..<self.agg.structs.len()
+            if !self.agg.structs[k].generic then self.struct_defaults(k)
 
         // What the elemental and parallel bodies may do, and what an `inout` call may share, is proved
         // over the finished IR, from the effect summary of every function.
@@ -395,6 +406,12 @@ struct Elab
 
     // A function's parameter types, modes and defaults, and its result type where it declares one.
     ensure_sig(*self, k: usize)
+        self.sig_types(k)
+        self.sig_defaults(k)
+
+    // A function's parameter types and modes, and its result type where it declares one; its
+    // defaults are left empty until `sig_defaults`, so a default may call any function.
+    sig_types(*self, k: usize)
         val f = self.funs[k]
         var sig = Sig(buf(), buf(), buf(), buf(), buf())
         val saved = self.fx
@@ -406,13 +423,6 @@ struct Elab
                 self.fail(f.decl.span, s"redeclaration of `${p.name}`")
 
             val ty = self.resolve_type(p.typ)
-            val default = p.default match
-                Some(d) ->
-                    if p.mode == Inout then self.fail(d.span, "an `inout` parameter cannot have a default")
-
-                    Some(self.check(d, ty, "this default"))
-                None -> None
-
             val id = self.new_local(p.name, ty, LParam(p.mode))
 
             self.written(id, p.typ)
@@ -420,7 +430,7 @@ struct Elab
             sig.names.push(p.name)
             sig.tys.push(ty)
             sig.modes.push(p.mode)
-            sig.defaults.push(default)
+            sig.defaults.push(None)
 
         f.ret match
             Some(t) ->
@@ -439,7 +449,34 @@ struct Elab
             self.fsig.push(Sig(buf(), buf(), buf(), buf(), buf()))
 
         self.fsig.set(k, sig)
-    end ensure_sig
+    end sig_types
+
+    // A function's defaults, each checked against its parameter's type in the function's module,
+    // with no local and no parameter in scope: the call fills it in and evaluates it there, afresh
+    // at every call that leaves the argument out.
+    sig_defaults(*self, k: usize)
+        val f = self.funs[k]
+        var sig = self.fsig[k]
+        val saved = self.fx
+        val saved_units = self.enter_unit_params(f.uparams)
+
+        self.fx = self.fx_for(k)
+        self.fx.params = sig.names
+
+        for j in 0..<f.params.len()
+            val p = f.params[j]
+
+            p.default match
+                Some(d) ->
+                    if p.mode == Inout then self.fail(d.span, "an `inout` parameter cannot have a default: it borrows a variable of the caller's")
+
+                    sig.defaults.set(j, Some(self.check(d, sig.tys[j], "this default")))
+                None -> ()
+
+        self.fsig.set(k, sig)
+        self.leave_unit_params(saved_units)
+        self.fx = saved
+    end sig_defaults
 
     ensure_body(*self, k: usize)
         if self.fstate[k] != Waiting then return

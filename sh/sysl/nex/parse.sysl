@@ -18,25 +18,42 @@ import sysl.buf.{Buf, buf}
 import sysl.text.{from_utf8_unchecked, parse_real}
 import sh.sysl.parsing.{Diagnostic, Source, Span, Spanned, Tokens, error, tokens_of}
 
-// A whole file: its declarations.
+// A whole file: its declarations. A literal may be written against the prelude's units and the
+// file's own (`10mm`).
 parse_program(src: Source) -> Result[Program, Diagnostic]
-    var p = parser(src, lex(src)?)
+    val toks = lex(src)?
+    var units = prelude_unit_names()
+
+    declared_units(toks.view(), &units)
+
+    var p = parser(src, toks, units)
 
     p.program()
 
-// One file of a project, its text between `from` and `to` in the project's text `src`.
-parse_file(src: Source, from: usize, to: usize) -> Result[Program, Diagnostic]
-    var p = parser(src, lex_file(src, from, to)?)
+// One file of a project, lexed, where `units` names every unit the program declares and the
+// prelude's: units have one namespace across the program, so `10mm` means the same in every file.
+parse_tokens(src: Source, toks: Buf[Spanned[Tok]], units: Buf[string]) -> Result[Program, Diagnostic]
+    var p = parser(src, toks, units)
 
     p.program()
 
 // One expression standing alone, as a `${...}` hole holds and as tests write them.
 parse_expression(src: Source) -> Result[Expr, Diagnostic]
-    var p = parser(src, lex(src)?)
+    var p = parser(src, lex(src)?, prelude_unit_names())
 
     p.standalone()
 
-private parser(src: Source, toks: Buf[Spanned[Tok]]) -> Parser = Parser(src, tokens_of(toks), false)
+// The names the `unit` declarations among `toks` declare, added to `into`.
+declared_units(toks: []const Spanned[Tok], into: *Buf[string])
+    for k in 1..<toks.len
+        if is_kw(toks[k - 1].value, "unit")
+            toks[k].value match
+                Ident(name) -> into.push(name)
+                Keyword(w) -> if w == "in" then into.push(w)
+                _ -> ()
+
+private parser(src: Source, toks: Buf[Spanned[Tok]], units: Buf[string]) -> Parser =
+    Parser(src, tokens_of(toks), false, units)
 
 private is_kw(t: Tok, text: string) -> bool = t match
     Keyword(k) -> k == text
@@ -117,6 +134,9 @@ struct Parser
     // in `a[f(end)]` the `end` is `a`'s.
     in_subscript: bool
 
+    // The names a numeric literal may be written against to carry that unit, `10mm` (DESIGN §13.2).
+    units: Buf[string]
+
     // -- the cursor -------------------------------------------------------------------------------
 
     // The token `n` ahead of the cursor; past the end, the end.
@@ -130,6 +150,31 @@ struct Parser
     at_word(self, word: string) -> bool = self.tok(0) match
         Ident(name) -> name == word
         _ -> false
+
+    // The unit a numeric literal `n` tokens ahead is written against: a unit's name directly after
+    // it, with no space, as in `10mm`, `2.5in` and `1e5Pa`. A name that is no unit's, or one after a
+    // space, is what the literal multiplies (`2x`, `2pi`, `2i`, `10 mm`).
+    glued_unit(self, n: usize) -> Option[string]
+        val (num, next) = (self.toks.peek_at(n), self.toks.peek_at(n + 1)) match
+            (Some(a), Some(b)) -> (a, b)
+            _ -> return None
+
+        num.value match
+            Num(_) -> ()
+            _ -> return None
+
+        if num.span.end != next.span.start then return None
+
+        val name = next.value match
+            Ident(w) -> w
+            Keyword(k) -> if k == "in" then k else return None
+            _ -> return None
+
+        for u in self.units
+            if u == name then return Some(name)
+
+        None
+    end glued_unit
 
     // Whether the cursor is on the first token of a line: what an end marker always is.
     at_line_head(self) -> bool = self.toks.looked_back() match
@@ -330,6 +375,27 @@ struct Parser
     end unit_decl
 
     // -- units --------------------------------------------------------------------------------------
+
+    // `10mm`: the literal `lit`, begun at `m` and spelled `text`, against the unit `name` at the
+    // cursor. It is the tree `10<mm>` makes. One name is the whole unit: a compound one is
+    // bracketed, `9.81<m/s^2>`, so a bracket after the name is refused rather than read as a second
+    // unit, and so is a unit against a hex, binary or octal literal, whose digits may be letters.
+    unit_shorthand(*self, m: usize, lit: Expr, text: string, name: string) -> Result[Expr, Diagnostic]
+        val n = self.toks.mark()
+
+        self.bump()
+
+        val unit = UnitExpr(self.toks.span_from(n), Base(name))
+        val whole = self.toks.span_from(m)
+
+        if text.starts_with("0x") || text.starts_with("0b") || text.starts_with("0o")
+            return Err(error(whole, s"a unit is written against a decimal literal, since a hex, binary or octal literal's digits may be letters: write `${text}<${name}>`"))
+
+        if is_unit_open(self.tok(0))
+            return Err(error(self.toks.here(), s"`${text}${name}` already carries its unit: a compound unit is written whole in brackets, `${text}<${name} …>`"))
+
+        Ok(ex(whole, Measured(lit, unit)))
+    end unit_shorthand
 
     // `<unit>` after a number, a name or a type name, its `<` at the cursor.
     annotation(*self) -> Result[UnitExpr, Diagnostic]
@@ -543,7 +609,12 @@ struct Parser
         val name = self.ident("a field name")?
 
         self.expect(":")?
-        Ok(Field(name, self.type_expr()?))
+
+        val typ = self.type_expr()?
+        val default = if self.accept("=") then Some(self.expr()?) else None
+
+        Ok(Field(name, typ, default))
+    end field
 
     // The lines of an indented block, each read by `item`, with the newline before the block and
     // the dedent after it taken. An item ends at a newline or a `;`; anything else after it is an
@@ -1085,6 +1156,9 @@ struct Parser
             Num(t) -> t
             _ -> return self.unary()
 
+        // `10mm` is a measured literal, an operand of its own, and `-10mm` is `-(10mm)`.
+        if self.glued_unit(n).is_some() then return self.unary()
+
         // A contextual word after a number is the clause it opens (`0..10 by 2`, `0..n reduce s: +`),
         // never something the number multiplies.
         self.tok(n + 1) match
@@ -1244,9 +1318,15 @@ struct Parser
 
         t match
             Num(text) ->
+                val unit = self.glued_unit(0)
+
                 self.bump()
 
-                return number(self.toks.span_from(m), text, false)
+                val lit = number(self.toks.span_from(m), text, false)?
+
+                return unit match
+                    Some(name) -> self.unit_shorthand(m, lit, text, name)
+                    None -> Ok(lit)
             Str(v) ->
                 self.bump()
                 return Ok(ex(self.toks.span_from(m), StrLit(v)))
@@ -1474,7 +1554,7 @@ struct Parser
 
                     parts.push(Value(ex(at, ExprKind.Name(name)), spec))
                 ExprHole(at, spec) ->
-                    var sub = parser(self.src, lex_within(self.src, at.start, at.end)?)
+                    var sub = parser(self.src, lex_within(self.src, at.start, at.end)?, self.units)
 
                     parts.push(Value(sub.standalone()?, spec))
 

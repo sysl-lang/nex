@@ -135,7 +135,8 @@ rounding: `a = x * a` with `a: [real32]` is refused, and `a = real32(x) * a` or
 ### 2.3 Literals and prelude constants
 
 An unsuffixed literal takes its type from its context; nex has no literal suffixes, because a suffix
-such as `1.0f32` would read as juxtaposition (`1.0 * f32`, ref §4.4).
+such as `1.0f32` would read as juxtaposition (`1.0 * f32`, ref §4.4). The one name a literal is
+written against that is not a multiplication is a unit's: `10mm` is `10<mm>` (§13.2).
 
 - **With an expected type** (an annotated binding, a parameter, a typed element or field): the
   literal is that type. An integer literal outside the target's range is a compile error
@@ -1652,6 +1653,33 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
   like any other, which `assert_traps` catches. Compiled, the limit is the machine stack's, and running
   past it ends the program as the system ends a stack overflow. A program that recurses deeper than
   10,000 calls writes the recursion as a loop.
+- **A default argument is an expression filled in at the call** (ref §6.5, the knob a CAD call
+  leaves out: `cylinder(r: real<mm>, h: real<mm> = 10<mm>, segments: integer = 64)`). Where nex
+  differs from Fortran's `optional` and `present()`: a parameter left out has a value, its default,
+  and the callee cannot tell it was left out. The rules:
+  - **It is evaluated at every call that leaves the argument out, afresh**, in its parameter's
+    place among the arguments, which a call evaluates in parameter order: `id: integer = next_id()`
+    calls `next_id` once per such call.
+    Nothing is evaluated once and shared, so a default never remembers an earlier call.
+  - **It sees the module-level names of the function's own module**, as a module-level binding's
+    initializer does — functions (declared anywhere in it), bindings, constants, and the private
+    ones too, wherever the call is. **It may not name a parameter**, its own or another's
+    (`h: real = 2 * r` is a compile error): it is evaluated before any parameter is bound. Nor does
+    it see the caller's locals.
+  - **It is checked against its parameter's type** as an initializer is (§2.2–§2.4): a literal adopts
+    it (`x: real = 1`), an integer widens, a narrowing is an error, and a measured parameter needs a
+    default of its dimension (`r: real<mm> = 5<mm>`; `= 5.0` is an error, and `= 0.5<cm>` converts).
+    In a generic `def`, it must have its parameter's type for every instance, so a parameter of type
+    `T` takes no literal default.
+  - **Any parameter may have one, in any position.** Positional arguments fill the leading
+    parameters, so a defaulted parameter before a required one is left out only by naming the later
+    one (`f(b = 2)`), as a Fortran `optional` dummy before a required one is.
+  - **An `inout` parameter has none** (it borrows the caller's variable), **nor has an `extern`'s**
+    (an `extern` transcribes the C prototype; a default belongs to a `def` that wraps it).
+  - **A function value carries no defaults.** A function type has no parameter names or defaults,
+    so a call through a function value, a function-typed parameter or a returned closure gives every
+    argument, by position; a `def` with defaults passed as a value has its full type (`(int64,
+    int64) -> void`). A local `def` is a function value, so its parameters take no default.
 
 ### 11.4 Structs, tuples, enums and `match`
 
@@ -1660,7 +1688,14 @@ with these rules (**PROPOSED** where marked).
 
 - **A constructor takes its fields by position or by name**, as a call takes its arguments, a
   Fortran structure constructor's keyword components: `Point(y = 2.0, x = 1.0)`,
-  `Rect(h = 2, w = 1)`. Every field is given; a field has no default. **PROPOSED.**
+  `Rect(h = 2, w = 1)`. **PROPOSED.**
+- **A struct's field may have a default** (`segments: integer = 64`), which a constructor that
+  leaves the field out takes, under exactly the rules of a parameter's default (§11.3): evaluated
+  afresh at each such constructor, seeing the struct's module and no other field, checked against
+  the field's type. A field with no default is given. A generic struct's field whose type names a
+  type parameter has no default, as a generic parameter of type `T` takes no literal one. **A
+  variant's field has no default**: a variant is built and matched with all of its fields, and a
+  pattern that left one out would not say which.
 - **A variant's fields may be of any type**, not only the scalars the reference allows; §3.1 and
   §6.2 already store arrays and views in enum payloads. **PROPOSED.**
 - **A struct or an enum cannot contain itself** by value, directly or through other structs, enums
@@ -1848,14 +1883,17 @@ unit psi = lbf / in^2
   (`in = 0.0254 m`) is a positive numeric literal times a unit expression. The factor is **exact**:
   a decimal literal is read as the rational it spells, and factors compose exactly, so `ft` is
   exactly 0.3048 m and `psi` exactly 6894.757293168361… Pa as a rational. A definition may not
-  refer to itself, directly or through another unit.
+  refer to itself, directly or through another unit. The prelude's angle units are scaled by a
+  power of π as well, held exactly beside the rational (`deg` is π/180 `rad`, §13.9); a module's
+  own declaration writes a decimal factor, so it scales from one of them (`unit grad = 0.9 deg`).
 - **Two units are the same unit** when they reduce to the same exponents of the same base units and
   the same factor. `N` and `kg m / s^2` are one unit, `Hz` and `1/s` are one, and so are `J` and
   `N m` (as in SI, torque and energy are not told apart). `mm` and `m` have the same **dimension**
   and different factors: two units, convertible (§13.3).
-- **Unit names live in their own namespace** and appear only inside `<…>` and in `unit`
-  declarations, so a variable named `m`, `s` or `g` does not clash with the unit, and the keyword
-  `in` is an ordinary unit name there (`2.0<in>`). A module's own `unit` declaration of a prelude
+- **Unit names live in their own namespace** and appear only inside `<…>`, in `unit`
+  declarations and directly after a numeric literal (`10mm`, §13.2), so a variable named `m`, `s`
+  or `g` does not clash with the unit, and the keyword `in` is an ordinary unit name there
+  (`2.0<in>`, `2in`). A module's own `unit` declaration of a prelude
   unit's name shadows it in that module, as any prelude name may be shadowed. `ms` is the
   millisecond; the metre-second is `m s`.
 - **A base unit is its name.** A module's `unit m` declares the same dimension the prelude's `m`
@@ -1868,6 +1906,7 @@ unit psi = lbf / in^2
 | Form | Example |
 |---|---|
 | a literal | `9.81<m/s^2>`, `2.0<in>`, `1.0e5<Pa>` |
+| a literal in one unit, shorthand | `10mm`, `2.5in`, `1e5Pa`, `-3mm` |
 | a real type | `real<m>`, `real32<m/s>`, `real16<Pa>` |
 | a complex type | `complex<V>`, `complex[real32]<ohm>` |
 | an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
@@ -1897,6 +1936,23 @@ unit psi = lbf / in^2
   | `(a + b)<m>`, `strip(y)<m>` | a unit on the parenthesised operand, on the call |
   | `if x<m> then …` | a unit: `then` cannot begin an operand |
 
+- **A unit's name written directly against a decimal literal, with no space, is that literal in
+  that unit**: `10mm` is `10<mm>`, `2.5in` is `2.5<in>`, `1e5Pa` (the exponent first, then the
+  unit) is `1e5<Pa>`. It is one operand, so it reads exactly as the bracketed form does: `-10mm` is
+  `-(10mm)`, `10mm^2` is `(10mm)^2`, `2 * 10mm` is `2 * (10mm)`, and `0mm < x < 1cm` is a chained
+  comparison.
+  - **One name is the whole unit.** A compound unit is bracketed, `9.81<m/s^2>`: in `9.81m/s^2` the
+    `s` is a value, divided by. A bracket after the name is a compile error (`10mm<in>`), since the
+    literal already has its unit.
+  - **The name is a unit's when the program has one by that name**: the prelude's (§13.9) or one a
+    `unit` declaration makes in any module, before or after the literal. Any other name is what the
+    literal multiplies (§4.4), so `2x`, `2pi`, `2e` and `2i` (§12) are products as before; the
+    prelude has no unit `i`, `e` or `pi`.
+  - **In that position the unit wins over a value of the same name**: with a local `m`, `3m` is three
+    metres, and `3 * m` (or `3 m`, with the space) multiplies by the local.
+  - **Only a decimal literal takes one.** A hex, binary or octal literal's digits may be letters
+    (`0x10cd` is one number), so a unit's name against one is a compile error: `0x10<mm>`.
+
 - **The checker accepts an annotation only on a dimensionless operand**: it attaches a unit to a
   number. An operand that already carries a unit is a compile error pointing to `to<u>(x)`, which
   is how a value changes unit (§13.3).
@@ -1916,7 +1972,7 @@ unit psi = lbf / in^2
   length and force are different dimensions"*.
 - **`*` and `/` combine units**: `3.0<m> / 2.0<s>` is a `real<m/s>`, and `2.0 * x` keeps `x`'s
   unit. A product keeps the names it was made from (`1.0<mm> * 1.0<in>` is `real<mm in>`, an area
-  whose factor is 0.001 × 0.0254).
+  whose factor is 0.001 × 0.0254), except that an angle can drop out of it (below).
 - **`^` takes a constant exponent** when its base carries a unit: `x^2` is `real<m^2>` for
   `x: real<m>`, and a rational exponent is allowed (`<m^(1/2)>`). The exponent is written as an
   integer literal, optionally negative (`x^-1`), or a fraction of two (`x^(1/2)`, `x^(-1/2)`); a
@@ -1930,6 +1986,31 @@ unit psi = lbf / in^2
   assignment of the same dimension and another scale is converted to the target's unit, as `+`
   converts its right operand. `val d: real<mm> = 1.0<in>` holds `25.4<mm>`. A different dimension
   is a compile error.
+- **An angle is a kind of unit**: the angle units are those whose dimension holds the base unit
+  `rad` — the prelude's `rad`, `deg`, `turn`, `arcmin`, `arcsec` and `sr` (= `rad^2`), and any
+  unit declared from them. They are checked where an angle meets a plain number and drop out of
+  products, so `rotate(part, 30)` meant in degrees does not compile, and `r * theta` is a length.
+  - **Angle units convert like any others**: `90.0<deg> + 0.5<rad>` is a `real<deg>` (the right
+    operand converted to the left one's unit), and `to<rad>(180.0<deg>)` is π rad.
+  - **A plain number is not an angle.** With `theta: real<rad>`, `theta + 0.5`, `theta > 0.0`, an
+    `if` with an angle in one branch and a plain number in another, `theta = 2.0`, and passing a
+    plain number to a parameter typed `real<rad>` or `real<deg>` are compile errors whose hint names
+    both forms: *"a bare number is not an angle; write `30<rad>` for radians or `30<deg>` for
+    degrees"*. The literal `0` is no exception, as it is none for any other unit (`theta = 0.0<rad>`).
+    An angle where a plain number is expected is refused the same way, and `strip(theta)` takes its
+    number.
+  - **An angle drops out where it meets another dimension in `*` or `/`**: the operand is taken in
+    radians and its angle removed, so `2.0<m> * 30.0<deg>` is a `real<m>` holding π/3, and
+    `theta / t` a `real<1/s>`. A result that is an angle and nothing else keeps it: `2.0 * theta`
+    and `omega * t` are angles, `theta * phi` is `rad^2`, and `theta / phi` is a plain number. The
+    angle drops at the operator where it meets the other dimension, so `theta * r / r` is a plain
+    number while `theta * (r / r)` is an angle. A unit parameter counts as a dimension other than
+    angle: `r * theta` with `r: real<U>` is a `real<U>`. `@` and `dot` follow the same rule.
+  - **A unit that mixes an angle with another dimension meets that dimension without it** in every
+    place two units must meet: `rad/s` and `1/s` (and so `Hz`) are one dimension, as in SI, so
+    `val omega: real<rad/s> = theta / t` holds, `omega * t` is an angle and `omega * r` a
+    `real<m/s>`. A declared unit that mixes the two (`unit rpm = turn / min`) is taken in base units
+    where its angle drops out: `2.0<rpm> * 1.0<m>` is a `real<m/s>`.
 - **`to<u>(x)`** converts explicitly, on a scalar and element-wise on an array: `to<mm>(1.0<in>)` is
   `25.4<mm>`. A target of another dimension is a compile error.
 - **`strip(x)`** removes the unit and gives the number in `x`'s own unit, dimensionless:
@@ -1949,11 +2030,15 @@ unit psi = lbf / in^2
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
   `sign(x)` and `arg(z)` return a plain number: the sign is −1, 0 or 1 whatever `x` measures, and
-  an angle is dimensionless.
-  `atan2(y, x)` takes two values of one dimension and returns a dimensionless angle.
-- `exp`, `log`, `sin`, `cos`, `tan` and the other elementary functions need a dimensionless argument
-  and return a dimensionless result. **`rad` is dimensionless** (`unit rad = 1`), so
-  `sin(0.5<rad>)` is accepted.
+  `arg(z)` is in radians.
+  `atan2(y, x)` takes two values of one dimension and returns a plain number, in radians.
+- **`sin`, `cos` and `tan` take an angle**, in any angle unit, converted to radians
+  (`sin(30.0<deg>)`), **or a plain number, which is radians**, as in Fortran; another unit, `sr`
+  among them, is a compile error. They return a plain number.
+- `exp`, `log`, `asin`, `acos`, `atan` and the other elementary functions need a dimensionless
+  argument — an angle is not one — and return a dimensionless result. **The inverse functions and
+  `atan2` return a plain number, in radians**, as in Fortran; `asin(x) * 1.0<rad>` makes it an
+  angle.
 - `product(a)` has unit `U^n`; for an `a` that carries a unit, `n` must be a static extent
   (**PROPOSED**), and otherwise it is a compile error that suggests `strip`.
 - `print` and string interpolation show the unit after the value, separated by a space: with
@@ -1992,8 +2077,8 @@ is held stripped.
 - **The element-wise operators, and the prelude functions applied element by element, follow the
   scalar rules of §13.3 and §13.4 for one element**: `a + b` needs one dimension and converts `b`'s
   elements to `a`'s unit, `a * b` and `a / b` combine units, a measured scalar broadcasts with its
-  unit, `a^2` takes a constant exponent, `sqrt(a)` halves the exponents and `sin(a)` needs a
-  dimensionless `a`.
+  unit, `a^2` takes a constant exponent, `sqrt(a)` halves the exponents, an array of angles drops
+  out of a product in radians, and `sin(a)` needs an array of angles or of plain numbers.
 - **`product(a, dim = k)`** multiplies the extent of axis `k`, so its unit is `U` to that extent:
   the axis is written as an integer literal and its extent is static, or, for an `a` that carries a
   unit, it is a compile error that suggests `strip` (**PROPOSED**).
@@ -2026,7 +2111,7 @@ unit-free parameters and result for the same reason.
 Units exist only in the type checker and are erased before MLIR is emitted, so a program with units
 compiles to the same code as the same program without them. **Mixing scales costs one
 multiplication by a constant**: the ratio of two exact factors, rounded once to the operand's width
-at compile time — the same single rounding a hand conversion makes. Where no scales are mixed, no
+at compile time — the same single rounding a hand conversion makes; a ratio that involves π is first taken to more than 50 significant digits. Where no scales are mixed, no
 conversion is emitted. The multiplication is an ordinary one: a conversion past the width's range is
 an infinity, or the overflow trap under `--fpe-trap` (§2.5).
 
@@ -2035,7 +2120,8 @@ an infinity, or the overflow trap under `--fpe-trap` (§2.5).
 | Units | Definitions |
 |---|---|
 | SI base | `m` `kg` `s` `A` `K` `mol` `cd` |
-| SI derived | `N = kg m / s^2`, `J = N m`, `W = J / s`, `Pa = N / m^2`, `Hz = 1 / s`, `C = A s`, `V = W / A`, `ohm = V / A`, `rad = 1` |
+| SI derived | `N = kg m / s^2`, `J = N m`, `W = J / s`, `Pa = N / m^2`, `Hz = 1 / s`, `C = A s`, `V = W / A`, `ohm = V / A` |
+| Angle | `rad` (a base unit), `sr = rad^2`, `deg = π/180 rad`, `turn = 2π rad`, `arcmin = deg / 60`, `arcsec = arcmin / 60` |
 | SI scaled | `mm = 0.001 m`, `cm = 0.01 m`, `km = 1000 m`, `g = 0.001 kg`, `ms = 0.001 s`, `us = 0.000001 s`, `ns = 0.000000001 s`, `kPa = 1000 Pa`, `MPa = 1000000 Pa`, `GPa = 1000000000 Pa`, `kN = 1000 N`, `kJ = 1000 J`, `kW = 1000 W` |
 | Imperial and US customary | `in = 0.0254 m`, `ft = 12 in`, `yd = 3 ft`, `mi = 5280 ft`, `lb = 0.45359237 kg`, `oz = 0.0625 lb`, `lbf = 4.4482216152605 N`, `slug = lbf s^2 / ft`, `psi = lbf / in^2`, `ksi = 1000 psi`, `BTU = 1055.05585262 J`, `hp = 550 ft lbf / s`, `usgal = 231 in^3`, `ukgal = 0.00454609 m^3` |
 
@@ -2091,7 +2177,8 @@ is in `K` until the affine units of §15 arrive.
 | Reductions | §10 | §7.4 | Fortran names: `minval`, `maxval`, `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`; `dim =` in place of the reference's `sum_axis`; `dot` conjugates |
 | Array elements | §3.3 | §3.1 | any element type but an array; structs and tuples of scalars stored inline |
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
-| Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; variant fields of any type; no type contains itself by value |
+| Default arguments | §6.5 | §11.3 | a defaulted parameter may stand anywhere, not only in a trailing run; a default sees the function's module and no parameter; `inout`, `extern` and local-`def` parameters and function values take none |
+| Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; a struct's field may have a default, a variant's may not; variant fields of any type; no type contains itself by value |
 | Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
 | Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed, and a bare `import m` gives qualified access, `m.x`; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |
 | Field places, `x.f(args)` | §4.16 | §11.4 | fields, tuple elements and `z.re`/`z.im` are assignable and passable `inout`; a function field is called |

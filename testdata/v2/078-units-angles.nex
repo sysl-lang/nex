@@ -1,0 +1,41 @@
+// Angles as a kind of unit: degrees and radians convert like millimetres and inches, a plain number is
+// not an angle, and an angle drops out, in radians, where it meets another dimension in a product.
+
+unit min = 60 s
+unit rpm = turn / min
+
+def arc_length(r: real<m>, a: real<rad>) = r * a
+
+def turned(x: real<m>, y: real<m>, a: real<rad>) = (x * cos(a) - y * sin(a), x * sin(a) + y * cos(a))
+
+def twice[U: Unit](x: real<U>) = 2.0 * x
+
+def main() =
+  val right = 90.0<deg>
+  print(right)
+  print(to<rad>(right))
+  print(right + 0.5pi<rad>)
+  print(to<deg>(1.0<turn>))
+  print(to<arcmin>(1.5<deg>))
+  print(right > 1.0<rad>)
+  print(if right > 2.0<rad> then right else 2.0<rad>)
+
+  print(arc_length(2.0<m>, 180.0<deg>))
+  print(turned(1.0<m>, 0.0<m>, 0.0<deg>))
+  print(sin(30.0<deg>) == sin(pi / 6.0))
+  print(sin(0.5) == sin(0.5<rad>))
+  print(twice(45.0<deg>))
+
+  val w: real<rad/s> = 1.0<turn> / 4.0<s>
+  print(w)
+  print(w * 2.0<s>)
+  print(w * 3.0<m>)
+  print(2.0<rpm> * 1.0<m>)
+  print(90.0<deg> / 45.0<deg>)
+  print(1.0<deg> * 2.0<deg>)
+
+  val angles = [0.0, 180.0, 360.0]<deg>
+  print(to<rad>(angles))
+  print(angles * 2.0<m>)
+  print(cos(angles) * 1.0<m>)
+  print(max(30.0<deg>, 1.0<rad>))

@@ -171,7 +171,9 @@ private generic(name: string, tps: Buf[TypeParam]) -> string
 
     name + "[" + join(out.view(), ", ") + "]"
 
-private show_field(f: Field) -> string = "(" + f.name + " " + show_type(f.typ) + ")"
+private show_field(f: Field) -> string = f.default match
+    Some(e) -> "(" + f.name + " " + show_type(f.typ) + " " + show_expr(e) + ")"
+    None -> "(" + f.name + " " + show_type(f.typ) + ")"
 
 show_decl(d: Decl) -> string
     var items: Buf[string] = buf()

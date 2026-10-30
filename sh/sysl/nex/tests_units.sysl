@@ -24,6 +24,27 @@ units_literal_adoption()
         "(def main () void (block (val a#0:real32<m> (adopt:real32<m> 1.0)) (print (s (strip:real32 (+:real32<m> a#0 (adopt:real32<m> 9.81))) \" m\"))))")
     assert_eq(refused("def main() = print(true<m>)\n"), "error: expected an expression, found ')' @1:27")
 
+@test("a unit's name against a literal elaborates exactly as the bracketed unit does")
+units_shorthand()
+    assert_eq(elaborated("def main() = print(10mm + 1in)\n"), elaborated("def main() = print(10<mm> + 1<in>)\n"))
+    assert_eq(elaborated("def main() = print(10mm + 1in)\n"),
+        "(def main () void (print (s (strip:real64 (+:real64<mm> 10.0<mm> (rescale:real64<mm> 25.4 1.0<in>))) \" mm\")))")
+    assert_eq(elaborated("def main() =\n  val a: real32<m> = 1.5m\n  print(-a + 2.5e-3km)\n"),
+        elaborated("def main() =\n  val a: real32<m> = 1.5<m>\n  print(-a + 2.5e-3<km>)\n"))
+    assert_eq(elaborated("def main() = print(10mm^2 / 2mm)\n"), elaborated("def main() = print(10<mm>^2 / 2<mm>)\n"))
+    assert_eq(refused("def main() = print(10mm + 1s)\n"), "error: cannot add mm and s: length and time are different dimensions @1:20")
+
+@test("a unit's name against a literal is the unit even where a local has that name")
+units_shorthand_over_a_local()
+    assert_eq(elaborated("def main() =\n  val m = 2.0\n  print(3m)\n"), elaborated("def main() =\n  val m = 2.0\n  print(3<m>)\n"))
+    assert_eq(elaborated("def main() =\n  val m = 2.0\n  print(3 m)\n"), elaborated("def main() =\n  val m = 2.0\n  print(3 * m)\n"))
+    assert_eq(refused("def main() =\n  val m = 2.0\n  print(3m + m)\n"), "error: cannot add m and a plain number: a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<m>` @3:9")
+
+@test("a unit the program declares is written against a literal too")
+units_shorthand_declared()
+    assert_eq(elaborated("unit apple\ndef main() = print(3apple + 2apple)\n"), elaborated("unit apple\ndef main() = print(3<apple> + 2<apple>)\n"))
+    assert_eq(refused("unit apple\nunit pear\ndef main() = print(3apple + 2pear)\n"), "error: cannot add apple and pear: apple and pear are different dimensions @3:20")
+
 @test("a module declares base, derived and scaled units, and the scales compose exactly")
 units_declarations()
     assert_eq(elaborated("unit m\nunit mm = 0.001 m\nunit in = 25.4 mm\ndef main() = print(10.0<mm> + 1.0<in>)\n"),
@@ -146,11 +167,10 @@ units_prelude_keep()
     assert_eq(refused("def main() = print(sign(2.0<m>) * 1.0<m> + 1.0<s>)\n"), "error: cannot add m and s: length and time are different dimensions @1:20")
     assert_eq(elaborated("def main() = print(arg(1.0i<V>))\n"), "(def main () void (print (arg:real64 (*:complex[real64]<V> (adopt:complex[real64] 1.0) i<V>))))")
 
-@test("the elementary functions take a dimensionless argument, rad and a scaled ratio among them")
+@test("the elementary functions take a dimensionless argument, a scaled ratio among them")
 units_prelude_dimensionless()
-    assert_eq(elaborated("def main() = print(sin(0.5<rad>))\n"), "(def main () void (print (sin:real64 0.5)))")
     assert_eq(elaborated("def main() = print(exp(1.0<mm/in>))\n"), "(def main () void (print (exp:real64 (rescale:real64 0.03937007874015748 1.0<mm/in>))))")
-    assert_eq(refused("def main() = print(sin(0.5<m>))\n"), "error: `sin` takes a dimensionless argument, and this is real64<m> (length); strip the unit to pass the number: `sin(strip(x))` @1:20")
+    assert_eq(refused("def main() = print(exp(0.5<m>))\n"), "error: `exp` takes a dimensionless argument, and this is real64<m> (length); strip the unit to pass the number: `exp(strip(x))` @1:20")
 
 @test("min, max, hypot and atan2 take one dimension, converting the second argument")
 units_prelude_two()

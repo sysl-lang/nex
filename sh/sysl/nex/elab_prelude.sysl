@@ -499,14 +499,16 @@ impl Elab
             Some(t) -> t
             None -> return self.invalid(span)
 
-        val u = self.exact(span, unit_mul(unit_of(ea), unit_of(eb))) match
+        val (ua, ub) = self.product_units(unit_of(ea), unit_of(eb), false)
+
+        val u = self.exact(span, unit_mul(ua, ub)) match
             Some(u) -> u
             None -> return self.invalid(span)
 
         if self.shape_meet(span, "`dot`", axes_of(out[0].ty), axes_of(out[1].ty)).is_none() then return self.invalid(span)
 
-        for k in 0..<2
-            out.set(k, promote(out[k], with_unit(with_elem(out[k].ty, n), elem_unit(out[k].ty))))
+        out.set(0, promote(out[0], with_unit(with_elem(out[0].ty, n), ua)))
+        out.set(1, promote(out[1], with_unit(with_elem(out[1].ty, n), ub)))
 
         texpr(span, measured(n, u), TArray(TReduction("dot", out, None)))
     end dot

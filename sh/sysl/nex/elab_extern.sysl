@@ -43,7 +43,7 @@ impl Elab
 
         for p in x.params
             if contains(names, p.name) then self.fail(x.decl.span, s"redeclaration of `${p.name}`")
-            if p.default.is_some() then self.fail(p.typ.span, "an `extern` parameter has no default")
+            if p.default.is_some() then self.fail(p.typ.span, "an `extern` parameter has no default: an `extern` declares the C function as it is, and a default belongs to a `def` that wraps it")
 
             val ty = self.resolve_type(p.typ)
 
