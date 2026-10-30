@@ -1,0 +1,59 @@
+// A Fortran routine calling nex back (DESIGN §10.2.1, §10.6): a callback passed to a `@fortran`
+// extern is called the Fortran way, every argument by reference, and its trampoline reads each as a
+// value — a real, an integer, a `complex(8)` and a default `logical` — and returns a real, a
+// `logical` or nothing. A `def`, a lambda that captures nothing and libm's `fabs` (a C function,
+// called through a trampoline) all pass. A trap inside a callback is raised where Fortran was called,
+// once it has returned, the calls it makes after the trap not run.
+
+@fortran @link("nexfort")
+extern def fsimpson(f: (real) -> real, a: real, b: real, n: int32, r: inout real)
+
+@fortran @link("nexfort")
+extern def fapply(g: (int32, real) -> real, n: int32, x: [real], out: inout [real])
+
+@fortran @link("nexfort")
+extern def fcount_if(p: (real) -> bool, n: int32, x: [real], k: inout int32)
+
+@fortran @link("nexfort")
+extern def feach(s: (complex, bool) -> void, n: int32, z: [complex])
+
+@link("m")
+extern def fabs(x: real): real
+
+def square(x: real): real = x * x
+
+def guarded_integral(b: real, n: int32): real =
+  var r = 0.0
+  fsimpson(guarded, 0.0, b, n, r)
+  r
+
+def show(z: complex, even: bool) =
+  print(s"$z $even")
+
+// A callback that prints its argument and traps past 2.5.
+def guarded(x: real): real =
+  print(x)
+  assert(x < 2.5, s"callback at $x")
+  x
+
+def main() =
+  var r = 0.0
+  fsimpson(square, 0.0, 3.0, 6, r)
+  print(r)
+  fsimpson(x -> x * x * x, 0.0, 2.0, 4, r)
+  print(r)
+  fsimpson(fabs, -1.0, 1.0, 4, r)
+  print(r)
+
+  var out: [real] = zeros(3)
+  fapply((i, x) -> i * 100.0 + x, 3, [0.5, 0.25, 0.125], out)
+  print(out)
+
+  var k: int32 = 0
+  fcount_if(x -> x > 1.0, 4, [0.5, 1.5, 2.0, -3.0], k)
+  print(k)
+
+  feach(show, 3, [1 + 1i, 2 - 1i, 0 + 3i])
+
+  assert_traps(() -> print(guarded_integral(4.0, 4)), "callback at 4.0")
+  print(guarded_integral(2.0, 2))

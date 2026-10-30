@@ -227,7 +227,7 @@ struct TFun
     body: TExpr
 
 // `extern def name(params): ret`: a C function, its parameter types and modes and its result.
-// `symbol` is the C name (`@symbol`, else `name`); `links` the libraries its `@link`s name and
+// `symbol` is the C name (`@symbol`, else `name`, or for `@fortran` gfortran's `name_`); `links` the libraries its `@link`s name and
 // `frameworks` the frameworks; `pure` whether it is declared `@pure`. By parameter: whether it is
 // `@strided`, and the function parameter a `@data(f)` one partners.
 struct TExtern
@@ -242,6 +242,8 @@ struct TExtern
     pure: bool
     strided: Buf[bool]
     partner: Buf[Option[usize]]
+    // Declared `@fortran`: every argument by reference, a string's length trailing (DESIGN §10.6).
+    fortran: bool
 
 // `val a, b = 1, 2` at module level: one initializer, its tuple taken apart into the module-level
 // bindings `pat` names.

@@ -1451,25 +1451,54 @@ Fortran procedure are reachable:
 
   `@fortran` applies gfortran's conventions so the declaration reads like the Fortran interface:
   1. **Name mangling**: the symbol is the lowercase name with a trailing underscore (`dgtsv_`);
-     `@symbol` overrides it (a module procedure's `__mod_MOD_name`).
+     `@symbol` overrides it (a module procedure's `__mod_MOD_name`). Fortran names are
+     case-insensitive, so `faxpy` and `FAXPY` are one symbol and two externs cannot declare both.
+     `@fortran` takes no arguments.
   2. **Every argument by reference**, as Fortran passes it: a read-mode scalar passes the address of
-     a temporary copy, an `inout` scalar the address of the caller's place.
+     a temporary copy, an `inout` scalar the address of the caller's place. In a parallel body each
+     thread has its own temporaries.
   3. **Hidden string lengths**: each `string` argument passes its pointer in place and its length
-     as an extra trailing argument (`size_t` in gfortran 8 and later), in order after all the
-     declared arguments. Fortran strings are not NUL-terminated and nex adds no terminator.
+     in bytes as an extra trailing argument (`size_t`, gfortran's convention since gfortran 8), in
+     order after all the declared arguments, so `len(s)` in Fortran is the string's byte count,
+     trailing blanks included. Fortran strings are not NUL-terminated and Fortran reads no
+     terminator. A string is read-only (`intent(in)`): an `inout` string is an error.
   4. **Arrays** pass as for C (§10.2, §10.3): column-major is native, so a dense array or a
-     leading-dimension view crosses with no copy, and Fortran's 1-based indexing matches nex's.
-  5. **Complex** is by reference like every other argument; a Fortran `COMPLEX` function result
-     follows gfortran's convention for the target *(unverified)*.
+     leading-dimension view crosses with no copy, a view strided along the first axis is copied in
+     (and back for `inout`), and Fortran's 1-based indexing matches nex's.
+  5. **Complex** is by reference like every other argument; a `complex(8)` or `complex(4)` function
+     result comes back by value as a C `_Complex` does, which is gfortran's convention on arm64 and
+     x86-64 (no `-ff2c`).
+  6. **`bool` is a default `logical`** — gfortran's kind 4, 4 bytes, `.true.` stored as 1 and any
+     nonzero read as true — as argument, `inout` and function result. An array of `bool` is an
+     error, since a `[bool]` holds bytes and a `logical` array 4-byte words: declare it `[int32]`
+     (0 and 1). A `logical(c_bool)` is reached through `bind(c)`, where it is C's `bool`.
+
+**Callbacks to Fortran.** A Fortran procedure calls an `external` dummy with every argument by
+reference, so the trampoline nex passes for a callback parameter of a `@fortran` extern takes an
+address for each argument and reads it as a value (a `logical` as 4 bytes); its result returns by
+value, a `logical` as 4 bytes. Its parameters are numbers, `bool` and complexes and never `inout`.
+Fortran hands a callback no user data, so a `@fortran` extern has no `c_ptr` and no `@data`, and its
+callback is a `def`, a C `extern` (called through the trampoline, since C takes values) or a lambda
+that captures nothing. Traps in a callback behave as in §10.2.1.
+
+**A `@fortran` extern is only called**: it is not a function value, and is not passed as a callback,
+since nothing but a Fortran caller passes its arguments by reference. A `def` that calls it is.
 
 What does not cross: Fortran assumed-shape (`a(:)`) dummies of a non-`bind(c)` procedure, which
-need gfortran's array descriptor; derived types; `optional` arguments. Each is reached through a
-`bind(c)` wrapper written in Fortran. LAPACK and BLAS (§10.4, §10.5) are themselves Fortran and are
-called through these rules.
+need gfortran's array descriptor; derived types (a `@c` struct is an error on a `@fortran` extern);
+`optional` arguments. Each is reached through a `bind(c)` wrapper written in Fortran. LAPACK and BLAS
+(§10.4, §10.5) are themselves Fortran and are called through these rules.
 
-**Linking.** `nex build` links the gfortran runtime automatically when the program has a
-`@fortran` extern. The Fortran library itself comes from `@link("name")` or `-l name`, found on the
-default search path or a `-L dir` given on the command line.
+**Linking.** `nex build` and `nex run` link the gfortran runtime automatically when the program has
+a `@fortran` extern, so a static Fortran archive links as it is: the runtime's directory is what
+`gfortran -print-file-name=libgfortran.dylib` names (`libgfortran.so` elsewhere), linked with
+`-lgfortran` and recorded as the program's run-time search path. The gfortran asked is
+`NEX_GFORTRAN`, else Homebrew's `/opt/homebrew/bin/gfortran`; with none there the link is refused
+with a message saying so. A program calling only `bind(c)` procedures links no Fortran runtime of its
+own: a Fortran shared library names its runtime itself. The Fortran library comes from
+`@link("name")` or `-l name`, found on the default search path or a `-L dir` given on the command
+line; a procedure no linked library defines is the linker's undefined-symbol error naming the
+mangled symbol (`_fdot_`).
 
 ---
 
