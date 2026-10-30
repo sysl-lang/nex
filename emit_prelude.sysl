@@ -1,0 +1,256 @@
+// The prelude functions that rearrange an array's axes — `permute`, and `reverse` on an axis known
+// only at run time (a written one is a view, `elab_view.sysl`) — and `assert_approx` (DESIGN §7.4,
+// §4.3).
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Emitter
+    // -- rearranging ------------------------------------------------------------------------------
+
+    // `reverse(a, k)` for a `k` computed at run time: a new array, axis `k` reversed; a `k` that is
+    // not an axis traps.
+    reversed_on(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val a = args[0]
+        val v = self.ex(a)
+        val r = rank_of(a.ty)
+        val k = self.widen64(self.ex(args[1]), bits_of(args[1].ty), is_signed(args[1].ty))
+
+        self.trap_if(self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64"), "not an axis of the array")
+
+        var dims: Buf[string] = buf()
+
+        for x in 1..r
+            dims.push(self.dim(span, v, a.ty, x))
+
+        val g = self.generate_open(span, t, dims)
+        var idx: Buf[string] = buf()
+
+        // Tensor dimension `d` is nex axis `r − d`.
+        for d in 0..<r
+            val i = self.def(s"linalg.index $d : index")
+            val last = self.def(s"arith.subi ${dims[r - d - 1]}, ${self.index_const(1)} : index")
+            val flip = self.def(s"arith.cmpi eq, $k, ${self.def(s"arith.constant ${r - d} : i64")} : i64")
+
+            idx.push(self.def(s"arith.select $flip, ${self.def(s"arith.subi $last, $i : index")}, $i : index"))
+
+        self.generate_close(span, t, self.def(s"tensor.extract $v[${joined(idx)}] : ${self.tensor_ty(span, a.ty)}"))
+        g
+
+    // `permute(a, (p1, …, pR))`: result axis `n` is source axis `p_n`. A permutation written out is
+    // one `linalg.transpose`; one computed at run time is checked, and traps where it is not one.
+    permuted(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val a = args[0]
+        val v = self.ex(a)
+        val r = rank_of(a.ty)
+        var written: Buf[usize] = buf()
+        var ps: Buf[string] = buf()
+
+        for n in 1..r
+            val x = args[n]
+
+            *x.kind match
+                TLiteral(IntVal(p), _) -> written.push(usize(p))
+                _ -> ()
+
+            ps.push(self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty)))
+
+        // The source extents, and the result's: axis `n` has source axis `p_n`'s.
+        var src: Buf[string] = buf()
+
+        for m in 1..r
+            src.push(self.dim(span, v, a.ty, m))
+
+        var dims: Buf[string] = buf()
+
+        for n in 0..<r
+            dims.push(self.select_by(ps[n], src, "index"))
+
+        val tt = self.tensor_ty(span, t)
+
+        if written.len() == r
+            // Result tensor dimension `d` is result axis `r − d`, whose source axis `p` is tensor
+            // dimension `r − p`.
+            var perm: Buf[string] = buf()
+
+            for d in 0..<r
+                perm.push(s"${r - written[r - d - 1]}")
+
+            val empty = self.def(s"tensor.empty(${joined(self.dynamic_of(t, dims))}) : $tt")
+
+            return self.def(s"linalg.transpose ins($v : ${self.tensor_ty(span, a.ty)}) outs($empty : $tt) permutation = [${joined(perm)}]")
+
+        // Each axis named once, every one in range.
+        var bad = self.def("arith.constant false")
+
+        for n in 0..<r
+            val off = self.def(s"arith.cmpi uge, ${self.def(s"arith.subi ${ps[n]}, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64")
+
+            bad = self.def(s"arith.ori $bad, $off : i1")
+
+            for j in 0..<n
+                bad = self.def(s"arith.ori $bad, ${self.def(s"arith.cmpi eq, ${ps[n]}, ${ps[j]} : i64")} : i1")
+
+        self.trap_if(bad, "not a permutation of the axes")
+
+        // Where the trap is taken the extents are the source's, so nothing reads outside it.
+        for n in 0..<r
+            dims.set(n, self.def(s"arith.select $bad, ${src[n]}, ${dims[n]} : index"))
+
+        val g = self.generate_open(span, t, dims)
+        // The result's nex index on each axis, then the source's: source axis `m` takes the index of
+        // the result axis whose `p` is `m`.
+        var at: Buf[string] = buf()
+
+        for n in 1..r
+            at.push(self.def(s"linalg.index ${r - n} : index"))
+
+        var idx: Buf[string] = buf()
+        var m = r
+
+        while m > 0
+            var i = self.index_const(0)
+
+            for n in 0..<r
+                val hit = self.def(s"arith.cmpi eq, ${ps[n]}, ${self.def(s"arith.constant $m : i64")} : i64")
+
+                i = self.def(s"arith.select $hit, ${at[n]}, $i : index")
+
+            idx.push(i)
+            m -= 1
+
+        self.generate_close(span, t, self.def(s"tensor.extract $v[${joined(idx)}] : ${self.tensor_ty(span, a.ty)}"))
+        g
+    end permuted
+
+    // Of `xs` (MLIR type `ty`), the one at 1-based position `k` (an `i64`); the first where `k` is
+    // none of them.
+    select_by(*self, k: string, xs: Buf[string], ty: string) -> string
+        var out = xs[0]
+
+        for j in 1..<xs.len()
+            val hit = self.def(s"arith.cmpi eq, $k, ${self.def(s"arith.constant ${j + 1} : i64")} : i64")
+
+            out = self.def(s"arith.select $hit, ${xs[j]}, $out : $ty")
+
+        out
+
+    // -- `assert_approx` --------------------------------------------------------------------------
+
+    // `assert_approx(a, b, tol)`: two numbers, or two arrays of one shape element by element, no
+    // further apart than `tol`; a `nan` is never close to anything. Otherwise a trap that says
+    // where and by how much.
+    assert_approx(*self, span: Span, args: Buf[TExpr]) -> string
+        val a = args[0]
+        val b = args[1]
+        val x = self.ex(a)
+        val y = self.ex(b)
+        val tol = self.ex(args[2])
+
+        if !is_arr(a.ty)
+            self.approx_check(span, x, y, a.ty, tol, buf())
+            return ""
+
+        val r = rank_of(a.ty)
+        var differ = self.def("arith.constant false")
+        var dims: Buf[string] = buf()
+
+        for k in 1..r
+            val m = self.dim(span, x, a.ty, k)
+            val n = self.dim(span, y, b.ty, k)
+
+            differ = self.def(s"arith.ori $differ, ${self.def(s"arith.cmpi ne, $m, $n : index")} : i1")
+            // The smaller, so where the trap is taken no loop reads outside either array.
+            dims.push(self.def(s"arith.minui $m, $n : index"))
+
+        self.op(s"scf.if $differ {")
+
+        val sink = self.call("nex_sink_new", "", "", "i64")
+
+        self.put_text(sink, if r == 1 then "assert_approx: the lengths differ, " else "assert_approx: the shapes differ, ")
+        self.put_extents(span, sink, x, a.ty)
+        self.put_text(sink, " and ")
+        self.put_extents(span, sink, y, b.ty)
+        self.trap_from(sink)
+        self.op("}")
+
+        // Storage order, nex axis 1 fastest: the loops in tensor order.
+        var loops: Buf[string] = buf()
+        var k = r
+
+        while k > 0
+            k -= 1
+            loops.push(dims[k])
+
+        val nest = self.nest_open(loops, "", "")
+        var at: Buf[string] = buf()
+        var j = nest.ivs.len()
+
+        while j > 0
+            j -= 1
+            at.push(self.def(s"arith.addi ${self.to_i64(nest.ivs[j])}, %one : i64"))
+
+        val xi = self.def(s"tensor.extract $x[${joined(nest.ivs)}] : ${self.tensor_ty(span, a.ty)}")
+        val yi = self.def(s"tensor.extract $y[${joined(nest.ivs)}] : ${self.tensor_ty(span, b.ty)}")
+
+        self.approx_check(span, xi, yi, elem_of(a.ty), tol, at)
+        self.nest_close(nest, "")
+        ""
+    end assert_approx
+
+    // `x` and `y`, of type `t`, no further apart than `tol` (a `real64`); `at`, the element's nex
+    // index where they are elements of arrays.
+    approx_check(*self, span: Span, x: string, y: string, t: Ty, tol: string, at: Buf[string])
+        val b = bits_of(t)
+        var d = ""
+
+        if is_complex(t)
+            d = self.def(s"complex.abs ${self.def(s"complex.sub $x, $y : complex<f$b>")} : complex<f$b>")
+        else
+            d = self.def(s"math.absf ${self.def(s"arith.subf $x, $y : f$b")} : f$b")
+
+        if b != 64 then d = self.def(s"arith.extf $d : f$b to f64")
+
+        self.op(s"scf.if ${self.not(self.def(s"arith.cmpf ole, $d, $tol : f64"))} {")
+
+        val sink = self.call("nex_sink_new", "", "", "i64")
+
+        self.put_text(sink, "assert_approx: ")
+
+        if at.len() > 0
+            self.put_text(sink, if at.len() == 1 then "element " else "element (")
+
+            for k in 0..<at.len()
+                if k > 0 then self.put_text(sink, ", ")
+                self.put_value(span, sink, at[k], INTEGER)
+
+            self.put_text(sink, if at.len() == 1 then ": " else "): ")
+
+        self.put_text(sink, "|")
+        self.put_value(span, sink, x, t)
+        self.put_text(sink, " - ")
+        self.put_value(span, sink, y, t)
+        self.put_text(sink, "| = ")
+        self.put_value(span, sink, d, REAL)
+        self.put_text(sink, " > ")
+        self.put_value(span, sink, tol, REAL)
+        self.trap_from(sink)
+        self.op("}")
+    end approx_check
+
+    // The extents of `v`: `3` for rank 1, `(2, 3)` above.
+    put_extents(*self, span: Span, sink: string, v: string, t: Ty)
+        val r = rank_of(t)
+
+        if r > 1 then self.put_text(sink, "(")
+
+        for k in 1..r
+            if k > 1 then self.put_text(sink, ", ")
+            self.put_value(span, sink, self.to_i64(self.dim(span, v, t, k)), INTEGER)
+
+        if r > 1 then self.put_text(sink, ")")
+
+    // A trap whose message is what `sink` holds.
+    trap_from(*self, sink: string)
+        self.call("nex_trap", self.call("nex_sink_finish", sink, "i64", "!llvm.ptr"), "!llvm.ptr", "")
+end Emitter

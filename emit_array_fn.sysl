@@ -73,6 +73,8 @@ impl Emitter
         if name == "flatten" then return self.cast(span, self.flat(span, self.ex(args[0]), args[0].ty), self.view_ty(t), t)
         if name == "reshape" then return self.reshape(span, args, t)
         if name == "transpose" then return self.transposed(span, self.ex(args[0]), args[0].ty, t)
+        if name == "permute" then return self.permuted(span, args, t)
+        if name == "reverse" then return self.reversed_on(span, args, t)
         if name == "to_integers" || name == "to_bytes"
             var operands: Buf[TExpr] = buf()
 
@@ -436,10 +438,12 @@ impl Emitter
     reduction(*self, e: TExpr, name: string, args: Buf[TExpr], dim: Option[TExpr]) -> string
         val a = args[0]
 
-        if name == "minloc" || name == "maxloc"
-            if dim.is_some() || rank_of(a.ty) != 1 then return self.unsupported(e.span, s"`$name` of rank ${rank_of(a.ty)}")
+        if (name == "minloc" || name == "maxloc") && dim.is_none()
+            val v = self.ex(a)
 
-            return self.location(e.span, name, self.flat(e.span, self.ex(a), a.ty), elem_of(a.ty), e.ty)
+            if rank_of(a.ty) == 1 then return self.location(e.span, name, self.flat(e.span, v, a.ty), elem_of(a.ty), e.ty)
+
+            return self.unflattened(e.span, self.location(e.span, name, self.flat(e.span, v, a.ty), elem_of(a.ty), INTEGER), v, a.ty, e.ty)
 
         var v = self.ex(a)
         var vt = a.ty
@@ -641,15 +645,68 @@ impl Emitter
         self.op("}")
         self.convert(span, s"$r#1", INTEGER, t, false)
 
-    // `sum(a, dim = k)` and the like: each lane along axis `k` reduced.
+    // `sum(a, dim = k)` and the like: each lane along axis `k` reduced. A `k` computed at run time
+    // that is not an axis traps.
     reduce_along(*self, e: TExpr, name: string, v: string, vt: Ty, d: TExpr) -> string
-        val k = *d.kind match
-            TLiteral(IntVal(x), _) -> usize(x)
-            _ -> 0
-
         val r = rank_of(vt)
 
-        if k == 0 || k > r then return self.unsupported(e.span, "a computed `dim =`")
+        *d.kind match
+            TLiteral(IntVal(x), _) ->
+                if x >= 1 && x <= i128(r) then return if r == 1 then self.reduce_whole(e.span, name, v, vt, e.ty) else self.reduce_lanes(e, name, v, vt, usize(x))
+            _ -> ()
+
+        val k = self.widen64(self.ex(d), bits_of(d.ty), is_signed(d.ty))
+        val outside = self.def(s"arith.cmpi uge, ${self.def(s"arith.subi $k, %one : i64")}, ${self.def(s"arith.constant $r : i64")} : i64")
+
+        self.trap_if(outside, "not an axis of the array")
+
+        if r == 1 then return self.reduce_whole(e.span, name, v, vt, e.ty)
+
+        // One case per axis; where the trap is taken, the first axis's stands in.
+        val tt = self.tensor_ty(e.span, e.ty)
+        val at = self.def(s"arith.index_cast ${self.def(s"arith.select $outside, %one, $k : i64")} : i64 to index")
+        val res = self.fresh()
+
+        self.op(s"$res = scf.index_switch $at -> $tt")
+
+        for a in 1..r
+            self.op(s"case $a {")
+            self.op(s"scf.yield ${self.reduce_lanes(e, name, v, vt, a)} : $tt")
+            self.op("}")
+
+        self.op("default {")
+        self.op(s"scf.yield ${self.reduce_lanes(e, name, v, vt, 1)} : $tt")
+        self.op("}")
+        res
+
+    // The reduction `name` of all of `v`, rank 1 or the lane of one, as a `t`.
+    reduce_whole(*self, span: Span, name: string, v: string, vt: Ty, t: Ty) -> string =
+        if name == "minloc" || name == "maxloc" then self.location(span, name, self.flat(span, v, vt), elem_of(vt), t)
+        else self.reduce_flat(span, name, self.flat(span, v, vt), elem_of(vt), t)
+
+    // The 1-based nex index, one per axis of `v` (of type `vt`), of the element at 1-based storage
+    // position `k` (an integer), as the tuple `t`; every index 0 where `k` is.
+    unflattened(*self, span: Span, k: string, v: string, vt: Ty, t: Ty) -> string
+        val zero = self.def("arith.constant 0 : i64")
+        val none = self.def(s"arith.cmpi eq, $k, $zero : i64")
+        var rest = self.def(s"arith.subi ${self.def(s"arith.select $none, %one, $k : i64")}, %one : i64")
+        var vals: Buf[string] = buf()
+        var tys: Buf[Ty] = buf()
+
+        for a in 1..rank_of(vt)
+            // The extent is at least 1 wherever an element was found; 1 stands in for an empty axis.
+            val n = self.def(s"arith.maxsi ${self.to_i64(self.dim(span, v, vt, a))}, %one : i64")
+            val i = self.def(s"arith.addi ${self.def(s"arith.remsi $rest, $n : i64")}, %one : i64")
+
+            vals.push(self.def(s"arith.select $none, $zero, $i : i64"))
+            tys.push(INTEGER)
+            rest = self.def(s"arith.divsi $rest, $n : i64")
+
+        self.make(self.ty(span, t), vals, tys)
+
+    // Each lane along nex axis `k` (a rank-2-or-more `v`) reduced.
+    reduce_lanes(*self, e: TExpr, name: string, v: string, vt: Ty, k: usize) -> string
+        val r = rank_of(vt)
 
         // The result's extents: every axis but `k`, nex order.
         var out_dims: Buf[string] = buf()
@@ -698,19 +755,19 @@ impl Emitter
             else
                 offs.push(at[p])
                 sizes.push("1")
-                subs.push(TSubAt(d))
+                subs.push(TSubAt(e))
                 p += 1
 
         val lt = Ty.Array(elem_of(vt), dynamic_axes(1))
         val lane = self.def(s"tensor.extract_slice $v${self.slice_text(subs, offs, sizes, strides)} : ${self.tensor_ty(e.span, vt)} to ${self.tensor_ty(e.span, lt)}")
-        val x = self.reduce_flat(e.span, name, lane, elem_of(vt), elem_of(t))
+        val x = self.reduce_whole(e.span, name, lane, lt, elem_of(t))
         var idx: Buf[string] = buf()
 
         for iv in nest.ivs
             idx.push(iv)
 
         self.nest_close(nest, self.def(s"tensor.insert $x into ${nest.accs[nest.accs.len() - 1]}[${joined(idx)}] : $tt"))
-    end reduce_along
+    end reduce_lanes
 
     // -- `@` --------------------------------------------------------------------------------------
 
