@@ -187,7 +187,8 @@ message suggests marking it `@elemental` or calling `map`.
 ## 6.5 Parameters, defaults and named arguments
 
 Each parameter is `name: type`, optionally followed by a mode (§6.8) and a default. Parameters with
-defaults must come last, so a positional call may leave trailing arguments off:
+defaults must come last, so a positional call may leave trailing arguments off; a parameter without
+a default after one with a default is a compile error:
 
 ```nex
 def damp(x: real, factor: real = 0.5, floor: real = 0.0) =
@@ -205,7 +206,24 @@ twice, or one left unfilled with no default, is a compile error. As with Fortran
 arguments, the names are part of the function's interface.
 
 A default expression is evaluated at **each call** that uses it, not once when the function is
-declared.
+declared, and only by a call that leaves its argument out.
+
+A default may use the **parameters before its own**, which hold that call's arguments, or their own
+defaults where the call left them out too:
+
+```nex
+def cylinder(r: real<m>, h: real<m> = 2.0 * r) = print(3.0 * r * r * h)
+def total(xs: [integer], n: integer = length(xs), from: integer = 1): integer = sum(xs[from..n])
+
+cylinder(1.0<m>)                   // h is 2.0 m
+total([1, 2, 3, 4], from = 3)      // n is 4: 7
+```
+
+The call evaluates its arguments once each, in parameter order, and each default after the
+arguments before it. A default that uses its own parameter or a later one is a compile error, and
+it never sees the caller's locals. A default may read an `inout` parameter before it as any other
+argument beside the borrow may (§6.8): `by: integer = length(v)` after `v: inout [integer]` is
+legal. A lambda written in a default may not capture a parameter.
 
 Defaults and named arguments need a call to one named, non-overloaded `def`. A call to an overloaded
 name, to a function value (§6.7) or through method notation (`x.f(…)`) passes every argument by

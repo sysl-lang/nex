@@ -111,11 +111,13 @@ struct Fx
     // (`elab_generic.sysl`), and which instance that is.
     subst: Buf[Binding]
     instance: Option[usize]
-    // While a default is elaborated, its function's parameter names or its struct's field names,
-    // which a default may not name: it is evaluated at the call, where they are not bound.
+    // While a default is elaborated, the names it may not use: its own parameter and every later one,
+    // or every field of its struct. A parameter's default sees the parameters before its own.
     params: Buf[string]
+    // The parameter whose default is elaborated; `""` for a field's.
+    owner: string
 
-empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None, buf())
+empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None, buf(), "")
 
 // A lambda bound by `val f = x -> ...` whose parameter types are not written: it is elaborated at
 // the first use that fixes them, inside the copy of the scope it was written in.
@@ -452,17 +454,19 @@ struct Elab
         self.fsig.set(k, sig)
     end sig_types
 
-    // A function's defaults, each checked against its parameter's type in the function's module,
-    // with no local and no parameter in scope: the call fills it in and evaluates it there, afresh
-    // at every call that leaves the argument out.
+    // A function's defaults, each checked against its parameter's type in the function's module with
+    // the parameters before its own in scope: the call fills it in and evaluates it there, afresh at
+    // every call that leaves the argument out, after the arguments before it. Defaults come last.
     sig_defaults(*self, k: usize)
         val f = self.funs[k]
         var sig = self.fsig[k]
         val saved = self.fx
         val saved_units = self.enter_unit_params(f.uparams)
+        var first: Option[string] = None
 
         self.fx = self.fx_for(k)
-        self.fx.params = sig.names
+        self.fx.frames.push(Frame(None, Void, true, 0))
+        self.open()
 
         for j in 0..<f.params.len()
             val p = f.params[j]
@@ -471,13 +475,41 @@ struct Elab
                 Some(d) ->
                     if p.mode == Inout then self.fail(d.span, "an `inout` parameter cannot have a default: it borrows a variable of the caller's")
 
-                    sig.defaults.set(j, Some(self.check(d, sig.tys[j], "this default")))
-                None -> ()
+                    var later: Buf[string] = buf()
 
+                    for i in j..<sig.names.len()
+                        later.push(sig.names[i])
+
+                    self.fx.params = later
+                    self.fx.owner = p.name
+
+                    val base = self.lambdas.len()
+
+                    sig.defaults.set(j, Some(self.check(d, sig.tys[j], "this default")))
+                    self.no_captured_parameter(base, sig.params, d.span)
+
+                    if first.is_none() then first = Some(p.name)
+                None -> first match
+                    Some(a) ->
+                        self.fail(p.typ.span, s"`${p.name}` has no default, but `${a}` before it has one: defaults come last, so that a call by position fills the parameters in order; give `${p.name}` a default or move it before `${a}`")
+                        first = None
+                    None -> ()
+
+            self.bind(sig.params[j])
+
+        self.close()
         self.fsig.set(k, sig)
         self.leave_unit_params(saved_units)
         self.fx = saved
     end sig_defaults
+
+    // A lambda made in a default may not capture a parameter: the call fills the default in where the
+    // parameter is the call's argument, and a lambda's body reads its captures from where it is made.
+    private no_captured_parameter(*self, base: usize, params: Buf[usize], span: Span)
+        for c in self.captures
+            if c.lambda >= base
+                for id in params
+                    if c.local == id then self.fail(span, s"a lambda in a default cannot capture the parameter `${self.locals[id].name}`; pass it to the lambda as an argument")
 
     ensure_body(*self, k: usize)
         if self.fstate[k] != Waiting then return

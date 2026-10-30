@@ -249,14 +249,21 @@ private compiled(p: TProgram, texts: Texts, host: Host, opts: ScriptOptions) -> 
 
     Ok(s)
 
-// The argument a host's call leaves out: its default run in a frame of its own when the call
-// evaluates its arguments. A trap there leaves the function's frame, at the default.
-private defaulted(m: &Machine, d: Compiled) -> Code
+// The argument `j` a host's call leaves out: its default run in a frame of its own when the call
+// evaluates its arguments, the arguments before it, `held`, in its first slots. A trap there leaves
+// the function's frame, at the default.
+private defaulted(m: &Machine, d: Compiled, held: &Cells, j: usize) -> Code
     (c) ->
         val code = d.code
-        val r = code(frame_of(d.slots))
+        val frame = frame_of(d.slots)
+
+        for i in 0..<j
+            frame.v.set(i, held.v[i])
+
+        val r = code(frame)
 
         r match
+            Ok(v) -> held.v.set(j, v)
             Err(Trapped(_)) ->
                 m.trace.push(TraceFrame(d.name, if m.sited then m.site else d.span))
                 m.sited = false
@@ -438,6 +445,8 @@ struct Script
             if !found then return Err(ScriptRefused(s"`$name` has no parameter `${a.name}`"))
 
         var codes: Buf[Code] = buf()
+        // Each argument as the call evaluates it, for the defaults after it to read.
+        val held = frame_of(n)
 
         for j in 0..<n
             val l = self.program.locals[f.params[j]]
@@ -453,9 +462,11 @@ struct Script
                         Ok(v) -> v
                         Err(message) -> return Err(ScriptRefused(message))
 
-                    codes.push((c) -> Ok(v))
+                    codes.push((c) ->
+                        held.v.set(j, v)
+                        Ok(v))
                 None -> self.defaults[k][j] match
-                    Some(d) -> codes.push(defaulted(self.m, d))
+                    Some(d) -> codes.push(defaulted(self.m, d, held, j))
                     None -> return Err(ScriptRefused(s"`$name` needs its argument `$what`"))
 
         self.start()?

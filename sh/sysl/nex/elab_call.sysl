@@ -255,10 +255,13 @@ impl Elab
                     next += 1
 
         var out: Buf[TExpr] = buf()
+        var given: Buf[bool] = buf()
         val generic = self.funs[k].uparams.len() > 0
         var bound = UnitBindings(buf(), buf())
 
         for j in 0..<slots.len()
+            given.push(slots[j].is_some())
+
             slots[j] match
                 Some(a) ->
                     val what = s"argument `${sig.names[j]}`"
@@ -277,10 +280,89 @@ impl Elab
             Fn(s) -> subst_ty(s.ret, bound)
             _ -> Error
 
-        if self.is_elemental(k) && any_array(out) then return self.elemental_call(span, texpr(at, ty, TFnRef(name)), out, ret)
+        val (items, args) = self.defaulted_args(k, out, given)
+        val call = if self.is_elemental(k) && any_array(args) then self.elemental_call(span, texpr(at, ty, TFnRef(name)), args, ret) else texpr(span, ret, TCall(texpr(at, ty, TFnRef(name)), args))
 
-        texpr(span, ret, TCall(texpr(at, ty, TFnRef(name)), out))
+        after_items(span, items, call)
     end call_fun
+
+    // The arguments `out` of a call of the `k`th `def`, where each default (`given[j]` false) that
+    // reads an earlier parameter reads that parameter's argument (DESIGN §11.3), and the items the
+    // call follows. Every argument up to the last one such a default reads is bound to a local of its
+    // own by an item, in parameter order, so that each is evaluated once and before the defaults
+    // after it; an `inout` argument is not bound but read in its place, as an argument beside a
+    // borrow reads it (§8.3). An `@elemental` function applied to an array does not fill a default
+    // that reads that array, which would see the whole of it and not one element.
+    defaulted_args(*self, k: usize, out: Buf[TExpr], given: Buf[bool]) -> (Buf[TExpr], Buf[TExpr])
+        val sig = self.fsig[k]
+        var items: Buf[TExpr] = buf()
+        var upto: usize = 0
+        var reading = false
+
+        for j in 0..<out.len()
+            if given[j] then continue
+
+            val reads = reads_locals(out[j], sig.params)
+
+            for i in 0..<j
+                if reads[i]
+                    if is_array(out[i].ty) && self.is_elemental(k)
+                        self.fail(out[i].span, s"`${self.funs[k].name}` is applied to each element of this array, and the default of `${sig.names[j]}` reads `${sig.names[i]}`, which would be the whole array; give `${sig.names[j]}`")
+
+                    if sig.modes[i] == Inout && self.has_call(out[i])
+                        self.fail(out[i].span, s"the default of `${sig.names[j]}` reads `${sig.names[i]}`, so this `inout` argument would be evaluated twice; bind what its subscript calls to a `val` first")
+
+                    if !reading || i > upto then upto = i
+
+                    reading = true
+
+        if !reading then return (items, out)
+
+        var args: Buf[TExpr] = buf()
+        var from: Buf[usize] = buf()
+        var to: Buf[TExpr] = buf()
+
+        for j in 0..<out.len()
+            val v = if given[j] then out[j] else subst_locals(out[j], from, to)
+
+            if j <= upto && sig.modes[j] != Inout
+                val id = self.argument_local(sig.names[j], v)
+                val read = texpr(v.span, v.ty, TLocal(id))
+
+                items.push(texpr(v.span, Void, TLet(id, v)))
+                args.push(read)
+                to.push(read)
+            else
+                args.push(v)
+                to.push(*v.kind match
+                    TBorrow(place) -> place
+                    _ -> v)
+
+            from.push(sig.params[j])
+
+        (items, args)
+    end defaulted_args
+
+    // A local holding the argument `v` of the parameter `name` for a call whose defaults read it,
+    // a `val` as `val name = v` would declare it.
+    private argument_local(*self, name: string, v: TExpr) -> usize
+        val origin = self.is_origin(v)
+        val id = self.new_local(name, v.ty, if origin then LOrigin else LVal)
+
+        if !origin && is_array(v.ty) && self.views_storage(v) then self.vw.locals.push(id)
+
+        id
+
+    // Whether `e` calls a function, which evaluating it again would call again.
+    private has_call(self, e: TExpr) -> bool
+        *e.kind match
+            TCall(_, _) -> return true
+            _ -> ()
+
+        for c in children(e)
+            if self.has_call(c) then return true
+
+        false
 
     // -- conversions ------------------------------------------------------------------------------
 
@@ -510,3 +592,7 @@ impl Elab
         self.fail(span, s"`${name}` takes ${wants}")
         self.invalid(span)
 end Elab
+
+// `call` after `items`, the locals a call's defaults read bound first; the call alone where there are
+// none.
+after_items(span: Span, items: Buf[TExpr], call: TExpr) -> TExpr = if items.len() == 0 then call else texpr(span, call.ty, TBlock(items, call))
