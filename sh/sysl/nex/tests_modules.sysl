@@ -80,6 +80,14 @@ mod_files_merge()
         ("helpers/a.nex", "module helpers\ndef f(x: integer) = g(x)\n"),
         ("helpers/b.nex", "module helpers\nprivate def g(x: integer) = x\n")]), "ok")
 
+@test("a unit any module declares is written against a literal in every module, as units are the program's")
+mod_unit_shorthand()
+    assert_eq(elab_project(project([("main.nex", "import fruit.{basket}\ndef main() = print(basket() + 2apple)\n"), ("fruit/f.nex", "module fruit\nunit apple\ndef basket() = 3apple\n")])),
+        elab_project(project([("main.nex", "import fruit.{basket}\ndef main() = print(basket() + 2<apple>)\n"), ("fruit/f.nex", "module fruit\nunit apple\ndef basket() = 3<apple>\n")])))
+    assert_eq(project_refused([("main.nex", "import fruit.{basket}\nunit apple\ndef main() = print(basket())\n"), ("fruit/f.nex", "module fruit\ndef basket() = 3apple\n")]), "ok")
+    assert_eq(project_refused([("main.nex", "import fruit.{basket}\ndef main() = print(basket())\n"), ("fruit/f.nex", "module fruit\ndef basket() = 3apple\n")]),
+        "error: unknown name `apple` @fruit/f.nex:2:17")
+
 @test("a module declaration is optional, and one that names another module is refused")
 mod_declaration()
     assert_eq(project_refused([("main.nex", "import helpers.{f}\ndef main() = print(f(1))\n"), ("helpers/ops.nex", "def f(x: integer) = x\n")]), "ok")
