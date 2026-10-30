@@ -1,0 +1,169 @@
+@tests
+
+// Parallel programs compiled and run (DESIGN §9): the `parallel` programs of `testdata/v2/` print the
+// same bytes at every thread count, a body's lines never interleave, a trap nothing catches ends the
+// program from inside a region, the OpenMP runtime is linked exactly when a program has a `parallel`
+// construct, and a body sharing strings and closures across threads leaks nothing and reads nothing
+// freed. The emitter's refusals inside a parallel body are here too.
+//
+// LLVM is found as the driver finds it; without `mlir-opt` every test skips.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{exists, read_text}
+import sysl.process.{Output, Var, capture}
+import sysl.testing.skip
+import sysl.text.{from_utf8, join, split}
+
+private val V2_PARALLEL_INDEX = from_utf8(embed("testdata/v2/index.tsv")).unwrap()
+
+// The thread counts every parallel program runs at: one, a power of two and a prime that divides
+// no block evenly.
+private val THREADS = ["1", "2", "7"]
+
+// The `parallel` programs of `testdata/v2/`.
+private parallel_programs() -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for line in split(V2_PARALLEL_INDEX, "\n")
+        val cols = split(line, "\t")
+
+        if cols.len > 1 && cols[1] == "parallel" then out.push(cols[0])
+
+    out
+
+// `text` compiled into `exe`.
+private build(b: Bench, text: string, exe: string)
+    val m = emitted(text) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+
+    lower_module(m, exe, b.work, b.tc) match
+        Ok(_) -> ()
+        Err(e) -> fail_with(e)
+
+// `exe` run with `OMP_NUM_THREADS` set to `threads`.
+private run_with(exe: string, threads: string) -> Output = capture(exe, [], env = [Var("OMP_NUM_THREADS", threads)], stderr = true).unwrap()
+
+@test("every parallel program of testdata/v2 prints its .out, bit for bit, on 1, 2 and 7 threads")
+par_run_thread_counts()
+    val b = bench()
+    var failed: Buf[string] = buf()
+    val names = parallel_programs()
+
+    for name in names
+        val exe = s"${b.work}/$name"
+        val expected = read_text(s"testdata/v2/$name.out").unwrap()
+
+        build(b, read_text(s"testdata/v2/$name.nex").unwrap(), exe)
+
+        for t in THREADS
+            val out = run_with(exe, t)
+
+            if !out.status.ok() || out.text != expected then failed.push(s"$name on $t threads: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+
+    finish(b)
+    assert(failed.len() == 0, join(failed.view(), "\n"))
+    assert_eq(names.len(), 4)
+
+@test("each print in a parallel body writes its whole line at once, in any order")
+par_run_atomic_lines()
+    val b = bench()
+    val exe = s"${b.work}/lines"
+    val tail = "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789"
+
+    build(b, "def main() =\n  parallel for i in 1..400\n    print(s\"line ${i} " + tail + " ${i * 3}\")\n    eprint(s\"err ${i} " + tail + "\")\n  print(\"after\")\n", exe)
+
+    val out = run_with(exe, "7")
+    val lines = split(out.text, "\n")
+    var seen: Buf[bool] = buf()
+
+    for _ in 0..<401
+        seen.push(false)
+
+    var bad: Buf[string] = buf()
+
+    for k in 0..<lines.len - 2
+        val parts = split(lines[k], " ")
+        val i = if parts.len == 4 then parse_count(parts[1]) else 0
+
+        if parts.len != 4 || parts[0] != "line" || parts[2] != tail || i < 1 || i > 400 || parts[3] != s"${i * 3}" || seen[i] then bad.push(lines[k])
+        else seen.set(i, true)
+
+    finish(b)
+    assert_eq(join(bad.view(), "\n"), "")
+    assert_eq(lines.len, 402)
+    assert_eq(lines[400], "after")
+    assert_eq(split(out.err.unwrap_or(""), "\n").len, 401)
+
+// The decimal count in `s`; 0 where it is not one.
+private parse_count(s: string) -> usize
+    var n: usize = 0
+
+    for c in s.bytes
+        if c < u8('0') || c > u8('9') then return 0
+        n = n * 10 + usize(c - u8('0'))
+
+    n
+
+@test("a trap nothing catches in a parallel body writes its message after what was printed, and aborts")
+par_run_uncaught_trap()
+    val b = bench()
+    val exe = s"${b.work}/trap"
+
+    build(b, "def main() =\n  print(\"before\")\n  var y: [integer] = zeros(100000)\n  parallel for i in 1..100000\n    y[i] = 1000 div (i - 54321)\n  print(\"after\")\n", exe)
+
+    for t in THREADS
+        val out = run_with(exe, t)
+
+        assert(!out.status.ok(), s"on $t threads the trap did not end the program")
+        assert_eq(out.text, "before\n")
+        assert_eq(out.err.unwrap_or(""), "trap: integer division by zero\n")
+
+    finish(b)
+
+@test("only a program with a parallel construct links the OpenMP runtime, and it says so in its module")
+par_run_links_openmp_only_when_parallel()
+    val b = bench()
+    val seq = s"${b.work}/seq"
+    val par = s"${b.work}/par"
+
+    build(b, "def main() =\n  val x: [real] = linspace(0.0, 1.0, 10)\n  print(sum(x))\n", seq)
+    build(b, "def main() =\n  val x: [real] = linspace(0.0, 1.0, 10)\n  print(parallel sum(x))\n", par)
+
+    val seq_syms = capture("/usr/bin/nm", ["-u", seq], stderr = true).unwrap().text
+    val par_syms = capture("/usr/bin/nm", ["-u", par], stderr = true).unwrap().text
+    val seq_libs = capture("/usr/bin/otool", ["-L", seq], stderr = true).unwrap().text
+    val par_libs = capture("/usr/bin/otool", ["-L", par], stderr = true).unwrap().text
+
+    finish(b)
+    assert(!seq_syms.contains("omp") && !seq_libs.contains("libomp"), seq_syms)
+    assert(par_syms.contains("__kmpc_fork_call") && par_libs.contains("libomp"), par_syms)
+    assert(pipeline_for("omp.parallel {").contains("convert-openmp-to-llvm,convert-func-to-llvm"))
+    assert(!pipeline_for("module {}").contains("openmp"))
+
+@test("threads sharing strings and closures leak nothing and read nothing freed under Guard Malloc")
+par_run_no_leaks_or_races()
+    if !exists("/usr/bin/leaks") then skip("no leaks tool")
+
+    val b = bench()
+    val name = "parallel-strings-and-closures"
+    val exe = s"${b.work}/shared"
+    val expected = read_text(s"testdata/leaks/$name.out").unwrap()
+
+    build(b, read_text(s"testdata/leaks/$name.nex").unwrap(), exe)
+
+    val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
+    val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
+
+    finish(b)
+    assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
+    assert_eq(guarded.text, expected)
+    assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
+
+@test("a parallel body writing a module-level array, or reducing a counted value, is refused by the emitter")
+par_emit_refusals()
+    assert_eq(emitted("var g: [real] = zeros(4)\ndef main() =\n  parallel for i in 1..4\n    g[i] = 1.0\n").err().unwrap_or(""),
+        "error: a parallel body writing a module-level array is not compiled yet @3:3")
+    assert_eq(emitted("def join2(a: string, b: string): string = a + b\ndef main() =\n  var s = \"\"\n  parallel for i in 1..4 reduce s: join2\n    s = join2(s, \"x\")\n  print(s)\n").err().unwrap_or(""),
+        "error: a reduction over string, which holds a count, is not compiled yet @4:3")
+    assert(emitted("var g: [real] = zeros(4)\ndef main() =\n  var h = g\n  parallel for i in 1..4\n    h[i] = g[i] + 1.0\n  print(h)\n").is_ok())

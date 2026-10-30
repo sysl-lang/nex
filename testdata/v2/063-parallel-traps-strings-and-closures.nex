@@ -1,0 +1,36 @@
+// DESIGN §9.4: a trap in any iteration ends the loop and is raised after it, where `assert_traps`
+// catches it; a body reads strings and calls closures from outside, whose counts every thread
+// changes at once (`runtime/heap.sysl`).
+
+def tag(s: string, k: integer): string = s"$s-$k"
+
+def divide_all(n: integer, at: integer): [integer] =
+  var y: [integer] = zeros(n)
+  parallel for i in 1..n
+    y[i] = 1000 div (i - at)
+  y
+
+def main() =
+  val name = s"shared${3 * 7}"
+  val f = (k: integer) -> s"$name:$k"
+  var count = 0
+  parallel for i in 1..200000 reduce count: +
+    val a = tag(name, i)
+    val b = f(i)
+    if a + b == "" then cycle
+    count += 1
+  print(count)
+  print(name)
+  print(f(1))
+
+  // A trap deep in the iteration space, in the first iteration and in the last.
+  assert_traps(() -> print(divide_all(100000, 77777)[1]), "division by zero")
+  assert_traps(() -> print(divide_all(100000, 1)[1]), "division by zero")
+  assert_traps(() -> print(divide_all(100000, 100000)[1]), "division by zero")
+  print(divide_all(5, 9))
+
+  // A trap in a parallel expression and in a reduction.
+  val big: [integer] = fill(10000, 9223372036854775000)
+  assert_traps(() -> print(parallel map(big, v -> v + 1000)), "overflow")
+  assert_traps(() -> print(parallel sum(big)), "overflow")
+  print("done")

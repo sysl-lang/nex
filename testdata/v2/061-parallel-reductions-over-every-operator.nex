@@ -1,0 +1,85 @@
+// DESIGN §9.2: a reduction over each built-in operator, the location reductions and a user-defined
+// operator; the result's bits do not depend on the thread count (§9.2.1), ties go to the lowest index,
+// and an empty loop leaves the starting value.
+
+def kahan_add(a: (real, real), b: (real, real)): (real, real) =
+  val y = b.1 - a.2
+  val t = a.1 + y
+  (t, (t - a.1) - y)
+
+var hits = 0
+
+def main() =
+  val n = 100000
+  val x: [real] = linspace(0.0, 1.0, n)
+
+  // `+` reduces in blocks and the pairwise tree, the same tree `sum` uses.
+  var total = 0.0
+  parallel for i in 1..n reduce total: +
+    total += x[i]
+  print(total)
+  print(total == sum(x))
+
+  // A compensated sum through a user operator, which starts every block from `(0.0, 0.0)`.
+  var s = (0.0, 0.0)
+  parallel for i in 1..n reduce s: kahan_add
+    s = kahan_add(s, (x[i], 0.0))
+  print(s.1)
+
+  // `*`, `min`, `max`, `and`, `or` over integers and bools, with a step.
+  var p = 1
+  var low = 1000
+  var high = -1000
+  var all = true
+  var any = false
+  parallel for i in 1..20 by 3 reduce p: *, low: min, high: max, all: and, any: or
+    p = p * i
+    low = min(low, i)
+    high = max(high, i)
+    all = all and i > 0
+    any = any or i == 19
+  print(s"$p $low $high $all $any")
+
+  // Real `min` and `max`, a complex sum and a `real32` maximum over two clauses.
+  var lo = 0.5
+  var hi = 0.5
+  var z = 0.0 + 0.0i
+  var peak: real32 = 0.0
+  parallel for u in 1..300, v in 1..400 reduce lo: min, hi: max, z: +, peak: max
+    lo = min(lo, u * 1.0 - v)
+    hi = max(hi, u * 1.0 - v)
+    z += u * 1.0 + v * 1.0i
+    peak = max(peak, real32(u * v))
+  print(s"$lo $hi")
+  print(z)
+  print(peak)
+
+  // `maxloc` and `minloc`: every value ties, in every block, and the lowest index wins.
+  val flat: [real] = ones(n)
+  var best = (0.0, 0)
+  parallel for i in 1..n reduce best: maxloc
+    best = maxloc(best, flat[i], i)
+  print(best)
+  var least = (10.0, 0)
+  parallel for i in 1..n reduce least: minloc
+    least = minloc(least, abs(x[i] - 0.75), i)
+  print(least)
+
+  // A module-level variable reduces; an empty loop leaves every variable as it was.
+  parallel for i in 1..n reduce hits: +
+    hits += 1
+  print(hits)
+  var kept = 7.5
+  var none = (2.0, 9)
+  parallel for i in 1..0 reduce kept: *, none: maxloc
+    kept *= 2.0
+    none = maxloc(none, 1.0, i)
+  print(s"$kept $none")
+
+  // An integer `+` that overflows traps, in whichever thread meets it.
+  assert_traps(() ->
+    var big = 9223372036854775000
+    parallel for i in 1..10000 reduce big: +
+      big += i
+    print(big), "overflow")
+  print("done")

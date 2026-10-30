@@ -1,0 +1,37 @@
+// DESIGN §9.3 and §9.2.1: a `parallel` map, element-wise expression or reduction computes exactly
+// what the sequential one does, bit for bit, at every rank; the pairwise tree is more accurate than
+// a naive left-to-right loop.
+
+def main() =
+  val n = 1000000
+  val x: [real] = linspace(0.0, 1.0, n)
+
+  // The whole-array reductions, with and without `parallel`.
+  print(parallel sum(x))
+  print(sum(x) == parallel sum(x))
+  print(dot(x, x) == parallel dot(x, x))
+  print(s"${parallel minval(x)} ${parallel maxval(x)}")
+  val ks: [integer] = [5, -2, 9, 4]
+  print(s"${parallel sum(ks)} ${parallel product(ks)} ${parallel minval(ks)} ${parallel maxval(ks)}")
+  val none: [real] = zeros(0)
+  print(s"${parallel sum(none)} ${parallel maxval(none)}")
+
+  // Element-wise expressions and maps, at ranks 1 and 2.
+  val e = parallel exp(-x * x)
+  print(all(e == exp(-x * x)))
+  print(e[1001])
+  val a: [real; :, :] = reshape(linspace(1.0, 12.0, 12), (3, 4))
+  print(parallel 2.0 * a + a)
+  val k = 3
+  print(parallel map(ks, v -> v * k))
+  print(parallel sum(a, dim = 1))
+  print(parallel sum(a, dim = 2))
+
+  // 0.1 added a million times: the tree's error is far below the naive loop's.
+  val tenths: [real] = fill(n, 0.1)
+  var naive = 0.0
+  for i in 1..n do naive += tenths[i]
+  val tree = parallel sum(tenths)
+  print(tree)
+  print(naive)
+  print(abs(tree - 100000.0) < abs(naive - 100000.0) / 100.0)
