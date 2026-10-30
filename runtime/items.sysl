@@ -1,0 +1,96 @@
+// Arrays whose elements are not numbers — strings, functions, tuples, structs, enums — and the stored
+// form of every other array. Both are objects of the counted heap (`heap.sysl`).
+//
+// **An array of non-numbers** ("items") is its elements' storage and how to count them. The payload
+// is words: the storage, the element count, the bytes of one element, the functions that take and
+// give back a count on the element at an address (null where the element holds none), the rank, and
+// then the extent of each nex axis. The elements lie in storage order, nex axis 1 fastest, each in its
+// stored form. An array is shared by its places, each holding a count, and one about to be written is
+// first made its place's own (`nex_items_own`), so a write is never seen through another place.
+//
+// **A stored array of numbers** is the memref descriptor of its storage (`array.sysl`), which the
+// object frees with itself.
+
+import sysl.raw.ptr_cast
+
+@needs(os)
+extern memcpy(to: *u8, from: *u8, n: usize) -> *u8
+
+struct Items
+    data: *u8
+    count: long
+    size: long
+    hold: *extern(*u8) -> unit
+    drop: *extern(*u8) -> unit
+    rank: long
+
+// The payload's words before the extents.
+private val ITEMS_WORDS: long = 6
+
+private items(p: *u8) -> *Items = ptr_cast(p)
+
+private extents(p: *u8) -> *long = ptr_cast(usize(p) + usize(ITEMS_WORDS) * 8)
+
+// A new array of `count` zeroed elements of `size` bytes and `rank` axes. A rank-1 array's extent is
+// its count; the caller stores the extents of any other.
+@export("nex_items_new")
+items_new(count: long, size: long, hold: *extern(*u8) -> unit, drop: *extern(*u8) -> unit, rank: long) -> *u8
+    val p = new_object((ITEMS_WORDS + rank) * 8, &items_free)
+    val a = items(p)
+
+    a.data = calloc(usize(if count > 0 then count * size else 1), 1)
+    a.count = count
+    a.size = size
+    a.hold = hold
+    a.drop = drop
+    a.rank = rank
+    if rank == 1 then extents(p)[0] = count
+    p
+
+// What an array holds released: a count on each element, then the storage.
+@export("nex_items_free")
+items_free(p: *u8)
+    val a = items(p)
+
+    if a.drop != null
+        for k in 0..<usize(a.count)
+            a.drop(&a.data[k * usize(a.size)])
+
+    free(a.data)
+
+// The array the place at `slot` holds made the place's own: where another place shares it, the place
+// is given a copy, each element counted again, and its count on the shared one given back.
+@export("nex_items_own")
+items_own(slot: **u8)
+    val p = slot[0]
+
+    if p == null || count_of(p) == 1 then return
+
+    val a = items(p)
+    val q = items_new(a.count, a.size, a.hold, a.drop, a.rank)
+
+    memcpy(items(q).data, a.data, usize(a.count * a.size))
+
+    for k in 0..<usize(a.rank)
+        extents(q)[k] = extents(p)[k]
+
+    if a.hold != null
+        for k in 0..<usize(a.count)
+            a.hold(&a.data[k * usize(a.size)])
+
+    slot[0] = q
+    release(p)
+
+// A stored array of numbers released: its storage, the descriptor's first word.
+@export("nex_array_free")
+array_free(p: *u8)
+    val d: **u8 = ptr_cast(p)
+
+    free(d[0])
+
+// The count of the object at `p`: 1 where its one holder may write it in place.
+@export("nex_count")
+count_of(p: *u8) -> long
+    val h: *long = ptr_cast(usize(p) - 16)
+
+    h[0]

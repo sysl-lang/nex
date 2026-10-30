@@ -67,12 +67,18 @@ impl Emitter
 
     mark(*self) -> usize = self.temps.len()
 
-    // The temporaries made since `m`, released.
+    // A new object of the counted heap the statement owns, whatever it holds.
+    own_ref(*self, h: string) -> string
+        self.temps.push(Temp(h, Str))
+        h
+
+    // The temporaries made since `m`, released; a temporary of an array-of-numbers type is a pin on
+    // a stored array (`emit_array.sysl`).
     release_from(*self, m: usize)
         while self.temps.len() > m
             val t = self.temps.pop().unwrap()
 
-            self.release(t.v, t.t)
+            if is_arr(t.t) then self.pin(t.v, t.t, -1) else self.release(t.v, t.t)
 
     // Everything the function still holds: its temporaries and its own locals.
     release_all(*self)

@@ -130,7 +130,7 @@ struct Emitter
         Real(b) -> self.real_const(0.0, b)
         Complex(b) -> self.complex_const(self.real_const(0.0, b), self.real_const(0.0, b), b)
         Bool -> self.def("arith.constant false")
-        Array(_, _) -> self.zero_array(span, t)
+        Array(_, _) -> if is_arr(t) then self.zero_array(span, t) else self.def("llvm.mlir.zero : !llvm.ptr")
         _ -> self.def(s"llvm.mlir.zero : ${self.ty(span, t)}")
 
     // The control word is 0: no `exit`, `cycle` or `return` is under way.
@@ -257,7 +257,7 @@ struct Emitter
         Bool -> "i1"
         Str -> "!llvm.ptr"
         Fn(_) -> CLOSURE
-        Array(_, _) -> self.tensor_ty(span, t)
+        Array(_, _) -> if is_arr(t) then self.tensor_ty(span, t) else "!llvm.ptr"
         Tuple(_) -> self.agg_ty(span, t)
         Nominal(_, _) -> self.agg_ty(span, t)
         Void -> ""
@@ -267,13 +267,13 @@ struct Emitter
             "i64"
 
     // The type a value of `t` is stored as, in memory and inside an aggregate: a complex as a struct
-    // of its parts.
+    // of its parts, an array as the address of the object holding it (`emit_array.sysl`).
     mem_ty(*self, span: Span, t: Ty) -> string = t match
         Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
-        Array(_, _) -> self.desc_ty(rank_of(t))
+        Array(_, _) -> "!llvm.ptr"
         _ -> self.ty(span, t)
 
-    // A value of `t` read in its stored form.
+    // A value of `t` read in its stored form; an array of numbers as a view pinned for the statement.
     from_mem(*self, v: string, t: Ty) -> string = t match
         Complex(b) ->
             val m = s"!llvm.struct<(f$b, f$b)>"
@@ -281,10 +281,12 @@ struct Emitter
             val im = self.def(s"llvm.extractvalue $v[1] : $m")
 
             self.def(s"complex.create $re, $im : complex<f$b>")
+        Array(_, _) -> if is_arr(t) then self.stored_view(Span(0, 0), v, t) else v
         _ -> v
 
-    // A value of `t` in its stored form.
+    // A value of `t` in its stored form; an array of numbers as a new object the statement owns.
     to_mem(*self, v: string, t: Ty) -> string = t match
+        Array(_, _) -> if is_arr(t) then self.own_ref(self.boxed_array(Span(0, 0), v, t)) else v
         Complex(b) ->
             val m = s"!llvm.struct<(f$b, f$b)>"
             val re = self.def(s"complex.re $v : complex<f$b>")
@@ -295,8 +297,6 @@ struct Emitter
         _ -> v
 
     load(*self, span: Span, ptr: string, t: Ty) -> string
-        if is_arr(t) then return self.load_array(span, ptr, t)
-
         self.from_mem(self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.mem_ty(span, t)}"), t)
 
     store(*self, span: Span, ptr: string, v: string, t: Ty)

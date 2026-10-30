@@ -40,8 +40,6 @@ impl Emitter
     // -- types ------------------------------------------------------------------------------------
 
     agg_ty(*self, span: Span, t: Ty) -> string
-        if self.holds_array(t) then self.later(span, s"an array inside a struct, tuple or enum (${show_ty(t)})")
-
         t match
             Tuple(es) -> return self.fields_ty(span, es)
             Nominal(name, _) ->
@@ -81,8 +79,6 @@ impl Emitter
         t match
             Complex(b) -> return if b == 64 then 2 else 1
             Fn(_) -> return 2
-            // A stored array is its memref descriptor (`emit_array.sysl`).
-            Array(_, axes) -> return 3 + 2 * axes.len()
             Tuple(es) -> return self.words_of(es)
             Nominal(name, _) ->
                 self.struct_of(name) match

@@ -13,10 +13,18 @@
 // `return` gives is carried the same way, as one more entry past the locals.
 //
 // **An array that must live in memory** — one a lambda captures, which both the lambda and its
-// maker read and write, or a module-level binding — is a memref descriptor stored in its cell. Its
-// elements are storage the runtime allocates and nothing frees; reading it is a `to_tensor` of the
-// stored memref, and writing it materializes the new value into that storage (or, for a value of
-// another shape, into fresh storage whose descriptor replaces the old).
+// maker read and write, a module-level binding, or a part of a struct, tuple or enum — is an object
+// of the counted heap holding the memref descriptor of its storage, which it frees with itself; the
+// place holds the object's address and a count on it (`emit_own.sysl`), so an aggregate copied shares
+// it. Reading it pins the object for the statement and answers a `to_tensor` of the stored memref: a
+// view valid while the statement runs, copied where it is bound to an array local or returned, which
+// outlive the statement (`reads_storage`). Writing it materializes the new value into that storage
+// where the place is the object's only holder and the shape is unchanged, and otherwise into a new
+// object that replaces the old.
+//
+// **An array of non-numbers** — strings, functions, tuples, structs, enums — is never a tensor, since
+// a memref holds only numbers: it is an object of the counted heap holding its elements
+// (`emit_items.sysl`), a value held and counted as a string is.
 //
 // **Element-wise work is one `linalg.generic` per operation**, its body the scalar operation the
 // emitter already writes, over block arguments. Fusion is `linalg-fuse-elementwise-ops`' job, never
@@ -49,8 +57,22 @@ struct Nest
     results: Buf[string]
     carried: string
 
+// Whether `t` is an array of numbers or booleans: a tensor.
 is_arr(t: Ty) -> bool = t match
-    Array(_, _) -> true
+    Array(e, _) -> is_number(*e)
+    _ -> false
+
+// Whether `t` is an array of anything else: an object holding its elements (`emit_items.sysl`).
+is_items(t: Ty) -> bool = t match
+    Array(e, _) -> !is_number(*e)
+    _ -> false
+
+private is_number(t: Ty) -> bool = t match
+    Int(_, _) -> true
+    Real(_) -> true
+    Complex(_) -> true
+    Bool -> true
+    Measured(b, _) -> is_number(*b)
     _ -> false
 
 copy_strings(xs: Buf[string]) -> Buf[string]
@@ -156,34 +178,6 @@ impl Emitter
             if t[k..<k + 1] == "?" then dims.push(self.index_const(0))
 
         self.def(s"tensor.empty(${joined(dims)}) : $t")
-
-    // Whether an aggregate of type `t` has an array among its parts, at any depth. Its storage would
-    // have to take part in the counted heap's ownership, which arrays do not yet. A type that holds
-    // itself is looked into a few levels deep, which is as far as an array can hide.
-    holds_array(*self, t: Ty, depth: int = 0) -> bool
-        if depth > 8 then return false
-
-        t match
-            Array(_, _) -> return true
-            Tuple(es) ->
-                for e in es
-                    if self.holds_array(e, depth + 1) then return true
-            Nominal(name, _) ->
-                self.struct_of(name) match
-                    Some(s) ->
-                        for f in s.fields
-                            if self.holds_array(f.ty, depth + 1) then return true
-                    None -> ()
-
-                self.enum_of(name) match
-                    Some(e) ->
-                        for v in e.variants
-                            for f in v.fields
-                                if self.holds_array(f.ty, depth + 1) then return true
-                    None -> ()
-            _ -> ()
-
-        false
 
     // -- index arithmetic -------------------------------------------------------------------------
 
@@ -444,15 +438,34 @@ impl Emitter
 
         v
 
-    // The tensor a stored array holds: its descriptor at `ptr` read as a memref.
-    load_array(*self, span: Span, ptr: string, t: Ty) -> string
-        val d = self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")
-        val m = self.def(s"builtin.unrealized_conversion_cast $d : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
+    // The tensor the stored array object `h` holds, the object pinned until the statement ends so
+    // that nothing the statement does frees the storage under it.
+    stored_view(*self, span: Span, h: string, t: Ty) -> string
+        self.pin(h, t, 1)
+        self.temps.push(Temp(h, t))
+
+        val m =self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")} : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
 
         self.def(s"bufferization.to_tensor $m restrict : ${self.memref_ty(span, t)} to ${self.tensor_ty(span, t)}")
 
-    // The tensor `v` stored at `ptr` in fresh storage.
+    // The tensor `v` stored into the place at `ptr` as a new object, the place's old one released.
     store_array(*self, span: Span, ptr: string, v: string, t: Ty)
+        if self.dirty
+            self.op(s"scf.if ${self.flowing()} {")
+            self.dirty = false
+            self.store_array(span, ptr, v, t)
+            self.dirty = true
+            self.op("}")
+            return
+
+        val h = self.boxed_array(span, v, t)
+        val old = self.def(s"llvm.load $ptr : !llvm.ptr -> !llvm.ptr")
+
+        self.op(s"llvm.store $h, $ptr : !llvm.ptr, !llvm.ptr")
+        self.release_ref(old)
+
+    // A new object of the counted heap holding the tensor `v` in fresh storage, with a count of 1.
+    boxed_array(*self, span: Span, v: string, t: Ty) -> string
         val r = rank_of(t)
         val d = self.desc_ty(r)
         val sizes = self.dims(span, v, t)
@@ -474,7 +487,10 @@ impl Emitter
             u = self.def(s"llvm.insertvalue $stride, $u[4, $k] : $d")
             stride = self.def(s"arith.muli $stride, ${self.to_i64(sizes[k])} : i64")
 
-        val p = self.call("nex_array_alloc", count, "i64", "!llvm.ptr")
+        self.external("nex_array_alloc", "i64", "!llvm.ptr")
+        self.external("nex_array_free", "!llvm.ptr", "")
+
+        val p = self.def(s"func.call @nex_array_alloc($count) : (i64) -> !llvm.ptr")
 
         u = self.def(s"llvm.insertvalue $p, $u[0] : $d")
         u = self.def(s"llvm.insertvalue $p, $u[1] : $d")
@@ -483,14 +499,51 @@ impl Emitter
         val m = self.def(s"builtin.unrealized_conversion_cast $u : $d to ${self.memref_ty(span, t)}")
 
         self.op(s"bufferization.materialize_in_destination $v in restrict writable $m : (${self.tensor_ty(span, t)}, ${self.memref_ty(span, t)}) -> ()")
-        self.effect(s"llvm.store $u, $ptr : $d, !llvm.ptr", "")
 
-    // The tensor `v`, of the shape the array stored at `ptr` has, written over its elements.
+        val free = self.def("func.constant @nex_array_free : (!llvm.ptr) -> ()")
+        val h = self.new_object((4 + 2 * r) * 8, self.def(s"builtin.unrealized_conversion_cast $free : (!llvm.ptr) -> () to !llvm.ptr"))
+
+        self.op(s"llvm.store $u, $h : $d, !llvm.ptr")
+        h
+
+    // The tensor `v`, of the shape the array stored at `ptr` has, written over its elements where the
+    // place is the only holder of its object, and otherwise stored as a new object.
     write_back(*self, span: Span, ptr: string, v: string, t: Ty)
-        val d = self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")
-        val m = self.def(s"builtin.unrealized_conversion_cast $d : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
+        if self.dirty
+            self.op(s"scf.if ${self.flowing()} {")
+            self.dirty = false
+            self.write_back(span, ptr, v, t)
+            self.dirty = true
+            self.op("}")
+            return
+
+        self.external("nex_count", "!llvm.ptr", "i64")
+
+        val h = self.def(s"llvm.load $ptr : !llvm.ptr -> !llvm.ptr")
+        val n = self.def(s"func.call @nex_count($h) : (!llvm.ptr) -> i64")
+        val holders = self.def(s"arith.subi $n, ${self.def(s"llvm.load ${self.pins_ptr(h, t)} : !llvm.ptr -> i64")} : i64")
+
+        self.op(s"scf.if ${self.def(s"arith.cmpi eq, $holders, %one : i64")} {")
+
+        val m = self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")} : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
 
         self.op(s"bufferization.materialize_in_destination $v in restrict writable $m : (${self.tensor_ty(span, t)}, ${self.memref_ty(span, t)}) -> ()")
+        self.op("} else {")
+        self.store_array(span, ptr, v, t)
+        self.op("}")
+
+    // The word after a stored array's descriptor: how many of its counts are pins, held by
+    // statements reading it rather than by places.
+    pins_ptr(*self, h: string, t: Ty) -> string =
+        self.def(s"llvm.getelementptr $h[${3 + 2 * rank_of(t)}] : (!llvm.ptr) -> !llvm.ptr, i64")
+
+    // A pin on the stored array object `h` taken (`by` 1) or given back (`by` −1).
+    pin(*self, h: string, t: Ty, by: int)
+        val p = self.pins_ptr(h, t)
+
+        if by > 0 then self.retain_ref(h)
+        self.op(s"llvm.store ${self.def(s"arith.addi ${self.def(s"llvm.load $p : !llvm.ptr -> i64")}, ${self.def(s"arith.constant $by : i64")} : i64")}, $p : i64, !llvm.ptr")
+        if by < 0 then self.release_ref(h)
 
     // The array a place holds now.
     place_value(*self, e: TExpr) -> string = *e.kind match
