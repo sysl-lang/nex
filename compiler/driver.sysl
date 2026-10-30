@@ -11,13 +11,15 @@
 // **The link takes the command line's `-L`/`-l` options and the libraries the program's externs
 // `@link`**, which the emitter writes as `// nex.link` lines before the module (DESIGN §10.1). **A
 // program whose `@` or linear-algebra prelude calls BLAS or LAPACK** says so in a `// nex.blas` line,
-// and links Accelerate on macOS and OpenBLAS elsewhere, or what `NEX_BLAS` names. **A program with
+// and links the library the runtime's `library` choice names (Accelerate on macOS and OpenBLAS
+// elsewhere by default), or what `NEX_BLAS` names. **A program with
 // a `@fortran` extern links gfortran's runtime**, which a `// nex.fortran` line says.
 //
 // LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm`; the runtime at `NEX_RUNTIME`, else
 // `libnex_rt.a` beside the `nex` executable.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{la_libraries, la_pkg_config}
 import sysl.buf.{Buf, buf}
 import sysl.env.get_or
 import sysl.fs.{exists, make_temp_dir, remove_dir_all, write_text}
@@ -109,25 +111,27 @@ uses_blas(mlir: string) -> bool
     false
 
 // The link inputs of the BLAS and LAPACK a program calls (DESIGN §10.4): `NEX_BLAS`, split at its
-// spaces, where it is set; else Accelerate on macOS and OpenBLAS elsewhere.
-blas_links() -> Buf[string]
+// spaces, where it is set; else the library the runtime's `library` choice names — the one the
+// interpreter in this command links — which is Accelerate on macOS and OpenBLAS elsewhere unless
+// the runtime was built with `openblas`, whose options `pkg-config` gives.
+blas_links() -> Result[Buf[string], string]
     var out: Buf[string] = buf()
-    val chosen = get_or("NEX_BLAS", "")
+    var chosen = get_or("NEX_BLAS", "")
+    val pc = la_pkg_config()
+
+    if chosen == "" && pc != ""
+        chosen = tool("pkg-config", ["--libs", pc], Inherit)?.trim()
 
     if chosen != ""
         for a in split(chosen, " ")
             if a != "" then out.push(a)
 
-        return out
+        return Ok(out)
 
-#if macos
-    out.push("-framework")
-    out.push("Accelerate")
-#else
-    out.push("-lopenblas")
-#endif
+    for lib in la_libraries()
+        out.push(s"-l$lib")
 
-    out
+    Ok(out)
 
 // Whether the module's lines before it say it has a `@fortran` extern.
 private calls_fortran(mlir: string) -> bool
@@ -194,8 +198,16 @@ lower_module(mlir: string, out: string, work: string, tc: Toolchain, links: []co
         args.push(a)
 
     if uses_blas(mlir)
-        for a in blas_links()
+        for a in blas_links()?
             args.push(a)
+
+    // The runtime archive is one object, its linear algebra among the rest; a program that calls
+    // none leaves that code, and the libraries it would need, out of its link.
+#if macos
+    args.push("-Wl,-dead_strip")
+#else
+    args.push("-Wl,--gc-sections")
+#endif
 
     if calls_fortran(mlir)
         // The gfortran at `NEX_GFORTRAN`, else Homebrew's.
