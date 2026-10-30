@@ -20,3 +20,4 @@ file	category	name
 019-arrays-through-control-flow-and-calls	rank-N	arrays through branches, loops, `return`, `inout`, function values, captures and module level
 030-units-imperial-and-si	units	imperial and SI conversions, mixed scales, expected types, real32 and complex, units printed inside aggregates
 031-units-rational-exponents	units	square roots and rational powers of units, and conversions between scales with exact roots
+032-units-through-the-language	units	values with units at module level, through compound assignment, loops, `match`, closures, function values and destructuring
