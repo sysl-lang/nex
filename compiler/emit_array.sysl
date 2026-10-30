@@ -1340,6 +1340,8 @@ impl Emitter
 
     // `a = v` or `a op= v` on a whole array place.
     assign_array(*self, span: Span, op: string, target: TExpr, value: TExpr)
+        if self.gemm_assign(span, op, target, value) then return
+
         if op == "="
             if self.par_assign(target, value) then return
 

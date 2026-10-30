@@ -171,8 +171,8 @@ and a BLAS library may use threads of its own under its own settings (`OPENBLAS_
 [Interoperability](/spec/11-interop/).
 
 {{< note >}}
-The size thresholds at which `@` switches to BLAS, the option to turn the switch off when building,
-and the folding of `C = alpha * (A @ B) + beta * C` into one `gemm` are proposed; OpenBLAS support
+The size thresholds at which `@` switches to BLAS and the option to turn the switch off when
+building are proposed; OpenBLAS support
 off macOS is not yet verified. The details may change.
 {{< /note >}}
 

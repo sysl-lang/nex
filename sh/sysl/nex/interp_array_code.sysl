@@ -76,6 +76,22 @@ private[nex] evaluated(codes: Buf[Code], c: &Cells) -> Result[Buf[Value], Signal
 
     Ok(vals)
 
+// The array of elements of `et` whose every element is `body` over `vals`, each an array of one
+// shape or a scalar broadcast, read from the frame's slots from `base`, set for each element in turn.
+private[nex] mapped_over(c: &Cells, vals: Buf[Value], arrays: Buf[bool], base: usize, body: Code, et: Ty) -> Answer
+    val s = common_shape(vals, arrays)?
+    val n = count_of(s)
+    val runs = runs_of(vals, arrays)
+    val res = data_for(et)
+
+    for j in 0..<n
+        for k in 0..<vals.len()
+            c.v.set(base + k, if arrays[k] then data_get(runs[k], usize(j)) else vals[k])
+
+        data_push(res, body(c)?)
+
+    Ok(dense_data(res, s.ext))
+
 // The shape the array operands among `vals` share, or the trap of two that differ.
 private[nex] common_shape(vals: Buf[Value], arrays: Buf[bool]) -> Result[&Arr, Signal]
     var shape: Option[&Arr] = None
@@ -655,20 +671,7 @@ impl Interp
 
         self.chains.pop()
 
-        (c) ->
-            val vals = evaluated(codes, c)?
-            val s = common_shape(vals, arrays)?
-            val n = count_of(s)
-            val runs = runs_of(vals, arrays)
-            val res = data_for(et)
-
-            for j in 0..<n
-                for k in 0..<vals.len()
-                    c.v.set(base + k, if arrays[k] then data_get(runs[k], usize(j)) else vals[k])
-
-                data_push(res, body(c)?)
-
-            Ok(dense_data(res, s.ext))
+        (c) -> mapped_over(c, evaluated(codes, c)?, arrays, base, body, et)
     end mapped
 
     // `mapped` where the scalar body is a call on operands `0 ..< params` of function `fixed`, or of

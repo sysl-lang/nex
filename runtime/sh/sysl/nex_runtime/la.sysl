@@ -49,28 +49,39 @@ la_libraries() -> []const string
 // matrix by a matrix is `?gemm`, a matrix and a vector `?gemv`, a vector by a matrix `?gemv` with the
 // matrix's flag turned, and `x @ conj(transpose(Y))`, which no `?gemv` flag spells, `?gemm` with `x`
 // as one row. `c` is the result's extents: a vector result is one column.
-la_product_into[T: Scalar](x: MatrixView[T], x_vec: bool, fx: Op, y: MatrixView[T], y_vec: bool, fy: Op, c: MatrixView[T]) -> Result[unit, string]
-    if !x_vec && !y_vec
-        if inner(fx, x, false) != inner(fy, y, true) then return Err(SHAPE_MISMATCH)
+la_product_into[T: Scalar](x: MatrixView[T], x_vec: bool, fx: Op, y: MatrixView[T], y_vec: bool, fy: Op, c: MatrixView[T]) -> Result[unit, string] =
+    la_update(T.one(), x, x_vec, fx, y, y_vec, fy, T.zero(), c)
 
-        return product(gemm(fx, fy, T.one(), x, y, T.zero(), c))
+// `c = alpha * (op(x) @ op(y)) + beta * c`, where `c` lies (DESIGN §10.4): the routine
+// `la_product_into` names, given `alpha` and `beta`, so `c` is read and written by the one call. `c`
+// must have the product's extents: a vector result is one column.
+la_update[T: Scalar](alpha: T, x: MatrixView[T], x_vec: bool, fx: Op, y: MatrixView[T], y_vec: bool, fy: Op, beta: T, c: MatrixView[T]) -> Result[unit, string]
+    val rows = if !x_vec then outer(fx, x, false) else outer(fy, y, true)
+    val cols = if !x_vec && !y_vec then outer(fy, y, true) else 1
+
+    if !x_vec && !y_vec
+        if inner(fx, x, false) != inner(fy, y, true) || c.rows != rows || c.cols != cols then return Err(SHAPE_MISMATCH)
+
+        return product(gemm(fx, fy, alpha, x, y, beta, c))
+
+    if c.rows != rows || c.cols != 1 then return Err(SHAPE_MISMATCH)
 
     if !x_vec
         if inner(fx, x, false) != y.rows then return Err(SHAPE_MISMATCH)
 
-        return product(gemv(fx, T.one(), x, y.col(0), T.zero(), c.col(0)))
+        return product(gemv(fx, alpha, x, y.col(0), beta, c.col(0)))
 
     if fy != Op.ConjTrans
         if inner(fy, y, true) != x.rows then return Err(SHAPE_MISMATCH)
 
-        return product(gemv(if fy == Op.NoTrans then Op.Trans else Op.NoTrans, T.one(), y, x.col(0), T.zero(), c.col(0)))
+        return product(gemv(if fy == Op.NoTrans then Op.Trans else Op.NoTrans, alpha, y, x.col(0), beta, c.col(0)))
 
     if y.cols != x.rows then return Err(SHAPE_MISMATCH)
 
     val row = MatrixView.from_ptr(x.ptr(), 1, x.rows, 1).map_err((e) -> s"$e")?
     val out = MatrixView.from_ptr(c.ptr(), 1, y.rows, 1).map_err((e) -> s"$e")?
 
-    product(gemm(Op.NoTrans, Op.ConjTrans, T.one(), row, y, T.zero(), out))
+    product(gemm(Op.NoTrans, Op.ConjTrans, alpha, row, y, beta, out))
 
 // `op(x) @ op(y)` as `la_product_into` takes it, into fresh storage.
 la_product[T: Scalar](x: MatrixView[T], x_vec: bool, fx: Op, y: MatrixView[T], y_vec: bool, fy: Op) -> Result[MatrixView[T], string]
@@ -229,6 +240,24 @@ la_product_c(kind: long, x: *u8, xr: long, xc: long, xld: long, x_vec: long, fx:
 
 private product_at[T: Scalar](x: *u8, xr: long, xc: long, xld: long, x_vec: long, fx: long, y: *u8, yr: long, yc: long, yld: long, y_vec: long, fy: long, c: *u8, cr: long, cc: long) -> Result[unit, string] =
     la_product_into(view[T](x, xr, xc, xld)?, x_vec != 0, op_of(fx), view[T](y, yr, yc, yld)?, y_vec != 0, op_of(fy), view[T](c, cr, cc, max(cr, 1))?)
+
+// `c = alpha * (op(x) @ op(y)) + beta * c` where `c` lies, its leading dimension `cld`; `alpha` and
+// `beta` are the addresses of one element each.
+@export("nex_la_update")
+la_update_c(kind: long, alpha: *u8, x: *u8, xr: long, xc: long, xld: long, x_vec: long, fx: long, y: *u8, yr: long, yc: long, yld: long, y_vec: long, fy: long, beta: *u8, c: *u8, cr: long, cc: long, cld: long)
+    val ok = kind match
+        0 -> done(update_at[f32](alpha, x, xr, xc, xld, x_vec, fx, y, yr, yc, yld, y_vec, fy, beta, c, cr, cc, cld))
+        1 -> done(update_at[real](alpha, x, xr, xc, xld, x_vec, fx, y, yr, yc, yld, y_vec, fy, beta, c, cr, cc, cld))
+        2 -> done(update_at[Cx[f32]](alpha, x, xr, xc, xld, x_vec, fx, y, yr, yc, yld, y_vec, fy, beta, c, cr, cc, cld))
+        _ -> done(update_at[Cx[real]](alpha, x, xr, xc, xld, x_vec, fx, y, yr, yc, yld, y_vec, fy, beta, c, cr, cc, cld))
+
+    if !ok then raise_trap()
+
+private update_at[T: Scalar](alpha: *u8, x: *u8, xr: long, xc: long, xld: long, x_vec: long, fx: long, y: *u8, yr: long, yc: long, yld: long, y_vec: long, fy: long, beta: *u8, c: *u8, cr: long, cc: long, cld: long) -> Result[unit, string]
+    val a: *T = ptr_cast(alpha)
+    val b: *T = ptr_cast(beta)
+
+    la_update(a[0], view[T](x, xr, xc, xld)?, x_vec != 0, op_of(fx), view[T](y, yr, yc, yld)?, y_vec != 0, op_of(fy), b[0], view[T](c, cr, cc, cld)?)
 
 // `x @ y` of two vectors of `n` and `m` elements at unit stride, written to `out`.
 @export("nex_la_dot")

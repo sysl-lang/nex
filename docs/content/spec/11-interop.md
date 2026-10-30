@@ -535,12 +535,19 @@ val y = A @ x                             // gemv when large enough
 val Hz = conj(transpose(Z)) @ z           // complex: the C flag
 ```
 
-An update of the form `C = alpha * (A @ B) + beta * C`, assigned back to the same `C`, is one
-`gemm` call using BLAS's `beta`.
+An update `C = alpha * (A @ B) + beta * C`, assigned back to the same `C`, is one `gemm` call
+(`gemv` for a matrix and a vector) using BLAS's `alpha` and `beta`, writing `C` where it lies with no
+buffer for the product. `C` is a `var` local of `real32`, `real64` or complex elements that no lambda
+captures; the value is a product term — `A @ B`, `alpha * (A @ B)` or `(A @ B) * alpha` — plus a term
+of `C` — `C`, `beta * C` or `C * beta` — in either order, or the statement is `C += A @ B` (with or
+without `alpha`). `alpha` and `beta` are any scalar expressions of `C`'s number type, each evaluated
+once. Where an operand of `@` reads `C` (`C = A @ C + C`) the product is made first and then added,
+since BLAS cannot read the storage it writes.
 
-{{< note >}}
-Fusing `C = alpha * (A @ B) + beta * C` into a single `gemm` is provisional and may change.
-{{< /note >}}
+The update goes to BLAS where the product alone would. Below that size the statement computes
+exactly what it says, each operation rounded in turn. Through BLAS, a `beta` of zero leaves `C`'s
+old elements unread, as BLAS specifies, so a NaN there does not reach the result. A `C` without the
+product's extents traps *"shape mismatch"*.
 
 **A BLAS result may differ from the fused path in the last bits**, because BLAS sums in a different
 order. To get the fused path everywhere — for a bit-for-bit comparison with an earlier run, say —

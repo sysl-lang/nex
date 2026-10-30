@@ -1748,8 +1748,32 @@ complex: nex's `@` does not conjugate). `x @ conj(transpose(Y))`, which `gemv` h
 ones the compiler emits both paths and a run-time test, both writing one result buffer made before
 the test; the test stays in the emitted code because the small path is a `linalg` operation inline. Operands that fail §10.3's stride rules are copied first, and so is a matrix whose column
 stride is less than its row count. The prelude's `dot(x, y)` is a reduction (§9.2.1), reproducible
-and never dispatched; `x @ y` is the product and dispatches. `C = alpha * (A @ B) + beta * C`
-assigned to the same `C` is one `gemm` with `beta` (**PROPOSED**).
+and never dispatched; `x @ y` is the product and dispatches.
+
+**`C = alpha * (A @ B) + beta * C` is one BLAS update**, `gemm` with `alpha` and `beta` (`gemv` where
+`B` or `A` is a vector), writing `C` where it lies with no buffer for the product. The forms
+recognized are an assignment to a `var` local `C` of `real32`, `real64` or complex elements that no
+lambda captures, whose value is the sum, in either order, of
+
+- a product term: `A @ B`, `alpha * (A @ B)` or `(A @ B) * alpha`, and
+- a term of `C`: `C`, `beta * C` or `C * beta`,
+
+and the compound `C += P` for a product term `P`. `alpha` and `beta` are scalars of `C`'s number type,
+any expression (a literal, a variable, a call); an operand written `transpose(X)` or
+`conj(transpose(X))` keeps its flag. Each operand is evaluated once, in the order written. **Where
+an operand of `@` reads `C`** (`C = A @ C + C`, `C = C[1..2, :] @ B + C`) BLAS would read the storage
+it writes, so the statement takes the general path: the product made, then the sum. Any other
+spelling — a difference, three terms, `C` on a slice, a captured `C` — is the general path too.
+
+The update goes to BLAS exactly where the product alone would, by the rules above; with dynamic
+extents both paths are emitted under the run-time test. **Below the threshold the statement is the
+expression as written**: the product computed inline, then `alpha * P + beta * C` element by
+element, each operation rounded as written, as an unrecognized statement would be. Through BLAS the
+update rounds as the library's `gemm` does: `alpha` scales the sum, then `beta * C` is added, and as
+BLAS specifies, a `beta` of zero leaves `C`'s old elements unread (a NaN there does not reach the
+result) and an `alpha` of zero leaves `A` and `B` unread. Both engines make the same call
+(`la_update` in the runtime), so they answer bit for bit alike. Where `C` has not the product's
+extents the statement traps *"shape mismatch"* on either path.
 
 **A BLAS result may differ in the last bits from the `linalg` path**, since it sums in a different
 order. Every corpus matrix is far below the threshold. A build flag disables dispatch
