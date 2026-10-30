@@ -113,7 +113,7 @@ array_logical_and_branches()
         "(def f ((c#0 bool) (a#1 [int64]) (b#2 [real64; 3]) (p#3 [bool])) void (block (print (if:[real64] c#0 (promote:[real64] a#1) (promote:[real64] b#2))) (print (.not:[bool] p#3)) (print (.and:[bool] (.>:[bool] a#1 1) p#3)) (print (.or:[bool] p#3 true))))\n(def main () void ())")
     assert_eq(refused("def f(p: [integer]) = not p\n" + MAIN), "error: `not` needs bools; found [int64] @1:23")
     assert_eq(refused("def f(p: [integer]) = p and true\n" + MAIN), "error: an operand of `and` must be bool or [bool], but this is [int64] @1:23")
-    assert_eq(refused("def f(c: bool, p: [integer], q: [integer; :, :]) = if c then p else q\n" + MAIN), "error: the branches of this `if` differ: [int64] and [int64; :, :] @1:53")
+    assert_eq(refused("def f(c: bool, p: [integer], q: [integer; :, :]) = if c then p else q\n" + MAIN), "error: the branches of this `if` differ: [int64] and [int64; :, :] @1:52")
 
 @test("a whole array takes a compound assignment, and a slice of a place is a place")
 array_compound_and_nested_places()

@@ -298,6 +298,11 @@ a static one its number. This keeps every `linalg` op, fusion and bufferization 
   (**PROPOSED**).
 - Rank is always static. Two operands of different rank in an element-wise operation are a compile
   error; there is no rank broadcasting.
+- A slice's kept axes are dynamic, except an axis taken whole with `:`, which keeps its static
+  extent: `m[:, 1]` of a `[real; 3, :]` is `[real; 3]`, `a[1..2]` is `[real; :]`.
+- Two arrays that stand for one value, as the branches of an `if` do, meet in one type: the same
+  rank, the common element type of §2.2, and a static extent only on an axis where both have the
+  same one.
 
 ### 3.4 Rank-generic and element-generic code
 
@@ -344,6 +349,12 @@ Every list at one depth must have the same length. A literal whose nesting is vi
 expression rather than a bracket list has a run-time length, and a mismatch there traps as in the
 reference. The source order is row-major, as you read it; storage is column-major regardless.
 
+The element type is the one the position expects (`val a: [real32] = [1, 2]`), or else the common
+type (§2.2) of the elements, a literal element adopting the others' type as an operand does:
+`[x32, 1]` is `[real32]`, `[n, 2.5]` is `[real64]`. Elements of non-numeric types must all be one
+type. An empty literal `[]` takes its type from its position, and with none is a compile error, as
+is an empty row inside a matrix literal.
+
 ### 4.2 Constructors
 
 `zeros`, `ones` and `fill` take an `integer` (rank 1) or an R-tuple of integers (rank R):
@@ -375,6 +386,23 @@ type lands"): `val z: [real32; :, :] = zeros((4, 4))`.
 | `transpose(m)` | rank 2 only |
 | `permute(a, (p1, …, pk))` | axes reordered: result axis `n` is source axis `p_n` (**PROPOSED**) |
 | `sum(a, dim = k)` | sum over axis `k`: rank R−1 (at rank 2, `k` is 1 or 2); every reduction takes `dim =` (§7.4) |
+| `diag(v)`, `diag(m)` | the square matrix with the vector `v` on its diagonal; the diagonal of the matrix `m` |
+| `linspace(lo, hi, n)` | `n` reals evenly from `lo` to `hi` inclusive, `[real; :]` |
+| `to_integers(b)`, `to_bytes(a)` | `int64(b)` and `uint8(a)`, element by element (§2.4); `to_bytes` traps outside `0..255` |
+
+An axis number written as a literal (`extent(m, 3)`, `dim = 0`) that is not an axis of the array is
+a compile error; a computed one traps.
+
+**The higher-order functions** take the function last and give its parameters the element type, so
+a lambda need not write them (`map(xs, x -> x * 2)`). They walk the elements in storage order:
+
+| Function | Result |
+|---|---|
+| `map(a, f)` | the shape of `a`, each element `f` of the source's; `f` returns a scalar |
+| `filter(a, p)` | `[T; :]` of the elements for which `p` is true |
+| `flatMap(a, f)` | `[U; :]`, the vectors `f` returns, concatenated |
+| `reduce(a, init, f)` | `f(…f(f(init, a₁), a₂)…)`; a literal `init` adopts the element type |
+| `enumerate(a)`, `zip(a, b)` | `[(integer, T); :]`, `[(T, U); :]` |
 
 `transpose`, `permute`, `reshape` of a dense array and `flatten` of a dense array return views (§6):
 no data moves (**PROPOSED** as a performance guarantee; the result is a value either way, so which it
@@ -599,6 +627,11 @@ shape (a compile error when both are static, else a trap), and is element-wise, 
 mixed per §2.2. **Broadcasting is scalar-only**: `A op s` and `s op A` for a scalar `s`, any rank.
 Element-wise expressions fuse to one loop nest per expression for every rank (`views.mlir`, rank 3).
 
+Comparisons are element-wise too: `a == b` and `a < 5` are `[bool]`, and whether two arrays are equal
+is `all(a == b)`. `not`, `and` and `or` apply element by element to `[bool]` operands (a `bool`
+broadcasts), evaluating both sides. A chained comparison (`0 < a < 1`) compares scalars only; on
+arrays it is `0 < a and a < 1`.
+
 ### 7.2 `@`
 
 `@` is defined on ranks 1 and 2, as ref §4.5 defines it:
@@ -639,8 +672,10 @@ as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps ever
 
 **A user function opts in with `@elemental`**: `@elemental def f(x: real) = …`. Its body obeys the
 parallel-body rules of §9.4 — no `inout` parameters, no writes to module variables, no I/O except
-`print` — so the compiler may evaluate it in any order and fuse it. An unmarked scalar function
-applied to an array is a compile error that suggests `@elemental` or `map`.
+`print` — so the compiler may evaluate it in any order and fuse it. Its parameters are scalars and
+it returns a value. Called with an array for any parameter, it applies element by element, its
+other arguments broadcasting as an operator's do. An unmarked scalar function applied to an array is
+a compile error that suggests `@elemental` or `map`.
 
 ### 7.4 Reductions
 
@@ -653,7 +688,10 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
   `sum(m, dim = 2)`, `maxval(a, dim = 1)`, `maxloc(a, dim = 1)`.
 - `min` and `max` are elemental (§7.3), never reductions: `max(a, 0.0)` clamps, and the extremes of
   one array are `minval` / `maxval`.
-- `norm2` is the Euclidean norm, the Frobenius norm of a matrix. There is no `norm`.
+- `norm2` is the Euclidean norm, the Frobenius norm of a matrix, and is real: an integer array is
+  widened to `real64`, a complex one gives its part type. There is no `norm`.
+- `any`, `all` and `count` take `[bool]`; `count` is an `integer`. `dot` takes two vectors and no
+  `dim =`.
 - `dot(x, y)` conjugates `x` when complex, as Fortran's `dot_product` and BLAS's `zdotc` do. `@`
   never conjugates.
 - The `minval` / `maxval` of an empty integer array are the type's largest / smallest values (the
@@ -1468,7 +1506,7 @@ is in `K` until the affine units of §15 arrive.
 |---|---|---|---|
 | Sized numeric types and their aliases | §3.1, §11.2 | §2.1 | `iso_fortran_env` names: `int8…64`, `uint8…64`, `real16…64`, `complex[real16…64]`; `integer`, `real`, `complex` become aliases of the 64-bit kinds |
 | Unsigned integers | — | §2.1, §2.2 | `uint8…64`, trapping; same-width signed/unsigned mixing needs a conversion |
-| `byte` and `[byte]` | §3.3.1 | §3.1 | gone: bytes are `[uint8]`, an ordinary array (`read_bytes`/`write_bytes` take and give `[uint8]`) |
+| `byte` and `[byte]` | §3.3.1 | §3.1 | gone: bytes are `[uint8]`, an ordinary array (`read_bytes`/`write_bytes` take and give `[uint8]`); `==` on them is element-wise like any array's (§7.1), so whole-buffer equality is `all(a == b)` |
 | Promotion | §3.2, §4.4 | §2.2 | a lattice across widths; integer meets real gives the real's width; a typed scalar promotes an array |
 | Index base | §4.14 (0-based) | §3.2, §5.1 | **1-based**, as Fortran; axis numbers (`extent(a, k)`, `dim =`) are 1-based too |
 | Range syntax | §4.14 (`..` half-open, `..=` inclusive) | §5.1 | `a..b` is **inclusive** (Fortran `a:b`); `a..<b` is half-open; `..=` is gone |
