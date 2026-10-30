@@ -51,7 +51,7 @@ def main() =
   print(minloc([3, 1, 2, 1]))
   print(maxloc([-5, -5]))
 
-  // `minval` and `maxval` carry a `nan` through, as `min` and `max` do.
+  // `minval` and `maxval` pass over a `nan` as well; `min` and `max` carry it through.
   print(s"${minval([nan, 1.0, 0.5])} ${maxval([1.0, nan])} ${minval(m, dim = 1)}")
 
   // A `parallel for` over four blocks of 4096: the first block all `nan`.

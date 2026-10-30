@@ -801,6 +801,12 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
 - `minloc(a)` and `maxloc(a)` return the index of the extreme element, a tuple of indices for rank
   ≥ 2; ties go to the first in storage order. A `nan` is never the extreme unless every element is
   one, when the location is the first; an empty array's location is `0`.
+- `minval(a)` and `maxval(a)` pass over a `nan` as `minloc` and `maxloc` do, and as Fortran's
+  `MINVAL` and `MAXVAL` do: a `nan` is never the extreme unless every element is one, when the
+  result is `nan`; along a `dim =` the rule holds lane by lane, and under `parallel` it holds across
+  blocks, whatever the thread count (a block of only `nan` is a `nan` partial, which every number
+  beats). The elemental `min` and `max` (§7.3), and a `min` or `max` operator of a `parallel for`
+  `reduce` clause (§9.2), are not reductions of an array and carry a `nan` through.
 - **Every reduction takes a named `dim =` argument**, reducing along that axis to rank R − 1:
   `sum(m, dim = 2)`, `maxval(a, dim = 1)`, `maxloc(a, dim = 1)`.
 - `min` and `max` are elemental (§7.3), never reductions: `max(a, 0.0)` clamps, and the extremes of
@@ -812,7 +818,7 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
 - `dot(x, y)` conjugates `x` when complex, as Fortran's `dot_product` and BLAS's `zdotc` do. `@`
   never conjugates.
 - The `minval` / `maxval` of an empty integer array are the type's largest / smallest values (the
-  identities of §9.2), and `+inf` / `-inf` for reals.
+  identities of §9.2), and `+inf` / `-inf` for reals: an empty array has no `nan` to give.
 
 ---
 

@@ -1,0 +1,103 @@
+// DESIGN §7.4: `minval` and `maxval` pass over a `nan` wherever it stands; they give a `nan` only where
+// every element is one, and `inf` / `-inf` over no elements. The same in every width, at every rank,
+// along a `dim =`, and under `parallel` across the 4096-element blocks of the tree. The elemental `min`
+// and `max`, and a `parallel for` reducing with them, still carry a `nan` through.
+
+def ax(k: integer) = k
+
+def main() =
+  // Leading, between and trailing `nan`.
+  print(minval([nan, 1.0, 0.5]))
+  print(maxval([nan, 1.0, 0.5]))
+  print(minval([2.0, nan, 1.0]))
+  print(maxval([2.0, nan, 3.0]))
+  print(minval([2.0, 1.0, nan]))
+  print(maxval([1.0, 2.0, nan]))
+  print(minval([nan, nan, 4.0, nan]))
+  print(maxval([nan, -inf]))
+  print(minval([nan, inf]))
+
+  // Every element `nan`; none at all.
+  print(minval([nan, nan]))
+  print(maxval([nan]))
+  val e: [real] = zeros(0)
+  print(s"${minval(e)} ${maxval(e)}")
+
+  // `-0.0` is below `0.0`, a `nan` before them or not.
+  print(1.0 / minval([nan, 0.0, -0.0]))
+  print(1.0 / maxval([nan, -0.0, 0.0]))
+
+  // `real32` and `real16`.
+  val f: [real32] = [nan, 3.0, 1.0, nan]
+  print(s"${minval(f)} ${maxval(f)}")
+  val fn: [real32] = [nan, nan]
+  print(s"${minval(fn)} ${maxval(fn)}")
+  val h: [real16] = [nan, 2.0, nan, 5.0]
+  print(s"${minval(h)} ${maxval(h)}")
+  val hn: [real16] = [nan, nan]
+  print(s"${minval(hn)} ${maxval(hn)}")
+
+  // Rank 2, and along each axis, the axis written or computed.
+  val m = [[nan, 1.0], [2.0, nan]]
+  print(s"${minval(m)} ${maxval(m)}")
+  print(minval(m, dim = 1))
+  print(minval(m, dim = 2))
+  print(maxval(m, dim = 1))
+  print(maxval(m, dim = 2))
+  print(minval(m, dim = ax(1)))
+  print(maxval(m, dim = ax(2)))
+
+  // A lane of only `nan` gives `nan`, and its neighbour does not.
+  val m2 = [[nan, 1.0], [nan, 2.0]]
+  print(minval(m2, dim = 1))
+  print(maxval(m2, dim = 1))
+  print(minval(m2, dim = 2))
+  print(minval(fill((2, 2), nan)))
+  print(maxval(fill((2, 3), nan), dim = 2))
+  val g = reshape(f, (2, 2))
+  print(s"${minval(g)} ${maxval(g)} ${minval(g, dim = 1)} ${maxval(g, dim = 2)}")
+
+  // Integers have no `nan`.
+  print(s"${minval([3, 1, 2])} ${maxval([3, 1, 2])}")
+
+  // `min` and `max` carry a `nan` through.
+  print(s"${min(nan, 1.0)} ${max(1.0, nan)}")
+
+  // Under `parallel`, over four blocks of 4096: the first all `nan`, a number in each of the others.
+  val n = 3 * 4096 + 100
+  var x: [real] = fill(n, nan)
+  x[4500] = 2.0
+  x[9000] = 5.0
+  x[n] = -3.0
+  print(s"${minval(x)} ${maxval(x)}")
+  print(s"${parallel minval(x)} ${parallel maxval(x)}")
+  print(s"${parallel minval(x * 2.0)} ${parallel maxval(x * 2.0)}")
+
+  // A number only in the first block, only in the last, and every element `nan`.
+  var y: [real] = fill(n, nan)
+  y[10] = 1.0
+  print(s"${parallel minval(y)} ${parallel maxval(y)}")
+  var z: [real] = fill(n, nan)
+  z[n] = 7.0
+  print(s"${parallel minval(z)} ${parallel maxval(z)}")
+  val allnan: [real] = fill(n, nan)
+  print(s"${parallel minval(allnan)} ${parallel maxval(allnan)} ${minval(allnan)} ${maxval(allnan)}")
+
+  // A `nan` at both ends of a run of numbers, and empty.
+  var w: [real] = fill(n, 1.0)
+  w[1] = nan
+  w[n] = nan
+  print(s"${parallel minval(w)} ${parallel maxval(w)}")
+  print(s"${parallel minval(e)} ${parallel maxval(e)}")
+
+  // `real32`.
+  var v: [real32] = fill(n, nan)
+  v[7000] = 1.5
+  print(s"${minval(v)} ${maxval(v)} ${parallel minval(v)} ${parallel maxval(v)}")
+
+  // The operator of a `reduce` clause is `min`, which carries a `nan`.
+  var lo = inf
+  parallel for i in 1..n reduce lo: min
+    lo = min(lo, x[i])
+  print(lo)
+  print("done")
