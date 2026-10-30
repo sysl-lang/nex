@@ -132,13 +132,22 @@ admits(c: string, t: Ty) -> bool
 
     true
 
+// Whether `Eq` admits a struct, an enum or a tuple: one `==` compares, holding no function value.
+private admits_aggregate(c: string, t: Ty) -> bool
+    if c != "Eq" then return false
+
+    t match
+        Ty.Tuple(_) -> true
+        Nominal(_, _) -> true
+        _ -> false
+
 private admitted_text(c: string) -> string
     if c == "Numeric" then return "the integer, real and complex types"
     if c == "Integral" then return "the integer types"
     if c == "Real" || c == "Ord" then return "the integer and real types"
     if c == "Float" then return "the real types"
     if c == "Complex" then return "the complex types"
-    if c == "Eq" then return "the numeric types, `bool` and `string`"
+    if c == "Eq" then return "the numeric types, `bool`, `string`, and the structs, enums and tuples that hold no function value"
 
     "every type"
 
@@ -528,7 +537,7 @@ impl Elab
 
         val k = self.funs.len()
 
-        self.funs.push(FunSrc(f.decl, name, f.params, f.ret, f.body))
+        self.funs.push(FunSrc(f.decl, name, f.params, f.ret, f.body, buf()))
         self.fret.push(Error)
         self.fret_known.push(false)
         self.fstate.push(Waiting)
@@ -821,9 +830,16 @@ impl Elab
                 self.fail(span, s"`${tp.name}` of `${inf.owner}` would be ${show_ty(t)}, which holds no value")
                 return false
 
-            if !admits(c, t)
+            if !(admits(c, t) || admits_aggregate(c, t))
                 self.fail(span, s"`${inf.owner}` needs `${tp.name}: ${c}`, and ${show_ty(t)} is not ${c}: ${c} admits ${admitted_text(c)}")
                 return false
+
+            if !admits(c, t)
+                self.function_inside(t) match
+                    Some(f) ->
+                        self.fail(span, s"`${inf.owner}` needs `${tp.name}: ${c}`, and ${show_ty(t)} is not ${c}: its $f, and function values are not compared")
+                        return false
+                    None -> ()
 
         true
     end constraints_hold

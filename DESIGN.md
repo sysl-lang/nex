@@ -241,7 +241,7 @@ The closed constraint set of ref §6.10 widens to the sized types:
 | `Float` | `real16`, `real32`, `real64` |
 | `Complex` | `complex[real16]`, `complex[real32]`, `complex[real64]` |
 | `Ord` | every integer and real type |
-| `Eq` | every numeric type, `bool`, `string` |
+| `Eq` | every numeric type, `bool`, `string`, and every struct, tuple and enum that holds no function value (§11.4) |
 | `Rank` | not a type: a rank (§3.4) |
 | `Unit` | not a type: a unit of measure (§13.5) |
 
@@ -1428,7 +1428,17 @@ with these rules (**PROPOSED** where marked).
   §6.2 already store arrays and views in enum payloads. **PROPOSED.**
 - **A struct or an enum cannot contain itself** by value, directly or through other structs, enums
   or tuples (`struct Node` with a field `next: Node`, `enum List` with `Cons(head: real, tail:
-  List)`); it may hold itself through an array (`kids: [Node]`), which is a handle. **PROPOSED.**
+  List)`); it may hold itself through an array (`kids: [Node]`), which is a handle.
+- **`==` and `!=` compare structs, tuples and enums field by field**: two values are equal where
+  they are the same variant, for an enum, and every field is equal as `==` compares the field's
+  type, so a `nan` field makes them unequal. A field that is an array is equal where the two arrays
+  have the same shape and `all(a == b)` holds; arrays of different shapes make the values unequal,
+  where `==` on the arrays themselves would trap (§7.1). A struct, tuple or enum that holds a
+  function value, in a field at any depth or as an array's elements, has no `==`: comparing two is a
+  compile error naming the field, and `Eq` (§2.6) does not admit it. A tuple built in place or a
+  bare variant on one side takes its type from the other (`t == (1, 2.0)` with `t: (real, real)`,
+  `s == Empty`); a tuple is never a struct, so `p == (1.0, 2.0)` with `p: Point` is a compile
+  error. `<` and the other orderings are not defined on them.
 - **Struct, enum and variant names share the top level** with functions and module-level bindings,
   and each is declared once: a variant `Empty` in two enums is a redeclaration. A local binding of
   the same name shadows a variant.
@@ -1540,6 +1550,10 @@ unit psi = lbf / in^2
   `in` is an ordinary unit name there (`2.0<in>`). A module's own `unit` declaration of a prelude
   unit's name shadows it in that module, as any prelude name may be shadowed. `ms` is the
   millisecond; the metre-second is `m s`.
+- **A base unit is its name.** A module's `unit m` declares the same dimension the prelude's `m`
+  is, so the prelude's units built on it (`N`, `Pa`, `in`) meet the module's `m`: a program may
+  declare the base units it uses and still convert `to<m>(1.0<N> / 1.0<kg> * 1.0<s^2>)`. A base
+  unit of a name the prelude does not have (`unit apple`) is a dimension of its own.
 
 ### 13.2 Spelling a unit
 
@@ -1596,8 +1610,12 @@ unit psi = lbf / in^2
   unit. A product keeps the names it was made from (`1.0<mm> * 1.0<in>` is `real<mm in>`, an area
   whose factor is 0.001 × 0.0254).
 - **`^` takes a constant exponent** when its base carries a unit: `x^2` is `real<m^2>` for
-  `x: real<m>`, and a rational exponent is allowed (`<m^(1/2)>`). `x^n` with `n` not a compile-time
-  constant needs a dimensionless `x`.
+  `x: real<m>`, and a rational exponent is allowed (`<m^(1/2)>`). The exponent is written as an
+  integer literal, optionally negative (`x^-1`), or a fraction of two (`x^(1/2)`, `x^(-1/2)`); a
+  real literal (`x^2.0`, `x^(1.0/2.0)`), a named value and a zero denominator are refused, and so is
+  an exponent that carries a unit. `x^n` with `n` computed needs a dimensionless `x`: `strip(x)^n`.
+  A result whose scale has no exact value (`1.0<mm>^(1/2)`, since √0.001 is irrational) is refused;
+  convert to a unit of scale 1 first.
 - **A bare literal is dimensionless.** With `x: real<m>`, `x + 1.0` and `x > 0.0` are compile errors;
   write `x + 1.0<m>` and `x > 0.0<m>`.
 - **An expected type converts** (**PROPOSED**): a binding, an argument, a returned value or an
@@ -1609,12 +1627,21 @@ unit psi = lbf / in^2
 - **`strip(x)`** removes the unit and gives the number in `x`'s own unit, dimensionless:
   `strip(25.4<mm>)` is `25.4`, and `strip(to<m>(d))` is the length in metres. On an array it is a
   view of the same storage, with no copy. **A unit is attached by multiplying**: `y * 1.0<m>`.
+- **A conversion to a real or complex type keeps the unit**: `real32(x)` for `x: real<m>` is a
+  `real32<m>`, and `complex(x)` a `complex<m>`. **An integer conversion of a value with a unit is
+  refused** (`int32(x)`, `to_integer(x)`), since integers carry no unit: `int32(strip(x))`.
+- **An `if` takes its first branch's unit**: every other branch must have the same dimension and
+  is converted to that unit, as `+` converts its right operand, so `if c then 1.0<m> else 2.0<mm>`
+  is a `real<m>`. A branch of another dimension, or a dimensionless one beside a unit, is a compile
+  error.
 
 ### 13.4 Prelude functions
 
 - `sqrt` halves every exponent: `sqrt(a)` for `a: real<m^2>` is `real<m>`.
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
+  `sign(x)` and `arg(z)` return a plain number: the sign is −1, 0 or 1 whatever `x` measures, and
+  an angle is dimensionless.
   `atan2(y, x)` takes two values of one dimension and returns a dimensionless angle.
 - `exp`, `log`, `sin`, `cos`, `tan` and the other elementary functions need a dimensionless argument
   and return a dimensionless result. **`rad` is dimensionless** (`unit rad = 1`), so
@@ -1658,8 +1685,9 @@ is held stripped. The products and solvers carry units through:
 
 ### 13.7 C and Fortran
 
-**An `extern` parameter never carries a unit.** Passing a unit-carrying value to one is a compile
-error that names `strip`: `cbrt(strip(v))`. An array strips as a view, with no copy, so
+**An `extern` parameter never carries a unit**, and neither does its result: an `extern def`
+whose signature writes a unit (`x: real<m>`, `: real<m>`) is a compile error. Passing a
+unit-carrying value to one is a compile error that names `strip`: `cbrt(strip(v))`. An array strips as a view, with no copy, so
 `cblas_ddot(n, strip(x), 1, strip(y), 1)` copies nothing. A result is given its unit by
 multiplying: `cbrt(strip(v)) * 1.0<m>`. A nex function passed as a callback (§10.2.1) has
 unit-free parameters and result for the same reason.
