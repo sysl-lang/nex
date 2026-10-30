@@ -35,7 +35,7 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
     Ok(e.program())
 
 private elab(p: Program) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics())
 
 // How far a declaration has got.
 enum Progress
@@ -142,6 +142,9 @@ struct Elab
     locals: Buf[LocalInfo]
     // The frame depth each local was bound at, which is what decides whether a lambda captures it.
     depth: Buf[usize]
+    // Each local's type as its declaration wrote it, `integer` or `[real]`, or `""` where it was
+    // inferred: a diagnostic names a value's type the way the source spelled it (DESIGN §2.1).
+    spelled: Buf[string]
     lambdas: Buf[TLambda]
     captures: Buf[Capture]
     loops: Buf[TLoop]
@@ -338,7 +341,10 @@ struct Elab
                     Some(self.check(d, ty, "this default"))
                 None -> None
 
-            sig.params.push(self.new_local(p.name, ty, LParam(p.mode)))
+            val id = self.new_local(p.name, ty, LParam(p.mode))
+
+            self.written(id, p.typ)
+            sig.params.push(id)
             sig.names.push(p.name)
             sig.tys.push(ty)
             sig.modes.push(p.mode)
@@ -462,7 +468,64 @@ struct Elab
     new_local(*self, name: string, ty: Ty, kind: LocalKind) -> usize
         self.locals.push(LocalInfo(name, ty, kind))
         self.depth.push(self.fx.frames.len())
+        self.spelled.push("")
         self.locals.len() - 1
+
+    // Records that local `id` was declared with the written type `t`.
+    // Inside an instance of a generic `def`, a type that names one of its parameters is not what the
+    // instance holds, and keeps its full name.
+    written(*self, id: usize, t: Type)
+        self.spelled.set(id, self.spelling_of(t))
+
+    // `t` as written, or `""` where it names a type parameter of the instance being elaborated.
+    spelling_of(self, t: Type) -> string = if self.names_type_param(t) then "" else show_type(t)
+
+    private names_type_param(self, t: Type) -> bool
+        *t.kind match
+            Named(n) ->
+                for b in self.fx.subst
+                    if b.name == n then return true
+
+                false
+            Applied(_, args) -> self.any_names_type_param(args)
+            Array(elem, axes) ->
+                for a in axes
+                    a match
+                        NamedExtent(n) ->
+                            for b in self.fx.subst
+                                if b.name == n then return true
+                        _ -> ()
+
+                self.names_type_param(elem)
+            Tuple(elems) -> self.any_names_type_param(elems)
+            Func(params, _, ret) -> self.any_names_type_param(params) || self.names_type_param(ret)
+            Measured(base, _) -> self.names_type_param(base)
+    end names_type_param
+
+    private any_names_type_param(self, ts: Buf[Type]) -> bool
+        for t in ts
+            if self.names_type_param(t) then return true
+
+        false
+
+    // The type of `v` as a diagnostic names it: as written where `v` reads a binding or parameter
+    // declared with a type, and by its DESIGN name otherwise.
+    shown(self, v: TExpr) -> string
+        *v.kind match
+            TLocal(id) -> if self.spelled[id].len > 0 then return self.spelled[id]
+            TGlobalRef(n) ->
+                // A member of a destructuring binding shares its tuple's written type, which is not
+                // the member's own.
+                for g in self.globals
+                    if g.name == n
+                        *g.decl.kind match
+                            Bind(_, pat, Some(t), _) -> *pat.kind match
+                                PatternKind.Name(_) -> return show_type(t)
+                                _ -> ()
+                            _ -> ()
+            _ -> ()
+
+        show_ty(v.ty)
 
     // Puts a local in the innermost block's scope.
     bind(*self, id: usize)

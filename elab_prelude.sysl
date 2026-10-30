@@ -38,7 +38,7 @@ private reads(n: usize) -> Buf[Mode]
     out
 
 // An integer written as a number, `3` or `-1`.
-private int_written(e: Expr) -> Option[i64] = *e.kind match
+private int_written(e: Expr) -> Option[i128] = *e.kind match
     IntLit(v) -> Some(v)
     Unary(op, x) -> if op == "-" then (*x.kind match
         IntLit(v) -> Some(-v)
@@ -124,7 +124,7 @@ impl Elab
             if pos.len() != 1 then return self.arity(span, name, "one array")
 
             if !is_int(e)
-                self.fail(pos[0].span, s"`${name}` converts integers; this is ${show_ty(a.ty)}")
+                self.fail(pos[0].span, s"`${name}` converts integers; this is ${self.shown(a)}")
                 return self.invalid(span)
 
             return self.elemental_conversion(span, name, if name == "to_bytes" then Int(8, false) else INTEGER, a)
@@ -152,6 +152,20 @@ impl Elab
             return texpr(span, Ty.Array(e, dynamic_axes(self.shape_rank(shape))), TBuiltin(name, out))
 
         if name == "permute" then return self.permute(span, a, pos)
+
+        if name == "zip"
+            if pos.len() != 2 then return self.arity(span, name, "two arrays")
+
+            val b = self.array_arg(name, pos[1])
+
+            if is_error(b.ty) then return self.invalid(span)
+
+            var pair: Buf[Ty] = buf()
+
+            pair.push(e)
+            pair.push(elem_of(b.ty))
+            out.push(b)
+            return texpr(span, Ty.Array(Ty.Tuple(pair), dynamic_axes(1)), TBuiltin(name, out))
 
         if pos.len() != 1 then return self.arity(span, name, "one array")
 
@@ -195,13 +209,13 @@ impl Elab
 
         if is_array(v.ty) || is_error(v.ty) then return v
 
-        self.fail(e.span, s"`${name}` takes an array; this is ${show_ty(v.ty)}")
+        self.fail(e.span, s"`${name}` takes an array; this is ${self.shown(v)}")
         self.invalid(e.span)
 
     // An axis number of an array of rank `rank`, checked at compile time where it is written as one.
     axis(*self, e: Expr, rank: usize, what: string) -> TExpr
         int_written(e) match
-            Some(k) -> if k < 1 || k > i64(rank) then self.fail(e.span, s"there is no axis ${k}: this array has rank ${rank}")
+            Some(k) -> if k < 1 || k > i128(rank) then self.fail(e.span, s"there is no axis ${k}: this array has rank ${rank}")
             None -> ()
 
         self.check(e, INTEGER, what)
@@ -231,7 +245,7 @@ impl Elab
             v.ty match
                 Ty.Tuple(ts) ->
                     for t in ts
-                        if !is_int(t) then self.fail(dims[0].span, s"a shape is a tuple of integers; this is ${show_ty(v.ty)}")
+                        if !is_int(t) then self.fail(dims[0].span, s"a shape is a tuple of integers; this is ${self.shown(v)}")
                 _ -> out.push(self.coerce(v, INTEGER, "an extent"))
 
             if out.len() == 0 then out.push(v)
@@ -281,7 +295,7 @@ impl Elab
             val v = self.elab(pos[1], wanted)
 
             if is_void(v.ty) then self.fail(pos[1].span, "an array cannot be filled with nothing: this is void")
-            if is_array(v.ty) then self.fail(pos[1].span, s"an array element is not an array; this is ${show_ty(v.ty)}")
+            if is_array(v.ty) then self.fail(pos[1].span, s"an array element is not an array; this is ${self.shown(v)}")
 
             elem = v.ty
             out.push(v)
@@ -308,7 +322,7 @@ impl Elab
 
         var out: Buf[TExpr] = buf()
         var axes: Buf[Extent] = buf()
-        var seen: Buf[i64] = buf()
+        var seen: Buf[i128] = buf()
         val source = axes_of(a.ty)
 
         out.push(a)
@@ -322,7 +336,7 @@ impl Elab
                         if s == k then self.fail(x.span, s"axis ${k} is given twice")
 
                     seen.push(k)
-                    axes.push(if k >= 1 && k <= i64(r) then source[usize(k - 1)] else Dynamic)
+                    axes.push(if k >= 1 && k <= i128(r) then source[usize(k - 1)] else Dynamic)
                 None -> axes.push(Dynamic)
 
         texpr(span, Ty.Array(elem_of(a.ty), axes), TBuiltin("permute", out))
@@ -339,13 +353,13 @@ impl Elab
 
             for k in 0..<2
                 if rank_of(out[k].ty) != 1 && !is_error(out[k].ty)
-                    self.fail(pos[k].span, s"`dot` takes two vectors (rank 1); this is ${show_ty(out[k].ty)}")
+                    self.fail(pos[k].span, s"`dot` takes two vectors (rank 1); this is ${self.shown(out[k])}")
                     return self.invalid(span)
 
             val ty = elem_of(out[0].ty)
 
             if !is_numeric(ty) && !is_error(ty)
-                self.fail(span, s"`dot` needs numbers; these are ${show_ty(out[0].ty)}")
+                self.fail(span, s"`dot` needs numbers; these are ${self.shown(out[0])}")
                 return self.invalid(span)
 
             if self.shape_meet(span, "`dot`", axes_of(out[0].ty), axes_of(out[1].ty)).is_none() then return self.invalid(span)
@@ -389,7 +403,7 @@ impl Elab
                 need = "numbers"
 
         if need.len > 0
-            self.fail(pos[0].span, s"`${name}` takes an array of ${need}; this is ${show_ty(a.ty)}")
+            self.fail(pos[0].span, s"`${name}` takes an array of ${need}; this is ${self.shown(a)}")
             return self.invalid(span)
 
         var args: Buf[TExpr] = buf()
@@ -409,7 +423,7 @@ impl Elab
 
                 for j in 0..<r
                     written match
-                        Some(n) -> if i64(j + 1) != n then kept.push(axes[j])
+                        Some(n) -> if i128(j + 1) != n then kept.push(axes[j])
                         None -> if j > 0 then kept.push(Dynamic)
 
                 val ty = if r == 1 then per else Ty.Array(per, kept)
@@ -444,7 +458,7 @@ impl Elab
             val ret = fn_ret(f.ty)
 
             if !promotes(ret, init.ty)
-                self.fail(pos[2].span, s"the function given to `reduce` returns ${show_ty(ret)}, and the accumulator is ${show_ty(init.ty)}")
+                self.fail(pos[2].span, s"the function given to `reduce` returns ${show_ty(ret)}, and the accumulator is ${self.shown(init)}")
 
             out.push(init)
             out.push(f)
@@ -504,7 +518,7 @@ impl Elab
 
                 // Written straight as the argument, it is borrowed for the call and does not escape.
                 self.agg.passed.push(lid)
-                texpr(e.span, self.lambda_body(lid, "", e.span, names, tys, reads(names.len()), None, body), TLambdaRef(lid))
+                texpr(e.span, self.lambda_body(lid, "", e.span, names, tys, self.spellings(params), reads(names.len()), None, body), TLambdaRef(lid))
             _ -> self.elab(e, Some(fn_type(ptys, reads(ptys.len()), Error)))
 
         f.ty match
@@ -516,11 +530,11 @@ impl Elab
                         if !promotes(ptys[k], sig.params[k]) || sig.modes[k] == Inout then fits = false
 
                 if !fits
-                    self.fail(e.span, s"${what} is called with (${show_tys_of(ptys)}); this is ${show_ty(f.ty)}")
+                    self.fail(e.span, s"${what} is called with (${show_tys_of(ptys)}); this is ${self.shown(f)}")
                     return self.invalid(e.span)
             Error -> ()
             _ ->
-                self.fail(e.span, s"${what} must be a function; this is ${show_ty(f.ty)}")
+                self.fail(e.span, s"${what} must be a function; this is ${self.shown(f)}")
                 return self.invalid(e.span)
 
         f
@@ -552,11 +566,11 @@ impl Elab
         val e = elem_of(out[0].ty)
 
         if rank_of(out[0].ty) != rank_of(out[1].ty) && !has_error(out[0].ty) && !has_error(out[1].ty)
-            self.fail(span, s"`assert_approx` compares values of one rank; these are ${show_ty(out[0].ty)} and ${show_ty(out[1].ty)}")
+            self.fail(span, s"`assert_approx` compares values of one rank; these are ${self.shown(out[0])} and ${self.shown(out[1])}")
             return self.invalid(span)
 
         if !is_numeric(e) && !is_error(e)
-            self.fail(span, s"`assert_approx` compares numbers; these are ${show_ty(out[0].ty)}")
+            self.fail(span, s"`assert_approx` compares numbers; these are ${self.shown(out[0])}")
             return self.invalid(span)
 
         if is_int(e)

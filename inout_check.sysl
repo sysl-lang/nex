@@ -76,7 +76,8 @@ private strip(e: TExpr) -> TExpr = *e.kind match
 
 private const_int(e: TExpr) -> Option[i64] = *strip(e).kind match
     TLiteral(v, _) -> v match
-        IntVal(x) -> Some(x)
+        // A literal beyond `int64`, a `uint64` constant, is no subscript the checker compares.
+        IntVal(x) -> if x >= -0x8000_0000_0000_0000 && x <= 0x7FFF_FFFF_FFFF_FFFF then Some(i64(x)) else None
         _ -> None
     TUnary(op, x) -> if op == "-" then const_int(x).map(v -> -v) else None
     _ -> None

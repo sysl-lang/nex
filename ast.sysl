@@ -186,7 +186,9 @@ struct Expr
     kind: &ExprKind
 
 enum ExprKind
-    IntLit(value: i64)
+    // An integer literal's value is its magnitude, with a written minus folded in: `0xFFFF_FFFF_FFFF_FFFF`
+    // is 2⁶⁴ − 1, not −1, and the type it is adopted into decides whether it fits.
+    IntLit(value: i128)
     RealLit(value: real)
     BoolLit(value: bool)
     StrLit(value: string)

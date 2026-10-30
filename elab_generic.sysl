@@ -786,7 +786,7 @@ impl Elab
                 val v = pre[i].unwrap()
 
                 if !self.unify(formals[j], v.ty, inf, !literal)
-                    self.fail(value_span(v), s"${what[j]} must be ${show_ty(formals[j])}, but this is ${show_ty(v.ty)}")
+                    self.fail(value_span(v), s"${what[j]} must be ${show_ty(formals[j])}, but this is ${self.shown(v)}")
                     ok = false
 
         if inf.clashes.len() > 0
@@ -881,10 +881,10 @@ impl Elab
     // An argument elaborated before its parameter's type was known, brought to that type: a literal
     // elaborated again so it adopts it, a borrow taken, anything else converted.
     private settle_arg(*self, e: Expr, v: Option[TExpr], ty: Ty, mode: Mode, what: string) -> TExpr
-        if mode == Inout then return self.borrow(e, ty)
+        if mode == Inout then return self.borrow(e, ty, "")
 
         v match
-            None -> self.argument(e, ty, mode, what)
+            None -> self.argument(e, ty, "", mode, what)
             Some(x) -> if self.literal_class(e) != NOT_LITERAL then self.check(e, ty, what) else self.coerce(x, ty, what)
 
     // -- calls ------------------------------------------------------------------------------------

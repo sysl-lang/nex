@@ -50,6 +50,8 @@ nsjail on its own VM.
 
 `bool`, `void` and `string` are as in ref §3.1, `void` being the type the reference calls `unit`. The aliases are the same type, not a distinct one:
 `[real]` and `[real64]` are one type, and a diagnostic names a type the way the source spelled it.
+A type the source never wrote, that of an inferred binding or of an intermediate result, is named
+by its full name: `int64`, `real64`, `complex[real64]`.
 
 **The names are Fortran's `iso_fortran_env` kind names**, so a Fortran programmer reads
 `real64`, `int32` and `complex[real64]` (Fortran's `complex(real64)`) without a glossary. The
@@ -137,7 +139,9 @@ such as `1.0f32` would read as juxtaposition (`1.0 * f32`, ref §4.4).
 
 - **With an expected type** (an annotated binding, a parameter, a typed element or field): the
   literal is that type. An integer literal outside the target's range is a compile error
-  (`val b: int8 = 300`, `val u: uint8 = -1`). A real literal is rounded to the nearest value of the target width;
+  (`val b: int8 = 300`, `val u: uint8 = -1`). An integer literal's value is its magnitude in every
+  base, never a bit pattern: `0xFF` is 255, so `val y: int8 = 0xFF` is refused, and
+  `0xFFFF_FFFF_FFFF_FFFF` initializes a `uint64` and no signed type. A literal is at most 64 bits. A real literal is rounded to the nearest value of the target width;
   one that rounds to infinity is a compile error (`val h: real16 = 70000.0`). An integer literal
   may initialize a real or complex (`val x: real32 = 1`), as ref §3.2 allows.
 - **As an operand of a binary operator whose other operand has a type:** an integer literal adopts

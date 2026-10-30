@@ -45,9 +45,9 @@ reversed(span: Span, a: TExpr, args: Buf[TExpr]) -> TExpr
     if args.len() == 2
         val k = *args[1].kind match
             TLiteral(IntVal(k), _) -> k
-            _ -> 0i64
+            _ -> 0
 
-        if k < 1 || k > i64(rank) then return texpr(span, a.ty, TBuiltin("reverse", args))
+        if k < 1 || k > i128(rank) then return texpr(span, a.ty, TBuiltin("reverse", args))
 
         axis = usize(k)
 
