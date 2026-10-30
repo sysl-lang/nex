@@ -66,11 +66,6 @@ elab_struct_declaration_errors()
     assert_eq(refused("struct T\n  kids: [T]\n" + MAIN), "ok")
     assert_eq(refused("struct P\n  x: real\ndef P() = 1\n" + MAIN), "error: redeclaration of `P` @3:1")
 
-@test("a generic struct or enum is reported once, at its declaration")
-elab_generic_aggregates()
-    assert_eq(refused("struct Box[T]\n  v: T\nenum Opt[T] =\n  Some(v: T)\n  None\ndef f(b: Box) = b\ndef main() =\n  val b = Box(1)\n  val n = None\n  Some(2) match\n    Some(x) -> print(x)\n    None -> ()\n"),
-        "error: a generic struct is not elaborated yet @1:1\nerror: a generic enum is not elaborated yet @3:1")
-
 // -- tuples -----------------------------------------------------------------------------------------
 
 @test("a tuple is built with or without parentheses, and its elements count from 1")

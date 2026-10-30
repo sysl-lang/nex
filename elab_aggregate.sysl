@@ -2,7 +2,9 @@
 // binding that takes a tuple apart, and the rules on what a lambda may capture.
 //
 // **A struct or an enum is a nominal type**, `Nominal(name, args)`, whose fields are looked up here
-// by its name; the type arguments a generic one will carry go in `args`. Their names, and the names
+// by its name. An instance of a generic one is a struct or an enum of its own, named for its
+// arguments, `Box[int64]` (`elab_generic.sysl`); `args` holds the arguments only of an application
+// inside a generic's own signature, `Box[T]`. Their names, and the names
 // of the variants, are declared at the top level beside the functions and module-level bindings, so a
 // variant is a value wherever its name is not shadowed: `Red`, `Converged(2.5)`. The field types are
 // resolved once every name is collected, so a struct may name one declared after it.
@@ -18,8 +20,8 @@
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.{Span, nearest_name}
 
-// A struct as written, and its fields once their types are resolved. A generic one is reported at
-// its declaration and its uses are left alone.
+// A struct as written, and its fields once their types are resolved. A generic one keeps none: its
+// instances are structs of their own.
 struct StructSrc
     decl: Decl
     name: string
@@ -80,14 +82,14 @@ impl Elab
 
     collect_struct(*self, d: Decl, name: string, tparams: Buf[TypeParam], fields: Buf[Field])
         if !self.declare(d.span, name) then return
-        if tparams.len() > 0 then self.later(d.span, "a generic struct")
+        if tparams.len() > 0 then self.collect_generic_agg(d, name, tparams, false)
 
         self.agg.structs.push(StructSrc(d, name, tparams.len() > 0, fields, buf()))
 
     // An enum, and each of its variants as a top-level name.
     collect_enum(*self, d: Decl, name: string, tparams: Buf[TypeParam], variants: Buf[Variant])
         if !self.declare(d.span, name) then return
-        if tparams.len() > 0 then self.later(d.span, "a generic enum")
+        if tparams.len() > 0 then self.collect_generic_agg(d, name, tparams, true)
 
         val owner = self.agg.enums.len()
 
@@ -164,7 +166,7 @@ impl Elab
             if !e.generic then self.check_contains_self(e.decl.span, e.name)
     end resolve_aggregates
 
-    private resolve_fields(*self, span: Span, owner: string, src: Buf[Field]) -> Buf[FieldInfo]
+    resolve_fields(*self, span: Span, owner: string, src: Buf[Field]) -> Buf[FieldInfo]
         var out: Buf[FieldInfo] = buf()
 
         for f in src
@@ -181,7 +183,7 @@ impl Elab
 
     // A struct or an enum holds its fields by value, so one that reaches itself through its fields,
     // its variants' fields or a tuple among them would have no size.
-    private check_contains_self(*self, span: Span, name: string)
+    check_contains_self(*self, span: Span, name: string)
         var seen: Buf[string] = buf()
 
         for t in self.member_types(name)
@@ -229,7 +231,8 @@ impl Elab
         out
     end member_types
 
-    // The type a struct's or an enum's name denotes; `Error`, already reported, for a generic one.
+    // The type a struct's or an enum's name denotes; `Error` for a generic one, which `resolve_type`
+    // reports before it gets here.
     nominal_named(self, name: string) -> Option[Ty]
         self.find_struct(name) match
             Some(k) -> return Some(if self.agg.structs[k].generic then Error else Nominal(name, buf()))
@@ -407,12 +410,12 @@ impl Elab
     end has_field
 
     // `Point(x, y)` or `Converged(x)`: a struct or a variant built, where `n` names one.
-    construct(*self, span: Span, at: Span, n: string, args: Buf[Expr]) -> Option[TExpr]
+    construct(*self, span: Span, at: Span, n: string, args: Buf[Expr], want: Option[Ty]) -> Option[TExpr]
         self.find_struct(n) match
             Some(k) ->
                 val s = self.agg.structs[k]
 
-                if s.generic then return Some(self.invalid(span))
+                if s.generic then return Some(self.generic_construct(span, at, n, args, want))
 
                 return Some(texpr(span, Nominal(n, buf()), TNew(self.field_args(span, n, s.fields, args))))
             None -> ()
@@ -423,7 +426,7 @@ impl Elab
 
         val e = self.agg.enums[v.owner]
 
-        if e.generic then return Some(self.invalid(span))
+        if e.generic then return Some(self.generic_construct(span, at, n, args, want))
 
         val fields = e.variants[v.tag].fields
 
@@ -481,12 +484,12 @@ impl Elab
 
     // A bare variant as a value; a struct's, an enum's or a fielded variant's name where a value is
     // expected is refused.
-    type_or_variant(*self, span: Span, n: string) -> Option[TExpr]
+    type_or_variant(*self, span: Span, n: string, want: Option[Ty]) -> Option[TExpr]
         self.find_variant(n) match
             Some(v) ->
                 val e = self.agg.enums[v.owner]
 
-                if e.generic then return Some(self.invalid(span))
+                if e.generic then return Some(self.generic_bare_variant(span, v, want))
 
                 val count = e.variants[v.tag].fields.len()
 
