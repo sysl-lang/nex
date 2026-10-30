@@ -150,6 +150,15 @@ mod_default_in_its_module()
         "(struct lib.P (n int64))\n(val lib.secret int64 41)\n(def lib.bump ((n#0 int64)) int64 (+:int64 n#0 1))\n(def lib.f ((n#1 int64 (call:int64 lib.bump lib.secret))) void (print n#1))\n(def main () void (block (call lib.f (call:int64 lib.bump lib.secret)) (print (.n:int64 (new:lib.P lib.secret)))))")
     assert_eq(project_refused([("main.nex", "import lib\nval secret = 1\ndef main() = print(secret)\n"), lib]), "ok")
 
+@test("a default calling another module's function through `m.f` takes that function's own defaults, and a cycle across modules is refused")
+mod_default_forward_qualified()
+    val lib = ("lib/lib.nex", "def g(k: integer = later()): integer = k * 2\ndef later(j: integer = 5): integer = j + 1\n")
+
+    assert_eq(project_refused([("main.nex", "import lib\ndef f(n: integer = lib.g()) = print(n)\ndef main() = f()\n"), lib]), "ok")
+    // Imports are acyclic, so a cycle of defaults lies within one module, reached from another.
+    assert_eq(project_refused([("main.nex", "import lib\ndef f(n: integer = lib.g()): integer = n\ndef main() = print(f())\n"), ("lib/lib.nex", "def g(k: integer = h()): integer = k\ndef h(j: integer = g()): integer = j\n")]),
+        "error: the defaults of these functions call one another in a cycle, `lib.g` → `lib.h` → `lib.g`: a default cannot reach the function it belongs to, even through another function's default @lib/lib.nex:2:20")
+
 @test("a private or missing member is not reached through `m.x`")
 mod_qualified_private()
     assert_eq(with_geom("import geom\ndef main() = print(geom.secret())\n"), "error: the module `geom` has no public member `secret` @main.nex:2:20")

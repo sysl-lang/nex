@@ -100,6 +100,41 @@ dft_function_value()
     assert_eq(refused("def ap(g: (integer) -> void) = g(1)\ndef f(x: integer, n: integer = 2) = print(x + n)\ndef main() = ap(f)\n"), "error: argument `g` must be (integer -> void), but this is (int64, int64) -> void @3:17")
     assert_eq(refused("def f(x: integer, n: integer = 64) = print(x + n)\ndef main() =\n  val g = f\n  g(1, 2)\n"), "ok")
 
+@test("a default may call a function declared after it that leaves out arguments of its own, which take their defaults")
+dft_forward_defaulted()
+    assert_eq(elaborated("def f(n: integer = g()) = print(n)\ndef g(k: integer = 3): integer = k * 2\ndef main() = f()\n"),
+        "(def f ((n#0 int64 (call:int64 g 3))) void (print n#0))\n(def g ((k#1 int64 3)) int64 (*:int64 k#1 2))\n(def main () void (call f (call:int64 g 3)))")
+    // A chain of three, each declared after the one whose default calls it.
+    assert_eq(elaborated("def f(a: integer = g()) = print(a)\ndef g(b: integer = h()): integer = b + 1\ndef h(c: integer = 4): integer = c * 10\ndef main() = f()\n"),
+        "(def f ((a#0 int64 (call:int64 g (call:int64 h 4)))) void (print a#0))\n(def g ((b#1 int64 (call:int64 h 4))) int64 (+:int64 b#1 1))\n(def h ((c#2 int64 4)) int64 (*:int64 c#2 10))\n(def main () void (call f (call:int64 g (call:int64 h 4))))")
+    // The later function's default reads its earlier parameter, which the forward call passes.
+    assert_eq(refused("def f(x: integer, y: integer = g(x)) = print(x + y)\ndef g(a: integer, b: integer = a + 1): integer = a * b\ndef main() = f(2)\n"), "ok")
+    // A generic callee declared later, its default filled in its instance.
+    assert_eq(refused("def f(n: integer = first(5)) = print(n)\ndef first[T](x: T, k: integer = 1): T = x\ndef main() = f()\n"), "ok")
+    // A concrete `def` beside a generic one of its name, chosen by a forward call relying on its default.
+    assert_eq(refused("def f(n: integer = pick(5)) = print(n)\ndef pick(x: integer, k: integer = 1): integer = x + k\ndef pick[T](x: T, y: T, k: integer = 1): T = x\ndef main() = f()\n"), "ok")
+    // A function's defaults elaborated while another's are, its result type inferred from its body.
+    assert_eq(refused("def f(n: integer = g()) = print(n)\ndef g(k: integer = 3) = k * 2\ndef main() = f()\n"), "ok")
+
+@test("defaults that reach their own function, directly or through other functions' defaults, are a cycle, refused at the call closing it")
+dft_cycle()
+    assert_eq(refused("def f(n: integer = f(1)): integer = n\n" + MAIN), "error: a default of `f` calls `f`: a default cannot reach the function it belongs to; give the argument at the call instead @1:20")
+    assert_eq(refused("def f(n: integer = f()): integer = n\n" + MAIN), "error: a default of `f` calls `f`: a default cannot reach the function it belongs to; give the argument at the call instead @1:20")
+    assert_eq(refused("def f(x: integer = g()): integer = x\ndef g(y: integer = f()): integer = y\n" + MAIN),
+        "error: the defaults of these functions call one another in a cycle, `f` → `g` → `f`: a default cannot reach the function it belongs to, even through another function's default @2:20")
+    assert_eq(refused("def f(x: integer = g()): integer = x\ndef g(y: integer = h()): integer = y\ndef h(z: integer = f(1)): integer = z\n" + MAIN),
+        "error: the defaults of these functions call one another in a cycle, `f` → `g` → `h` → `f`: a default cannot reach the function it belongs to, even through another function's default @3:20")
+    // Through a lambda written in the default.
+    assert_eq(refused("def f(n: integer = (() -> f(1))()): integer = n\n" + MAIN), "error: a default of `f` calls `f`: a default cannot reach the function it belongs to; give the argument at the call instead @1:27")
+    // Through the body of a function whose result type the default needs, which leaves the argument out.
+    assert_eq(refused("def f(x: integer = g()): integer = x\ndef g() = f()\n" + MAIN),
+        "error: this call leaves out `x`, whose default is being elaborated: the defaults of `f` reach this call, which reaches them again; give `x` here @2:11")
+    // A body may call the function with every argument given, and a declared result type keeps the body out of it.
+    assert_eq(refused("def f(x: integer = g()): integer = x\ndef g() = f(1)\n" + MAIN), "ok")
+    assert_eq(refused("def f(x: integer = g()): integer = x\ndef g(): integer = f()\n" + MAIN), "ok")
+    // A generic instance whose default calls the same instance.
+    assert_eq(refused("def f[T](x: T, n: integer = f(x)): integer = n\ndef main() = print(f(1))\n"), "error: a default of `f` calls `f`: a default cannot reach the function it belongs to; give the argument at the call instead @1:29")
+
 // -- fields -----------------------------------------------------------------------------------------
 
 @test("a struct's field default is filled into each constructor that leaves it out")

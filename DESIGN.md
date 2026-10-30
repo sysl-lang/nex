@@ -1999,6 +1999,15 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
     parameter's name hides a module-level name in the defaults after it. **It may not name its own
     parameter or a later one** (`h: real = 2 * r` before `r` is a compile error naming both), nor
     does it see the caller's locals.
+  - **A default may call a function declared after it, and that call may leave out arguments the
+    later function defaults** (`n: integer = g()` before `def g(k: integer = 3)`): every function's
+    defaults are known before any call fills them in, whatever the declaration order and across
+    modules. **A default may not reach its own function**, directly (`def f(n: integer = f(1))`)
+    or through other functions' defaults (`def f(x = g())` with `def g(y = f())`): the cycle is a
+    compile error naming each function on it, at the call that closes it, even where that call
+    gives every argument. A function body may call the function with every argument given; a body
+    elaborated while the defaults are (its result type undeclared, needed by a default) that
+    leaves out an argument whose default is in the cycle is refused the same way.
   - **A default may read an `inout` parameter before it** (`by: integer = length(v)` after
     `v: inout [integer]`): it is an argument evaluated before the call starts, so the borrow rules
     of an argument beside a borrow apply (§8.3 rule 2) — a value computed from the place is legal, a
