@@ -164,7 +164,8 @@ beside a `real32`), and with no context `pi`, `e`, `inf`, `nan` are `real64` and
 
 Every numeric type name is also its conversion function, on a scalar and element-wise on an array:
 `real32(x)`, `int16(n)`, `uint8(k)`, `complex[real32](z)`, `complex[real32](re, im)`,
-`real64(a)`.
+`real64(a)`. In the two-argument form each part converts as `real32(re)` would, and either part may
+be an array, the other then an array of the same shape or a scalar that broadcasts.
 
 | From → to | Behaviour |
 |---|---|
@@ -595,7 +596,9 @@ an owned array is never observable, only its cost: **a view is a value**, fixed 
    being **returned** from the function, **stored** in a struct, tuple or enum payload, **captured**
    by an escaping closure, or bound at **module level**, is copied to a dense owned array at that
    point. Passing a view as an argument is not an escape (the callee borrows it, ref §8.4), and
-   neither is binding it to a local `val`.
+   neither is binding it to a local `val`. The copy is made where the value is known to be a view
+   (a slice, `reverse`, a local `val` bound to one, a branch giving one); a parameter is not known
+   to be one, so a function that returns its parameter copies nothing.
 4. **The source does not change under it.** If the source is a `var` and is written while a view of
    it is still live, the view keeps the values it had when it was taken: the compiler copies the view
    before the write. A view whose last use comes before the write costs nothing
@@ -646,7 +649,13 @@ for k in -r..r do acc += w[k] * x[i - k]
   parameter starts at 1 and no function ever asks what its array's bounds are.
 - `rebase(w)` is an ordinary 1-based copy of an offset view's elements (`rebase(w)[1]` is `w[-r]`),
   and is what crosses a function boundary. A function that wants the offset takes it as an ordinary
-  argument and calls `origin` itself.
+  argument and calls `origin` itself. `rebase` of an ordinary array is a dense copy of it.
+- **Only a `val` holds an offset view, and only indexing reads its offsets.** Binding one to a `var`,
+  assigning it, or giving it as the value of an `if`, a `match` or a block is a compile error naming
+  `origin`, as escaping is. Read as a value — by an operator, `sum`, `print`, `for x in w` — it is
+  its elements, and the result is 1-based like every other value. A slice of an offset view
+  (`w[-1..1]`) is an ordinary 1-based view, as a Fortran section is. `origin(w, …)` of an offset
+  view replaces its first indices.
 
 ---
 
@@ -704,7 +713,7 @@ as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps ever
 
 **A user function opts in with `@elemental`**: `@elemental def f(x: real) = …`. Its body obeys the
 parallel-body rules of §9.4 — no `inout` parameters, no writes to module variables, no I/O except
-`print` — so the compiler may evaluate it in any order and fuse it. Its parameters are scalars and
+`print` and `eprint`, no `parallel`, directly or through anything it calls — so the compiler may evaluate it in any order and fuse it. Its parameters are scalars and
 it returns a value. Called with an array for any parameter, it applies element by element, its
 other arguments broadcasting as an operator's do. An unmarked scalar function applied to an array is
 a compile error that suggests `@elemental` or `map`.
@@ -814,6 +823,14 @@ The uniqueness rule (ref §8.2) loses its `mut` case: a `var` array is moved onl
 assignment to another `var` (and the auto-clone pass makes the latter a copy when the source is used
 again, ref §8.3). An `inout` call is not a move and needs no clone.
 
+**Where the auto-clone pass clones.** An array local bound or assigned to a `var` (`var b = a`,
+`b = a`) is **moved** when the source is a `val` or `var` bound in the same function that nothing
+uses afterwards: no later read or write, no loop around the transfer that the source was bound
+outside of, and no lambda capturing it. Otherwise it is **cloned**, and always when the source is
+a parameter (the caller keeps it, `inout` or not), a module-level binding, a loop variable or a
+name bound by destructuring or a `match`. A view bound or assigned to a `var` is copied (§6.2 rule
+2). A `val` bound to a `var` array shares it, as a view of a `var` does (§6.2 rule 4).
+
 **Lowering.** An `inout` array is a tensor argument whose updated value is returned and bound back
 to the caller's variable. Every nex function except `main` is emitted `private`; with
 `drop-equivalent-buffer-results` before `buffer-deallocation-pipeline`, a result that is its own
@@ -840,8 +857,9 @@ parallel for i in 1..rows(c), j in 1..cols(c)          // a 2-D iteration space
 ```
 
 The header is `parallel for` *index* `in` *range* (`,` *index* `in` *range*)*, over integer ranges
-only (not over an array's elements). The iterations may run in any order and at the same time; the
-loop ends when all of them have.
+only (not over an array's elements), each with an optional `by` step. The iteration space is a box:
+no range may use another clause's index. The iterations may run in any order and at the same time;
+the loop ends when all of them have.
 
 ### 9.2 Reductions
 
@@ -857,8 +875,12 @@ print(total, peak)
 ```
 
 **The operators** are the built-in `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc`, and any
-**user-defined function** of type `(T, T) -> T`. The reduction variable is an outer `var` of a type
-the operator applies to. Each iteration contributes through exactly one of `v op= e`, `v = v op e`,
+**user-defined function** of type `(T, T) -> T`. The reduction variable is an outer `var` (local
+or module-level) of a type the operator applies to: a number for `+` and `*`, an integer or a real
+for `min` and `max`, a `bool` for `and` and `or`, a (value, index) pair for `minloc` and `maxloc`,
+and `T` for a user function. A built-in operator reduces a scalar, not an array; an array is
+reduced element by element by a loop over its indices, or with a user operator. A variable is named
+in one `reduce` clause only. Each iteration contributes through exactly one of `v op= e`, `v = v op e`,
 `v = op(v, e)` (for `min`, `max` and a user function), `v = v and e`, `v = v or e`, or the location
 forms below, where `e` does not mention `v`; `v` is not read anywhere else in the body. The `var`'s
 value before the loop is the starting value, and after the loop it holds the combination of the
@@ -892,7 +914,8 @@ function `reduce` keeps its name.
   val (largest, where) = worst
   ```
 
-  Ties go to the lowest index, as in Fortran, whatever the thread count.
+  Ties go to the lowest index, as in Fortran, whatever the thread count. The three-argument
+  `maxloc(v, x, i)` exists only as this contribution; anywhere else it is a compile error.
 
 #### 9.2.1 Reproducible reductions
 
@@ -946,19 +969,27 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
 
 1. **No write to shared state.** Assignment is allowed only to (a) bindings declared inside the
    body, (b) declared reduction variables, in the forms of §9.2, and (c) elements or slices of an
-   outer `var` array (or `inout` parameter) **owned by the iteration**: in every such write, some
-   axis's subscript is exactly one of the loop's index variables, distinct loop variables on
+   outer `var` array (or `inout` parameter) **owned by the iteration**: in every such write, each
+   of the loop's index variables is exactly the subscript of one axis, distinct variables on
    distinct axes, so two iterations can never write the same element (`y[i]`, `m[:, j]`,
    `c[i, j]`, `t[i, :, k]`). `y[i + 1]`, `y[2 * i]` and `y[idx[i]]` are rejected (**PROPOSED**: the
-   rule recognizes only the plain index variable).
+   rule recognizes only the plain index variable), and so is `c[i, :]` under the header
+   `i in …, j in …`, since iterations with one `i` and different `j` share that row. Every write to
+   one array in a body uses the same subscripts: `c[i, j]` and `c[j, i]` together are rejected.
+   Passing a place `inout` is a write to it.
 2. **No read of what another iteration writes.** An array written under rule 1(c) may be read in the
    body only at the iteration's own subscript (`y[i]` when writing `y[i]`); `y[i - 1]` is rejected.
    Every other outer binding is read-only for the duration of the loop, and reading it is free:
    value semantics means no other code can change it meanwhile.
 3. **No effects through calls.** A function called in the body may receive `inout` only places that
    rule 1 allows the body to write (`normalize(m[:, j])`), and may not itself write a module-level
-   `var` (the transitive summary of §8.3). `extern` functions not marked `@pure` (§10) are rejected
-   in a parallel body.
+   `var` (the transitive summary of §8.3), nor read one the body writes element by element, nor —
+   for a local function — assign a local of the enclosing function or read a reduction variable.
+   `extern` functions not marked `@pure` (§10) are rejected in a parallel body. **The checker must
+   see what is called**: a function by its name, a lambda, or a `val` bound to one. Calling a
+   function value it cannot see into — a parameter of function type, a `var`, a field — is a
+   compile error in a parallel body, and so is calling a function that itself calls one. A
+   function or lambda passed as a value (to `map`, say) counts as called by whatever receives it.
    **I/O:** `print` and writing to stderr are allowed, and each call is **atomic** — its whole line
    is written under a lock, so lines never interleave mid-line — but the **order of lines across
    iterations is unspecified**. This is the one deliberately non-reproducible thing in a parallel
@@ -970,7 +1001,9 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
    `parallel for j in 1..n, i in 1..m`.
 6. **`cycle` is allowed, `exit` is not.** `cycle` ends the current iteration; `exit` (and an
    `exit`/`cycle` naming a loop outside the body) is a compile error, since the iterations have no
-   order to leave.
+   order to leave. `return` is a compile error for the same reason, and so is `stop`; a failed
+   `assert` traps instead, and a trap ends the loop as described below. A loop inside the body may
+   be left by `exit` as any loop may.
 
 A body the checker cannot prove is a compile error naming the offending write or read, never a
 silent fallback to a sequential loop. The wording of the checker's messages is the
@@ -1343,6 +1376,17 @@ with these rules (**PROPOSED** where marked).
 - **A tuple built in place converts element by element** to the tuple its position expects:
   `val t: (real, real) = 1, n` adopts `1` and widens `n`. A tuple value as a whole does not widen:
   `val u: (real, real) = t` with `t: (int64, int64)` is a compile error. **PROPOSED.**
+- **A destructuring pattern nests**: `val a, (b, c) = 1, (2.5, true)`, and `for` takes the same
+  patterns. Parentheses group a tuple inside another, and are what a type annotation needs.
+- **A binding takes apart only tuples.** A variant pattern in a `val` or `var` (`val Converged(x) =
+  s`) is a compile error, even where the enum has a single variant: a binding cannot fail, and `match`
+  is how a variant is taken apart.
+- **A tuple assignment stores a tuple into a list of places**: `a, b = b, a`, `p.x, (v[1], _) =
+  f()`. The right side is evaluated whole first, then each element is stored into its target left to
+  right, so `a, b = b, a` swaps. A target is anything a plain assignment may store into, or `_`. A
+  right side written as a tuple converts element by element to the targets' types, as a tuple built
+  in place does; a tuple value is stored as it is, without widening. A place written twice in one
+  list (`a, a = 1, 2`) is a compile error, and a list of targets takes only `=`, never `+=`.
 - **A module-level destructuring binding** (`val a, b = 10, 20`) evaluates its initializer once and
   binds each name as a module-level binding; one that binds no name (`val _, _ = …`) is a compile
   error, since the top level holds no statements.
@@ -1353,7 +1397,9 @@ with these rules (**PROPOSED** where marked).
   that name, and is `f(x, args)` otherwise.
 - **A `match` arm is a variant pattern, a name or `_`.** A variant with fields is matched with all of
   them, `Circle(r)`, `Rect(w, _)`; writing `Circle` alone for a variant with fields is a compile
-  error. A field's sub-pattern is a name or `_`. Every variant is covered once, by its arm or by a
+  error. A field's sub-pattern is a name or `_`. A tuple pattern, as an arm or as a field's
+  sub-pattern, is a compile error: a tuple is taken apart by a destructuring binding, inside the arm
+  where it is a field. Every variant is covered once, by its arm or by a
   catch-all; an arm that repeats a variant or follows a catch-all is a compile error. The arms meet
   in one type as an `if`'s branches do, a literal arm adopting the others' type (§2.3).
 - **What a lambda captures** (ref §4.11, §8.3 rule 4): a lambda **escapes** unless it is written

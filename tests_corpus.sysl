@@ -120,6 +120,29 @@ corpus_aggregate_programs_elaborate()
     assert_eq(clean, 38)
 end corpus_aggregate_programs_elaborate
 
+// The categories of views and of the copies `var` arrays need.
+private val VIEW_CATEGORIES = ["view-style slicing", "rank-2 view-style slicing", "rank-2 sub-rectangle view-style slicing", "rank-1 strided view-style slicing", "auto-clone (§8.3)"]
+
+@test("every view and auto-clone corpus program elaborates")
+corpus_view_programs_elaborate()
+    var clean = 0
+
+    for line in split(INDEX, "\n")
+        if line.len == 0 || line.starts_with("file\t") then continue
+
+        val cols = split(line, "\t")
+
+        for c in VIEW_CATEGORIES
+            if cols[1] != c then continue
+
+            val src = source_of(cols[0], read_text(s"testdata/corpus/${cols[0]}.nex").unwrap())
+
+            elaborate(parse_program(src).unwrap()) match
+                Ok(_) -> clean += 1
+                Err(ds) -> assert(false, s"${cols[0]}: ${ds[0].message} @${src.locate(ds[0].span.start)}")
+
+    assert_eq(clean, 49)
+
 // The categories of generic functions, structs and enums.
 private val GENERIC_CATEGORIES = ["user generics", "user generic structs", "user generic enums"]
 

@@ -268,7 +268,3 @@ elab_type_names()
     assert_eq(refused("def f(x: foo) = ()\n" + MAIN), "error: unknown type `foo` @1:10")
     assert_eq(refused("def f(): unit = ()\n" + MAIN), "error: `unit` declares a physical unit; the empty type is `void` @1:10")
     assert_eq(refused("def f(x: byte) = ()\n" + MAIN), "error: there is no `byte` type; raw bytes are `uint8` @1:10")
-
-@test("what the elaborator does not handle yet is said to be that")
-elab_not_yet()
-    assert_eq(refused("def main() = print(origin([1, 2], 0))\n"), "error: the view function `origin` is not elaborated yet @1:20")

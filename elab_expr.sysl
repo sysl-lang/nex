@@ -222,10 +222,10 @@ impl Elab
             Range(lo, hi, inclusive, stride) -> self.range_value(span, lo, hi, inclusive, stride, want)
             ExprKind.Array(elems) -> self.array_literal(span, elems, want)
             ExprKind.Tuple(elems) -> self.tuple(span, elems, want)
-            Index(target, indices) -> self.index(span, self.infer(target), indices)
+            Index(target, indices) -> as_view(self.index(span, self.infer(target), indices))
             TupleField(receiver, index) -> self.tuple_field(span, receiver, index)
-            ParallelFor(_, _, _) -> self.not_yet(span, "a `parallel for`")
-            Parallel(_) -> self.not_yet(span, "a `parallel` expression")
+            ParallelFor(clauses, reductions, body) -> self.parallel_for(span, clauses, reductions, body)
+            Parallel(body) -> self.parallel_expr(span, body, want)
             Match(scrutinee, cases) -> self.match_expr(span, scrutinee, cases, want)
             NamedArg(_, _) ->
                 self.fail(span, "a named argument stands only in a call's argument list")
@@ -680,7 +680,7 @@ impl Elab
         val frame = self.fx.frames[top]
 
         val v = value match
-            Some(x) -> Some(if frame.ret_known then self.check(x, frame.ret, "the result") else self.infer(x))
+            Some(x) -> Some(self.escaping(if frame.ret_known then self.check(x, frame.ret, "the result") else self.infer(x), "returned"))
             None ->
                 if frame.ret_known && !is_void(frame.ret) && !is_wild(frame.ret)
                     self.fail(span, s"this function returns ${show_ty(frame.ret)}; `return` needs a value")
@@ -730,9 +730,7 @@ impl Elab
                 typ match
                     Some(t) ->
                         val ty = self.resolve_type(t)
-                        val v = self.check(init, ty, s"`${name}`")
-
-                        texpr(d.span, Void, TLet(self.declare_local(pat.span, name, ty, lkind), v))
+                        self.bind_local(d.span, pat.span, name, ty, lkind, self.check(init, ty, s"`${name}`"))
                     None ->
                         *init.kind match
                             Lambda(params, body) ->
@@ -741,7 +739,7 @@ impl Elab
 
                         val v = self.bound_value(init, name)
 
-                        texpr(d.span, Void, TLet(self.declare_local(pat.span, name, v.ty, lkind), v))
+                        self.bind_local(d.span, pat.span, name, v.ty, lkind, v)
             Fun(name, tparams, params, ret, body) ->
                 if tparams.len() > 0 then return self.not_yet(d.span, "a generic local function")
 
@@ -797,7 +795,7 @@ impl Elab
     // -- lambdas ----------------------------------------------------------------------------------
 
     reserve_lambda(*self, span: Span) -> usize
-        self.lambdas.push(TLambda("", buf(), Error, buf(), texpr(span, Error, TInvalid), true))
+        self.lambdas.push(TLambda("", buf(), Error, buf(), texpr(span, Error, TInvalid), true, buf()))
         self.lambdas.len() - 1
 
     // `(x, y) -> body`: its parameter types as written, or from the function type its position
@@ -869,7 +867,7 @@ impl Elab
         val frame = self.fx.frames.pop().unwrap()
 
         self.close()
-        self.lambdas.set(lid, TLambda(name, ids, frame.ret, buf(), b, self.check_captures(lid, span)))
+        self.lambdas.set(lid, TLambda(name, ids, frame.ret, buf(), b, self.check_captures(lid, span), buf()))
         fn_type(tys, modes, frame.ret)
     end lambda_body
 
@@ -897,7 +895,10 @@ impl Elab
                     LParam(m) -> m == Inout
                     _ -> false
 
-                if !writable then self.fail(span, s"`${n}` cannot be assigned: ${what_local(self.locals[id].kind)}")
+                if !writable && self.is_view_local(id)
+                    self.fail(span, s"`${n}` is a view, and nothing writes through a view; assign to the window of the array it was taken from")
+                elif !writable
+                    self.fail(span, s"`${n}` cannot be assigned: ${what_local(self.locals[id].kind)}")
 
                 return texpr(span, self.locals[id].ty, TLocal(id))
             None -> ()
@@ -918,6 +919,14 @@ impl Elab
     end place
 
     assign(*self, span: Span, op: string, target: Expr, value: Expr) -> TExpr
+        self.reduction_named(target) match
+            Some(k) -> return self.contribution(span, op, k, value)
+            None -> ()
+
+        *target.kind match
+            ExprKind.Tuple(_) -> return self.assign_tuple(span, target, value)
+            _ -> ()
+
         val p = self.place(target)
 
         if is_array(p.ty) then return self.array_assign(span, op, target, p, value)
@@ -1013,6 +1022,7 @@ private what_local(kind: LocalKind) -> string = kind match
     LVar -> "it is a `var`"
     LParam(_) -> "a parameter is read-only unless it is `inout`"
     LLoop -> "a loop variable is read-only"
+    LOrigin -> "an `origin` view is read-only; write the array it was taken from"
 
 private show_place(e: Expr) -> string = *e.kind match
     Name(n) -> n
@@ -1030,4 +1040,8 @@ copy_fx(fx: Fx) -> Fx
     marks.extend(fx.marks.view())
     loops.extend(fx.loops.view())
     frames.extend(fx.frames.view())
-    Fx(scope, marks, loops, frames, fx.in_const, fx.subst, fx.instance)
+
+    var reds: Buf[RedVar] = buf()
+
+    reds.extend(fx.reds.view())
+    Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance)

@@ -28,9 +28,23 @@ enum TArr
     TArrayLit(items: Buf[TExpr])
     // `lo..hi` or `lo..<hi` as a value: the rank-1 array of the integers it counts.
     TRangeValue(lo: TExpr, hi: TExpr, inclusive: bool, step: Option[TExpr])
-    // `a[s1, ..., sR]`, read or as a place: an element where every axis collapses, else a slice.
+    // `a[s1, ..., sR]`: an element, read or written, where every axis collapses; or a slice as a
+    // place, written in place or borrowed by an `inout` parameter (DESIGN §5.3, §8.2). On an `origin`
+    // view the subscripts count from its first indices.
     TIndex(target: TExpr, subs: Buf[TSub])
-    // `end` in an index list: the extent of axis `axis` (from 1) of the innermost index list's target.
+    // A slice read as a value: a view of `target`'s storage with its own offset, extents and strides,
+    // a negative stride walking its axis downward. Nothing is allocated or copied (DESIGN §6.1).
+    TView(target: TExpr, subs: Buf[TSub])
+    // `origin(a, f1, ..., fk)`: `source` seen with axis j starting at `firsts[j]`, the axes after the
+    // last first index starting at 1. It lives only in the function that took it (DESIGN §6.4).
+    TOrigin(source: TExpr, firsts: Buf[TExpr])
+    // A dense, owned, 1-based copy of `value`, made for the reason `why` says (DESIGN §6.2, §6.4).
+    TCopy(value: TExpr, why: CopyWhy)
+    // An array local handed to a `var`, bound or assigned: moved where the source is never used
+    // again, cloned where it is, as `d` records once the whole body is seen (DESIGN §8.4).
+    TTransfer(value: TExpr, d: &Transfer)
+    // `end` in an index list: the last index of axis `axis` (from 1) of the innermost index list's
+    // target, its extent, or on an `origin` view its first index plus its extent less one.
     TEnd(axis: usize)
     // A binary operator applied element by element, to two arrays of one shape or an array and a
     // scalar, both already of the element type the operator computes in.
@@ -55,3 +69,18 @@ enum TArr
     // `for x in a`: every element in storage order, column-major for rank ≥ 2 (DESIGN §4.3).
     TForEach(loop_id: usize, var_id: usize, array: TExpr, body: TExpr)
 end TArr
+
+// Why a `TCopy` copies.
+enum CopyWhy
+    // A view bound or assigned to a `var`, which owns its elements (DESIGN §6.2 rule 2).
+    IntoVar
+    // A view returned, stored in a struct, tuple or enum payload, or bound at module level (rule 3).
+    Escape
+    // `rebase(w)`: an `origin` view's elements as an ordinary 1-based array (DESIGN §6.4).
+    Rebase
+
+// Whether a `TTransfer` clones: true where the source is used after it, is used again by a later
+// pass round a loop, is captured by a lambda, or is not the body's own to give away (a parameter,
+// a loop variable, a binding taken out of a tuple or a `match`).
+struct Transfer
+    clones: bool

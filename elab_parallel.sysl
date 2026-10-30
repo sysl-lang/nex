@@ -1,0 +1,314 @@
+// Parallelism (DESIGN §9): a `parallel for` with its `reduce` clauses and the contributions in its
+// body, and the `parallel` expressions of §9.3.
+//
+// **A contribution is recognized while the body is elaborated.** The reduction variables of the
+// loops around the cursor are in `Fx.reds`; an assignment whose target is one of them must have one
+// of the forms §9.2 allows for its operator, and becomes a `TContribute` of the value alone. What
+// the body may otherwise do — which writes it owns, what it reads, what it calls — is proved over
+// the finished IR by `parallel_check.sysl`.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// A reduction variable in scope inside a `parallel for` body.
+struct RedVar
+    // The local it is; `None` for a module-level `var`, which `name` names.
+    local: Option[usize]
+    name: string
+    // The operator as the header writes it: `+`, `max`, `maxloc`, or a function's name.
+    op: string
+    ty: Ty
+    // The variable as a place, a `TLocal` or a `TGlobalRef`.
+    target: TExpr
+
+private val BUILTIN_OPS = ["+", "*", "min", "max", "and", "or", "minloc", "maxloc"]
+
+private is_builtin_op(op: string) -> bool
+    for o in BUILTIN_OPS
+        if o == op then return true
+
+    false
+
+// The forms an iteration contributes through, for a diagnostic.
+private contribution_forms(v: string, op: string) -> string
+    if op == "+" || op == "*" then return s"`${v} ${op}= e` or `${v} = ${v} ${op} e`"
+    if op == "and" || op == "or" then return s"`${v} = ${v} ${op} e`"
+    if op == "minloc" || op == "maxloc" then return s"`${v} = ${op}(${v}, x, i)`"
+
+    s"`${v} = ${op}(${v}, e)`"
+
+impl Elab
+    // `parallel for i in r, j in s reduce v: op body` (DESIGN §9.1, §9.2).
+    parallel_for(*self, span: Span, clauses: Buf[LoopClause], reductions: Buf[Reduction], body: Expr) -> TExpr
+        var reds: Buf[TReduce] = buf()
+        var scope: Buf[RedVar] = buf()
+
+        for k in 0..<reductions.len()
+            val r = reductions[k]
+
+            for j in 0..<k
+                if reductions[j].name == r.name then self.fail(span, s"`${r.name}` is named in two `reduce` clauses")
+
+            self.reduction_var(span, r) match
+                Some(v) ->
+                    val op = if is_builtin_op(v.op) then RBuiltin(v.op) else RUser(self.name(span, v.op, None))
+
+                    reds.push(TReduce(v.target, op))
+                    scope.push(v)
+                None -> ()
+
+        // The ranges are elaborated before any index is in scope: the iteration space is a box.
+        var ranges: Buf[TParClause] = buf()
+
+        for c in clauses
+            ranges.push(self.par_range(c))
+
+        val id = self.new_loop(None)
+
+        self.open()
+
+        var out: Buf[TParClause] = buf()
+
+        for k in 0..<clauses.len()
+            val c = ranges[k]
+            val var_id = self.declare_local(clauses[k].range.span, clauses[k].name, c.lo.ty, LLoop)
+
+            out.push(TParClause(var_id, c.lo, c.hi, c.inclusive, c.step))
+
+        self.fx.loops.push(id)
+
+        val base = self.fx.reds.len()
+
+        self.fx.reds.extend(scope.view())
+
+        val b = self.elab(body, Some(Void))
+
+        while self.fx.reds.len() > base
+            self.fx.reds.pop()
+
+        self.fx.loops.pop()
+        self.close()
+        texpr(span, Void, TParallel(TParFor(id, out, reds, b)))
+    end parallel_for
+
+    // One clause's range, its bounds in their common integer type; the index is not bound yet, so
+    // `var_id` is 0 here.
+    private par_range(*self, c: LoopClause) -> TParClause
+        val (lo, hi, inclusive, stride) = *c.range.kind match
+            Range(Some(lo), Some(hi), inclusive, stride) -> (lo, hi, inclusive, stride)
+            _ ->
+                self.fail(c.range.span, s"a `parallel for` runs over an integer range (`${c.name} in 1..n`), not over an array's elements")
+
+                val bad = self.invalid(c.range.span)
+
+                return TParClause(0, bad, bad, true, None)
+
+        val bounds = self.operands(lo, hi, None)
+        var ty = self.common_of(c.range.span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
+
+        if !is_int(ty) && !is_error(ty)
+            self.fail(c.range.span, s"a `parallel for` range counts in integers; this one is ${show_ty(ty)}")
+            ty = Error
+
+        val step = stride match
+            Some(s) -> Some(self.check(s, ty, "the step"))
+            None -> None
+
+        TParClause(0, promote(bounds.lhs, ty), promote(bounds.rhs, ty), inclusive, step)
+    end par_range
+
+    // The variable a `reduce` clause names, where it is an outer `var` its operator applies to.
+    private reduction_var(*self, span: Span, r: Reduction) -> Option[RedVar]
+        var local: Option[usize] = None
+        var ty = Error
+        var target = self.invalid(span)
+
+        self.lookup_local(r.name) match
+            Some(id) ->
+                val is_var = self.locals[id].kind match
+                    LVar -> true
+                    _ -> false
+
+                if !is_var
+                    self.fail(span, s"a reduction variable is an outer `var`, and `${r.name}` is not one")
+                    return None
+
+                self.note_capture(id)
+                local = Some(id)
+                ty = self.locals[id].ty
+                target = texpr(span, ty, TLocal(id))
+            None ->
+                self.find_top(r.name) match
+                    Some(TopValue(k)) ->
+                        ty = self.global_type(k, span)
+
+                        if self.globals[k].kind != Var
+                            self.fail(span, s"a reduction variable is an outer `var`, and `${r.name}` is not one")
+                            return None
+
+                        target = texpr(span, ty, TGlobalRef(r.name))
+                    _ ->
+                        self.unknown_name(span, r.name)
+                        return None
+
+        if is_error(ty) then return None
+
+        val fits = if r.op == "+" || r.op == "*"
+            is_numeric(ty)
+        elif r.op == "min" || r.op == "max"
+            is_ordered(ty)
+        elif r.op == "and" || r.op == "or"
+            ty_eq(ty, Bool)
+        elif r.op == "minloc" || r.op == "maxloc"
+            ty match
+                Ty.Tuple(elems) -> elems.len() == 2 && is_ordered(elems[0]) && is_int(elems[1])
+                _ -> false
+        else
+            self.user_operator(span, r.op, ty)
+
+        if !fits
+            if is_builtin_op(r.op)
+                val need = if r.op == "+" || r.op == "*"
+                    "a number"
+                elif r.op == "min" || r.op == "max"
+                    "an integer or a real"
+                elif r.op == "and" || r.op == "or"
+                    "a bool"
+                else
+                    "a (value, index) pair, `(0.0, 0)`"
+
+                self.fail(span, s"`${r.op}` reduces ${need}, and `${r.name}` is ${show_ty(ty)}")
+
+            return None
+
+        Some(RedVar(local, r.name, r.op, ty, target))
+    end reduction_var
+
+    // Whether `name` is a function of type `(T, T) -> T`, reporting why where it is not.
+    private user_operator(*self, span: Span, name: string, ty: Ty) -> bool
+        val f = self.name(span, name, None)
+
+        if is_error(f.ty) then return false
+
+        val ok = f.ty match
+            Fn(sig) -> sig.params.len() == 2 && ty_eq(sig.params[0], ty) && ty_eq(sig.params[1], ty) && ty_eq(sig.ret, ty) && sig.modes[0] == Read && sig.modes[1] == Read
+            _ -> false
+
+        if !ok then self.fail(span, s"a reduction's operator `${name}` must be a function (${show_ty(ty)}, ${show_ty(ty)}) -> ${show_ty(ty)}, and it is ${show_ty(f.ty)}")
+
+        ok
+
+    // The reduction variable an assignment's target names, by its position in `Fx.reds`.
+    reduction_named(self, target: Expr) -> Option[usize]
+        if self.fx.reds.len() == 0 then return None
+
+        val n = *target.kind match
+            Name(n) -> n
+            _ -> return None
+
+        val local = self.lookup_local(n)
+
+        for k in 0..<self.fx.reds.len()
+            val r = self.fx.reds[k]
+
+            r.local match
+                Some(id) -> local match
+                    Some(l) -> if l == id then return Some(k)
+                    None -> ()
+                None -> if local.is_none() && r.name == n then return Some(k)
+
+        None
+    end reduction_named
+
+    // Whether `e` is the name of the `k`th reduction variable itself.
+    private names_reduction(self, e: Expr, k: usize) -> bool = *e.kind match
+        Name(_) -> self.reduction_named(e) match
+            Some(j) -> j == k
+            None -> false
+        _ -> false
+
+    // An assignment to a reduction variable inside its loop: one of the forms of DESIGN §9.2, or
+    // refused. Where the contributed value mentions the variable, the checker reports the read.
+    contribution(*self, span: Span, op: string, k: usize, value: Expr) -> TExpr
+        val r = self.fx.reds[k]
+
+        if op != "="
+            if (r.op == "+" || r.op == "*") && op[0..<op.len - 1] == r.op then return self.contribute(span, r, value)
+
+            return self.bad_contribution(span, r)
+
+        *value.kind match
+            BinOp(o, lhs, e) ->
+                if o == r.op && (o == "+" || o == "*" || o == "and" || o == "or") && self.names_reduction(lhs, k) then return self.contribute(span, r, e)
+            Call(callee, args) ->
+                val f = *callee.kind match
+                    Name(f) -> f
+                    _ -> return self.bad_contribution(span, r)
+
+                if f == r.op && args.len() > 0 && self.names_reduction(args[0], k)
+                    if args.len() == 2 && r.op != "minloc" && r.op != "maxloc" && r.op != "+" && r.op != "*" && r.op != "and" && r.op != "or"
+                        return self.contribute(span, r, args[1])
+
+                    if args.len() == 3 && (r.op == "minloc" || r.op == "maxloc")
+                        val elems = r.ty match
+                            Ty.Tuple(elems) -> elems
+                            _ -> return self.invalid(span)
+
+                        val x = self.check(args[1], elems[0], "the candidate")
+                        val i = self.check(args[2], elems[1], "the candidate's index")
+
+                        return texpr(span, Void, TParallel(TContribute(r.target, x, Some(i))))
+            _ -> ()
+
+        self.bad_contribution(span, r)
+    end contribution
+
+    private contribute(*self, span: Span, r: RedVar, e: Expr) -> TExpr =
+        texpr(span, Void, TParallel(TContribute(r.target, self.check(e, r.ty, "the contribution"), None)))
+
+    private bad_contribution(*self, span: Span, r: RedVar) -> TExpr
+        self.fail(span, s"`${r.name}` reduces with `${r.op}`, so an iteration changes it only by ${contribution_forms(r.name, r.op)}, where `e` does not mention `${r.name}`")
+        self.invalid(span)
+
+    // `minloc(v, x, i)` outside the loop whose reduction it contributes to.
+    location_outside(*self, span: Span, name: string) -> TExpr
+        self.fail(span, s"`${name}(v, x, i)` is the contribution of a `reduce v: ${name}` clause, and stands only in that loop's body as `v = ${name}(v, x, i)`")
+        self.invalid(span)
+
+    // `parallel e` (DESIGN §9.3): a `map`, one of the reductions `sum`, `product`, `minval`, `maxval`,
+    // `dot`, or a whole-array element-wise expression.
+    parallel_expr(*self, span: Span, body: Expr, want: Option[Ty]) -> TExpr
+        val v = self.elab(body, want)
+
+        if is_error(v.ty) then return v
+
+        val what = parallel_form(v)
+
+        if what.len > 0
+            self.fail(body.span, what)
+            return self.invalid(span)
+
+        texpr(span, v.ty, TParallel(TParExpr(v)))
+end Elab
+
+// Why `v` has no parallel form; `""` where it has one.
+private parallel_form(v: TExpr) -> string
+    *v.kind match
+        TBuiltin(name, _) ->
+            if name == "map" then return ""
+            if name == "reduce" then return "the general `reduce(a, init, f)` has no parallel form; write a `parallel for ... reduce s: f` with `f` as the operator"
+        TArray(op) -> *op match
+            TReduction(name, _, _) ->
+                if name == "sum" || name == "product" || name == "minval" || name == "maxval" || name == "dot" then return ""
+
+                return s"`${name}` has no parallel form; `parallel` computes `sum`, `product`, `minval`, `maxval` and `dot`"
+            TElementwise(_, _, _) -> return ""
+            TElementwiseUnary(_, _) -> return ""
+            TElemental(_, _) -> return ""
+            TElementalCall(_, _) -> return ""
+            TElementalConvert(_, _) -> return ""
+            _ -> ()
+        _ -> ()
+
+    "`parallel` computes a `map`, a reduction (`sum`, `product`, `minval`, `maxval`, `dot`) or a whole-array element-wise expression, and this is none of them"
+end parallel_form

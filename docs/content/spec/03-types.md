@@ -246,6 +246,30 @@ t.2                               // the second, hi
 Destructuring, `val (lo, hi) = …`, is the usual way to take a tuple apart. A field may also be read by
 position with `.` and a number, counted from 1 like every index in nex.
 
+A destructuring pattern nests, with parentheses around the inner tuple, and `_` drops an element:
+
+```nex
+val n, (lo, hi) = count_and_range(samples)
+val (k, (_, last)), ok = search(table)
+```
+
+A binding takes apart only tuples. `val Converged(x) = s` is a compile error, even for an enum with
+one variant, since a binding cannot fail; a variant is taken apart with `match` (§7.2).
+
+**Tuple assignment** stores a tuple into a list of places that already exist. The right side is
+evaluated whole before anything is stored, so the classic swap needs no temporary:
+
+```nex
+a, b = b, a
+p.x, (v[i], _) = step(p.x, v[i])
+```
+
+The places are stored left to right. Each target is a `var`, an `inout` parameter, a field or an
+element, as for a plain `=`, or `_`. A right side written as a tuple converts element by element, so
+`x, n = n, 3` with `x: real` widens `n`; a tuple value is stored as it is, so `x, y = t` with
+`t: (integer, integer)` and `x, y: real` is a compile error. Naming one place twice (`a, a = 1, 2`)
+is a compile error, and a list of targets takes `=` only, never `+=` or another compound operator.
+
 The parentheses around a tuple type are optional except where commas already separate something
 else, as in a parameter list: `def join(p: (real, real), q: (real, real))` takes two tuples.
 
