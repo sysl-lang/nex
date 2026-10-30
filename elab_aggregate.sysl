@@ -459,7 +459,7 @@ impl Elab
     // Whether `receiver` names a struct value with a field `name`, so that `receiver.name(args)` calls
     // that field.
     has_field(*self, receiver: Expr, name: string) -> bool
-        val n = *receiver.kind match
+        val n = *self.qualified(receiver).kind match
             ExprKind.Name(n) -> n
             _ -> return false
 

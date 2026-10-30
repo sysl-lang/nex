@@ -43,6 +43,10 @@ impl Elab
         if self.mods.single() then return n
 
         val m = self.mods.module_at(span.start)
+
+        // `a.b.x`, which `qualified` makes of a bare import's path and a member.
+        if n.contains(".") then return self.member_of(m, n).unwrap_or("")
+
         val own = self.mods.qualify(m, n)
 
         if self.top_exists(own) then return own
@@ -72,18 +76,84 @@ impl Elab
         for i in self.mods.imports
             if i.owner == m && i.target == internal then return Some(i.alias)
 
+        for q in self.mods.qualified
+            if q.owner == m && internal.starts_with(s"${q.target}.") && !internal[q.target.len + 1..].contains(".") then return Some(internal)
+
         None
 
-    // Whether `n` at `span` is a name an import of its module meant to bind and could not.
-    refused_import(self, span: Span, n: string) -> bool
+    // Whether `n` at `span` is a name an import of its module meant to bind and could not, which has
+    // been reported; or `a.b.x` where `a.b` has no public `x`, reported here.
+    refused_import(*self, span: Span, n: string) -> bool
         if self.mods.single() then return false
 
         val m = self.mods.module_at(span.start)
+
+        if n.contains(".")
+            val k = last_dot(n)
+
+            self.fail(span, s"the module `${n[..<k]}` has no public member `${n[k + 1..]}`")
+            return true
 
         for i in self.mods.refused
             if i.owner == m && i.alias == n then return true
 
         false
+
+    // The internal name `a.b.x` denotes in module `m`, which has `import a.b`: module `a.b`'s public `x`.
+    private member_of(self, m: usize, n: string) -> Option[string]
+        val k = last_dot(n)
+        val path = n[..<k]
+
+        for q in self.mods.qualified
+            if q.owner == m && q.target == path
+                val internal = self.mods.qualify(self.mods.find(path).unwrap(), n[k + 1..])
+
+                return if self.top_exists(internal) && !self.mods.is_private(internal) then Some(internal) else None
+
+        None
+
+    // `e` with a qualified name read as the one name it is (DESIGN §11.5): `a.b.x`, where the module
+    // has `import a.b` and `a` names no local, is the name `a.b.x`, and `a.b.f(args)` its call. Any
+    // other expression is itself.
+    qualified(self, e: Expr) -> Expr
+        if self.mods.qualified.len() == 0 then return e
+
+        *e.kind match
+            Field(receiver, name) ->
+                self.module_named(receiver) match
+                    Some(path) -> Expr(e.span, ExprKind.Name(s"${path}.${name}"))
+                    None -> e
+            MethodCall(receiver, name, args) ->
+                self.module_named(receiver) match
+                    Some(path) -> Expr(e.span, Call(Expr(e.span, ExprKind.Name(s"${path}.${name}")), args))
+                    None -> e
+            _ -> e
+
+    // The path of a module `e` names, where `e` is `a.b`, the module has `import a.b`, and `a` is no
+    // local: a local shadows a module.
+    private module_named(self, e: Expr) -> Option[string]
+        var path = ""
+        var at = e
+
+        loop
+            *at.kind match
+                ExprKind.Name(n) ->
+                    if self.lookup_local(n).is_some() then return None
+
+                    path = if path == "" then n else s"${n}.${path}"
+                    break
+                Field(receiver, name) ->
+                    path = if path == "" then name else s"${name}.${path}"
+                    at = receiver
+                _ -> return None
+
+        val m = self.mods.module_at(e.span.start)
+
+        for q in self.mods.qualified
+            if q.owner == m && q.target == path then return Some(path)
+
+        None
+    end module_named
 
     // What every `import` binds, checked: each name a public declaration of the module, and none
     // the importing module declares itself or imports from elsewhere.
@@ -102,10 +172,8 @@ impl Elab
                 None -> continue
 
             if !wildcard && selectors.len() == 0
-                self.fail(d.span, s"`import ${path}` names nothing to import: name the members, `import ${path}.{x, y}`, or take every public one, `import ${path}.*`")
-                continue
-
-            if wildcard
+                self.bind_module(d.span, m, segs[0], path)
+            elif wildcard
                 for internal in self.public_names(target)
                     self.bind_import(d.span, m, target, internal[self.mods.names[target].len + 1..], internal)
             else
@@ -120,6 +188,23 @@ impl Elab
                     self.bind_import(d.span, m, target, s.alias.unwrap_or(s.name), internal)
     end resolve_imports
 
+    // `import a.b`: `a.b.x` names the module's public `x`. `a` may be neither a name the module
+    // declares nor one another import binds.
+    private bind_module(*self, span: Span, m: usize, head: string, path: string)
+        if self.top_exists(self.mods.qualify(m, head))
+            self.fail(span, s"the imported module `${path}` clashes with this module's own `${head}`")
+            return
+
+        for i in self.mods.imports
+            if i.owner == m && i.alias == head
+                self.fail(span, s"`${head}` is imported twice, as `${i.target}` and as the module `${path}`")
+                return
+
+        for q in self.mods.qualified
+            if q.owner == m && q.target == path then return
+
+        self.mods.qualified.push(ImportName(m, path, path))
+
     private bind_import(*self, span: Span, m: usize, from: usize, alias: string, internal: string)
         if self.top_exists(self.mods.qualify(m, alias))
             self.fail(span, s"the imported `${alias}` clashes with this module's own `${alias}`")
@@ -128,6 +213,11 @@ impl Elab
         for i in self.mods.imports
             if i.owner == m && i.alias == alias
                 if i.target != internal then self.fail(span, s"`${alias}` is imported twice, as `${i.target}` and as `${internal}`")
+                return
+
+        for q in self.mods.qualified
+            if q.owner == m && first_word(q.target) == alias
+                self.fail(span, s"`${alias}` is imported twice, as the module `${q.target}` and as `${internal}`")
                 return
 
         self.mods.imports.push(ImportName(m, alias, internal))
@@ -178,6 +268,14 @@ impl Elab
                     if self.fret_known[k] && !is_void(self.fret[k]) && !is_wild(self.fret[k])
                         self.fail(self.funs[k].decl.span, s"a test returns nothing, but this one returns ${show_ty(self.fret[k])}")
                 _ -> ()
+
+// The offset of the last `.` in `n`, which holds one.
+private last_dot(n: string) -> usize = n.last_index_of(".").unwrap()
+
+// `a` of `a.b.c`.
+private first_word(path: string) -> string = path.index_of(".") match
+    Some(k) -> path[..<k]
+    None -> path
 
 private dotted(segs: Buf[string]) -> string
     var out = ""

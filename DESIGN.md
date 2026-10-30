@@ -1589,8 +1589,18 @@ its module, and a `@test module` exists only in a test build — with these rule
   modules it imports, which are the directories beside it; the other files beside it are not read,
   so a directory of independent programs stays one. The root module declares no `module`.
 - **An import names what it takes**: `import a.b.{x, y as z}`, or every public name of the module
-  with `import a.b.*`, as Fortran's `use a_b` does. `import a.b` alone names nothing and is a compile
-  error. An import names a module, not a declaration inside one.
+  with `import a.b.*`, as Fortran's `use a_b` does. An import names a module, not a declaration
+  inside one, and a brace list names at least one member.
+- **A bare `import a.b` gives qualified access**: `a.b.x` is the module's public `x`, written with
+  the whole path the import names, as Python's `import a.b` does — `import a` alone does not reach
+  `a.b.x`. Every kind of top-level name is reached this way: a call `geom.dist(p, q)`, a constructor
+  `geom.Point(1.0, 2.0)`, a variant `opt.Empty` or `opt.Some(3)`, a binding read or a public `var`
+  assigned (`lib.count = 0`), a function as a value, and a type in an annotation, `p: geom.Point`,
+  `geom.Pair[integer, real]`. A private member is "the module `geom` has no public member `x`".
+  Bare and listed imports of one module may stand together. **A local shadows a module**: where a
+  parameter, binding or loop variable is named as the path's first word, `a.b` is that local's field.
+  The first word may be neither a name the module declares nor one another import binds. Units are
+  not reached through a module, having one namespace (below).
 - **A `module` declaration is the first line of its file, and imports come before every other
   declaration.**
 - **A module sees its own declarations, in every one of its files, `private` ones included, and what
@@ -1923,7 +1933,7 @@ is in `K` until the affine units of §15 arrive.
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
 | Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; variant fields of any type; no type contains itself by value |
 | Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
-| Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed and a bare `import m` is not; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |
+| Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed, and a bare `import m` gives qualified access, `m.x`; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |
 | Field places, `x.f(args)` | §4.16 | §11.4 | fields, tuple elements and `z.re`/`z.im` are assignable and passable `inout`; a function field is called |
 | `match` | §7.5 | §11.4 | a fielded variant is matched with its fields; coverage, repeats and unreachable arms are compile errors |
 | Escaping lambdas | §4.11 | §8.3, §11.4 | only a lambda written as an argument does not escape; an escaping one may not capture `inout` |
