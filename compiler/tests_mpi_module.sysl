@@ -746,29 +746,26 @@ mpi_thread_level_and_hybrid_bits()
 private caught_loop(times: int) -> string
     s"import mpi.*\n\ndef main() =\n  for i in 1..<${times + 1}\n    assert_traps(() -> print(scatter([1, 2])), \"scatter:\")\n    assert_traps(() -> print(alltoall([1, 2])), \"alltoall:\")\n    assert_traps(() -> print(global_sum([1.0, 2.0], 3)), \"global_sum:\")\n    assert_traps(() -> print(global_dot([1.0, 2.0], [1.0], 1)), \"global_dot:\")\n    assert_traps(() -> print(bcast([1.0], root = 4)), \"bcast:\")\n    assert_traps(() -> print(reduce_to([1.0], +, root = 2)), \"reduce_to:\")\n    assert_traps(() -> print(gather([1.0], root = 2)), \"gather:\")\n    assert_traps(() -> print(global_sum([9223372036854775807, 1], 1)), \"global_sum: int64 overflow\")\n"
 
-// The leaks `leaks` finds in the program at `exe` at exit: its summary line.
-private leak_summary(exe: string) -> string
-    val out = capture("/usr/bin/leaks", ["--atExit", "--", exe], stderr = true).unwrap()
+// The "scratch live" lines the shim writes at exit when `NEX_MPI_REPORT_SCRATCH` is set: how many
+// scratch buffers each rank still holds, sorted.
+private scratch_report(o: Output) -> string
+    var ls: Buf[string] = buf()
 
-    for l in split(out.text, "\n")
-        if l.contains(" leaks for ") then return split(l, ": ")[1]
+    for l in split(s"${o.text}\n${o.err.unwrap_or("")}", "\n")
+        if l.contains(": scratch live ") then ls.push(l)
 
-    out.text
+    sort(ls.view())
+    join(ls.view(), "\n")
 
-@test("a trap caught by `assert_traps` in each collective that takes scratch memory gives it back: 200 rounds of caught traps leave the leaks of an empty program, and every round catches its trap")
+@test("a trap caught by `assert_traps` in each collective that takes scratch memory gives it back: after 200 rounds of caught traps the shim holds no scratch buffer, and every round catches its trap")
 mpi_caught_traps_leak_nothing()
-    if !exists("/usr/bin/leaks") then skip("no leaks tool")
-
     val b = mpi_bench()
-    val empty = built(b, caught_loop(0), "caught_none")
     val many = built(b, caught_loop(200), "caught_many")
-    val base = leak_summary(empty)
-    val after = leak_summary(many)
-    val ran = capture(many, [], stderr = true, timeout = JOB_TIMEOUT).unwrap()
+    val ran = capture(many, [], env = [Var("NEX_MPI_REPORT_SCRATCH", "1")], stderr = true, timeout = JOB_TIMEOUT).unwrap()
 
     finish(b)
     assert(ran.status.ok(), s"${ran.status}\n${ran.err.unwrap_or("")}")
-    assert_eq(after, base)
+    assert_eq(scratch_report(ran), "rank 0: scratch live 0")
 
 // Two ranks, `times` rounds: the integer overflow of a reduction traps in the shim's combination
 // with its scratch buffers live, on every rank for allreduce, on the root for reduce_to and on rank
@@ -776,29 +773,12 @@ mpi_caught_traps_leak_nothing()
 private overflow_loop(times: int) -> string
     s"import mpi.*\n\ndef main() =\n  val me = this_rank()\n  for i in 1..<${times + 1}\n    assert_traps(() -> print(allreduce([9223372036854775807, 1], +)), \"allreduce: int64 overflow\")\n    if me == 0 then assert_traps(() -> print(reduce_to([9223372036854775807], +)), \"reduce_to: int64 overflow\") else print(reduce_to([9223372036854775807], +))\n    if me == 1 then assert_traps(() -> print(scan([9223372036854775807], +)), \"scan: int64 overflow\") else print(scan([9223372036854775807], +))\n"
 
-// The summaries `leaks` prints for each rank of a 2-rank job of `exe`, sorted, without process ids.
-private job_leaks(exe: string) -> string
-    val out = job("/usr/bin/leaks", 2, args = ["--atExit", "--", exe])
-    var ls: Buf[string] = buf()
-
-    for l in split(out.text, "\n")
-        if l.contains(" leaks for ") then ls.push(split(l, ": ")[1])
-
-    sort(ls.view())
-    join(ls.view(), "\n")
-
-@test("a reduction's integer-overflow trap, caught by `assert_traps` on two ranks with the shim's scratch buffers live, gives them back: 200 rounds leave the leaks of an empty program on each rank")
+@test("a reduction's integer-overflow trap, caught by `assert_traps` on two ranks with the shim's scratch buffers live, gives them back: after 200 rounds each rank holds no scratch buffer")
 mpi_caught_overflow_traps_leak_nothing()
-    if !exists("/usr/bin/leaks") then skip("no leaks tool")
-
     val b = mpi_bench()
-    val empty = built(b, overflow_loop(0), "overflow_none")
     val many = built(b, overflow_loop(200), "overflow_many")
-    val base = job_leaks(empty)
-    val after = job_leaks(many)
-    val ran = job(many, 2)
+    val ran = job(many, 2, env = [Var("NEX_MPI_REPORT_SCRATCH", "1")])
 
     finish(b)
     assert(ran.status.ok(), s"${ran.status}\n${ran.err.unwrap_or("")}")
-    assert(base.contains("leaks for"), base)
-    assert_eq(after, base)
+    assert_eq(scratch_report(ran), "rank 0: scratch live 0\nrank 1: scratch live 0")
