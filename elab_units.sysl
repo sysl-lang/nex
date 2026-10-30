@@ -91,6 +91,9 @@ private clash(lead: string, a: TExpr, b: TExpr) -> string
 
     lead + " " + unit_clash(ua, ub)
 
+// Two values whose units do not meet, as a diagnostic opened by `lead`.
+units_differ(lead: string, a: TExpr, b: TExpr) -> string = clash(lead, a, b)
+
 private plain_word(v: TExpr) -> string = if bare_literal(v).is_some() then "a bare number" else "a plain number"
 
 // How a plain number beside a value in unit `u` is given that unit.
@@ -117,15 +120,16 @@ unit_note(v: TExpr, ty: Ty) -> string
 // `v` as `print` and an interpolation see it: a value with a unit is its number followed by a
 // space and the unit's spelling, so emission never sees the unit (DESIGN §13.4).
 interp_value(out: *Buf[TPart], v: TExpr, spec: string)
-    if !has_unit(v.ty)
+    if !carries_unit(v.ty)
         out.push(TValue(v, spec))
         return
 
-    out.push(TValue(texpr(v.span, base_of(v.ty), TUnitAs(v)), spec))
-    out.push(TText(" " + spell(unit_of(v.ty))))
+    // An array shows its elements and then its one unit.
+    out.push(TValue(texpr(v.span, stripped(v.ty), TUnitAs(v)), spec))
+    out.push(TText(" " + spell(elem_unit(v.ty))))
 
 printable(v: TExpr) -> TExpr
-    if !has_unit(v.ty) then return v
+    if !carries_unit(v.ty) then return v
 
     var parts: Buf[TPart] = buf()
 
@@ -138,7 +142,7 @@ struct UnitBindings
     units: Buf[Unit]
 
 // `t` with the bound unit parameters replaced by their units.
-subst_ty(t: Ty, b: UnitBindings) -> Ty = if has_unit(t) then measured(base_of(t), subst_unit(unit_of(t), b.names, b.units)) else t
+subst_ty(t: Ty, b: UnitBindings) -> Ty = if carries_unit(t) then with_unit(t, subst_unit(elem_unit(t), b.names, b.units)) else t
 
 impl Elab
     // -- declarations -----------------------------------------------------------------------------
@@ -231,7 +235,7 @@ impl Elab
     end unit_decl_value
 
     // `u`, where its scale could be held exactly.
-    private exact(*self, span: Span, u: Unit) -> Option[Unit]
+    exact(*self, span: Span, u: Unit) -> Option[Unit]
         if is_exact(u.factor) then return Some(u)
 
         self.fail(span, "the scale of this unit has no exact value: it is too large to hold, or the root of a scale that is not a perfect power")
@@ -314,7 +318,7 @@ impl Elab
 
         val unit = self.unit_expr_value(u, false)
         val goal = want match
-            Some(t) -> Some(base_of(t))
+            Some(t) -> Some(stripped(t))
             None -> None
 
         // An integer literal with a unit is the real literal of that value: `12<in>` is `12.0<in>`.
@@ -324,24 +328,27 @@ impl Elab
 
         if is_error(v.ty) || unit.is_none() then return self.invalid(span)
 
-        if has_unit(v.ty)
-            self.fail(span, s"this already carries the unit ${spell(unit_of(v.ty))}; a value changes unit with `to<${spell(unit.unwrap())}>(x)`")
+        // On an array the unit is given to every element: `[1.0, 2.0]<m>` (DESIGN §13.2).
+        val e = elem_of(v.ty)
+
+        if has_unit(e)
+            self.fail(span, s"this already carries the unit ${spell(unit_of(e))}; a value changes unit with `to<${spell(unit.unwrap())}>(x)`")
             return self.invalid(span)
 
-        if is_int(v.ty)
-            self.fail(span, "a unit attaches to a real or complex value, and this is an integer, which counts things: `real(n)<m>`")
+        if is_int(e)
+            self.fail(span, s"a unit attaches to a real or complex value, and this is ${if is_array(v.ty) then "an array of integers, which count things: `real(a)<m>`" else "an integer, which counts things: `real(n)<m>`"}")
             return self.invalid(span)
 
-        if !is_real(v.ty) && !is_complex(v.ty)
+        if !is_real(e) && !is_complex(e)
             self.fail(span, s"a unit attaches to a number, and this is ${show_ty(v.ty)}")
             return self.invalid(span)
 
-        val ty = measured(v.ty, unit.unwrap())
+        val ty = with_elem(v.ty, measured(e, unit.unwrap()))
 
         *v.kind match
             TLiteral(_, _) -> texpr(span, ty, *v.kind)
             TConstant(_, _) -> texpr(span, ty, *v.kind)
-            _ -> if has_unit(ty) then texpr(span, ty, TUnitAs(v)) else v
+            _ -> if carries_unit(ty) then texpr(span, ty, TUnitAs(v)) else v
     end annotate
 
     // `to<mm>(x)`: `x` in another unit of its dimension (DESIGN §13.3).
@@ -356,10 +363,12 @@ impl Elab
 
         if is_error(v.ty) || target.is_none() then return self.invalid(span)
 
+        // On an array it converts every element.
         val to = target.unwrap()
-        val from = unit_of(v.ty)
+        val from = elem_unit(v.ty)
+        val b = base_of(elem_of(v.ty))
 
-        if !is_real(base_of(v.ty)) && !is_complex(base_of(v.ty))
+        if !is_real(b) && !is_complex(b)
             self.fail(args[0].span, s"`to` converts a number with a unit, and this is ${show_ty(v.ty)}")
             return self.invalid(span)
 
@@ -380,10 +389,11 @@ impl Elab
 
         val v = self.infer(args[0])
 
+        // On an array it is a view of the same storage.
         if is_error(v.ty) then return self.invalid(span)
-        if has_unit(v.ty) then return texpr(span, base_of(v.ty), TUnitAs(v))
+        if carries_unit(v.ty) then return texpr(span, stripped(v.ty), TUnitAs(v))
 
-        if !is_numeric(v.ty)
+        if !is_numeric(elem_of(v.ty))
             self.fail(args[0].span, s"`strip` removes the unit from a number, and this is ${show_ty(v.ty)}")
             return self.invalid(span)
 
@@ -514,11 +524,11 @@ impl Elab
     // An argument to a parameter whose type mentions a unit parameter: the first such argument binds
     // the parameter, and the parameter's type with what is bound is the argument's goal (DESIGN §13.5).
     unit_argument(*self, bound: *UnitBindings, a: Expr, ty: Ty, named: string, mode: Mode, what: string) -> TExpr
-        val pu = subst_unit(unit_of(ty), bound.names, bound.units)
+        val pu = subst_unit(elem_unit(ty), bound.names, bound.units)
 
-        if !has_param(pu) || mode == Inout then return self.argument(a, measured(base_of(ty), pu), named, mode, what)
+        if !has_param(pu) || mode == Inout then return self.argument(a, with_unit(ty, pu), named, mode, what)
 
-        val v = if self.literal_class(a) != NOT_LITERAL then self.elab(a, Some(base_of(ty))) else self.infer(a)
+        val v = if self.literal_class(a) != NOT_LITERAL then self.elab(a, Some(stripped(ty))) else self.infer(a)
 
         if is_error(v.ty) then return v
 
@@ -536,12 +546,12 @@ impl Elab
             none.push(unit_one())
 
             val rest = subst_unit(pu, only, none)
-            val solved = unit_pow(unit_div(unit_of(v.ty), rest), rinv(free[0].exp))
+            val solved = unit_pow(unit_div(elem_unit(v.ty), rest), rinv(free[0].exp))
 
             if is_exact(solved.factor)
                 bound.names.push(free[0].name)
                 bound.units.push(solved)
 
-        self.coerce(v, measured(base_of(ty), subst_unit(unit_of(ty), bound.names, bound.units)), what)
+        self.coerce(v, with_unit(ty, subst_unit(elem_unit(ty), bound.names, bound.units)), what)
     end unit_argument
 end Elab

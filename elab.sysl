@@ -651,10 +651,6 @@ struct Elab
             Array(elem, axes) ->
                 val e = self.resolve_type(elem)
 
-                if has_unit(e)
-                    self.later(t.span, "an array whose elements carry a unit")
-                    return Error
-
                 self.rank_shape(t.span, axes) match
                     Some(shape) -> return Ty.Array(e, shape)
                     None -> ()

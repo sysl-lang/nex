@@ -400,6 +400,21 @@ base_of(t: Ty) -> Ty = t match
 // `base` in unit `u`; in the dimensionless unit of scale 1 it is plain `base` (`real<1>` is `real`).
 measured(base: Ty, u: Unit) -> Ty = if is_one(u) || is_error(base) then base else Measured(base, u)
 
+// Every element of an array carries the array's one unit (DESIGN §13.6), so these ask the question
+// of a scalar or of an array's element type alike.
+
+// Whether a scalar, or an array's elements, carry a unit.
+carries_unit(t: Ty) -> bool = has_unit(elem_of(t))
+
+// The unit of a scalar, or of each element of an array.
+elem_unit(t: Ty) -> Unit = unit_of(elem_of(t))
+
+// `t` with its unit removed: a scalar's number type, or an array of the same shape over it.
+stripped(t: Ty) -> Ty = with_elem(t, base_of(elem_of(t)))
+
+// `t` in unit `u`: a scalar, or an array whose elements are.
+with_unit(t: Ty, u: Unit) -> Ty = with_elem(t, measured(base_of(elem_of(t)), u))
+
 // `promotes` where a unit is involved: the same unit, and a base that promotes.
 unit_promotes(from: Ty, to: Ty) -> bool = unit_eq(unit_of(from), unit_of(to)) && promotes(base_of(from), base_of(to))
 
@@ -434,9 +449,10 @@ private erase_all(ts: Buf[Ty]) -> Buf[Ty]
     out
 
 // `v` converted to unit `to` of its own dimension: a `TRescale` by the ratio of the two scales, or,
-// where the scales agree, a `TUnitAs` that only renames the unit.
+// where the scales agree, a `TUnitAs` that only renames the unit. On an array both apply to every
+// element.
 rescaled(v: TExpr, to: Unit) -> TExpr
-    val f = rdiv(unit_of(v.ty).factor, to.factor)
-    val ty = measured(base_of(v.ty), to)
+    val f = rdiv(elem_unit(v.ty).factor, to.factor)
+    val ty = with_unit(v.ty, to)
 
     if ratio_eq(f, ONE_RATIO) then texpr(v.span, ty, TUnitAs(v)) else texpr(v.span, ty, TRescale(v, f))

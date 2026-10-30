@@ -144,7 +144,7 @@ show_texpr(p: TProgram, e: TExpr) -> string
         TPromote(v) -> s"(${typed("promote", e.ty)} ${show_texpr(p, v)})"
         TConvert(v, traps) -> s"(${typed(if traps then "convert-trap" else "convert", e.ty)} ${show_texpr(p, v)})"
         TRescale(v, f) -> s"(${typed("rescale", e.ty)} ${real_text(ratio_real(f))} ${show_texpr(p, v)})"
-        TUnitAs(v) -> s"(${typed(if has_unit(e.ty) then "unit" else "strip", e.ty)} ${show_texpr(p, v)})"
+        TUnitAs(v) -> s"(${typed(if carries_unit(e.ty) then "unit" else "strip", e.ty)} ${show_texpr(p, v)})"
         TMakeComplex(re, im) -> s"(${typed("complex", e.ty)} ${show_texpr(p, re)} ${show_texpr(p, im)})"
         TComplexPart(v, imag) -> s"(${typed(if imag then ".im" else ".re", e.ty)} ${show_texpr(p, v)})"
         TBinary(op, l, r) -> s"(${typed(op, e.ty)} ${show_texpr(p, l)} ${show_texpr(p, r)})"
