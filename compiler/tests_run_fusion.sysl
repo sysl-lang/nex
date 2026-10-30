@@ -1,0 +1,131 @@
+@tests
+
+// Element-wise fusion without `parallel` (DESIGN §7.1): a quiet whole element-wise expression is one
+// `linalg.generic` with no array in between, an assignment to a local it reads writes that local in
+// place, and a reduction's quiet operand is computed as the reduction reads it. Each program runs on
+// both engines, which must agree; the interpreter computes operation by operation, so agreement is
+// the check that fusing is unobservable.
+
+import sysl.text.join
+
+private val AXPY = "def main() =\n  val x = fill(4, 1.5)\n  var y = fill(4, 2.0)\n  for r in 1..3\n    y = 0.5 * x + y\n  print(y)\n"
+
+@test("y = a*x + y is one linalg.generic writing y's own value: no tensor.empty for it, and bufferized no copy")
+axpy_in_place()
+    val b = bench()
+    val m = emitted(AXPY).unwrap()
+    val buffers = lowered_until(b, m, "convert-bufferization-to-memref")
+    val out = ran(b, AXPY)
+
+    finish(b)
+    assert_eq(occurrences(m, "linalg.generic"), 1)
+    // The two `fill`s; the sum has none of its own.
+    assert_eq(occurrences(m, "tensor.empty"), 2)
+    assert(m.contains("ins(%v43 : tensor<?xf64>) outs(%v44 : tensor<?xf64>)"), m)
+    assert_eq(occurrences(buffers, "memref.alloc"), 2)
+    assert_eq(occurrences(buffers, "memref.copy"), 0)
+    assert_eq(out.text, "[4.25, 4.25, 4.25, 4.25]\n")
+
+@test("five operators and an elemental call are one linalg.generic over the four arrays")
+point_distance_one_generic()
+    val m = emitted("def main() =\n  val x1 = fill(3, 1.0)\n  val y1 = fill(3, 2.0)\n  val x2 = [4.0, 5.0, 6.0]\n  val y2 = [6.0, 2.0, 2.0]\n  var d: [real] = zeros(3)\n" +
+                    "  d = sqrt((x2 - x1)^2 + (y2 - y1)^2)\n  print(d)\n").unwrap()
+
+    assert_eq(occurrences(m, "linalg.generic"), 1)
+    assert(m.contains("ins(%v23, %v9, %v28, %v18 : tensor<?xf64>, tensor<?xf64>, tensor<?xf64>, tensor<?xf64>)"), m)
+    assert(m.contains("math.sqrt"), m)
+
+@test("sum(x * y), dot(x, y) and sqrt(sum(x * x)) never build the products: no linalg.generic at all")
+reductions_fused()
+    val b = bench()
+    val program = "def main() =\n  val x = fill(4, 1.5)\n  val y = fill(4, 2.0)\n  print(sum(x * y))\n  print(dot(x, y))\n  print(sqrt(sum(x * x)))\n"
+    val m = emitted(program).unwrap()
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(occurrences(m, "linalg.generic"), 0)
+    // The two `fill`s and each reduction's block partials.
+    assert_eq(occurrences(m, "tensor.empty"), 5)
+    assert_eq(out.text, "12.0\n12.0\n3.0\n")
+
+@test("an assignment fused in place reads its target only at the element it writes: shifted, reversed, twice, shared")
+aliasing_cases()
+    val b = bench()
+    val out = ran(b, "def main() =\n  val x = [1.0, 2.0, 3.0, 4.0, 5.0]\n  var y = [10.0, 20.0, 30.0, 40.0, 50.0]\n  y = 2.0 * x + y\n  print(y)\n" +
+                     "  var v = [1.0, 2.0, 3.0, 4.0, 5.0]\n  v = v[5..1 by -1] * 10.0 + v\n  print(v)\n" +
+                     "  var w = [1.0, 2.0, 3.0, 4.0, 5.0]\n  w[2..5] = w[1..4] * 10.0 + 1.0\n  print(w)\n" +
+                     "  var u = [1.0, 2.0, 3.0, 4.0, 5.0]\n  u = u[2..5] + u[1..4]\n  print(u)\n" +
+                     "  var h = [1.0, 2.0, 3.0, 4.0, 5.0]\n  h = h + h[1..5] * 0.5\n  print(h)\n" +
+                     "  var s = [1.5, 2.5, 3.5]\n  s = s * s\n  print(s)\n" +
+                     "  var t = [1.0, 2.0, 3.0]\n  t = t * t + t\n  print(t)\n" +
+                     "  var k = [1.0, 2.0, 3.0]\n  val keep = k\n  k = 2.0 * k + 1.0\n  print(keep)\n  print(k)\n" +
+                     "  var st: [real; 3] = [1.0, 2.0, 3.0]\n  val held = st\n  val other: [real; 3] = [4.0, 5.0, 6.0]\n  st = other * 2.0 + 1.0\n  print(st)\n  print(held)\n" +
+                     "  var g = [1.0, 2.0, 3.0]\n  for r in 1..2\n    val before = g\n    g = g * 2.0 + 1.0\n    print(before)\n  print(g)\n")
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[12.0, 24.0, 36.0, 48.0, 60.0]\n[51.0, 42.0, 33.0, 24.0, 15.0]\n[1.0, 11.0, 21.0, 31.0, 41.0]\n[3.0, 5.0, 7.0, 9.0]\n" +
+                        "[1.5, 3.0, 4.5, 6.0, 7.5]\n[2.25, 6.25, 12.25]\n[2.0, 6.0, 12.0]\n[1.0, 2.0, 3.0]\n[3.0, 5.0, 7.0]\n[9.0, 11.0, 13.0]\n[1.0, 2.0, 3.0]\n" +
+                        "[1.0, 2.0, 3.0]\n[3.0, 5.0, 7.0]\n[7.0, 11.0, 15.0]\n")
+
+@test("fusion over complex, real32, units, rank 2 and a mixed-width operand, and the reductions over them")
+fused_element_types()
+    val b = bench()
+    val out = ran(b, "def main() =\n  var z = [1.0 + 1.0i, 2.0 - 1.0i]\n  val a = 0.5 + 2.0i\n  z = a * z + z\n  print(z)\n  print(dot(z, z * 2.0))\n" +
+                     "  var f: [real32] = [1.0, 2.0, 3.0]\n  val g: [real32] = [0.5, 0.25, 0.125]\n  f = 3.0 * g + f\n  print(f)\n  print(sum(f * g))\n" +
+                     "  val wide: [real] = [1.0, 2.0, 3.0]\n  print(f * 2.0 + wide)\n" +
+                     "  var m: [real; :, :] = [[1.0, 2.0], [3.0, 4.0]]\n  m = m * 2.0 - m * m\n  print(m)\n  print(sum(m * m))\n  print(maxval(m - 1.0))\n" +
+                     "  var d = [1.0, 2.0, 3.0]<m>\n  d = d * 2.0 + 100.0<cm>\n  print(d)\n  print(sum(d * 2.0))\n" +
+                     "  val x = [1.0, 2.0, 3.0]\n  print(minval(x - 5.0))\n  print(count(x * 2.0 > 3.0))\n  print(product(x * 0.5))\n  print(norm2(x * 2.0))\n")
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[-0.5+3.5i, 5.0+2.5i]\n87.5+0.0i\n[2.5, 2.75, 3.375]\n2.359375\n[6.0, 7.5, 9.75]\n[[1.0, 0.0], [-3.0, -8.0]]\n74.0\n0.0\n" +
+                        "[3.0, 5.0, 7.0] m\n30.0 m\n-4.0\n2\n0.75\n7.483314773547883\n")
+
+@test("a shape mismatch inside a fused expression traps with the same message, in the order the operations alone check")
+fused_shape_traps()
+    val b = bench()
+    val out = ran(b, "def g(n: integer): [real] =\n  print(\"g\")\n  fill(n, 1.0)\n\n" +
+                     "def assigned(a: [real], d: [real]): [real] =\n  var y = [1.0, 2.0, 3.0]\n  y = 2.0 * a + d\n  y\n\n" +
+                     "def main() =\n  val a: [real] = zeros(3)\n  val d: [real] = zeros(2)\n" +
+                     "  assert_traps(() -> print((a + d) * g(3)), \"shape mismatch\")\n  print(\"after the first\")\n" +
+                     "  assert_traps(() -> print(a * 2.0 + g(2)), \"shape mismatch\")\n" +
+                     "  assert_traps(() -> print(sum(a * d)), \"shape mismatch\")\n" +
+                     "  assert_traps(() -> print(dot(a, d * 2.0)), \"shape mismatch\")\n" +
+                     "  assert_traps(() -> print(assigned(a, d)), \"shape mismatch\")\n" +
+                     "  val m: [real; :, :] = zeros((2, 3))\n  val n: [real; :, :] = zeros((3, 2))\n  print(m * 2.0 + n)\n")
+
+    finish(b)
+    // `(a + d)` is checked before `g(3)` is called; `a * 2.0 + g(2)` calls `g` first.
+    assert_eq(out.text, "after the first\ng\n")
+    assert_eq(out.err.unwrap_or(""), "trap: shape mismatch\n")
+    assert(!out.status.ok())
+
+@test("an expression that can trap or print is not fused: each operation whole, in order, each element computed once")
+unquiet_not_fused()
+    val b = bench()
+    val program = "@elemental\ndef h(x: real): real =\n  print(x)\n  x * 2.0\n\n" +
+                  "def main() =\n  val x = [1.0, 2.0]\n  print(h(x) + h(x * 10.0))\n" +
+                  "  val p = fill(3, 9223372036854775807)\n  val q = fill(2, 1)\n  assert_traps(() -> print((p + p) + q), \"overflow\")\n" +
+                  "  print([6, 8] / [2, 4] + [1, 1])\n"
+    val m = emitted(program).unwrap()
+    val out = ran(b, program)
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "1.0\n2.0\n10.0\n20.0\n[22.0, 44.0]\n[4, 3]\n")
+    assert(occurrences(m, "linalg.generic") >= 4, m)
+
+@test("under --fpe-trap a real expression is not fused: a division by zero traps before a later operand's shape is checked")
+fpe_trap_not_fused()
+    val b = bench()
+    val program = "def main() =\n  val x = [1.0, 2.0, 3.0]\n  val z = [1.0, 0.0, 1.0]\n  val y: [real] = zeros(2)\n  print(x * 2.0 + x)\n  print(sum(x * x))\n  print(x / z + y)\n"
+    val trapped = ran(b, program, fpe_trap = true)
+    val plain = ran(b, program)
+
+    finish(b)
+    assert_eq(trapped.text, "[3.0, 6.0, 9.0]\n14.0\n")
+    assert_eq(trapped.err.unwrap_or(""), "trap: floating-point division by zero\n")
+    assert_eq(plain.err.unwrap_or(""), "trap: shape mismatch\n")
+    assert_eq(join([trapped.text, plain.text].view(), ""), "[3.0, 6.0, 9.0]\n14.0\n[3.0, 6.0, 9.0]\n14.0\n")

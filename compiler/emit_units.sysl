@@ -16,6 +16,8 @@ impl Emitter
         val t = e.ty
 
         if is_arr(t)
+            if self.fuses(e) then return self.fused(e)
+
             var operands: Buf[TExpr] = buf()
 
             operands.push(v)

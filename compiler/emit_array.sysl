@@ -26,10 +26,18 @@
 // a memref holds only numbers: it is an object of the counted heap holding its elements
 // (`emit_items.sysl`), a value held and counted as a string is.
 //
-// **Element-wise work is one `linalg.generic` per operation**, its body the scalar operation the
-// emitter already writes, over block arguments. Fusion is `linalg-fuse-elementwise-ops`' job, never
-// the emitter's. The scalar body reaches its operands through a frame of the chain stack, so the
-// scalar emitter runs unchanged inside a region.
+// **A quiet element-wise expression is one `linalg.generic`**, its body the whole expression's
+// scalar computation (`fused_scalar`, shared with `parallel`) over block arguments that read the
+// arrays at its leaves, so no array is built in between. Quiet (`quiet`) means it can neither trap
+// nor print once its operands' shapes agree, so computing each element whole is indistinguishable
+// from computing operation by operation, which is what the interpreter does. The leaves are
+// evaluated, and the shapes checked, in the order the operations one by one would check them. An
+// assignment to a local the expression reads at each element writes that local's own value, and a
+// reduction's quiet operand is computed as the reduction reads it. Every other element-wise operation
+// is one `linalg.generic` of its own, run whole before the next, so its traps and prints come in
+// the order of the operations; the pipeline has no fusion pass, which would compute a producer whose
+// body calls a function twice. The scalar body reaches its operands through a frame of the chain
+// stack, so the scalar emitter runs unchanged inside a region.
 
 import nex.sh.sysl.nex.*
 import nex_runtime.sh.sysl.nex_runtime.{ARRAY_CLOSE, ARRAY_OPEN, FIELD_SEPARATOR, INDEX_OUT_OF_BOUNDS, SHAPE_MISMATCH, SLICE_LENGTH_MISMATCH, SLICE_OUT_OF_BOUNDS, ZERO_RANGE_STEP,
@@ -46,6 +54,39 @@ struct Fork
     then_text: string
     then_arr: Buf[string]
     then_value: string
+
+// What an element-wise `linalg.generic` writes.
+enum Dest
+    // A new array.
+    Fresh
+    // Operand `k`'s own value, a local the expression reads at each element it computes.
+    Operand(k: usize)
+    // The array `v`, of the result's type, whose shape is static.
+    Over(v: string)
+
+// A fused element-wise expression: its leaves in source order and their values, the scalar over
+// them, the condition that a shape check among them trapped (`""` where none can), and the index of
+// the first array leaf.
+struct Fused
+    leaves: Buf[TExpr]
+    scalar: TExpr
+    vals: Buf[string]
+    mismatch: string
+    first: Option[usize]
+
+// The local `e` reads, where it is one.
+local_of(e: TExpr) -> Option[usize] = *e.kind match
+    TLocal(id) -> Some(id)
+    _ -> None
+
+// Whether every extent of the array type `t` is known when compiling.
+private is_static(t: Ty) -> bool
+    for x in axes_of(t)
+        x match
+            Fixed(_) -> ()
+            _ -> return false
+
+    true
 
 // An `scf.while` being emitted: the array locals it carries and the name of its results.
 struct Loop
@@ -608,6 +649,7 @@ impl Emitter
     // An array node's value.
     array(*self, e: TExpr, op: TArr) -> string
         if is_items(array_of_node(e, op)) && !self.on_args(op) then return self.items_node(e, op)
+        if self.fuses(e) then return self.fused(e)
 
         op match
             TIndex(target, subs) ->
@@ -727,6 +769,7 @@ impl Emitter
     // A widened array: its elements converted, or only its static extents forgotten.
     promoted(*self, e: TExpr, v: TExpr) -> string
         if ty_eq(elem_of(v.ty), elem_of(e.ty)) then return self.cast(e.span, self.ex(v), v.ty, e.ty)
+        if self.fuses(e) then return self.fused(e)
 
         var operands: Buf[TExpr] = buf()
 
@@ -746,36 +789,54 @@ impl Emitter
         self.mapped_values(e.span, e.ty, operands, vals, scalar)
 
     mapped_values(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], scalar: TExpr) -> string
-        val r = rank_of(out)
-        val ot = self.tensor_ty(span, out)
-        var first = ""
-        var first_ty = out
-        var ins: Buf[string] = buf()
-        var in_tys: Buf[string] = buf()
+        var first: Option[usize] = None
         var mismatch = ""
 
         for k in 0..<operands.len()
             if !is_arr(operands[k].ty) then continue
 
-            if first == ""
-                first = vals[k]
-                first_ty = operands[k].ty
-            else
-                // Two arrays of dynamic shape must agree at run time.
-                for a in 1..r
-                    val x = self.dim(span, first, first_ty, a)
-                    val y = self.dim(span, vals[k], operands[k].ty, a)
-                    val ne = self.def(s"arith.cmpi ne, $x, $y : index")
+            first match
+                Some(f) -> mismatch = self.agree(span, rank_of(out), vals[f], operands[f].ty, vals[k], operands[k].ty, mismatch)
+                None -> first = Some(k)
 
-                    self.trap_if(ne, SHAPE_MISMATCH)
-                    mismatch = if mismatch == "" then ne else self.def(s"arith.ori $mismatch, $ne : i1")
+        if self.par_kernel
+            val dims = first match
+                Some(f) -> self.dynamic_dims(span, vals[f], operands[f].ty, out)
+                None -> self.dynamic_dims(span, "", out, out)
 
-            ins.push(vals[k])
-            in_tys.push(self.tensor_ty(span, operands[k].ty))
+            return self.map_kernel(span, out, operands, vals, scalar, dims)
 
-        if self.par_kernel then return self.map_kernel(span, out, operands, vals, scalar, self.dynamic_dims(span, first, first_ty, out))
+        self.map_into(span, out, operands, vals, scalar, first, mismatch, Dest.Fresh)
 
-        val empty = self.def(s"tensor.empty(${joined(self.dynamic_dims(span, first, first_ty, out))}) : $ot")
+    // `a` (of array type `at`) and `b` (of `bt`), both of rank `r`, checked to have one shape: a
+    // shape-mismatch trap per axis, the condition that one was taken or'ed into `mismatch`, answered.
+    agree(*self, span: Span, r: usize, a: string, at: Ty, b: string, bt: Ty, mismatch: string) -> string
+        var out = mismatch
+
+        for k in 1..r
+            val ne = self.def(s"arith.cmpi ne, ${self.dim(span, a, at, k)}, ${self.dim(span, b, bt, k)} : index")
+
+            self.trap_if(ne, SHAPE_MISMATCH)
+            out = if out == "" then ne else self.def(s"arith.ori $out, $ne : i1")
+
+        out
+
+    // The array of type `out` whose every element is `scalar` over the elements of `operands`
+    // (values `vals`), whose shapes are already checked, `first` the first array among them and
+    // `mismatch` the condition that the check trapped: one `linalg.generic` writing `dest`.
+    map_into(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], scalar: TExpr, first: Option[usize], mismatch: string, dest: Dest) -> string
+        val ot = self.tensor_ty(span, out)
+        val dims = first match
+            Some(f) -> self.dynamic_dims(span, vals[f], operands[f].ty, out)
+            None -> self.dynamic_dims(span, "", out, out)
+        val init = dest match
+            Dest.Operand(k) -> vals[k]
+            Dest.Over(v) -> v
+            Dest.Fresh -> self.def(s"tensor.empty(${joined(dims)}) : $ot")
+        // The operands read through the output's own element: the destination's, where it is one.
+        val local = dest match
+            Dest.Operand(k) -> local_of(operands[k])
+            _ -> None
 
         // Past the trap the shapes agree, but where both are known statically and differ, folding
         // would meet an operation over mismatched operands; the operation is kept off that path.
@@ -783,43 +844,53 @@ impl Emitter
             val v = self.fresh()
 
             self.op(s"$v = scf.if $mismatch -> ($ot) {")
-            self.op(s"scf.yield $empty : $ot")
+            self.op(s"scf.yield $init : $ot")
             self.op("} else {")
-            self.op(s"scf.yield ${self.elementwise(span, out, operands, vals, ins, in_tys, empty, scalar)} : $ot")
+            self.op(s"scf.yield ${self.elementwise(span, out, operands, vals, init, local, scalar)} : $ot")
             self.op("}")
             return v
 
-        self.elementwise(span, out, operands, vals, ins, in_tys, empty, scalar)
+        self.elementwise(span, out, operands, vals, init, local, scalar)
 
-    // The `linalg.generic` computing `scalar` over `ins` into `empty`.
-    private elementwise(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], ins: Buf[string], in_tys: Buf[string], empty: string, scalar: TExpr) -> string
+    // The `linalg.generic` computing `scalar` over the arrays among `operands` into `init`. An
+    // operand that is the local `local` is read through the output's element instead, `init` being
+    // that local's own value.
+    private elementwise(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], init: string, local: Option[usize], scalar: TExpr) -> string
         val r = rank_of(out)
         val ot = self.tensor_ty(span, out)
         val m = identity_map(r)
         var maps = m
+        var ins: Buf[string] = buf()
+        var in_tys: Buf[string] = buf()
+        val o = self.fresh()
 
-        for _ in ins
-            maps += s", $m"
-
-        // The block's arguments: one per array operand, then the output element.
+        // The block's arguments: one per array operand read as an input, then the output element.
         var args: Buf[string] = buf()
         var frame: Buf[string] = buf()
 
         for k in 0..<operands.len()
-            if is_arr(operands[k].ty)
-                val b = self.fresh()
-
-                args.push(s"$b: ${self.elem_ty(span, elem_of(operands[k].ty))}")
-                frame.push(b)
-            else
+            if !is_arr(operands[k].ty)
                 frame.push(vals[k])
+                continue
 
-        args.push(s"${self.fresh()}: ${self.elem_ty(span, elem_of(out))}")
+            if local.is_some() && local_of(operands[k]) == local
+                frame.push(o)
+                continue
+
+            val b = self.fresh()
+
+            ins.push(vals[k])
+            in_tys.push(self.tensor_ty(span, operands[k].ty))
+            maps += s", $m"
+            args.push(s"$b: ${self.elem_ty(span, elem_of(operands[k].ty))}")
+            frame.push(b)
+
+        args.push(s"$o: ${self.elem_ty(span, elem_of(out))}")
 
         val v = self.fresh()
         val ins_text = if ins.len() == 0 then "" else s"ins(${joined(ins)} : ${joined(in_tys)}) "
 
-        self.op(s"$v = linalg.generic {indexing_maps = [$maps], iterator_types = [${parallel_iterators(r)}]} ${ins_text}outs($empty : $ot) {")
+        self.op(s"$v = linalg.generic {indexing_maps = [$maps], iterator_types = [${parallel_iterators(r)}]} ${ins_text}outs($init : $ot) {")
         self.op(s"^bb0(${joined(args)}):")
 
         val y = self.in_frame(frame, scalar)
@@ -828,6 +899,78 @@ impl Emitter
         self.op(s"} -> $ot")
         v
     end elementwise
+
+    // -- fusion -----------------------------------------------------------------------------------
+
+    // Whether the element-wise expression `e` is emitted fused (DESIGN §7.1): one `linalg.generic`
+    // computing each element whole from the arrays and values at its leaves, with no array in
+    // between. Only a quiet expression fuses, one that can neither trap nor print once its operands'
+    // shapes agree, so the order elements are computed in is unobservable; under `parallel` the
+    // region does its own fusing.
+    fuses(*self, e: TExpr) -> bool
+        if self.par_kernel || !fusible(e) then return false
+
+        var leaves: Buf[TExpr] = buf()
+
+        quiet(fused_scalar(e, &leaves), self.fpe_trap)
+
+    // The leaves of the fusible `e` evaluated in source order into `vals`, each operation's array
+    // operands checked to agree in shape at the point the operation alone checks them (after its
+    // operands, against its first array operand), so the traps and their order are those of the
+    // operations one by one. Answers the index of `e`'s first array leaf.
+    fused_leaves(*self, e: TExpr, f: *Fused) -> Option[usize]
+        if !fusible(e)
+            f.vals.push(self.ex(e))
+            return if is_arr(e.ty) then Some(f.vals.len() - 1) else None
+
+        var reps: Buf[usize] = buf()
+
+        for o in fused_operands(e)
+            self.fused_leaves(o, f) match
+                Some(k) -> reps.push(k)
+                None -> ()
+
+        // Each operand's shape is its first array leaf's.
+        for j in 1..<reps.len()
+            f.mismatch = self.agree(e.span, rank_of(e.ty), f.vals[reps[0]], f.leaves[reps[0]].ty, f.vals[reps[j]], f.leaves[reps[j]].ty, f.mismatch)
+
+        if reps.len() == 0 then None else Some(reps[0])
+
+    // The fusible `e` with its leaves evaluated and their shapes checked.
+    fused_form(*self, e: TExpr) -> Fused
+        var f = Fused(buf(), texpr(e.span, e.ty, TChainOperand(0)), buf(), "", None)
+
+        f.scalar = fused_scalar(e, &f.leaves)
+        f.first = self.fused_leaves(e, &f)
+        f
+
+    // The fusible, quiet `e` as one `linalg.generic` into a new array.
+    fused(*self, e: TExpr) -> string
+        val f = self.fused_form(e)
+
+        self.map_into(e.span, e.ty, f.leaves, f.vals, f.scalar, f.first, f.mismatch, Dest.Fresh)
+
+    // `target = value` where `value` fuses and `target` is a local array held as a value of the same
+    // type: the one `linalg.generic` writes the local's own value where `value` reads `target` itself
+    // (each element read before it is written, no other element read), or where the type's shape is
+    // static, so the old value has the new one's shape. Bufferization writes the buffer in place, and
+    // copies it first only where the old value is still read: by another holder, or by an operand
+    // that is a view of it read at other elements. A dynamic shape that `value` does not read may
+    // change, so it is written into a new array. False where the assignment is not of that shape.
+    fused_assign(*self, target: TExpr, value: TExpr) -> bool
+        val id = *target.kind match
+            TLocal(id) -> id
+            _ -> return false
+
+        if !self.in_ssa(id) || !self.fuses(value) || self.tensor_ty(value.span, value.ty) != self.tensor_ty(target.span, target.ty) then return false
+
+        val f = self.fused_form(value)
+        val dest = leaf_of(f.leaves, id) match
+            Some(k) -> Dest.Operand(k)
+            None -> if is_static(target.ty) then Dest.Over(self.read_array(target.span, id)) else Dest.Fresh
+
+        self.arr.set(id, self.map_into(value.span, value.ty, f.leaves, f.vals, f.scalar, f.first, f.mismatch, dest))
+        true
 
     // `scalar` emitted with `frame` as the operands its `TChainOperand` leaves read, nothing having
     // left the statement yet.
@@ -1341,7 +1484,7 @@ impl Emitter
     // `a = v` or `a op= v` on a whole array place.
     assign_array(*self, span: Span, op: string, target: TExpr, value: TExpr)
         if op == "="
-            if self.par_assign(target, value) then return
+            if self.par_assign(target, value) || self.fused_assign(target, value) then return
 
             // A place in memory takes a copy of what it is given anyway.
             self.set_place(target, if self.reads_storage(target) then self.ex(value) else self.lasting(value), false)

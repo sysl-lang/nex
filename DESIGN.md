@@ -741,7 +741,22 @@ for k in -r..r do acc += w[k] * x[i - k]
 ref §4.5 holds for every rank: `A op B` needs equal rank (a compile error otherwise) and equal
 shape (a compile error when both are static, else a trap), and is element-wise, with element types
 mixed per §2.2. **Broadcasting is scalar-only**: `A op s` and `s op A` for a scalar `s`, any rank.
-Element-wise expressions fuse to one loop nest per expression for every rank (`views.mlir`, rank 3).
+Element-wise expressions fuse to one loop nest per expression for every rank (`views.mlir`, rank 3),
+reading the arrays at the expression's leaves and building no array in between, so
+`sqrt((x2 - x1)^2 + (y2 - y1)^2)` reads four arrays and writes one. **What fuses is a quiet
+expression**: real and complex arithmetic, comparisons, widenings, unit conversions and the prelude's
+elemental functions, which can neither trap nor print once the operands' shapes agree. Integer
+arithmetic (which traps on overflow and on a zero divisor), complex division, a conversion that
+checks its range, a call of an `@elemental` function (which may print or trap) and everything under
+`--fpe-trap` are computed one operation at a time, each whole before the next, so their traps and
+prints come in the order of the operations. Either way the shapes are checked, and a mismatch traps,
+in the order the operations one by one check them: after both operands of each are evaluated. **An
+assignment writes its target in place** where the target is a local array the expression reads at
+the element it computes (`y = a*x + y`), or a local of static shape: each element is read before it
+is written. Where the old value is still read — by another holder (`val keep = y`), or by an operand
+that is a view of the target read at other elements (`v = v[n..1 by -1] + v`) — bufferization copies
+it first. **A reduction's quiet operand is fused into it**: `sum(x * y)`, `dot(x, y)` and
+`sqrt(sum(x * x))` compute each product as the reduction reads it, in the same blocks and tree.
 
 Comparisons are element-wise too: `a == b` and `a < 5` are `[bool]`, and whether two arrays are equal
 is `all(a == b)`. `not`, `and` and `or` apply element by element to `[bool]` operands (a `bool`
@@ -783,12 +798,14 @@ threshold it is a BLAS call (§10.4).
 the rest of the elementary functions, `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `sign`,
 `hypot`, `atan2`, `min`, `max`: applied to an array of any rank it applies element by element and
 returns an array of the same shape, and it fuses into the surrounding expression's loop nest like an
-operator. `sqrt(a) + 1.0` is one loop. Arguments of a several-argument elemental function broadcast
+operator (§7.1). `sqrt(a) + 1.0` is one loop. Arguments of a several-argument elemental function broadcast
 as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps every element.
 
 **A user function opts in with `@elemental`**: `@elemental def f(x: real) = …`. Its body obeys the
 parallel-body rules of §9.4 — no `inout` parameters, no writes to module variables, no I/O except
-`print` and `eprint`, no `parallel`, directly or through anything it calls — so the compiler may evaluate it in any order and fuse it. Its parameters are scalars and
+`print` and `eprint`, no `parallel`, directly or through anything it calls — so `parallel` may
+evaluate it in any order and fuse it (§9.5). Without `parallel` its call is computed whole, every
+element's call before the operation that uses it, since it may print or trap (§7.1). Its parameters are scalars and
 it returns a value. Called with an array for any parameter, it applies element by element, its
 other arguments broadcasting as an operator's do. An unmarked scalar function applied to an array is
 a compile error that suggests `@elemental` or `map`.
