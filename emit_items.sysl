@@ -208,6 +208,7 @@ impl Emitter
 
         self.op(s"scf.for $iv = %one to ${self.def(s"arith.addi $n, %one : i64")} step %one : i64 {")
 
+        val mark = self.mark()
         var parts: Buf[string] = buf()
         var part_tys: Buf[Ty] = buf()
 
@@ -218,8 +219,6 @@ impl Emitter
         for k in 0..<vals.len()
             parts.push(self.any_element(span, vals[k], tys[k], iv))
             part_tys.push(elem_of(tys[k]))
-
-        val mark = self.mark()
 
         self.item_init(span, h, iv, self.make(m, parts, part_tys), et)
         self.release_from(mark)
@@ -239,7 +238,12 @@ impl Emitter
         self.op(s"scf.if ${self.def(s"arith.cmpi ne, $iv, %one : i64")} {")
         self.put_text(sink, ", ")
         self.op("}")
+
+        // What printing an element pins is the pass's own.
+        val m = self.mark()
+
         self.put_value(span, sink, self.item_load(span, self.item_at(h, iv), elem_of(t)), elem_of(t))
+        self.release_from(m)
         self.op("}")
         self.put_text(sink, "]")
 end Emitter

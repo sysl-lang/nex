@@ -18,3 +18,6 @@ file	category	name
 017-reshape-and-flatten-at-rank-3	rank-N	`flatten` and `reshape` round trips at ranks 2 and 3, `transpose`, `shape`, `extents`, `@`
 018-static-shapes	rank-N	static shapes passed, combined, converted from dynamic ones, and the conversion that traps
 019-arrays-through-control-flow-and-calls	rank-N	arrays through branches, loops, `return`, `inout`, function values, captures and module level
+020-arrays-inside-aggregates-are-values	prelude	an array in a struct, read into a local or returned, then the struct written; a module-level array copied, then written; arrays a `match` arm writes
+021-arrays-of-non-numbers	prelude	arrays of structs, strings and closures written through elements and shared by value; `enumerate`, `zip`; an array of strings in a struct
+022-rearranging-locating-and-reducing-along-a-computed-axis	prelude	`permute` written and computed, `reverse` on a computed axis, `dim =` computed, `minloc`/`maxloc` at ranks 1–3 and along an axis, `assert_approx` and the traps of each

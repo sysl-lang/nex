@@ -1,0 +1,101 @@
+struct Grid
+  cells: [real]
+  name: string
+
+struct Tagged
+  id: integer
+  marks: [integer]
+  words: [string]
+
+enum Shape =
+  Poly(points: [real])
+  Labels(names: [string])
+  Empty
+
+val table = [1, 2, 3]
+var counts = [0, 0]
+var names = ["x", "y"]
+
+def make(n: integer) = Grid(fill(n, 1.0), s"g$n")
+
+def pair(n: integer) = (fill(n, 2), n)
+
+def greetings(n: integer) =
+  var out = ["hello"]
+  for k in 1..n
+    out = [s"$k"]
+  out
+
+def counter() =
+  var xs = [0, 0, 0]
+  def bump(k: integer) =
+    xs[k] = xs[k] + 1
+    xs
+  bump
+
+def collector() =
+  var seen = ["start"]
+  def add(s: string) =
+    seen[1] = seen[1] + s
+    seen[1]
+  add
+
+def describe(s: Shape) =
+  s match
+    Poly(ps) -> s"poly ${sum(ps)}"
+    Labels(ns) -> s"labels ${ns[1]}"
+    Empty -> "empty"
+
+def main() =
+  var g = make(3)
+  g.cells[2] = 7.0
+  var h = g
+  h.cells[1] = 9.0
+  print(g.cells)
+  print(h.cells)
+  g.cells = g.cells * 2.0
+  print(g.cells)
+  val a, n = pair(4)
+  print(a)
+  print(n)
+  print(describe(Poly([1.0, 2.0])))
+  print(describe(Labels([s"l${n}", "m"])))
+  print(describe(Empty))
+  var picked = [0, 0]
+  Labels(["q"]) match
+    Labels(ns) -> picked[1] = length(ns)
+    _ -> picked[2] = 5
+  print(picked)
+  val b = counter()
+  print(b(1))
+  print(b(3))
+  val c = collector()
+  print(c("a"))
+  print(c("b"))
+  counts[2] = table[3]
+  counts = counts + 1
+  print(counts)
+  names[2] = s"z$n"
+  names = [names[2], names[1], "w"]
+  print(names)
+  var i = 0
+  while i < 3
+    g = make(i + 1)
+    i += 1
+  print(g.cells)
+  var ts = [Tagged(1, [1, 2], ["a"]), Tagged(2, [3], [s"b$n", "c"])]
+  val us = ts
+  ts[1].marks[2] = 20
+  ts[2].words[1] = "B"
+  ts[2] = Tagged(9, [9], ["nine"])
+  print(ts)
+  print(us)
+  print(greetings(3))
+  val fs = [(x: integer) -> x + n, (x: integer) -> x * n]
+  for f in fs
+    print(f(10))
+  for k, w in enumerate(us[2].words)
+    print(s"$k $w")
+  for x, w in zip(table, names)
+    print(s"$x $w")
+  print(zip(names, enumerate(names)))

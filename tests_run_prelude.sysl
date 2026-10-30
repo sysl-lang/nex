@@ -1,0 +1,46 @@
+@tests
+
+// The array prelude compiled and run: the corpus categories PLAN.md's M8 counts, and the messages of
+// the traps the prelude's own checks raise — a computed axis that is not one, a computed permutation
+// that is not one, and each way `assert_approx` fails — written out whole, where a corpus program's
+// `assert_traps` only finds a word in them.
+
+import sysl.text.join
+
+private val M8_CATEGORIES = ["prelude", "docs/examples"]
+
+@test("every program of PLAN.md's M8 corpus categories prints its .out")
+run_m8_corpus()
+    val r = corpus_run(M8_CATEGORIES[..])
+
+    assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
+    assert_eq(join(r.waiting.view(), "\n"), "")
+    assert_eq(r.passed, 50)
+
+@test("the prelude's checks trap with messages that say what was wrong, and where")
+run_prelude_traps()
+    val b = bench()
+    val dim = ran(b, "def ax(k: integer) = k\ndef main() =\n  print(sum([[1, 2]], dim = ax(3)))\n")
+    val dim_ok = ran(b, "def ax(k: integer) = k\ndef main() =\n  print(sum([[1, 2], [3, 4]], dim = ax(2)))\n  print(maxloc([[1, 9], [3, 4]], dim = ax(1)))\n")
+    val reversed = ran(b, "def ax(k: integer) = k\ndef main() =\n  print(reverse([[1, 2], [3, 4]], ax(2)))\n  print(reverse([1, 2], ax(0)))\n")
+    val permuted = ran(b, "def ax(k: integer) = k\ndef main() =\n  print(permute([[1, 2]], (ax(2), ax(1))))\n  print(permute([[1, 2]], (ax(2), ax(2))))\n")
+    val element = ran(b, "def main() =\n  assert_approx([[1.0, 2.0], [3.0, 4.0]], [[1.0, 2.0], [3.0, 4.5]], 1.0e-6)\n")
+    val lengths = ran(b, "def main() =\n  assert_approx([1.0, 2.0], [1.0, 2.0, 3.0], 1.0e-6)\n")
+    val shapes = ran(b, "def main() =\n  assert_approx([[1.0], [2.0]], [[1.0, 2.0]], 1.0e-6)\n")
+    val complex = ran(b, "def main() =\n  assert_approx(1.0 + 0i, 1.0 + 5.0i, 1.0e-6)\n")
+    val nan = ran(b, "def main() =\n  val z = 0.0\n  assert_approx([1.0, 2.0], [1.0, z / z], 1.0)\n")
+    val close = ran(b, "def main() =\n  assert_approx(2, 2, 0.0)\n  assert_approx([1.0e300], [1.0e300 * (1.0 + 1.0e-16)], 1.0e290)\n  print(\"close\")\n")
+
+    finish(b)
+    assert_eq(dim.err.unwrap_or(""), "trap: not an axis of the array\n")
+    assert_eq(dim_ok.text, "[3, 7]\n[2, 1]\n")
+    assert_eq(reversed.text, "[[2, 1], [4, 3]]\n")
+    assert_eq(reversed.err.unwrap_or(""), "trap: not an axis of the array\n")
+    assert_eq(permuted.text, "[[1], [2]]\n")
+    assert_eq(permuted.err.unwrap_or(""), "trap: not a permutation of the axes\n")
+    assert_eq(element.err.unwrap_or(""), "trap: assert_approx: element (2, 2): |4.0 - 4.5| = 0.5 > 1.0E-6\n")
+    assert_eq(lengths.err.unwrap_or(""), "trap: assert_approx: the lengths differ, 2 and 3\n")
+    assert_eq(shapes.err.unwrap_or(""), "trap: assert_approx: the shapes differ, (2, 1) and (1, 2)\n")
+    assert_eq(complex.err.unwrap_or(""), "trap: assert_approx: |1.0+0.0i - 1.0+5.0i| = 5.0 > 1.0E-6\n")
+    assert_eq(nan.err.unwrap_or(""), "trap: assert_approx: element 2: |2.0 - nan| = nan > 1.0\n")
+    assert_eq(close.text, "close\n")

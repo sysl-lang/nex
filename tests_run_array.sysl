@@ -14,9 +14,6 @@ private val M6_CATEGORIES = ["arrays", "auto-clone (§8.3)", "[byte] buffer"]
 // The programs of those categories whose `.out` DESIGN.md does not give, each for the reason beside
 // it; the user decides them.
 private val DISAGREEING = [
-    // `var b = a` of a `val` used again is a clone (DESIGN §8.4), so `a[1]` stays 10; the `.out`,
-    // the reference's, prints 999.
-    "299-val-source-bound-to-var-does-not-need-cloning-val-is-immutab",
     // Awaiting the user's decision on `==` for byte buffers: DESIGN §7.1 makes `==` element-wise.
     "423-round-trip-via-to-integers-and-to-bytes",
     "425-structural-equality-on-length-and-bytes"]
@@ -33,7 +30,7 @@ run_m6_corpus()
 
     assert_eq(join(r.waiting.view(), "\n"), "")
     assert_eq(join(names.view(), "\n"), join(DISAGREEING[..], "\n"))
-    assert_eq(r.passed, 112)
+    assert_eq(r.passed, 113)
 
 // `m` lowered by the pipeline's passes up to and including the first whose text starts `last`.
 private lowered_until(b: Bench, m: string, last: string) -> string

@@ -1,5 +1,6 @@
 // Ownership of the counted values: strings built at run time, function values (through their
-// environments) and the aggregates that hold either.
+// environments), arrays of non-numbers (`emit_items.sysl`), the stored arrays of numbers a cell or
+// an aggregate holds (`emit_array.sysl`), and the aggregates that hold any of them.
 //
 // **Every place owns what it holds.** A local's slot, a captured local's cell, a module-level binding
 // and the slot a `return` stores into each hold one count on their value: a store retains the new
