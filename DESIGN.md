@@ -1254,6 +1254,45 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
   One whose types nothing fixes is a compile error. A `def` inside a body is a named lambda; it may
   call itself where it declares its result type.
 
+### 11.4 Structs, tuples, enums and `match`
+
+The reference's structs, tuples, sum types and `match` (ref §3.4–§3.7, §4.16, §4.17, §7.5) stand,
+with these rules (**PROPOSED** where marked).
+
+- **A constructor takes its fields by position or by name**, as a call takes its arguments, a
+  Fortran structure constructor's keyword components: `Point(y = 2.0, x = 1.0)`,
+  `Rect(h = 2, w = 1)`. Every field is given; a field has no default. **PROPOSED.**
+- **A variant's fields may be of any type**, not only the scalars the reference allows; §3.1 and
+  §6.2 already store arrays and views in enum payloads. **PROPOSED.**
+- **A struct or an enum cannot contain itself** by value, directly or through other structs, enums
+  or tuples (`struct Node` with a field `next: Node`, `enum List` with `Cons(head: real, tail:
+  List)`); it may hold itself through an array (`kids: [Node]`), which is a handle. **PROPOSED.**
+- **Struct, enum and variant names share the top level** with functions and module-level bindings,
+  and each is declared once: a variant `Empty` in two enums is a redeclaration. A local binding of
+  the same name shadows a variant.
+- **A tuple built in place converts element by element** to the tuple its position expects:
+  `val t: (real, real) = 1, n` adopts `1` and widens `n`. A tuple value as a whole does not widen:
+  `val u: (real, real) = t` with `t: (int64, int64)` is a compile error. **PROPOSED.**
+- **A module-level destructuring binding** (`val a, b = 10, 20`) evaluates its initializer once and
+  binds each name as a module-level binding; one that binds no name (`val _, _ = …`) is a compile
+  error, since the top level holds no statements.
+- **A field is a place**: `p.x = v`, `o.i.v += 1`, `t.2 = 5` and `z.re = 1.0` write through a
+  `var` or an `inout` parameter, and `p.x` or `t.1` may be passed `inout`. **PROPOSED** for `z.re`
+  and `z.im`, as Fortran's `z%re`.
+- **`x.f(args)` calls the field `f`** where `x` names a struct value with a function-typed field of
+  that name, and is `f(x, args)` otherwise.
+- **A `match` arm is a variant pattern, a name or `_`.** A variant with fields is matched with all of
+  them, `Circle(r)`, `Rect(w, _)`; writing `Circle` alone for a variant with fields is a compile
+  error. A field's sub-pattern is a name or `_`. Every variant is covered once, by its arm or by a
+  catch-all; an arm that repeats a variant or follows a catch-all is a compile error. The arms meet
+  in one type as an `if`'s branches do, a literal arm adopting the others' type (§2.3).
+- **What a lambda captures** (ref §4.11, §8.3 rule 4): a lambda **escapes** unless it is written
+  straight as an argument; a `val`-bound lambda and a local `def` escape. An escaping lambda may not
+  capture an `inout` parameter (**PROPOSED** for a local `def`, which Fortran's internal procedures
+  would allow; nex's may be returned). A `var` array moves into the one lambda that captures it, and
+  a second lambda capturing it is a compile error; a scalar `var` or a `val` may be captured by any
+  number.
+
 ---
 
 ## 12. The imaginary unit `i`
@@ -1506,6 +1545,11 @@ is in `K` until the affine units of §15 arrive.
 | Reductions | §10 | §7.4 | Fortran names: `minval`, `maxval`, `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`; `dim =` in place of the reference's `sum_axis`; `dot` conjugates |
 | Array elements | §3.3 | §3.1 | any element type but an array; structs and tuples of scalars stored inline |
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
+| Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; variant fields of any type; no type contains itself by value |
+| Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
+| Field places, `x.f(args)` | §4.16 | §11.4 | fields, tuple elements and `z.re`/`z.im` are assignable and passable `inout`; a function field is called |
+| `match` | §7.5 | §11.4 | a fielded variant is matched with its fields; coverage, repeats and unreachable arms are compile errors |
+| Escaping lambdas | §4.11 | §8.3, §11.4 | only a lambda written as an argument does not escape; an escaping one may not capture `inout` |
 | Units of measure | — | §13 | `unit` declarations (base, derived, scaled by an exact factor); `9.81<m/s^2>`, `real<m>`, `[real<Pa>; :, :]`; same-dimension scales convert to the left operand's unit, other dimensions are a compile error; `to<u>`, `strip`; erased before code generation |
 | Unit generics | §6.10 | §2.6, §13.5 | `U: Unit` parameters (`real<U^2>`) |
 | Prelude units | — | §13.9 | SI base, derived and scaled, imperial and US customary; `usgal` / `ukgal`, no `gal` |

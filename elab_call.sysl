@@ -55,6 +55,10 @@ impl Elab
                     Some(TopValue(_)) -> return self.call_value(span, self.name(callee.span, n, None), args)
                     None -> ()
 
+                self.construct(span, callee.span, n, args) match
+                    Some(v) -> return v
+                    None -> ()
+
                 scalar_named(n) match
                     Some(t) -> return self.conversion(span, n, t, args)
                     None -> ()
@@ -84,35 +88,28 @@ impl Elab
             _ -> self.call_value(span, self.infer(callee), args)
     end call
 
-    // `x.f(args)` is `f(x, args)`.
+    // `x.f(args)` calls the field `f` where `x` is a struct with a field of that name, and is
+    // `f(x, args)` otherwise.
     method_call(*self, span: Span, receiver: Expr, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        if self.has_field(receiver, name) then return self.call_value(span, self.field(receiver.span, receiver, name), args)
+
         var all: Buf[Expr] = buf()
 
         all.push(receiver)
         all.extend(args.view())
         self.call(span, Expr(span, ExprKind.Name(name)), all, want)
 
-    // `z.re` and `z.im`; the fields of structs and tuples come with them.
-    field(*self, span: Span, receiver: Expr, name: string) -> TExpr
-        val v = self.infer(receiver)
-
-        v.ty match
-            Complex(b) ->
-                if name == "re" || name == "im" then return texpr(span, Real(b), TComplexPart(v, name == "im"))
-
-                self.fail(span, s"a complex number has the fields `re` and `im`, not `${name}`")
-                self.invalid(span)
-            Error -> self.invalid(span)
-            _ -> self.not_yet(span, "a field")
-    end field
+    // `z.re` and `z.im`, or a struct's field.
+    field(*self, span: Span, receiver: Expr, name: string) -> TExpr = self.select_field(span, self.infer(receiver), name)
 
     // An argument passed to an `inout` parameter: a variable the callee borrows, exactly of the
     // parameter's type, since a borrow cannot convert (DESIGN §8).
     borrow(*self, arg: Expr, ty: Ty) -> TExpr
         *arg.kind match
             Name(_) -> ()
+            Field(_, _) -> ()
+            TupleField(_, _) -> ()
             Index(_, _) -> return self.not_yet(arg.span, "an element or a slice passed `inout`")
-            Field(_, _) -> return self.not_yet(arg.span, "a field passed `inout`")
             _ ->
                 self.fail(arg.span, "an `inout` argument is a variable the callee can write to")
                 return self.invalid(arg.span)
@@ -126,8 +123,11 @@ impl Elab
     end borrow
 
     // One argument against its parameter's type and mode.
-    argument(*self, arg: Expr, ty: Ty, mode: Mode, name: string) -> TExpr =
-        if mode == Inout then self.borrow(arg, ty) else self.check(arg, ty, name)
+    argument(*self, arg: Expr, ty: Ty, mode: Mode, name: string) -> TExpr
+        if mode == Inout then return self.borrow(arg, ty)
+
+        self.pass_lambda(arg)
+        self.check(arg, ty, name)
 
     // A call of a function value, with positional arguments only.
     call_value(*self, span: Span, f: TExpr, args: Buf[Expr]) -> TExpr

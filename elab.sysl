@@ -15,8 +15,8 @@
 // **A mistake is reported once.** What could not be typed has the type `Error`, which every check
 // accepts, so one unknown name gives one diagnostic and not one at every operator it reaches.
 //
-// The expressions are elaborated in `elab_expr.sysl`, the calls in `elab_call.sysl` and the prelude
-// in `elab_prelude.sysl`.
+// The expressions are elaborated in `elab_expr.sysl`, the calls in `elab_call.sysl`, the structs,
+// enums, tuples and `match` in `elab_aggregate.sysl`, and the prelude in `elab_prelude.sysl`.
 
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.{Diagnostic, Span, error, nearest_name}
@@ -32,7 +32,7 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
     Ok(e.program())
 
 private elab(p: Program) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates())
 
 // How far a declaration has got.
 enum Progress
@@ -138,6 +138,8 @@ struct Elab
     loops: Buf[TLoop]
     pending: Buf[Pending]
     fx: Fx
+    // The structs, enums and module-level destructuring bindings (`elab_aggregate.sysl`).
+    agg: Aggregates
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -145,7 +147,7 @@ struct Elab
         self.diags.push(error(span, message))
 
     // A construct whose elaboration belongs to a part of the language the elaborator does not
-    // handle yet: arrays, tuples, structs, enums, generics, units, parallelism.
+    // handle yet: arrays, generics, units, parallelism.
     later(*self, span: Span, what: string)
         self.fail(span, s"${what} is not elaborated yet")
 
@@ -156,6 +158,7 @@ struct Elab
 
     run(*self)
         self.collect()
+        self.resolve_aggregates()
 
         for k in 0..<self.funs.len()
             self.ensure_sig(k)
@@ -186,17 +189,7 @@ struct Elab
                                 self.globals.push(GlobalSrc(d, name, kind, typ, init))
                                 self.gstate.push(Waiting)
                                 self.gty.push(Error)
-                        _ ->
-                            self.later(pat.span, "a destructuring binding")
-
-                            // Its names are declared, untyped and already finished, so their uses
-                            // are not reported too.
-                            for n in pattern_names(pat)
-                                if self.declare(d.span, n)
-                                    self.tops.push(Top(n, TopValue(self.globals.len())))
-                                    self.globals.push(GlobalSrc(d, n, kind, typ, init))
-                                    self.gstate.push(Finished)
-                                    self.gty.push(Error)
+                        _ -> self.collect_group(d, kind, pat, typ, init)
                 Fun(name, tparams, params, ret, body) ->
                     if tparams.len() > 0 then
                         self.later(d.span, "a generic function")
@@ -213,8 +206,8 @@ struct Elab
                                     self.fstate.push(Waiting)
                             None -> self.fail(d.span, s"`${name}` has no body")
                 Extern(_, _, _) -> self.later(d.span, "an `extern` declaration")
-                Struct(_, _, _) -> self.later(d.span, "a struct")
-                Enum(_, _, _) -> self.later(d.span, "an enum")
+                Struct(name, tparams, fields) -> self.collect_struct(d, name, tparams, fields)
+                Enum(name, tparams, variants) -> self.collect_enum(d, name, tparams, variants)
                 Module(_) -> self.later(d.span, "a module declaration")
                 Import(_, _, _) -> self.later(d.span, "an import")
                 UnitDecl(_, _, _) -> self.later(d.span, "a unit declaration")
@@ -222,7 +215,7 @@ struct Elab
 
     // Whether `name` is free at the top level; if not, says so.
     declare(*self, span: Span, name: string) -> bool
-        if self.find_top(name).is_some()
+        if self.find_top(name).is_some() || self.is_aggregate_name(name)
             self.fail(span, s"redeclaration of `${name}`")
             return false
 
@@ -261,6 +254,10 @@ struct Elab
 
     ensure_global(*self, k: usize)
         if self.gstate[k] != Waiting then return
+
+        self.group_of(k) match
+            Some(g) -> return self.ensure_group(g)
+            None -> ()
 
         self.gstate.set(k, Working)
 
@@ -494,6 +491,10 @@ struct Elab
                 scalar_named(name) match
                     Some(ty) -> ty
                     None ->
+                        self.nominal_named(name) match
+                            Some(ty) -> return ty
+                            None -> ()
+
                         if name == "byte"
                             self.fail(t.span, "there is no `byte` type; raw bytes are `uint8`")
                         else
@@ -546,11 +547,15 @@ struct Elab
     // -- the result -------------------------------------------------------------------------------
 
     program(self) -> TProgram
-        var decls: Buf[TDecl] = buf()
+        var decls = self.type_decls()
 
         for top in self.tops
             top.kind match
                 TopValue(k) ->
+                    self.group_decl(k) match
+                        Some(g) -> decls.push(TupleGlobalDecl(g))
+                        None -> ()
+
                     for g in self.gout
                         if g.name == self.globals[k].name then decls.push(GlobalDecl(g))
                 TopFun(k) ->
@@ -566,7 +571,7 @@ struct Elab
             for c in self.captures
                 if c.lambda == l then caps.push(c.local)
 
-            lambdas.push(TLambda(x.name, x.params, x.ret, caps, x.body))
+            lambdas.push(TLambda(x.name, x.params, x.ret, caps, x.body, x.escapes))
 
         TProgram(decls, self.locals, lambdas, self.loops)
     end program
