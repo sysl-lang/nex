@@ -373,6 +373,8 @@ impl Emitter
     items_builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
         if name == "enumerate" || name == "zip" then return self.paired(span, name, args, t)
         if name == "map" then return self.items_map(span, args, t)
+        if name == "flatMap" then return self.items_flat_mapped(span, args, t)
+        if name == "reduce" then return self.items_fold(span, args, t)
 
         if !is_items(args[0].ty) then return self.unsupported(span, s"`$name` making an array of ${show_ty(elem_of(t))}")
 
@@ -383,6 +385,9 @@ impl Emitter
 
         if name == "reverse" then return self.reversed_at(span, args, t)
         if name == "flatten" then return self.own_ref(self.call("nex_items_flat", self.ex(args[0]), "!llvm.ptr", "!llvm.ptr"))
+        if name == "transpose" || name == "permute" then return self.items_permuted(span, args)
+        if name == "reshape" then return self.items_reshaped(span, args, t)
+        if name == "filter" then return self.items_filtered(span, args, t)
 
         self.unsupported(span, s"`$name` on an array of ${show_ty(elem_of(args[0].ty))}")
 

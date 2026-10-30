@@ -32,6 +32,7 @@ file	category	name
 031-units-rational-exponents	units	square roots and rational powers of units, and conversions between scales with exact roots
 032-units-through-the-language	units	values with units at module level, through compound assignment, loops, `match`, closures, function values and destructuring
 033-units-on-arrays	units	arrays with units converted element by element, through arithmetic, reductions, products, writes, loops and a generic function
+034-rearranging-filtering-and-folding-arrays-of-non-numbers	prelude	`transpose`, `permute` (written and computed orders), `reshape`, `filter`, `reduce` and `flatMap` over arrays of strings, structs, enums, tuples and closures at ranks 1 to 3, each result a value of its own, and `==` on structs, enums and tuples holding such arrays at ranks 2 and 3
 060-parallel-for-writes-owned-elements	parallel	a `parallel for` writing the element or column each iteration owns, over one and two clauses, with steps, inner loops, `cycle` and an `inout` array parameter
 061-parallel-reductions-over-every-operator	parallel	a reduction over `+ * min max and or`, `minloc`/`maxloc` with ties across blocks, a user operator (Kahan), a complex sum, a module-level variable, an empty loop and an overflow trap
 062-parallel-expressions-agree-with-sequential	parallel	`parallel` sums, products, extremes, `dot`, element-wise expressions, `map` and `dim =` reductions equal to the sequential ones bit for bit; the pairwise tree against a naive loop

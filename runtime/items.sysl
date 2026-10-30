@@ -22,6 +22,9 @@ import sysl.raw.ptr_cast
 @needs(os)
 extern memcpy(to: *u8, from: *u8, n: usize) -> *u8
 
+@needs(os)
+extern realloc(p: *u8, n: usize) -> *u8
+
 struct Items
     data: *u8
     count: long
@@ -313,6 +316,91 @@ items_stack(p: *u8, k: long, part: *u8)
 
         memcpy(e, at(part, j), z)
         if a.hold != null then a.hold(e)
+
+// -- rearranging and growing ----------------------------------------------------------------------
+
+// The array at `p` of `rank` axes with its axes reordered, each element counted again: axis `n` of
+// the new array is axis `perm[n − 1]` of `p`. A trap where `perm` names an axis twice or one that `p`
+// lacks.
+@export("nex_items_permute")
+items_permute(p: *u8, rank: long, perm: *long) -> *u8
+    for n in 0..<usize(rank)
+        if perm[n] < 1 || perm[n] > rank then trap_with("not a permutation of the axes")
+
+        for j in 0..<n
+            if perm[j] == perm[n] then trap_with("not a permutation of the axes")
+
+    if p == null then return null
+
+    val a = items(p)
+    val q = items_new(a.count, a.size, a.hold, a.drop, rank)
+    val z = usize(a.size)
+
+    for n in 0..<usize(rank)
+        extents(q)[n] = extents(p)[usize(perm[n] - 1)]
+
+    for t in 0..<a.count
+        // The element's index on axis `n` of the new array is its index on axis `perm[n]` of `p`.
+        var rest = t
+        var pos: long = 0
+
+        for n in 0..<usize(rank)
+            var step: long = 1
+
+            for m in 0..<usize(perm[n] - 1)
+                step *= extents(p)[m]
+
+            pos += rest % extents(q)[n] * step
+            rest /= extents(q)[n]
+
+        val e = &items(q).data[usize(t) * z]
+
+        memcpy(e, at(p, pos), z)
+        if a.hold != null then a.hold(e)
+
+    q
+
+// The elements of the array at `p`, in storage order, given to the new array at `q`, which has as
+// many, each counted again.
+@export("nex_items_fill_from")
+items_fill_from(q: *u8, p: *u8)
+    val b = items(q)
+    val z = usize(b.size)
+
+    for t in 0..<items_count(p)
+        val e = &b.data[usize(t) * z]
+
+        memcpy(e, at(p, t), z)
+        if b.hold != null then b.hold(e)
+
+// The elements of the array at `part`, in storage order, appended to the new array of one axis at
+// `p`, each counted again.
+@export("nex_items_append")
+items_append(p: *u8, part: *u8)
+    val a = items(p)
+    val n = items_count(part)
+
+    if n == 0 then return
+
+    val z = usize(a.size)
+
+    a.data = realloc(a.data, usize(a.count + n) * z)
+
+    for t in 0..<n
+        val e = &a.data[usize(a.count + t) * z]
+
+        memcpy(e, at(part, t), z)
+        if a.hold != null then a.hold(e)
+
+    a.count += n
+    extents(p)[0] = a.count
+
+// The new array of one axis at `p` cut to its first `n` elements; those after them were never given
+// a value.
+@export("nex_items_cut")
+items_cut(p: *u8, n: long)
+    items(p).count = n
+    extents(p)[0] = n
 
 // A stored array of numbers released: its storage, the descriptor's first word.
 @export("nex_array_free")

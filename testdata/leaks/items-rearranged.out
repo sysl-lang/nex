@@ -1,0 +1,15 @@
+10
+[a, d, b, e, c, f]
+10
+[a, e, d, c, b, f]
+10
+[a, d, b, e, c, f]
+abcdefadbecfabcdef
+e
+none
+f
+P { name=xy, n=3 }
+P { name=xxyy, n=6 }
+true
+P { name=ab, n=3 }
+3
