@@ -1,5 +1,6 @@
 // Ownership of the counted values: strings built at run time, function values (through their
-// environments) and the aggregates that hold either.
+// environments), arrays of non-numbers (`emit_items.sysl`), the stored arrays of numbers a cell or
+// an aggregate holds (`emit_array.sysl`), and the aggregates that hold any of them.
 //
 // **Every place owns what it holds.** A local's slot, a captured local's cell, a module-level binding
 // and the slot a `return` stores into each hold one count on their value: a store retains the new
@@ -33,6 +34,7 @@ impl Emitter
     managed(*self, t: Ty) -> bool = t match
         Str -> true
         Fn(_) -> true
+        Array(_, _) -> is_items(t)
         Tuple(es) -> self.any_managed(es)
         Nominal(name, _) ->
             self.struct_of(name) match
@@ -48,15 +50,19 @@ impl Emitter
                 None -> false
         _ -> false
 
+    // Whether a part of an aggregate of type `t` holds a count: a counted value, or an array of
+    // numbers, which an aggregate holds as an object of the counted heap (`emit_array.sysl`).
+    part_managed(*self, t: Ty) -> bool = is_arr(t) || self.managed(t)
+
     any_managed(*self, ts: Buf[Ty]) -> bool
         for t in ts
-            if self.managed(t) then return true
+            if self.part_managed(t) then return true
 
         false
 
     any_managed_fields(*self, fields: Buf[FieldInfo]) -> bool
         for f in fields
-            if self.managed(f.ty) then return true
+            if self.part_managed(f.ty) then return true
 
         false
 
@@ -67,12 +73,18 @@ impl Emitter
 
     mark(*self) -> usize = self.temps.len()
 
-    // The temporaries made since `m`, released.
+    // A new object of the counted heap the statement owns, whatever it holds.
+    own_ref(*self, h: string) -> string
+        self.temps.push(Temp(h, Str))
+        h
+
+    // The temporaries made since `m`, released; a temporary of an array-of-numbers type is a pin on
+    // a stored array (`emit_array.sysl`).
     release_from(*self, m: usize)
         while self.temps.len() > m
             val t = self.temps.pop().unwrap()
 
-            self.release(t.v, t.t)
+            if is_arr(t.t) then self.pin(t.v, t.t, -1) else self.release(t.v, t.t)
 
     // Everything the function still holds: its temporaries and its own locals.
     release_all(*self)
@@ -134,6 +146,7 @@ impl Emitter
         t match
             Str -> self.count_ref(v, up)
             Fn(_) -> self.count_ref(self.def(s"llvm.extractvalue $v[1] : $CLOSURE"), up)
+            Array(_, _) -> if is_items(t) then self.count_ref(v, up)
             _ ->
                 if self.managed(t)
                     val k = self.helper_index(t)
@@ -152,6 +165,14 @@ impl Emitter
     release_ref(*self, p: string)
         self.count_ref(p, false)
 
+    // Part `k` of the aggregate `v` (MLIR type `m`) counted, in its stored form.
+    count_part(*self, v: string, m: string, k: usize, t: Ty, up: bool)
+        if !self.part_managed(t) then return
+
+        val p = self.def(s"llvm.extractvalue $v[$k] : $m")
+
+        if is_arr(t) then self.count_ref(p, up) else self.count(self.from_mem(p, t), t, up)
+
     // Each part of an aggregate counted, or `v` itself.
     count_parts(*self, v: string, t: Ty, up: bool)
         val span = Span(0, 0)
@@ -161,14 +182,14 @@ impl Emitter
                 val m = self.ty(span, t)
 
                 for k in 0..<es.len()
-                    if self.managed(es[k]) then self.count(self.field(v, m, k, es[k]), es[k], up)
+                    self.count_part(v, m, k, es[k], up)
             Nominal(name, _) ->
                 val m = self.ty(span, t)
 
                 self.struct_of(name) match
                     Some(s) ->
                         for k in 0..<s.fields.len()
-                            if self.managed(s.fields[k].ty) then self.count(self.field(v, m, k, s.fields[k].ty), s.fields[k].ty, up)
+                            self.count_part(v, m, k, s.fields[k].ty, up)
                         return
                     None -> ()
 
@@ -187,7 +208,7 @@ impl Emitter
                     val pt = self.payload_ty(span, fields)
 
                     for k in 0..<fields.len()
-                        if self.managed(fields[k].ty) then self.count(self.field(p, pt, k, fields[k].ty), fields[k].ty, up)
+                        self.count_part(p, pt, k, fields[k].ty, up)
 
                     self.op("scf.yield")
                     self.op("}")
@@ -218,8 +239,8 @@ impl Emitter
         self.entry.push(s"    $z = llvm.mlir.zero : $ty\n    llvm.store $z, $p : $ty, !llvm.ptr\n")
         p
 
-    // The number of the helpers for `t`: `dup.N` and `drop.N` count an aggregate's parts, and
-    // `cell.N` releases what a cell holding a `t` holds.
+    // The number of the helpers for `t`: `dup.N` and `drop.N` count an aggregate's parts, `cell.N`
+    // releases what a cell holding a `t` holds, and `hold.N` retains it.
     helper_index(*self, t: Ty) -> usize
         val name = show_ty(t)
 
@@ -255,10 +276,19 @@ impl Emitter
             self.op("func.return")
             self.end(s"  func.func private @\"drop.$k\"(%v: $m)")
             self.begin(Void, none)
-            self.release(self.load(span, "%p", t), t)
+            self.count_stored("%p", t, false)
             self.op("func.return")
             self.end(s"  func.func private @\"cell.$k\"(%p: !llvm.ptr)")
+            self.begin(Void, none)
+            self.count_stored("%p", t, true)
+            self.op("func.return")
+            self.end(s"  func.func private @\"hold.$k\"(%p: !llvm.ptr)")
             k += 1
+
+    // The value of `t` stored at `p` counted, read in its stored form.
+    count_stored(*self, p: string, t: Ty, up: bool)
+        if is_arr(t) then self.count_ref(self.def(s"llvm.load $p : !llvm.ptr -> !llvm.ptr"), up)
+        else self.count(self.load(Span(0, 0), p, t), t, up)
 
     // The captures lambda `id` keeps in its environment, in order: the cells it counts, then the
     // `inout` places it borrows. A local `def` calling itself is not among them.

@@ -23,6 +23,9 @@ file	category	name
 022-slices-of-places-and-inout-windows	views	writes through slices of places, `inout` windows, a read window beside a disjoint inout one (DESIGN §5.3, §8.2, §8.3)
 023-origin-and-rebase	views	offset views: a symmetric kernel, a ghost-cell grid, `end`, traps, captures and `rebase` (DESIGN §6.4)
 024-view-rules	views	a view copied into a var, returned, captured, at module level, kept when its source is written (DESIGN §6.2)
+025-arrays-inside-aggregates-are-values	prelude	an array in a struct, read into a local or returned, then the struct written; a module-level array copied, then written; arrays a `match` arm writes
+026-arrays-of-non-numbers	prelude	arrays of structs, strings and closures written through elements and shared by value; `enumerate`, `zip`; an array of strings in a struct
+027-rearranging-locating-and-reducing-along-a-computed-axis	prelude	`permute` written and computed, `reverse` on a computed axis, `dim =` computed, `minloc`/`maxloc` at ranks 1–3 and along an axis, `assert_approx` and the traps of each
 030-units-imperial-and-si	units	imperial and SI conversions, mixed scales, expected types, real32 and complex, units printed inside aggregates
 031-units-rational-exponents	units	square roots and rational powers of units, and conversions between scales with exact roots
 032-units-through-the-language	units	values with units at module level, through compound assignment, loops, `match`, closures, function values and destructuring

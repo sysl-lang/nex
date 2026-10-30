@@ -475,7 +475,8 @@ type lands"): `val z: [real32; :, :] = zeros((4, 4))`.
 | `to_integers(b)`, `to_bytes(a)` | `int64(b)` and `uint8(a)`, element by element (§2.4); `to_bytes` traps outside `0..255` |
 
 An axis number written as a literal (`extent(m, 3)`, `dim = 0`) that is not an axis of the array is
-a compile error; a computed one traps.
+a compile error; a computed one traps `not an axis of the array`. A computed `permute` order that
+names an axis twice or one the array lacks traps `not a permutation of the axes`.
 
 **The higher-order functions** take the function last and give its parameters the element type, so
 a lambda need not write them (`map(xs, x -> x * 2)`). They walk the elements in storage order:
@@ -487,6 +488,16 @@ a lambda need not write them (`map(xs, x -> x * 2)`). They walk the elements in 
 | `flatMap(a, f)` | `[U; :]`, the vectors `f` returns, concatenated |
 | `reduce(a, init, f)` | `f(…f(f(init, a₁), a₂)…)`; a literal `init` adopts the element type |
 | `enumerate(a)`, `zip(a, b)` | `[(integer, T); :]`, `[(T, U); :]` |
+
+`enumerate` pairs each element with its position from 1, `for i, x in enumerate(xs)` giving `xs[i]`
+as `x`; `zip` stops at the shorter array, as the reference's does. An array of rank ≥ 2 is taken in
+storage order, its position counted along it.
+
+**`assert_approx(a, b, tol)`** passes where `|a − b| ≤ tol`: for two numbers, or for two arrays of
+one shape element by element (an integer widened to `real64`, a complex's distance its modulus). A
+`nan` is never within any tolerance. Otherwise it traps, saying where and by how much: `assert_approx:
+element (2, 2): |4.0 - 4.5| = 0.5 > 1.0E-6`, or `assert_approx: the shapes differ, (2, 1) and (1, 2)`
+(`the lengths differ, 2 and 3` at rank 1).
 
 `transpose`, `permute`, `reshape` of a dense array and `flatten` of a dense array return views (§6):
 no data moves (**PROPOSED** as a performance guarantee; the result is a value either way, so which it

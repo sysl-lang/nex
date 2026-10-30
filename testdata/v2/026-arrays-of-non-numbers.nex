@@ -1,0 +1,39 @@
+struct P
+  x: integer
+  tag: string
+
+struct Box
+  items: [string]
+  data: [real]
+
+def names() = ["ann", "bob", s"c${1 + 1}"]
+
+def main() =
+  var ps = [P(1, "a"), P(2, "b"), P(3, "c")]
+  val qs = ps
+  ps[1].x = 99
+  ps[2] = P(7, "z")
+  print(ps[1].x)
+  print(qs[1].x)
+  print(length(ps))
+  for p in ps
+    print(p.tag)
+  var ns = names()
+  ns[3] = ns[3] + "!"
+  print(ns)
+  val fs = [(x: integer) -> x + 1, (x: integer) -> x * 2]
+  for f in fs
+    print(f(10))
+  print(fs[2](4))
+  val xs = [10, 20, 30]
+  for i, x in enumerate(xs)
+    print(s"$i: $x")
+  for a, b in zip(xs, ns)
+    print(s"$a $b")
+  print(enumerate([1.5, 2.5]))
+  print(zip(ns, ns))
+  var b = Box(["q"], [1.0])
+  b.items[1] = "r"
+  print(b.items)
+  val t = (ps, 3)
+  print(t)

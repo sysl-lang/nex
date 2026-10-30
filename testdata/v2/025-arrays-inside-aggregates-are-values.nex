@@ -1,0 +1,43 @@
+struct Grid
+  cells: [real]
+
+enum Step =
+  Set(at: integer, to: integer)
+  Keep
+
+var counts = [1, 2]
+
+def first(g: Grid) = g.cells
+
+def main() =
+  var g = Grid([1.0, 2.0])
+  val c = g.cells
+  var d = [0.0]
+  d = if length(c) > 1 then g.cells else d
+  val e = first(g)
+  g.cells[1] = 5.0
+  print(c)
+  print(d)
+  print(e)
+  print(g.cells)
+  val snapshot = counts
+  counts[1] = 9
+  print(snapshot)
+  print(counts)
+  var k = 0
+  def bump() =
+    k += 1
+    counts[2] = counts[2] + k
+  bump()
+  bump()
+  print(counts)
+  var xs = [1, 2, 3]
+  for s in [Set(1, 10), Keep, Set(3, 30)]
+    val old = s match
+      Set(at, to) ->
+        val was = xs[at]
+        xs[at] = to
+        was
+      Keep -> 0
+    print(old)
+  print(xs)
