@@ -56,7 +56,8 @@ val inside = 1.5 < a < 2.5          // [false, true, false]
 
 The prelude's math functions are **elemental**: applied to an array they apply to every element, and
 the call fuses into the expression's loop like any operator ([Prelude §12.2](/spec/12-prelude/)). A
-user function marked `@elemental` behaves the same way ([Functions](/spec/06-functions/)); any other
+user function marked `@elemental` applies element by element the same way, its call computed whole
+before the operation that uses it, since it may print or trap ([Functions](/spec/06-functions/)); any other
 function reaches every element through `map` ([Arrays §4.3.4](/spec/04-arrays/)):
 
 ```nex
@@ -122,6 +123,23 @@ val r = 2u - v + 0.5 * w            // one loop over the elements, one result ar
 Slices take part on the same terms: `a[2..end] - a[1..end-1]` is one loop over views of `a`, with no
 copy of either window ([Arrays §4.7](/spec/04-arrays/)). So write whole-array expressions freely;
 splitting one into named steps for readability costs the intermediate arrays the split creates.
+
+A reduction takes its operand into the same loop: `sum(x * y)`, `dot(x, y)` and `sqrt(sum(x * x))`
+compute each product as they add it, and never build the array of products.
+
+**An assignment writes its target in place** when the expression reads the target only at the
+element it is computing, as `y = alpha * x + y` does. Where the old value is still needed — another
+name holds it (`val before = y`), or the expression reads the target at other elements
+(`v = v[n..1 by -1] + v`) — the compiler copies it first, so the result is always the one the
+expression describes.
+
+**What fuses is arithmetic that cannot fail**: real and complex arithmetic, comparisons, widenings,
+unit conversions and the prelude's elemental functions. An operation that can trap or print —
+integer arithmetic (an overflow, a zero divisor), complex division, a conversion that checks its
+range, a call of a user `@elemental` function, anything under `--fpe-trap` — is computed whole, over
+every element, before the next operation, so its traps and prints come in the order of the
+operations, the same on every engine. Mismatched shapes trap in the same order either way: an
+operation's operands are checked as soon as both are evaluated.
 
 A whole-array expression runs on one thread. `parallel` before a `map` or a reduction —
 `parallel sum(x * y)` — runs it on several ([Parallelism](/spec/10-parallelism/)); nex never threads
