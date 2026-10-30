@@ -28,7 +28,7 @@ impl Elab
 
             val ty = self.resolve_type(p.typ)
 
-            if has_unit(ty) then self.fail(p.typ.span, s"an `extern` parameter never carries a unit: C takes the number, so declare it ${show_ty(base_of(ty))} and pass `strip(x)`")
+            if carries_unit(ty) then self.fail(p.typ.span, s"an `extern` parameter never carries a unit: C takes the number, so declare it ${show_ty(stripped(ty))} and pass `strip(x)`")
 
             names.push(p.name)
             tys.push(ty)
@@ -38,7 +38,7 @@ impl Elab
             Some(t) ->
                 val r = self.resolve_type(t)
 
-                if has_unit(r) then self.fail(t.span, s"an `extern` result never carries a unit: declare it ${show_ty(base_of(r))} and give the result its unit by multiplying, `${x.name}(...) * 1.0<${spell(unit_of(r))}>`")
+                if carries_unit(r) then self.fail(t.span, s"an `extern` result never carries a unit: declare it ${show_ty(stripped(r))} and give the result its unit by multiplying, `${x.name}(...) * 1.0<${spell(elem_unit(r))}>`")
                 r
             None -> Void
 
@@ -74,7 +74,7 @@ impl Elab
 
             val v = self.elab(a, Some(ty))
 
-            if has_unit(v.ty)
+            if carries_unit(v.ty)
                 self.fail(a.span, s"`${x.name}` is an `extern`, whose parameters never carry a unit; pass the number: `${x.name}(strip(x))`")
                 out.push(self.invalid(a.span))
             else

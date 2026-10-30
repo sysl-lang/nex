@@ -72,9 +72,11 @@ enum TKind
     TConvert(value: TExpr, traps: bool)
     // `value` in a unit of the same dimension and another scale: one multiplication by `factor`, the
     // exact ratio of the two scales, which emission rounds once to the value's width (DESIGN §13.8).
+    // On an array value it multiplies every element.
     TRescale(value: TExpr, factor: Ratio)
     // `value` with a unit attached (`x<m>`), renamed to an equal unit (`to<N>(m)`), or removed
-    // (`strip(x)`): the number is unchanged, and the node's type says which.
+    // (`strip(x)`): the number is unchanged, and the node's type says which. On an array value it
+    // is the same storage under another element type.
     TUnitAs(value: TExpr)
     // `complex[realN](re, im)`: both parts already of the part type.
     TMakeComplex(re: TExpr, im: TExpr)

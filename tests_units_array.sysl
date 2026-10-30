@@ -1,0 +1,155 @@
+@tests
+
+// Arrays whose elements carry a unit (DESIGN §13.6): every element carries the array's one unit, the
+// element-wise operators and the prelude follow it as they do on a scalar, and a mix of scales is a
+// `rescale` of the whole array. Each rule is checked both ways.
+
+private val MAIN = "def main() = ()\n"
+
+private not_constant(at: string) -> string =
+    "error: `^` on a value with a unit needs a constant exponent, so that the result's unit is known (`x^2`, `x^(1/2)`); this base is real64<m>, so strip the unit to raise it to a computed power: `strip(x)^n` " + at
+
+// -- literals and types -------------------------------------------------------------------------------
+
+@test("an array literal of measured elements is in the first one's unit, the others converted to it")
+units_array_literal()
+    assert_eq(elaborated("def main() = print([1.0<m>, 2.0<mm>])\n"),
+        "(def main () void (print (s (strip:[real64] (array:[real64<m>] 1.0<m> (rescale:real64<m> 0.001 2.0<mm>))) \" m\")))")
+    assert_eq(elaborated("def main() =\n  val x = 1.0<m>\n  print([2.0<mm>, x])\n"),
+        "(def main () void (block (val x#0:real64<m> 1.0<m>) (print (s (strip:[real64] (array:[real64<mm>] 2.0<mm> (rescale:real64<mm> 1000.0 x#0))) \" mm\"))))")
+    assert_eq(refused("def main() = print([1.0<m>, 2.0<s>])\n"), "error: an element of this array must be real64<m>, but this is real64<s>: time and length are different dimensions @1:29")
+    assert_eq(refused("def main() = print([0.0, 1.0<m>])\n"), "error: an element of this array must be real64<m>, but this is real64: a bare literal is dimensionless; write it with its unit, `0.0<m>` @1:21")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  val y = [2.0]\n  print([x[1], y[1]])\n"),
+        "error: the elements of this array differ: m and a plain number: a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<m>` @4:16")
+
+@test("an array type carries a unit, and a value of its dimension in another scale converts to it")
+units_array_type()
+    assert_eq(elaborated("def main() =\n  val a: [real<m>] = []\n  print(a)\n"), "(def main () void (block (val a#0:[real64<m>] (array:[real64<m>])) (print (s (strip:[real64] a#0) \" m\"))))")
+    assert_eq(elaborated("def main() =\n  val a: [real<mm>] = [1.0<in>]\n  print(a)\n"),
+        "(def main () void (block (val a#0:[real64<mm>] (array:[real64<mm>] (rescale:real64<mm> 25.4 1.0<in>))) (print (s (strip:[real64] a#0) \" mm\"))))")
+    assert_eq(elaborated("def main() =\n  val x = [1.0<in>]\n  val a: [real<mm>] = x\n  print(a)\n"),
+        "(def main () void (block (val x#0:[real64<in>] (array:[real64<in>] 1.0<in>)) (val a#1:[real64<mm>] (rescale:[real64<mm>] 25.4 x#0)) (print (s (strip:[real64] a#1) \" mm\"))))")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  val y: [real<s>] = x\n"), "error: `y` must be [real<s>], but this is [real64<m>]: length and time are different dimensions @3:22")
+    assert_eq(refused("def main() =\n  val x = [1.0]\n  val y: [real<m>] = x\n"), "error: `y` must be [real<m>], but this is [real64]: a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<m>` @3:22")
+    assert_eq(refused("def main() =\n  val x: [int64<m>] = []\n"), "error: a unit attaches to a real or complex type, and this is int64: an integer counts things @2:11")
+
+@test("a unit written after an array gives it to every element")
+units_array_annotation()
+    assert_eq(elaborated("def main() = print([1.0, 2.0]<m>)\n"), "(def main () void (print (s (strip:[real64] (unit:[real64<m>] (array:[real64] 1.0 2.0))) \" m\")))")
+    assert_eq(refused("def main() = print([1, 2]<m>)\n"), "error: a unit attaches to a real or complex value, and this is an array of integers, which count things: `real(a)<m>` @1:20")
+    assert_eq(refused("def main() = print([1.0<m>]<m>)\n"), "error: this already carries the unit m; a value changes unit with `to<m>(x)` @1:20")
+
+// -- element-wise arithmetic --------------------------------------------------------------------------
+
+@test("element-wise + and the comparisons take one dimension, converting the right operand to the left's unit")
+units_array_additive()
+    assert_eq(elaborated("def main() =\n  val a = [1.0<m>]\n  print(a + [1.0<in>])\n"),
+        "(def main () void (block (val a#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.+:[real64<m>] a#0 (rescale:[real64<m>] 0.0254 (array:[real64<in>] 1.0<in>)))) \" m\"))))")
+    assert_eq(elaborated("def main() =\n  val a = [1.0<m>]\n  print(a > 1.0<ft>)\n"),
+        "(def main () void (block (val a#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (.>:[bool] a#0 (rescale:real64<m> 0.3048 1.0<ft>)))))")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(x + [1.0<s>])\n"), "error: cannot add m and s: length and time are different dimensions @3:9")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(x == [1.0<s>])\n"), "error: cannot compare m and s: length and time are different dimensions @3:9")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(x + 1.0)\n"), "error: cannot add m and a bare number: a bare literal is dimensionless; write it with its unit, `1.0<m>` @3:9")
+
+@test("element-wise * and / combine units, a plain scalar keeps them, and ^ takes a constant exponent")
+units_array_multiplicative()
+    assert_eq(elaborated("def main() =\n  val x = [1.0<m>]\n  val y = [1.0<s>]\n  print(x / y)\n"),
+        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (val y#1:[real64<s>] (array:[real64<s>] 1.0<s>)) (print (s (strip:[real64] (./:[real64<m/s>] x#0 y#1)) \" m/s\"))))")
+    assert_eq(elaborated("def main() =\n  val x = [1.0, 2.0]\n  print(x * 1.0<m>)\n"),
+        "(def main () void (block (val x#0:[real64] (array:[real64] 1.0 2.0)) (print (s (strip:[real64] (.*:[real64<m>] x#0 1.0<m>)) \" m\"))))")
+    assert_eq(elaborated("def main() =\n  val x = [1.0<m>]\n  print(-x * 2.0)\n"),
+        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.*:[real64<m>] (.-:[real64<m>] x#0) 2.0)) \" m\"))))")
+    assert_eq(elaborated("def main() =\n  val x = [1.0<m>]\n  print(x^2)\n"),
+        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.^:[real64<m^2>] x#0 2)) \" m^2\"))))")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  val n = 2\n  print(x^n)\n"), not_constant("@4:9"))
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(x^[1.0, 2.0])\n"), not_constant("@3:9"))
+
+// -- conversion ---------------------------------------------------------------------------------------
+
+@test("to converts every element and strip is a view of the numbers")
+units_array_to_strip()
+    assert_eq(elaborated("def main() =\n  val a = [1.0<m>]\n  print(to<mm>(a))\n  print(strip(a))\n"),
+        "(def main () void (block (val a#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (rescale:[real64<mm>] 1000.0 a#0)) \" mm\")) (print (strip:[real64] a#0))))")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(to<s>(x))\n"), "error: `to<s>` converts within one dimension: m is length, and s is time @3:9")
+
+@test("a real conversion of a measured array keeps the unit; an integer one is refused")
+units_array_conversions()
+    assert_eq(elaborated("def main() = print(real32([1.0<m>]))\n"), "(def main () void (print (s (strip:[real32] (.convert:[real32<m>] (array:[real64<m>] 1.0<m>))) \" m\")))")
+    assert_eq(refused("def main() = print(int64([1.0<m>]))\n"), "error: `int64(...)` gives integers, which carry no unit; strip the unit first: `int64(strip(a))` @1:20")
+
+// -- the prelude --------------------------------------------------------------------------------------
+
+@test("an elemental prelude function on a measured array follows the scalar rule for each element")
+units_array_elemental()
+    assert_eq(elaborated("def main() =\n  val a = [1.0<m>]\n  print(sqrt(abs(a) * a))\n"),
+        "(def main () void (block (val a#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.sqrt:[real64<m>] (.*:[real64<m^2>] (.abs:[real64<m>] a#0) a#0))) \" m\"))))")
+    assert_eq(elaborated("def main() =\n  val x = [1.0<mm>]\n  val y = [1.0<in>]\n  print(sin(x / y))\n"),
+        "(def main () void (block (val x#0:[real64<mm>] (array:[real64<mm>] 1.0<mm>)) (val y#1:[real64<in>] (array:[real64<in>] 1.0<in>)) (print (.sin:[real64] (rescale:[real64] 0.03937007874015748 (./:[real64<mm/in>] x#0 y#1))))))")
+    assert_eq(elaborated("def main() =\n  val x = [1.0<m>]\n  print(min(x, [1.0<mm>]))\n  print(atan2(x, x))\n"),
+        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.min:[real64<m>] x#0 (rescale:[real64<m>] 0.001 (array:[real64<mm>] 1.0<mm>)))) \" m\")) (print (.atan2:[real64] x#0 x#0))))")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(sin(x))\n"), "error: `sin` takes a dimensionless argument, and this is real64<m> (length); strip the unit to pass the number: `sin(strip(x))` @3:9")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(min(x, [1.0<s>]))\n"), "error: `min` cannot combine m and s: length and time are different dimensions @3:9")
+
+@test("sum, minval, maxval and norm2 keep the unit; minloc and maxloc give positions")
+units_array_reductions()
+    assert_eq(elaborated("def main() =\n  val a = [1.0<m>]\n  print(sum(a) + minval(a) + maxval(a) + norm2(a))\n  print(maxloc(a))\n"),
+        "(def main () void (block (val a#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:real64 (+:real64<m> (+:real64<m> (+:real64<m> (sum:real64<m> a#0) (minval:real64<m> a#0)) (maxval:real64<m> a#0)) (norm2:real64<m> a#0))) \" m\")) (print (maxloc:int64 a#0))))")
+    assert_eq(elaborated("def main() =\n  val a = [[1.0<m>, 2.0<m>]]\n  print(sum(a, dim = 2))\n"),
+        "(def main () void (block (val a#0:[real64<m>; :, :] (array:[real64<m>; :, :] (array:[real64<m>] 1.0<m> 2.0<m>))) (print (s (strip:[real64] (sum:[real64<m>] a#0 (dim 2))) \" m\"))))")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(sum(x) + 1.0<s>)\n"), "error: cannot add m and s: length and time are different dimensions @3:9")
+
+@test("product raises the unit to the number of elements it multiplies, which must be static")
+units_array_product()
+    assert_eq(elaborated("def main() =\n  val x: [real<m>; 3] = [1.0<m>, 2.0<m>, 3.0<m>]\n  print(product(x))\n"),
+        "(def main () void (block (val x#0:[real64<m>; 3] (array:[real64<m>; 3] 1.0<m> 2.0<m> 3.0<m>)) (print (s (strip:real64 (product:real64<m^3> x#0)) \" m^3\"))))")
+    assert_eq(elaborated("def main() =\n  val A: [real<N>; :, 2] = [[1.0<N>, 2.0<N>]]\n  print(product(A, dim = 2))\n"),
+        "(def main () void (block (val A#0:[real64<N>; :, 2] (array:[real64<N>; :, 2] (array:[real64<N>] 1.0<N> 2.0<N>))) (print (s (strip:[real64] (product:[real64<N^2>] A#0 (dim 2))) \" N^2\"))))")
+    assert_eq(elaborated("def main() =\n  val x = [1.0, 2.0]\n  print(product(x))\n"), "(def main () void (block (val x#0:[real64] (array:[real64] 1.0 2.0)) (print (product:real64 x#0))))")
+    assert_eq(refused("def f(x: [real<m>]) = product(x)\n" + MAIN),
+        "error: `product` of [real<m>] has the unit m to the power of the number of elements it multiplies, and that number is not static; strip the unit to multiply the numbers: `product(strip(a))` @1:23")
+    assert_eq(refused("def main() =\n  val A: [real<N>; :, 2] = [[1.0<N>, 2.0<N>]]\n  print(product(A, dim = 1))\n"),
+        "error: `product` of [real<N>; :, 2] has the unit N to the power of the number of elements it multiplies, and that number is not static; strip the unit to multiply the numbers: `product(strip(a))` @3:9")
+
+@test("dot and @ multiply their operands' units")
+units_array_linear_algebra()
+    assert_eq(elaborated("def main() =\n  val x: [real<m>; 2] = [1.0<m>, 2.0<m>]\n  val f: [real<N>; 2] = [1.0<N>, 2.0<N>]\n  val e: real<J> = dot(x, f)\n  print(e)\n"),
+        "(def main () void (block (val x#0:[real64<m>; 2] (array:[real64<m>; 2] 1.0<m> 2.0<m>)) (val f#1:[real64<N>; 2] (array:[real64<N>; 2] 1.0<N> 2.0<N>)) (val e#2:real64<J> (dot:real64<m N> x#0 f#1)) (print (s (strip:real64 e#2) \" J\"))))")
+    assert_eq(elaborated("def main() =\n  val A: [real<N>; 2, 2] = [[1.0<N>, 2.0<N>], [3.0<N>, 4.0<N>]]\n  val x: [real<m>; 2] = [1.0<m>, 2.0<m>]\n  print(A @ x)\n"),
+        "(def main () void (block (val A#0:[real64<N>; 2, 2] (array:[real64<N>; 2, 2] (array:[real64<N>] 1.0<N> 2.0<N>) (array:[real64<N>] 3.0<N> 4.0<N>))) (val x#1:[real64<m>; 2] (array:[real64<m>; 2] 1.0<m> 2.0<m>)) (print (s (strip:[real64; 2] (@:[real64<N m>; 2] A#0 x#1)) \" N m\"))))")
+    assert_eq(elaborated("def main() =\n  val x: [real<m>; 2] = [1.0<m>, 2.0<m>]\n  print(dot(x, [1, 2]))\n"),
+        "(def main () void (block (val x#0:[real64<m>; 2] (array:[real64<m>; 2] 1.0<m> 2.0<m>)) (print (s (strip:real64 (dot:real64<m> x#0 (promote:[real64] (array:[int64] 1 2)))) \" m\"))))")
+    assert_eq(refused("def main() =\n  val x: [real<m>; 2] = [1.0<m>, 2.0<m>]\n  val e: real<m> = dot(x, x)\n"), "error: `e` must be real<m>, but this is real64<m^2>: area and length are different dimensions @3:20")
+    assert_eq(refused("def main() =\n  val A: [real<N>; 2, 2] = [[1.0<N>, 2.0<N>], [3.0<N>, 4.0<N>]]\n  val x: [real<m>; 2] = [1.0<m>, 2.0<m>]\n  val y: [real<s>; 2] = A @ x\n"),
+        "error: `y` must be [real<s>; 2], but this is [real64<N m>; 2]: energy and time are different dimensions @4:25")
+
+// -- control flow, places and generic units -----------------------------------------------------------
+
+@test("an if over measured arrays takes its first branch's unit")
+units_array_if()
+    assert_eq(elaborated("def main() =\n  val x = [1.0<m>]\n  print(if true then x else [1.0<mm>])\n"),
+        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (if:[real64<m>] true x#0 (rescale:[real64<m>] 0.001 (array:[real64<mm>] 1.0<mm>)))) \" m\"))))")
+    assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(if true then x else [1.0<s>])\n"), "error: the branches of this `if` differ: [real64<m>] and [real64<s>] @3:9")
+
+@test("an element of a measured array is read, assigned and iterated with its unit")
+units_array_places()
+    assert_eq(elaborated("def main() =\n  var y = [1.0<m>]\n  y[1] = 3.0<mm>\n  for v in y do print(v)\n"),
+        "(def main () void (block (var y#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (= (index:real64<m> y#0 1) (rescale:real64<m> 0.001 3.0<mm>)) (for L0 v#1:real64<m> (in y#0) (print (s (strip:real64 v#1) \" m\")))))")
+    assert_eq(refused("def main() =\n  var y = [1.0<m>]\n  y[1] = 3.0<s>\n"), "error: the value must be real64<m>, but this is real64<s>: time and length are different dimensions @3:10")
+
+@test("a function generic over a unit takes measured arrays")
+units_array_generic()
+    assert_eq(elaborated("def mean[U: Unit](a: [real<U>]) = sum(a) / length(a)\ndef main() = print(mean([1.0<m>, 2.0<m>]))\n"),
+        "(def mean ((a#0 [real64<U>])) real64<U> (/:real64<U> (sum:real64<U> a#0) (promote:real64 (length:int64 a#0))))\n(def main () void (print (s (strip:real64 (call:real64<m> mean (array:[real64<m>] 1.0<m> 2.0<m>))) \" m\")))")
+    assert_eq(elaborated("def same[U: Unit](a: [real<U>], b: [real<U>]) = a + b\ndef main() =\n  print(same([1.0<m>], [2.0<mm>]))\n"),
+        "(def same ((a#0 [real64<U>]) (b#1 [real64<U>])) [real64<U>] (.+:[real64<U>] a#0 b#1))\n(def main () void (print (s (strip:[real64] (call:[real64<m>] same (array:[real64<m>] 1.0<m>) (array:[real64<m>] (rescale:real64<m> 0.001 2.0<mm>)))) \" m\")))")
+    assert_eq(refused("def same[U: Unit](a: [real<U>], b: [real<U>]) = a + b\ndef main() =\n  print(same([1.0<m>], [2.0<s>]))\n"),
+        "error: an element of this array must be real64<m>, but this is real64<s>: time and length are different dimensions @3:25")
+
+// -- C ------------------------------------------------------------------------------------------------
+
+@test("an extern takes a stripped array; a measured one, or a unit in its signature, is refused")
+units_array_extern()
+    assert_eq(elaborated("extern def f(a: [real]): real\ndef main() = print(f(strip([1.0<m>])))\n"),
+        "(extern f ([real64]) -> real64)\n(def main () void (print (call:real64 f (strip:[real64] (array:[real64<m>] 1.0<m>)))))")
+    assert_eq(refused("extern def f(a: [real]): real\ndef main() =\n  val x = [1.0<m>]\n  print(f(x))\n"), "error: `f` is an `extern`, whose parameters never carry a unit; pass the number: `f(strip(x))` @4:11")
+    assert_eq(refused("extern def f(a: [real<m>]): real\n" + MAIN), "error: an `extern` parameter never carries a unit: C takes the number, so declare it [real64] and pass `strip(x)` @1:17")

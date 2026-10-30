@@ -1707,7 +1707,25 @@ specialization: `sqr` called on `real<m>` and on `real<s>` is one function.
 ### 13.6 Linear algebra
 
 Every element of an array carries the array's one unit; a matrix whose columns have different units
-is held stripped. The products and solvers carry units through:
+is held stripped.
+
+- **An array literal is in the unit of its first element that carries one**, and every other
+  element of that dimension is converted to it, as `+` converts its right operand:
+  `[1.0<m>, 2.0<mm>]` is a `[real<m>]` holding 1.0 and 0.002. An element of another dimension, or a
+  dimensionless one, is a compile error (`[0.0, 1.0<m>]` asks for `0.0<m>`). Where the literal's type
+  is expected, every element is converted to that type's unit.
+- **A unit written after an array gives it to every element**: `[1.0, 2.0]<m>` is a `[real<m>]`,
+  the same storage under another type, as `strip(a)` is the reverse.
+- **The element-wise operators, and the prelude functions applied element by element, follow the
+  scalar rules of §13.3 and §13.4 for one element**: `a + b` needs one dimension and converts `b`'s
+  elements to `a`'s unit, `a * b` and `a / b` combine units, a measured scalar broadcasts with its
+  unit, `a^2` takes a constant exponent, `sqrt(a)` halves the exponents and `sin(a)` needs a
+  dimensionless `a`.
+- **`product(a, dim = k)`** multiplies the extent of axis `k`, so its unit is `U` to that extent:
+  the axis is written as an integer literal and its extent is static, or, for an `a` that carries a
+  unit, it is a compile error that suggests `strip` (**PROPOSED**).
+
+The products and solvers carry units through:
 
 | Operation | Unit |
 |---|---|
