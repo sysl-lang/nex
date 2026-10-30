@@ -110,9 +110,30 @@ impl Emitter
         var arrays: Buf[CArray] = buf()
         var roots: Buf[CRoot] = buf()
         var windows: Buf[CWindow] = buf()
+        // By parameter: the user data a callback's `@data` partner passes.
+        var datas: Buf[string] = buf()
+        var callbacks = false
+        var next = 0
 
-        for j in 0..<args.len()
-            val a = args[j]
+        for j in 0..<x.params.len()
+            datas.push("")
+
+            // A `@data` parameter has no argument; it passes its callback's user data, set below.
+            if x.partner[j].is_some()
+                vals.push("")
+                continue
+
+            val a = args[next]
+
+            next += 1
+
+            if is_callback_ty(x.params[j])
+                val cb = self.c_callback(a, x.params[j], has_data(x.partner, j))
+
+                vals.push(cb.code)
+                datas.set(j, cb.data)
+                callbacks = true
+                continue
 
             *a.kind match
                 TBorrow(place) ->
@@ -140,6 +161,31 @@ impl Emitter
                         Complex(b) -> self.c_complex(v, b)
                         _ -> v)
 
+        for j in 0..<x.params.len()
+            x.partner[j] match
+                Some(f) -> vals.set(j, datas[f])
+                None -> ()
+
+        val tys = self.declare_c(span, x)
+        val rt = self.c_result_ty(span, ret)
+
+        // A callback's trap is raised once C has returned (`runtime/trap.sysl`).
+        if callbacks then self.call("nex_cb_begin", "", "", "")
+
+        val value = if windows.len() == 0
+            self.c_value(self.effect(s"func.call @\"${x.symbol}\"(${joined(vals)}) : (${joined(tys)}) -> ${result_text(rt)}", rt), rt, ret)
+        else
+            self.c_wrapped(span, self.c_wrapper(span, WrapJob.CallC(x.symbol), vals, tys, rt, roots, windows), rt, ret, roots)
+
+        self.give_back(arrays)
+
+        if callbacks then self.call("nex_cb_end", "", "", "")
+
+        value
+    end extern_call
+
+    // The C function `x` declared by its symbol, once; the C types of its parameters.
+    declare_c(*self, span: Span, x: TExtern) -> Buf[string]
         var tys: Buf[string] = buf()
         var decl: Buf[string] = buf()
 
@@ -149,18 +195,10 @@ impl Emitter
             tys.push(t)
             decl.push(t + c_ext(x.params[j], x.modes[j]))
 
-        val rt = self.c_result_ty(span, ret)
+        val rt = self.c_result_ty(span, x.ret)
 
-        self.declare(s"c.${x.symbol}", s"func.func private @\"${x.symbol}\"(${joined(decl)})${if rt == "" then "" else s" -> ($rt${c_ext(ret, Mode.Read)})"}")
-
-        val value = if windows.len() == 0
-            self.c_value(self.effect(s"func.call @\"${x.symbol}\"(${joined(vals)}) : (${joined(tys)}) -> ${result_text(rt)}", rt), rt, ret)
-        else
-            self.c_wrapped(span, self.c_wrapper(span, WrapJob.CallC(x.symbol), vals, tys, rt, roots, windows), rt, ret, roots)
-
-        self.give_back(arrays)
-        value
-    end extern_call
+        self.declare(s"c.${x.symbol}", s"func.func private @\"${x.symbol}\"(${joined(decl)})${if rt == "" then "" else s" -> ($rt${c_ext(x.ret, Mode.Read)})"}")
+        tys
 
     // The `inout` array place `place` opened: its root, numbered in `roots`, which gains it unless an
     // earlier argument of the call holds the same one, and the slices opened from it to the window.
@@ -347,7 +385,7 @@ impl Emitter
             self.op("}")
 
     // A C result `r` of type `rt` as a value of `ret`: a complex from the struct of its parts.
-    private c_value(*self, r: string, rt: string, ret: Ty) -> string = base_of(ret) match
+    c_value(*self, r: string, rt: string, ret: Ty) -> string = base_of(ret) match
         Complex(b) ->
             val re = self.def(s"llvm.extractvalue $r[0] : $rt")
             val im = self.def(s"llvm.extractvalue $r[1] : $rt")
@@ -437,7 +475,7 @@ impl Emitter
         ok
 
     // The MLIR type of a parameter of type `t` in mode `mode` as C takes it.
-    private c_param_ty(*self, span: Span, t: Ty, mode: Mode) -> string
+    c_param_ty(*self, span: Span, t: Ty, mode: Mode) -> string
         if mode == Inout then return "!llvm.ptr"
 
         base_of(t) match
@@ -445,15 +483,17 @@ impl Emitter
             Array(_, _) -> "!llvm.ptr"
             Nominal(_, _) -> "!llvm.ptr"
             Str -> "!llvm.ptr"
+            Fn(_) -> "!llvm.ptr"
+            CPtr -> "!llvm.ptr"
             _ -> self.ty(span, t)
 
     // The MLIR type of a result of type `t` as C gives it, `""` for none.
-    private c_result_ty(*self, span: Span, t: Ty) -> string = base_of(t) match
+    c_result_ty(*self, span: Span, t: Ty) -> string = base_of(t) match
         Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
         _ -> self.ty(span, t)
 
     // The complex `v` with parts of `b` bits as the array of its parts C takes.
-    private c_complex(*self, v: string, b: int) -> string
+    c_complex(*self, v: string, b: int) -> string
         val at = s"!llvm.array<2 x f$b>"
         val re = self.def(s"complex.re $v : complex<f$b>")
         val im = self.def(s"complex.im $v : complex<f$b>")
@@ -492,7 +532,7 @@ private same_root(a: TExpr, b: TExpr) -> bool = *a.kind match
 
 // The extension clang gives a C argument or result of type `t`: 8- and 16-bit integers and `bool`
 // are widened by the caller on arm64.
-private c_ext(t: Ty, mode: Mode) -> string
+c_ext(t: Ty, mode: Mode) -> string
     if mode == Inout then return ""
 
     base_of(t) match

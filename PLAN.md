@@ -390,6 +390,22 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    is at gfortran's. dot keeps each 4096-element block in order (§9.2.1), so its additions do not
    vectorize and it scales with threads instead: 2.2× at 4.
 
+   *Fused `parallel` expressions* (same machine; 100 sweeps of n = 10⁷ plus the setup; wall time,
+   median of 7, min–max beside it, load 10–30). Before, each element-wise operator under `parallel`
+   was a region of its own writing a new array, and a reduction's operand was built whole first;
+   now a whole element-wise expression is one region, `y = parallel 0.5 * x + y` writes `y` in
+   place, and `sum(x * y)` / `dot(x, y)` compute each product as the block reduces it.
+
+   | kernel | sequential | before, 1 / 4 / 6 threads | after, 1 / 4 / 6 threads |
+   |---|---|---|---|
+   | `y = parallel 0.5 * x + y` | 318 (315–332) | 513 / 419 / 448 | 255 / 152 / 151 (144–226) |
+   | `parallel dot(x, y)` | 791 (778–864) | 790 / 316 / 257 | 521 / 150 / 113 (111–117) |
+   | `parallel sum(x * y)` | — | 789 / 325 / 241 | 523 / 158 / 117 (113–137) |
+
+   The axpy at 4 threads is 2.1× the sequential whole-array statement (which allocates its result
+   each sweep) and 2.8× the unfused `parallel` form; dot at 4 threads is 5.3× its sequential build.
+   Bits are unchanged: the blocks and the tree are the sequential reduction's.
+
    *Count cost* (`nex_retain`/`nex_release`; a loop of 3·10⁷ passes that copies and drops two
    strings, a closure and a struct holding both, no allocation; median of 5, four rounds): atomic
    counts 2438–2822 ms, plain 2066–2179, plain-unless-a-region-runs (what the runtime does) 2215–2276.

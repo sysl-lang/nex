@@ -624,15 +624,13 @@ struct Parser
         if self.accept(".")
             self.expect("{")?
 
-            if !self.at("}")
-                loop
-                    val name = self.ident("a name to import")?
-                    val alias = if self.accept("as") then Some(self.ident("a name to import it as")?) else None
+            loop
+                val name = self.ident("a name to import")?
+                val alias = if self.accept("as") then Some(self.ident("a name to import it as")?) else None
 
-                    selectors.push(Selector(name, alias))
+                selectors.push(Selector(name, alias))
 
-                    if !self.accept(",") then break
-            end if
+                if !self.accept(",") then break
 
             self.expect("}")?
         end if
@@ -809,8 +807,14 @@ struct Parser
         if self.at("unit")
             return Err(error(self.toks.here(), "`unit` declares a physical unit; the empty type is `void`"))
 
-        val name = self.ident("a type")?
-        var t =Type(self.toks.span_from(m), Named(name))
+        var name = self.ident("a type")?
+
+        // `geom.Point`: a type of a module the file imports bare.
+        while self.at(".") && is_ident(self.tok(1))
+            self.bump()
+            name += "." + self.ident("a type")?
+
+        var t = Type(self.toks.span_from(m), Named(name))
 
         if self.accept("[")
             var args: Buf[Type] = buf()

@@ -1,0 +1,3 @@
+module linalg.dense
+
+def dot(a: integer, b: integer) = a * b

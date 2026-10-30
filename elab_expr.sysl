@@ -211,7 +211,7 @@ impl Elab
     elab(*self, e: Expr, want: Option[Ty]) -> TExpr
         val span = e.span
 
-        *e.kind match
+        *self.qualified(e).kind match
             IntLit(v) -> self.int_literal(span, v, want)
             RealLit(v) -> self.real_literal(span, v, want)
             BoolLit(v) -> texpr(span, Bool, TLiteral(BoolVal(v), false))
@@ -223,7 +223,7 @@ impl Elab
             Chain(operands, ops) -> self.chain(span, operands, ops)
             Unary(op, x) -> self.unary(span, op, x, want)
             Juxtapose(c, b) -> self.binary(span, "*", c, b, want)
-            Call(callee, args) -> self.call(span, callee, args, want)
+            Call(callee, args) -> self.call(span, self.qualified(callee), args, want)
             MethodCall(receiver, name, args) -> self.method_call(span, receiver, name, args, want)
             Field(receiver, name) -> self.field(span, receiver, name)
             Lambda(params, body) -> self.lambda(span, params, body, want)
@@ -281,7 +281,7 @@ impl Elab
 
                 return texpr(span, ty, TGlobalRef(g))
             Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(g))
-            Some(TopExtern(k)) -> return texpr(span, self.extern_type(k), TFnRef(g))
+            Some(TopExtern(k)) -> return self.extern_value(span, k, g)
             None -> ()
 
         self.find_generic_fun(g) match
@@ -963,7 +963,7 @@ impl Elab
     place(*self, target: Expr) -> TExpr
         val span = target.span
 
-        val n = *target.kind match
+        val n = *self.qualified(target).kind match
             Name(n) -> n
             Field(receiver, name) -> return self.select_field(span, self.place(receiver), name)
             TupleField(receiver, index) -> return self.select_element(span, self.place(receiver), index)

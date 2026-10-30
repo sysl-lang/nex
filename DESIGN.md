@@ -1144,6 +1144,18 @@ gives each thread its own copy of every local the body binds, its loop counter a
 | `parallel` element-wise or `map` | the thread's run of the result's elements, in storage order, each computed by the scalar operation over the operands' elements |
 | `parallel sum`, `product`, `minval`, `maxval`, `dot` | the thread's run of blocks, each reduced as the sequential reduction reduces it; after the region the same tree |
 
+**A whole element-wise expression is one region.** Under `parallel`, the operators, elemental
+calls, conversions and widenings of an element-wise expression are fused into one scalar computation
+over the arrays and values at its leaves, so `parallel 0.5 * x + y` reads `x` and `y` once each and
+builds no array in between. `and` and `or` are not fused into: their operands are computed whole,
+as without `parallel`. A reduction's operand is fused the same way: `parallel sum(x * y)` and
+`parallel dot(x, y)` compute each product as its block reduces it and never build the array of
+products; the blocks and the tree are unchanged, so the bits are those of the sequential reduction.
+**`y = parallel e`, where `y` is a local array that `e` reads at the element it computes, writes `y`'s
+own buffer in place**: each element is read before it is written, and no other element is read, so
+nothing is allocated. Bufferization copies the buffer first only where something else still holds
+`y`'s old value.
+
 **Arrays cross as buffers.** A local the body reads crosses as its address. An array crosses as a
 memref descriptor, through a *launcher*: a private function that takes every array the region
 reaches as a tensor argument, gives back each one the body writes, fills their fields of the
@@ -1154,7 +1166,9 @@ first only where the caller still needs its old value or the call also reads it.
 written array is a `restrict writable` tensor over that buffer, written back over it at the end,
 which bufferization turns into nothing. An array a lambda captures is held in a cell as a counted
 object; one the body writes crosses as that object's own buffer, written in place, after the cell
-is given a copy of its own if anything else (a `val` sharing it, §8.4) still holds the object. The
+is given a copy of its own if anything else (a `val` sharing it, §8.4) still holds the object. A
+lambda made inside the body that captures that array captures the cell, so it reads the object the
+body writes: the iteration's own elements as the iteration has written them so far. The
 result of a `parallel` element-wise expression is a buffer allocated before the region and freed by
 the deallocation pipeline.
 
@@ -1294,8 +1308,27 @@ A call passes an ordinary closure for `f` and **omits** `data`:
 `f`'s C type, passes the closure's environment as `data`, and the trampoline unpacks it and calls
 the closure. The closure is **borrowed for the call** and may not escape it: a library that keeps
 the pointer past its return is outside the model. A capturing closure for a callback parameter with
-no `@data` partner is a compile error. A trap inside a callback unwinds to the nex frame that made
-the extern call *(unverified)*.
+no `@data` partner is a compile error, as is a function value held in a variable: without a partner
+the argument is a `def` or an `extern` named directly, or a lambda that captures nothing.
+
+**A callback's types cross by value.** Its parameters and result are numbers, `bool` and complexes
+as the table above passes them, never `inout`; an array, a string or a struct does not cross to a
+callback, since C hands over no extent with a pointer. Its type holds one `c_ptr`, where C hands the
+user data back, exactly when it has a `@data` partner, and an extern has one `@data` per callback.
+
+**A trap inside a callback never crosses C's frames.** The callback stops, C's call goes on, and
+every callback C makes after it in the same call returns zero (or nothing) without running; when C
+returns, the trap is raised in the nex frame that made the extern call, where `assert_traps` or the
+program's end sees it like any other. A trap in a callback of a callback ends the inner extern call,
+then the outer. With nothing to catch it, a trap ends the program where it happens, as any trap does.
+
+**A callback runs on the thread that made the extern call, while the call runs.** Called after the
+call returned, or on a thread C started, it has no nex frame to give a trap back to and no hold on
+its closure, and the program ends with a trap saying so.
+
+**An `extern` is a function value** where everything it takes and returns crosses by value — numbers,
+`bool` and complexes, none `inout`: `val f = cbrt`. Passed for a callback with no `@data` partner it
+is C's own function pointer. Any other extern is only called.
 
 ### 10.3 Strides and the leading dimension
 
@@ -1681,8 +1714,18 @@ its module, and a `@test module` exists only in a test build — with these rule
   modules it imports, which are the directories beside it; the other files beside it are not read,
   so a directory of independent programs stays one. The root module declares no `module`.
 - **An import names what it takes**: `import a.b.{x, y as z}`, or every public name of the module
-  with `import a.b.*`, as Fortran's `use a_b` does. `import a.b` alone names nothing and is a compile
-  error. An import names a module, not a declaration inside one.
+  with `import a.b.*`, as Fortran's `use a_b` does. An import names a module, not a declaration
+  inside one, and a brace list names at least one member.
+- **A bare `import a.b` gives qualified access**: `a.b.x` is the module's public `x`, written with
+  the whole path the import names, as Python's `import a.b` does — `import a` alone does not reach
+  `a.b.x`. Every kind of top-level name is reached this way: a call `geom.dist(p, q)`, a constructor
+  `geom.Point(1.0, 2.0)`, a variant `opt.Empty` or `opt.Some(3)`, a binding read or a public `var`
+  assigned (`lib.count = 0`), a function as a value, and a type in an annotation, `p: geom.Point`,
+  `geom.Pair[integer, real]`. A private member is "the module `geom` has no public member `x`".
+  Bare and listed imports of one module may stand together. **A local shadows a module**: where a
+  parameter, binding or loop variable is named as the path's first word, `a.b` is that local's field.
+  The first word may be neither a name the module declares nor one another import binds. Units are
+  not reached through a module, having one namespace (below).
 - **A `module` declaration is the first line of its file, and imports come before every other
   declaration.**
 - **A module sees its own declarations, in every one of its files, `private` ones included, and what
@@ -2016,7 +2059,7 @@ is in `K` until the affine units of §15 arrive.
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
 | Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; variant fields of any type; no type contains itself by value |
 | Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
-| Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed and a bare `import m` is not; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |
+| Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed, and a bare `import m` gives qualified access, `m.x`; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |
 | Field places, `x.f(args)` | §4.16 | §11.4 | fields, tuple elements and `z.re`/`z.im` are assignable and passable `inout`; a function field is called |
 | `match` | §7.5 | §11.4 | a fielded variant is matched with its fields; coverage, repeats and unreachable arms are compile errors |
 | Escaping lambdas | §4.11 | §8.3, §11.4 | only a lambda written as an argument does not escape; an escaping one may not capture `inout` |
