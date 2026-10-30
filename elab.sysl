@@ -177,8 +177,8 @@ struct Elab
                 TopValue(k) -> self.ensure_global(k)
                 TopFun(k) -> self.ensure_body(k)
 
-        // What the elemental and parallel bodies may do is proved over the finished IR, from the
-        // effect summary of every function.
+        // What the elemental and parallel bodies may do, and what an `inout` call may share, is proved
+        // over the finished IR, from the effect summary of every function.
         val p = self.program()
         val fx = summarize(p)
 
@@ -186,6 +186,7 @@ struct Elab
             self.check_elemental(k, fx)
 
         self.check_parallel(p, fx)
+        self.check_inout(p, fx)
         self.check_main()
     end run
 
