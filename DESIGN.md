@@ -2352,7 +2352,8 @@ kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
   where neither says. A module-level binding's initializer is the frame `module level`. A trap
   `assert_traps` catches leaves no stack.
 - **The host may bound a run**: `opts.budget` is the steps one `run` or `call` may take — a call's
-  entry and a loop's pass are a step each — and `cancel()`, called from a host function or from
+  entry and a loop's pass are a step each, so an `@elemental` function applied to an array, and the
+  function `map`, `filter`, `reduce` or `flatMap` is given, take a step an element — and `cancel()`, called from a host function or from
   `write`, stops the run in progress at its next step. Either ends the run with `ScriptHalt`, which
   `assert_traps` does not catch; the next request starts with the budget whole and uncancelled. Calls
   nest at most 10,000 deep, as everywhere (§11.3).

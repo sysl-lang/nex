@@ -1,0 +1,107 @@
+@tests
+
+// A function called once an element — a user's `@elemental` function on arrays, and the function
+// `map`, `filter`, `reduce` and `flatMap` are given — on both engines, which must agree: recursion,
+// an elemental function calling itself on an array inside its own body, a `return`, a loop and a
+// lambda in the body, a lambda that changes a variable it captures, a local `def`, a closure made in
+// the body capturing one of its locals, no elements at all, and a trap part way through.
+
+private val PROGRAM = raw"""
+@elemental
+def fact(n: integer): integer = if n <= 1 then 1 else n * fact(n - 1)
+
+@elemental
+def twos(n: integer): integer = if n <= 0 then 1 else sum(twos([n - 1, n - 1]))
+
+@elemental
+def scaled(x: real, k: real): real =
+  var t = x
+  if t > 1.0
+    return t * k
+  for i in 1..2
+    t = t + k
+  t
+
+@elemental
+def later(x: real): real =
+  val g = (d: real) -> x + d
+  g(0.5)
+
+def main() =
+  val n = [1, 2, 3, 4, 5]
+  print(fact(n))
+  print(twos([0, 1, 2, 3]))
+  print(scaled([0.5, 2.0, 0.25], 3.0))
+  print(scaled(0.5, [1.0, 2.0]))
+  print(later([1.0, 2.0, 3.0]))
+  var count = 0
+  val b = map(n, (v: integer) ->
+    count += 1
+    v * count
+  )
+  print(b)
+  print(count)
+  val step = 10
+  print(map(n, v -> v + step))
+  print(filter(n, v -> v % 2 == 1))
+  print(reduce(n, 100, (a, v) -> a - v))
+  print(flatMap(n, v -> [v, -v]))
+  val e: [integer] = filter(n, v -> v > 9)
+  print(map(e, v -> v * 2))
+  print(filter(e, v -> v > 0))
+  print(reduce(e, 7, (a, v) -> a + v))
+  def tri(k: integer): integer = if k == 0 then 0 else k + tri(k - 1)
+  print(map(n, tri))
+  print(map(n, v ->
+    var t = v
+    val add = (k: integer) -> t + k
+    t = t * 2
+    add(1)
+  ))
+  print(map(n, fact))
+  print(map(n, v ->
+    print(v)
+    v div (3 - v)
+  ))
+"""
+
+private val EXPECTED = raw"""
+[1, 2, 6, 24, 120]
+[1, 2, 4, 8]
+[6.5, 6.0, 6.25]
+[2.5, 4.5]
+[1.5, 2.5, 3.5]
+[1, 4, 9, 16, 25]
+5
+[11, 12, 13, 14, 15]
+[1, 3, 5]
+85
+[1, -1, 2, -2, 3, -3, 4, -4, 5, -5]
+[]
+[]
+7
+[1, 3, 6, 10, 15]
+[3, 5, 7, 9, 11]
+[1, 2, 6, 24, 120]
+1
+2
+3
+"""
+
+@test("a function called once an element, elemental or given to map, filter, reduce or flatMap, agrees on both engines: recursion, captures, locals, no elements, a trap part way")
+run_calls_per_element()
+    val b = bench()
+    val out = ran(b, PROGRAM)
+
+    finish(b)
+    assert_eq(out.text, EXPECTED)
+    assert_eq(out.err.unwrap_or(""), "trap: integer division by zero\n")
+
+@test("an elemental function on two arrays of different lengths traps before it calls anything")
+run_elemental_call_shapes()
+    val b = bench()
+    val out = ran(b, "@elemental\ndef add(x: real, y: real): real =\n  print(x)\n  x + y\n\ndef main() =\n  print(add([1.0, 2.0], [3.0, 4.0]))\n  print(add([1.0, 2.0], [3.0]))\n")
+
+    finish(b)
+    assert_eq(out.text, "1.0\n2.0\n[4.0, 6.0]\n")
+    assert_eq(out.err.unwrap_or(""), "trap: shape mismatch\n")

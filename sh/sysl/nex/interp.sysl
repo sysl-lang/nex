@@ -246,6 +246,57 @@ private call_lambda(m: &Machine, k: usize, env: Buf[Value], args: Buf[Code], c: 
 
     run_frame(m, l.code, frame, l.name, l.span)
 
+// A function value called once for each element of a loop — a user's `@elemental` function, the
+// function `map`, `filter` or `reduce` is given — in one frame made for the loop and reused by every
+// call, which is a call as `call_value` makes it but for the frame. Nothing a call leaves in the
+// frame is read by the next: the caller stores the arguments in its first slots, `run` stores the
+// captures again, and the body binds every other local before it reads it; a lambda made in the body
+// keeps the cells it captures, never the frame.
+private[nex] struct Repeated
+    m: &Machine
+    code: Code
+    frame: &Cells
+    // The captures, stored from slot `at`; and the slot where a local `def` finds itself.
+    env: Buf[Value]
+    at: usize
+    self_slot: Option[usize]
+    me: Value
+    name: string
+    span: Span
+
+// `f` ready to be called once an element; none where it is not a function.
+private[nex] repeated(m: &Machine, f: Value) -> Option[Repeated] = f match
+    VFn(k) ->
+        val g = m.funs[k]
+
+        Some(Repeated(m, g.code, frame_of(g.slots), buf(), 0, None, VVoid, g.name, g.span))
+    VClosure(k, env) ->
+        val l = m.lambdas[k]
+
+        Some(Repeated(m, l.code, frame_of(l.slots), env, l.params, l.self_slot, f, l.name, l.span))
+    _ -> None
+
+// `repeated`, with the trap a call of a value that is not a function is.
+private[nex] function_value(m: &Machine, f: Value) -> Result[Repeated, Signal] = repeated(m, f) match
+    Some(r) -> Ok(r)
+    None -> Err(Trapped(NOT_A_FUNCTION))
+
+impl Repeated
+    // Argument `j` of the next call.
+    arg(self, j: usize, v: Value)
+        self.frame.v.set(j, v)
+
+    // The call, its arguments stored; a trap is sited at `site`, the call's place in the caller.
+    run(self, site: Span) -> Answer
+        for j in 0..<self.env.len()
+            self.frame.v.set(self.at + j, self.env[j])
+
+        self.self_slot match
+            Some(s) -> self.frame.v.set(s, self.me)
+            None -> ()
+
+        sited(self.m, run_frame(self.m, self.code, self.frame, self.name, self.span), site)
+
 // A body run in its frame, a call deeper. A trap leaving it adds the frame to the trap's stack.
 private run_frame(m: &Machine, code: Code, frame: &Cells, name: string, span: Span) -> Answer
     if m.depth >= MAX_CALL_DEPTH then return trapped(call_depth_message())
@@ -1527,7 +1578,9 @@ private arg_at(m: &Machine, k: long) -> Answer
 private[nex] call_value(m: &Machine, f: Value, args: Buf[Code], c: &Cells) -> Answer = f match
     VFn(k) -> call_fun(m, k, args, c)
     VClosure(k, env) -> call_lambda(m, k, env, args, c)
-    _ -> trapped("a call of a value that is not a function")
+    _ -> trapped(NOT_A_FUNCTION)
+
+private[nex] val NOT_A_FUNCTION = "a call of a value that is not a function"
 
 // A real of `fb` bits as one of `tb`: a widening, or a rounding that traps an overflow under
 // `--fpe-trap`.

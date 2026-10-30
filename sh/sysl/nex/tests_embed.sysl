@@ -543,6 +543,39 @@ emb_trap_stack()
 
     assert_eq(ran(t), "trap: integer division by zero\n  in inner at t.nex:3:3\n  in outer at t.nex:6:3\n  in main at t.nex:10:9")
 
+@test("a trap inside a function called once an element leaves that function's frame, sited where it happened, then the caller's at the call")
+emb_trap_stack_per_element()
+    val s = loaded("@elemental\ndef inv(x: integer): integer =\n  val z = x - 2\n  x div z\n\ndef main() =\n  print(inv([1, 2, 3]))\n")
+
+    assert_eq(ran(s), "trap: integer division by zero\n  in inv at t.nex:4:3\n  in main at t.nex:7:9")
+
+    val t = loaded("@elemental\ndef inv(x: integer): integer = x div (x - 2)\n\ndef outer(a: [integer]): [integer] =\n  val b = inv(a)\n  b\n\ndef main() =\n  print(outer([1, 2, 3]))\n")
+
+    assert_eq(ran(t), "trap: integer division by zero\n  in inv at t.nex:1:1\n  in outer at t.nex:5:11\n  in main at t.nex:9:9")
+
+    val u = loaded("def main() =\n  val k = 2\n  print(map([1, 2, 3], v -> v div (k - v)))\n  print(1)\n")
+
+    assert_eq(ran(u), "trap: integer division by zero\n  in a lambda at t.nex:3:29\n  in main at t.nex:3:9")
+
+    val w = loaded("def main() =\n  print(reduce([1, 2, 3], 0, (a, v) ->\n    val d = 2 - v\n    a + v div d\n  ))\n")
+
+    assert_eq(ran(w), "trap: integer division by zero\n  in a lambda at t.nex:4:5\n  in main at t.nex:2:9")
+
+    val x = loaded("def main() =\n  def odd(v: integer): bool = v div (v - 3) > 0\n  print(filter([1, 2, 3], odd))\n")
+
+    assert_eq(ran(x), "trap: integer division by zero\n  in odd at t.nex:2:31\n  in main at t.nex:3:9")
+
+@test("a function called once an element takes a step for each call, so a budget stops a long map part way")
+emb_budget_per_element()
+    val o: &Out = Out(str_builder())
+    val s = loaded("var n = 0\n\n@elemental\ndef same(x: integer): integer = x\n\ndef each(k: integer): integer =\n  val a: [integer] = zeros(k)\n  sum(map(a, v ->\n    n += 1\n    v\n  ))\n\ndef elementwise(k: integer): integer =\n  val a: [integer] = zeros(k)\n  sum(same(a))\n", new_host(), kept(o, 50))
+
+    assert_eq(called(s, "each", one(int_value(100))), "stopped after 50 steps, the host's budget")
+    assert_eq(shown(s.get("n").unwrap()), "i64:48")
+    assert_eq(called(s, "each", one(int_value(40))), "i64:0")
+    assert_eq(called(s, "elementwise", one(int_value(100))), "stopped after 50 steps, the host's budget")
+    assert_eq(called(s, "elementwise", one(int_value(40))), "i64:0")
+
 @test("a step budget stops an infinite loop and runaway recursion, and the next call starts with the budget whole")
 emb_budget()
     val o: &Out = Out(str_builder())

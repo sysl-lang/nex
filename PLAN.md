@@ -529,9 +529,12 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       `min`, `max`, `atan2`, `hypot`, the complex functions), `minloc`/`maxloc`, `product` of complex
       numbers, `dot` of integers and complex numbers, and the inline product below BLAS's size, which
       keeps `linalg.matmul`'s order with each product and sum rounded on its own, never fused
-      (`interp_kernels_fn.sysl`, `interp_la.sysl`). A user's `@elemental` function and `map` call
-      their scalar body per element, reading each operand from a typed copy taken before the body
-      runs; `filter`, `reduce` and the parallel forms run value by value.
+      (`interp_kernels_fn.sysl`, `interp_la.sysl`). A user's `@elemental` function, and the function
+      `map`, `filter`, `reduce` and `flatMap` are given, are called once an element in one frame made
+      for the loop and reused by every call (`Repeated` in `interp.sysl`), each operand read from a
+      typed copy taken before the first call; each call is otherwise the call a scalar call is — a
+      step, the depth limit, and a trap's stack with the function's frame sited where it happened,
+      then the caller's at the call. The parallel forms run value by value.
       Measured (`bench/interp-elementwise.nex`: 200 000 `real64` elements, 50 passes of two
       element-wise statements and a `sum`, then an element loop): 0.02 s compiled; interpreted 0.64 s
       with values as storage, 0.69 s → 0.31 s (and 0.91 s → 0.29 s in a second, interleaved run
@@ -548,8 +551,15 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       0.30 s → 0.28 s. Of the 1.00 s left in the first, the `@elemental` call and the `map` are
       0.39 s and 0.34 s: about 95 ns and 85 ns an element, against 22 ns for the same per-element
       frame with a prelude function as its body, so the call itself — a frame per element — is
-      three quarters of it. Compiling an elemental function's body into the element loop, its
-      parameters in the loop's slots, would save most of that; it is a change to the call path.
+      three quarters of it. Reusing one frame for the loop's calls, measured the same way (median of
+      5, interleaved, under load 36): `bench/interp-elemental.nex` 1.47 s → 0.69 s;
+      `bench/interp-map.nex` (200 000 `real64` elements, 20 passes of two `map`s, one of a lambda
+      capturing a local, a `filter` and a `reduce`) 2.88 s → 1.11 s; 50 passes of `damp(x, 0.5)` alone
+      over the same elements 1.29 s → 0.52 s and of `map(x, v -> v * 0.5 + 1.0)` 1.21 s → 0.47 s,
+      against 0.11 s for `x * 0.5 + 1.0`: about 118 ns → 40 ns an element for the elemental call and
+      110 ns → 36 ns for the lambda. Outputs identical, and trap stacks and step counts identical to
+      the frame-per-call path (`tests_embed.sysl`). What is left is the call's bookkeeping — the step,
+      the depth, the captures stored again — and the body's own closures over boxed values.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel

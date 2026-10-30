@@ -535,11 +535,7 @@ impl Interp
 
             return (c) -> map1(f, v(c)?, et)
 
-        if name == "map"
-            var leaves: Buf[TExpr] = buf()
-
-            leaves.push(leaf(args[0], 0))
-            return self.mapped(t, args, texpr(span, elem_of(t), TCall(leaf(args[1], 1), leaves)))
+        if name == "map" then return self.mapped_call(span, t, args, 1, None)
 
         if name == "reduce" then return self.folded(span, args, t)
         if name == "filter" then return self.filtered(span, args)
@@ -643,19 +639,7 @@ impl Interp
     // `reduce(a, init, f)`: `f(…f(f(init, a₁), a₂)…)`, in storage order.
     folded(*self, span: Span, args: Buf[TExpr], t: Ty) -> Code
         val codes = self.operands(args)
-        var leaves: Buf[TExpr] = buf()
-
-        leaves.push(texpr(span, t, TChainOperand(1)))
-        leaves.push(texpr(span, elem_of(args[0].ty), TChainOperand(2)))
-
-        val base = self.next
-
-        self.next += 3
-        self.chains.push(base)
-
-        val call = self.ex(texpr(span, t, TCall(texpr(span, args[2].ty, TChainOperand(0)), leaves)))
-
-        self.chains.pop()
+        val m = self.m
 
         (c) ->
             val f = codes[0]
@@ -663,13 +647,16 @@ impl Interp
             val h = codes[2]
             val xs = elements(arr_of(f(c)?))
             var acc = g(c)?
+            val fv = h(c)?
 
-            c.v.set(base, h(c)?)
+            if xs.len() == 0 then return Ok(acc)
+
+            val r = function_value(m, fv)?
 
             for x in xs
-                c.v.set(base + 1, acc)
-                c.v.set(base + 2, x)
-                acc = call(c)?
+                r.arg(0, acc)
+                r.arg(1, x)
+                acc = r.run(span)?
 
             Ok(acc)
 
@@ -678,21 +665,23 @@ impl Interp
     filtered(*self, span: Span, args: Buf[TExpr]) -> Code
         val codes = self.operands(args)
         val et = elem_of(args[0].ty)
-        val (base, apply) = self.applying(span, args[1], et, Bool)
+        val m = self.m
 
         (c) ->
             val f = codes[0]
             val g = codes[1]
             val xs = elements(arr_of(f(c)?))
             var out: Buf[Value] = buf()
+            val fv = g(c)?
 
-            c.v.set(base, g(c)?)
+            if xs.len() == 0 then return Ok(vector(et, out))
 
+            val r = function_value(m, fv)?
             var keep: Buf[bool] = buf()
 
             for x in xs
-                c.v.set(base + 1, x)
-                keep.push(bool_of(apply(c)?))
+                r.arg(0, x)
+                keep.push(bool_of(r.run(span)?))
 
             for k in 0..<xs.len()
                 if keep[k] then out.push(xs[k])
@@ -705,40 +694,26 @@ impl Interp
         val ret = args[1].ty match
             Fn(sig) -> sig.ret
             _ -> Void
-        val (base, apply) = self.applying(span, args[1], elem_of(args[0].ty), ret)
+        val m = self.m
 
         (c) ->
             val f = codes[0]
             val g = codes[1]
             val xs = elements(arr_of(f(c)?))
             var out: Buf[Value] = buf()
+            val fv = g(c)?
 
-            c.v.set(base, g(c)?)
+            if xs.len() == 0 then return Ok(vector(elem_of(ret), out))
+
+            val r = function_value(m, fv)?
 
             for x in xs
-                c.v.set(base + 1, x)
+                r.arg(0, x)
 
-                for y in elements(arr_of(apply(c)?))
+                for y in elements(arr_of(r.run(span)?))
                     out.push(y)
 
             Ok(vector(elem_of(ret), out))
-
-    // The call of the function value `f` on one element of type `et`, answering a `ret`: compiled
-    // over two slots of the frame, the function then the element, the first of which is answered.
-    applying(*self, span: Span, f: TExpr, et: Ty, ret: Ty) -> (usize, Code)
-        var leaves: Buf[TExpr] = buf()
-
-        leaves.push(texpr(span, et, TChainOperand(1)))
-
-        val base = self.next
-
-        self.next += 2
-        self.chains.push(base)
-
-        val call = self.ex(texpr(span, ret, TCall(texpr(span, f.ty, TChainOperand(0)), leaves)))
-
-        self.chains.pop()
-        (base, call)
 
     // `assert_approx(a, b, tol)` on two arrays of one shape: every pair of elements no further apart
     // than `tol`; otherwise a trap that says where and by how much, or how the shapes differ.

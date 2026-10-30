@@ -67,6 +67,50 @@ private[nex] int_value(n: long, t: Ty) -> Value = base_of(t) match
 // An operand of a scalar body: the `k`th value of the innermost chain frame, of `e`'s element type.
 private[nex] leaf(e: TExpr, k: usize) -> TExpr = texpr(e.span, elem_of(e.ty), TChainOperand(k))
 
+// The values of `codes`, in order.
+private[nex] evaluated(codes: Buf[Code], c: &Cells) -> Result[Buf[Value], Signal]
+    var vals: Buf[Value] = buf()
+
+    for f in codes
+        vals.push(f(c)?)
+
+    Ok(vals)
+
+// The shape the array operands among `vals` share, or the trap of two that differ.
+private[nex] common_shape(vals: Buf[Value], arrays: Buf[bool]) -> Result[&Arr, Signal]
+    var shape: Option[&Arr] = None
+
+    for k in 0..<vals.len()
+        if !arrays[k] then continue
+
+        val a = arr_of(vals[k])
+
+        shape match
+            Some(s) -> if !same_shape(s, a) then return Err(Trapped(SHAPE_MISMATCH))
+            None -> shape = Some(a)
+
+    Ok(shape.unwrap())
+
+// Each array operand's elements in storage order, taken before an element's body runs, which may
+// write the place an operand came from: machine numbers copied as they lie, and an array of values
+// read as `elements` reads it, which shares the arrays its elements hold. A scalar has none.
+private[nex] runs_of(vals: Buf[Value], arrays: Buf[bool]) -> Buf[Data]
+    var runs: Buf[Data] = buf()
+
+    for k in 0..<vals.len()
+        if !arrays[k]
+            runs.push(DValues(buf()))
+            continue
+
+        val a = arr_of(vals[k])
+
+        runs.push(a.store.d match
+            DValues(_) -> DValues(elements(a))
+            _ -> data_gather(a)
+        )
+
+    runs
+
 impl Interp
     // Whether a value of `t` holds an array: is one, or has a field that is, at any depth.
     holds_array(*self, t: Ty) -> bool
@@ -191,6 +235,12 @@ impl Interp
                         (c) -> map1(f, a(c)?, to)
                     None -> self.later(e.span, s"a conversion from ${show_ty(v.ty)} to ${show_ty(e.ty)}")
             TElementalCall(callee, args) ->
+                *callee.kind match
+                    TFnRef(name) -> self.fun_number(name) match
+                        Some(k) -> return self.mapped_call(e.span, e.ty, args, args.len(), Some(k))
+                        None -> ()
+                    _ -> ()
+
                 var leaves: Buf[TExpr] = buf()
 
                 for k in 0..<args.len()
@@ -606,43 +656,10 @@ impl Interp
         self.chains.pop()
 
         (c) ->
-            var vals: Buf[Value] = buf()
-
-            for k in 0..<codes.len()
-                val f = codes[k]
-
-                vals.push(f(c)?)
-
-            var shape: Option[&Arr] = None
-
-            for k in 0..<vals.len()
-                if !arrays[k] then continue
-
-                val a = arr_of(vals[k])
-
-                shape match
-                    Some(s) -> if !same_shape(s, a) then return trapped(SHAPE_MISMATCH)
-                    None -> shape = Some(a)
-
-            val s = shape.unwrap()
+            val vals = evaluated(codes, c)?
+            val s = common_shape(vals, arrays)?
             val n = count_of(s)
-            // Each array operand's elements in storage order, taken before the body runs, which may
-            // write the place an operand came from: machine numbers copied as they lie, and an array
-            // of values read as `elements` reads it, which shares the arrays its elements hold.
-            var runs: Buf[Data] = buf()
-
-            for k in 0..<vals.len()
-                if !arrays[k]
-                    runs.push(DValues(buf()))
-                    continue
-
-                val a = arr_of(vals[k])
-
-                runs.push(a.store.d match
-                    DValues(_) -> DValues(elements(a))
-                    _ -> data_gather(a)
-                )
-
+            val runs = runs_of(vals, arrays)
             val res = data_for(et)
 
             for j in 0..<n
@@ -653,6 +670,41 @@ impl Interp
 
             Ok(dense_data(res, s.ext))
     end mapped
+
+    // `mapped` where the scalar body is a call on operands `0 ..< params` of function `fixed`, or of
+    // the function value operand `params` is: every element's call made in one frame (`Repeated`).
+    mapped_call(*self, span: Span, out: Ty, operands: Buf[TExpr], params: usize, fixed: Option[usize]) -> Code
+        val codes = self.operands(operands)
+        var arrays: Buf[bool] = buf()
+
+        for o in operands
+            arrays.push(is_array(o.ty))
+
+        val et = elem_of(out)
+        val m = self.m
+
+        (c) ->
+            val vals = evaluated(codes, c)?
+            val s = common_shape(vals, arrays)?
+            val n = count_of(s)
+            val runs = runs_of(vals, arrays)
+            val res = data_for(et)
+
+            if n == 0 then return Ok(dense_data(res, s.ext))
+
+            val r = function_value(m, fixed match
+                Some(k) -> VFn(k)
+                None -> vals[params]
+            )?
+
+            for j in 0..<n
+                for k in 0..<params
+                    r.arg(k, if arrays[k] then data_get(runs[k], usize(j)) else vals[k])
+
+                data_push(res, r.run(span)?)
+
+            Ok(dense_data(res, s.ext))
+    end mapped_call
 
     // An array widened element by element, or seen with other static extents.
     array_converted(*self, span: Span, v: TExpr, to: Ty, traps: bool) -> Code
