@@ -12,8 +12,16 @@
 
 import sysl.buf.{Buf, buf}
 import sysl.math.max
-import sysl.text.split
+import sysl.text.{split, str_builder}
 import sh.sysl.parsing.Span
+
+// A `match` case written aside: its head, its operations, the array values as it leaves them and its
+// value (`""` for none).
+struct Case
+    head: string
+    text: string
+    arr: Buf[string]
+    value: string
 
 impl Emitter
     struct_of(*self, name: string) -> Option[TStruct]
@@ -194,19 +202,20 @@ impl Emitter
         // The elaborator matches nothing but an enum.
         val en = self.enum_ty(st).unwrap()
         val idx = self.tag_index(s, self.ty(e.span, st))
-        val r = if rt == "" then "" else self.fresh()
-
-        self.op(if rt == "" then s"scf.index_switch $idx" else s"$r = scf.index_switch $idx -> $rt")
-
         var fallback: Option[TArm] = None
+        // Each case is written aside, since what it yields is known only once every case is: its
+        // value, and every array value held as an SSA value that some case changes.
+        val outer = self.body
         val before = copy_strings(self.arr)
+        var cases: Buf[Case] = buf()
 
         for arm in arms
             arm.pat match
                 PVariant(_, tag, binds) ->
                     val fields = en.variants[tag].fields
 
-                    self.op(s"case $tag {")
+                    self.body = str_builder()
+                    self.arr = copy_strings(before)
                     self.dirty = entry
 
                     if fields.len() > 0
@@ -222,23 +231,67 @@ impl Emitter
 
                         self.release_from(m)
 
-                    self.arm_end(arm.body, e.ty, rt, before)
+                    val v = if rt == "" then self.region(arm.body) else self.region_value(arm.body, e.ty)
+
+                    cases.push(Case(s"case $tag", self.body.finish(), copy_strings(self.arr), if rt == "" then "" else v))
                 PAny(_) -> if fallback.is_none() then fallback = Some(arm)
 
-        self.op("default {")
+        self.body = str_builder()
+        self.arr = copy_strings(before)
         self.dirty = entry
 
-        fallback match
+        // Where every variant has its arm the tag is never another, and the default yields zeros.
+        val dv = fallback match
             Some(arm) ->
                 self.bind_whole(e.span, arm.pat, s, st)
-                self.arm_end(arm.body, e.ty, rt, before)
-            None ->
-                // Every variant has its arm; the tag is never another.
-                if rt == "" then self.op("scf.yield") else self.yield_value("", e.ty)
-                self.op("}")
+                if rt == "" then self.region(arm.body) else self.region_value(arm.body, e.ty)
+            None -> ""
+
+        cases.push(Case("default", self.body.finish(), copy_strings(self.arr), dv))
+        self.body = outer
+
+        var ids: Buf[usize] = buf()
+
+        for k in 0..<before.len()
+            if before[k] == "" then continue
+
+            for c in cases
+                if c.arr[k] != before[k]
+                    ids.push(k)
+                    break
+
+        var tys: Buf[string] = buf()
+
+        for id in ids
+            tys.push(self.tensor_ty(e.span, self.carried_ty(id)))
+
+        if rt != "" then tys.push(rt)
+
+        val n = tys.len()
+        val r = self.fresh()
+
+        self.op(s"${result_def(r, n)}scf.index_switch $idx${if n == 0 then "" else s" -> ${joined(tys)}"}")
+
+        for c in cases
+            self.op(s"${c.head} {")
+            self.body.push(c.text)
+
+            var vals: Buf[string] = buf()
+
+            for id in ids
+                vals.push(c.arr[id])
+
+            if rt != "" then vals.push(if c.value == "" then self.zero_of(e.span, e.ty) else c.value)
+            self.op(if n == 0 then "scf.yield" else s"scf.yield ${joined(vals)} : ${joined(tys)}")
+            self.op("}")
+
+        self.arr = before
+
+        for k in 0..<ids.len()
+            self.arr.set(ids[k], result_name(r, k, n))
 
         self.dirty = entry
-        if r == "" then "" else self.own(r, e.ty)
+        if rt == "" then "" else self.own(result_name(r, n - 1, n), e.ty)
     end match_expr
 
     // `name -> ...`: the whole value bound.
@@ -247,21 +300,6 @@ impl Emitter
             PAny(Some(id)) -> self.bind_value(span, id, s, t)
             _ -> ()
 
-    // An arm's body as its case's region, yielding its value of `t` (MLIR type `rt`); the array
-    // values held as SSA values, `before` the `match`, are what they were again after it.
-    arm_end(*self, body: TExpr, t: Ty, rt: string, before: Buf[string])
-        if rt == ""
-            self.region(body)
-            self.op("scf.yield")
-        else
-            self.yield_value(self.region_value(body, t), t)
-
-        self.op("}")
-
-        for k in 0..<before.len()
-            if before[k] != "" && self.arr[k] != before[k] then self.later(body.span, "an array assigned inside a `match` arm")
-
-        self.arr = copy_strings(before)
 
     // -- destructuring ----------------------------------------------------------------------------
 
