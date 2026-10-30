@@ -12,8 +12,9 @@
 //
 // **An operand crosses as §10.3 says an array crosses to C**: the address of its first element where
 // it lies, with the column stride as its leading dimension, or a dense copy (`nex_c_gather`) where
-// nex's first axis is not at unit stride or the columns overlap. The result is a fresh buffer the
-// runtime writes, which becomes the product's tensor.
+// nex's first axis is not at unit stride or the columns overlap. The result is a buffer the runtime
+// writes, which becomes the product's tensor: a fresh one, or for `c = a @ b` the local `c`'s own
+// where it has the product's extents and lies dense (`matmul_assign`).
 //
 // A program that calls BLAS or LAPACK says so before its module (`// nex.blas`), and the driver
 // links the library.
@@ -115,19 +116,24 @@ private static_blas(lt: Ty, rt: Ty) -> Option[bool]
 impl Emitter
     // `a @ b` (DESIGN §7.2, §10.4): through BLAS, through `linalg`, or through either as its size
     // decides at run time.
-    matmul(*self, e: TExpr, l: TExpr, r: TExpr) -> string
+    matmul(*self, e: TExpr, l: TExpr, r: TExpr) -> string = self.matmul_to(e, l, r, "")
+
+    // `a @ b` written, where `dest` is not `""`, over the array `dest` of the product's type where
+    // its extents are the product's and it lies dense, as a buffer BLAS writes; else into a new one.
+    // `dest` must not be read by `a` or `b`.
+    matmul_to(*self, e: TExpr, l: TExpr, r: TExpr, dest: string) -> string
         if !blas_element(elem_of(e.ty)) then return self.linalg_matmul(e, l.ty, r.ty, self.ex(l), self.ex(r))
 
         val oa = blas_operand(l)
         val ob = blas_operand(r)
 
-        if oa.flag != NO_TRANS || ob.flag != NO_TRANS then return self.blas_matmul(e, oa, ob, self.ex(oa.x), self.ex(ob.x))
+        if oa.flag != NO_TRANS || ob.flag != NO_TRANS then return self.blas_matmul(e, oa, ob, self.ex(oa.x), self.ex(ob.x), dest)
 
         val a = self.ex(l)
         val b = self.ex(r)
 
         static_blas(l.ty, r.ty) match
-            Some(big) -> return if big then self.blas_matmul(e, oa, ob, a, b) else self.linalg_matmul(e, l.ty, r.ty, a, b)
+            Some(big) -> return if big then self.blas_matmul(e, oa, ob, a, b, dest) else self.linalg_matmul(e, l.ty, r.ty, a, b)
             None -> ()
 
         // The size, as `measured_axes` takes it, against the threshold.
@@ -149,25 +155,27 @@ impl Emitter
             val v = self.fresh()
 
             self.op(s"$v = scf.if $big -> ($t) {")
-            self.op(s"scf.yield ${self.blas_matmul(e, oa, ob, a, b)} : $t")
+            self.op(s"scf.yield ${self.blas_matmul(e, oa, ob, a, b, "")} : $t")
             self.op("} else {")
             self.op(s"scf.yield ${self.linalg_matmul(e, l.ty, r.ty, a, b)} : $t")
             self.op("}")
             return v
 
-        self.either_matmul(e, l.ty, r.ty, a, b, big)
+        self.either_matmul(e, l.ty, r.ty, a, b, big, dest)
 
     // `a @ b` of operand types `lt` and `rt`, an array, through BLAS where `big` holds and through
     // `linalg` on buffers where it does not. The result's buffer is made before the choice, so the
     // product has one buffer whichever path wrote it.
-    private either_matmul(*self, e: TExpr, lt: Ty, rt: Ty, a: string, b: string, big: string) -> string
+    private either_matmul(*self, e: TExpr, lt: Ty, rt: Ty, a: string, b: string, big: string, dest: string) -> string
         val span = e.span
         val ra = rank_of(lt)
         val rb = rank_of(rt)
+        val m = if ra == 2 then self.dim(span, a, lt, 1) else self.dim(span, b, rt, 2)
+        // The destination's buffer is taken before the operands are read, so bufferization copies
+        // it first where an operand still reads it.
+        val c = self.product_buffer(span, e.ty, m, if ra == 2 && rb == 2 then self.dim(span, b, rt, 2) else "", dest)
         val am = self.read_buffer(span, a, lt)
         val bm = self.read_buffer(span, b, rt)
-        val m = if ra == 2 then self.dim(span, a, lt, 1) else self.dim(span, b, rt, 2)
-        val c = self.fresh_buffer(span, elem_of(e.ty), m, if ra == 2 && rb == 2 then self.dim(span, b, rt, 2) else "")
 
         self.op(s"scf.if $big {")
 
@@ -191,23 +199,30 @@ impl Emitter
         self.buffer_tensor(span, c, e.ty)
 
     // `a @ b` through BLAS, the operands' values `a` and `b`.
-    private blas_matmul(*self, e: TExpr, oa: BlasOperand, ob: BlasOperand, a: string, b: string) -> string
+    private blas_matmul(*self, e: TExpr, oa: BlasOperand, ob: BlasOperand, a: string, b: string, dest: string) -> string
         val span = e.span
-        val x = self.blas_arg(span, self.read_buffer(span, a, oa.x.ty), oa.x.ty, false)
-        val y = self.blas_arg(span, self.read_buffer(span, b, ob.x.ty), ob.x.ty, false)
         val ra = rank_of(oa.x.ty)
         val rb = rank_of(ob.x.ty)
+        // The result's buffer, of op(X)'s rows and op(Y)'s columns, is taken before the operands are
+        // read, so bufferization copies the destination first where an operand still reads it.
+        var c: Option[LBuf] = None
+
+        if ra == 2
+            val rows = self.dim(span, a, oa.x.ty, if oa.flag == NO_TRANS then 1 else 2)
+
+            c = if rb == 2 then Some(self.product_buffer(span, e.ty, rows, self.dim(span, b, ob.x.ty, if ob.flag == NO_TRANS then 2 else 1), dest))
+                else Some(self.product_buffer(span, e.ty, rows, "", dest))
+        elif rb == 2 then c = Some(self.product_buffer(span, e.ty, self.dim(span, b, ob.x.ty, if ob.flag == NO_TRANS then 2 else 1), "", dest))
+
+        val x = self.blas_arg(span, self.read_buffer(span, a, oa.x.ty), oa.x.ty, false)
+        val y = self.blas_arg(span, self.read_buffer(span, b, ob.x.ty), ob.x.ty, false)
         var out = ""
 
-        if ra == 1 && rb == 1 then out = self.la_dot(span, e.ty, x, y)
-        else
-            // The result's extents: op(X)'s rows and op(Y)'s columns.
-            val rows = if oa.flag == NO_TRANS then x.rows else x.cols
-            val cols = if ob.flag == NO_TRANS then y.cols else y.rows
-            val c = if ra == 2 && rb == 2 then self.fresh_buffer(span, elem_of(e.ty), rows, cols) elif ra == 2 then self.fresh_buffer(span, elem_of(e.ty), rows, "") else self.fresh_buffer(span, elem_of(e.ty), cols, "")
-
-            self.la_product(e.ty, x, ra, oa.flag, y, rb, ob.flag, c)
-            out = self.buffer_tensor(span, c, e.ty)
+        c match
+            None -> out = self.la_dot(span, e.ty, x, y)
+            Some(cb) ->
+                self.la_product(e.ty, x, ra, oa.flag, y, rb, ob.flag, cb)
+                out = self.buffer_tensor(span, cb, e.ty)
 
         var copies: Buf[CArray] = buf()
 
@@ -294,6 +309,48 @@ impl Emitter
         val base = self.def(s"arith.index_cast ${self.def(s"memref.extract_aligned_pointer_as_index $m : $mty -> index")} : index to i64")
 
         LBuf(m, mty, self.def(s"llvm.inttoptr $base : i64 to !llvm.ptr"), rows, if cols == "" then self.index_const(1) else cols)
+
+    // The buffer a product of type `t`, of extents `rows` by `cols` (`""` for a vector), is written
+    // to: the array `dest`'s own where it has those extents and lies dense from its first element,
+    // else a fresh one, as it is where `dest` is `""`.
+    product_buffer(*self, span: Span, t: Ty, rows: string, cols: string, dest: string) -> LBuf
+        if dest == "" then return self.fresh_buffer(span, elem_of(t), rows, cols)
+
+        val vt = self.view_ty(t)
+        val bt = self.boundary_ty(span, vt)
+        val dm = self.def(s"bufferization.to_buffer ${self.cast(span, dest, t, vt)} : ${self.tensor_ty(span, vt)} to $bt")
+        val md = self.metadata(dm, vt)
+        val one = self.index_const(1)
+        // In buffer order, nex's last axis first: the sizes from `#2`, then the strides.
+        var checks: Buf[string] = buf()
+
+        if cols == ""
+            checks.push(s"$md#2, $rows")
+            checks.push(s"$md#3, $one")
+        else
+            checks.push(s"$md#3, $rows")
+            checks.push(s"$md#2, $cols")
+            checks.push(s"$md#5, $one")
+            checks.push(s"$md#4, $rows")
+
+        var ok = ""
+
+        for c in checks
+            val eq = self.def(s"arith.cmpi eq, $c : index")
+
+            ok = if ok == "" then eq else self.def(s"arith.andi $ok, $eq : i1")
+
+        val m = self.fresh()
+
+        self.op(s"$m = scf.if $ok -> ($bt) {")
+        self.op(s"scf.yield $dm : $bt")
+        self.op("} else {")
+
+        val f = self.fresh_buffer(span, elem_of(t), rows, cols)
+
+        self.op(s"scf.yield ${self.def(s"memref.cast ${f.m} : ${f.mty} to $bt")} : $bt")
+        self.op("}")
+        LBuf(m, bt, self.first_element(span, m, vt), rows, if cols == "" then one else cols)
 
     // The buffer `b`, written, as a value of the array type `t`.
     buffer_tensor(*self, span: Span, b: LBuf, t: Ty) -> string

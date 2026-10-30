@@ -9,7 +9,7 @@
 // array local holds now (`arr`); a write makes a new tensor and rebinds it, and bufferization makes
 // the write in place where no other reader needs the old value. A structured region that may rebind
 // one carries it out: an `scf.if` yields every array local either branch changed, and an
-// `scf.while` carries every array local live at the loop as an iteration argument. The value a
+// `scf.for` or `scf.while` carries every array local live at the loop as an iteration argument. The value a
 // `return` gives is carried the same way, as one more entry past the locals.
 //
 // **An array that must live in memory** — one a lambda captures, which both the lambda and its
@@ -63,6 +63,8 @@ enum Dest
     Operand(k: usize)
     // The array `v`, of the result's type, whose shape is static.
     Over(v: string)
+    // The array `v`, of the result's type, where its extents are the result's, else a new array.
+    OverIfSame(v: string)
 
 // A fused element-wise expression: its leaves in source order and their values, the scalar over
 // them, the condition that a shape check among them trapped (`""` where none can), and the index of
@@ -88,10 +90,19 @@ private is_static(t: Ty) -> bool
 
     true
 
-// An `scf.while` being emitted: the array locals it carries and the name of its results.
+// An `scf.while` or `scf.for` being emitted: the array locals it carries, the name of its results,
+// and an `scf.for`'s induction variable (`""` for an `scf.while`).
 struct Loop
     ids: Buf[usize]
     result: string
+    iv: string
+
+// A loop of passes counted on entry being emitted (`passes_open`): the loop, the slot of its
+// counter (`""` for an `scf.for`), and the pass from 0, an `i64`.
+struct Passes
+    l: Loop
+    counter: string
+    k: string
 
 // Nested `scf.for` loops being emitted: their induction variables, outermost first, the tensor each
 // level carries, and each level's result.
@@ -357,7 +368,7 @@ impl Emitter
 
         if ids.len() == 0
             self.op("scf.while : () -> () {")
-            return Loop(ids, r)
+            return Loop(ids, r, "")
 
         var inits: Buf[string] = buf()
         var tys: Buf[string] = buf()
@@ -372,7 +383,73 @@ impl Emitter
         val ty_text = joined(tys)
 
         self.op(s"${result_def(r, ids.len())}scf.while (${joined(inits)}) : ($ty_text) -> ($ty_text) {")
-        Loop(ids, r)
+        Loop(ids, r, "")
+
+    // An `scf.for` of `n` passes (an `index`) opens, carrying every array value live here; its
+    // induction variable counts the passes from 0, and `body` is the body to come. `loop_close`
+    // ends it. One-shot bufferization reuses a carried array's buffer from pass to pass where the
+    // body's new value is written in place or in a buffer of its own, where an `scf.while` would
+    // copy it at every pass whose value is not the old buffer, so a loop whose passes are counted on
+    // entry is an `scf.for`.
+    //
+    // **Canonicalize takes an `scf.for`'s carried tensor to keep the shape it starts with**: where
+    // the value going in is a `tensor.cast` from a static shape, it carries the static shape and
+    // casts each pass's new value to it. An array the body may give another shape therefore goes in
+    // as a slice of itself whose extents pass through memory (`opaque`), which canonicalize cannot
+    // see through; the slice is the whole array, which bufferization makes a view, not a copy.
+    counted_open(*self, n: string, body: TExpr) -> Loop
+        var ids: Buf[usize] = buf()
+
+        for k in 0..<self.arr.len()
+            if self.arr[k] != "" then ids.push(k)
+
+        val r = self.fresh()
+        val iv = self.fresh()
+        val zero = self.index_const(0)
+        val one = self.index_const(1)
+
+        if ids.len() == 0
+            self.op(s"scf.for $iv = $zero to $n step $one {")
+            return Loop(ids, r, iv)
+
+        var inits: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+
+        for id in ids
+            val b = self.fresh()
+            val t = self.carried_ty(id)
+            val v = if !is_static(t) && may_reshape(body, id) then self.opaque(self.arr[id], t) else self.arr[id]
+
+            inits.push(s"$b = $v")
+            tys.push(self.tensor_ty(Span(0, 0), t))
+            self.arr.set(id, b)
+
+        self.op(s"${result_def(r, ids.len())}scf.for $iv = $zero to $n step $one iter_args(${joined(inits)}) -> (${joined(tys)}) {")
+        Loop(ids, r, iv)
+
+    // The whole of the array `v` of type `t` as a slice whose dynamic extents are stored to memory and
+    // loaded back, so that no fold knows them.
+    private opaque(*self, v: string, t: Ty) -> string
+        val span = Span(0, 0)
+        val axes = axes_of(t)
+        val r = axes.len()
+        val slot = self.alloca("i64")
+        var offsets: Buf[string] = buf()
+        var sizes: Buf[string] = buf()
+        var strides: Buf[string] = buf()
+
+        for k in 0..<r
+            offsets.push("0")
+            strides.push("1")
+            axes[r - 1 - k] match
+                Fixed(x) -> sizes.push(s"$x")
+                _ ->
+                    self.op(s"llvm.store ${self.to_i64(self.dim(span, v, t, r - k))}, $slot : i64, !llvm.ptr")
+                    sizes.push(self.def(s"arith.index_cast ${self.def(s"llvm.load $slot : !llvm.ptr -> i64")} : i64 to index"))
+
+        val tt = self.tensor_ty(span, t)
+
+        self.def(s"tensor.extract_slice $v[${joined(offsets)}] [${joined(sizes)}] [${joined(strides)}] : $tt to $tt")
 
     loop_types(*self, l: Loop) -> string
         var tys: Buf[string] = buf()
@@ -832,6 +909,7 @@ impl Emitter
         val init = dest match
             Dest.Operand(k) -> vals[k]
             Dest.Over(v) -> v
+            Dest.OverIfSame(v) -> self.same_or_new(span, v, out, dims)
             Dest.Fresh -> self.def(s"tensor.empty(${joined(dims)}) : $ot")
         // The operands read through the output's own element: the destination's, where it is one.
         val local = dest match
@@ -851,6 +929,28 @@ impl Emitter
             return v
 
         self.elementwise(span, out, operands, vals, init, local, scalar)
+
+    // The array `v` of type `t` where its dynamic extents are `dims`, else a new array of them: an
+    // `alloc_tensor`, which, unlike a `tensor.empty`, CSE does not merge with an equal one before a
+    // loop, whose buffer the loop would then have to copy out at every pass.
+    private same_or_new(*self, span: Span, v: string, t: Ty, dims: Buf[string]) -> string
+        val ot = self.tensor_ty(span, t)
+        val have = self.dynamic_dims(span, v, t, t)
+        var same = ""
+
+        for k in 0..<dims.len()
+            val eq = self.def(s"arith.cmpi eq, ${have[k]}, ${dims[k]} : index")
+
+            same = if same == "" then eq else self.def(s"arith.andi $same, $eq : i1")
+
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if $same -> ($ot) {")
+        self.op(s"scf.yield $v : $ot")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.def(s"bufferization.alloc_tensor(${joined(dims)}) : $ot")} : $ot")
+        self.op("}")
+        r
 
     // The `linalg.generic` computing `scalar` over the arrays among `operands` into `init`. An
     // operand that is the local `local` is read through the output's element instead, `init` being
@@ -956,7 +1056,8 @@ impl Emitter
     // static, so the old value has the new one's shape. Bufferization writes the buffer in place, and
     // copies it first only where the old value is still read: by another holder, or by an operand
     // that is a view of it read at other elements. A dynamic shape that `value` does not read may
-    // change, so it is written into a new array. False where the assignment is not of that shape.
+    // change, so it is written over the local's value where the extents agree at run time, and into
+    // a new array where they do not. False where the assignment is not of that shape.
     fused_assign(*self, target: TExpr, value: TExpr) -> bool
         val id = *target.kind match
             TLocal(id) -> id
@@ -967,9 +1068,30 @@ impl Emitter
         val f = self.fused_form(value)
         val dest = leaf_of(f.leaves, id) match
             Some(k) -> Dest.Operand(k)
-            None -> if is_static(target.ty) then Dest.Over(self.read_array(target.span, id)) else Dest.Fresh
+            None -> if is_static(target.ty) then Dest.Over(self.read_array(target.span, id))
+                    elif f.first.is_some() then Dest.OverIfSame(self.read_array(target.span, id))
+                    else Dest.Fresh
 
         self.arr.set(id, self.map_into(value.span, value.ty, f.leaves, f.vals, f.scalar, f.first, f.mismatch, dest))
+        true
+
+    // `target = l @ r` where `target` is a local array held as a value of the product's type that
+    // neither operand reads: the product is written over the local's buffer where its extents
+    // agree and it lies dense (`matmul_to`). False where the assignment is not of that shape.
+    matmul_assign(*self, target: TExpr, value: TExpr) -> bool
+        val id = *target.kind match
+            TLocal(id) -> id
+            _ -> return false
+        val (l, r) = *value.kind match
+            TArray(op) -> *op match
+                TMatMul(a, b) -> (a, b)
+                _ -> return false
+            _ -> return false
+
+        if !self.in_ssa(id) || rank_of(value.ty) == 0 || reads_local(l, id) || reads_local(r, id) then return false
+        if self.tensor_ty(value.span, value.ty) != self.tensor_ty(target.span, target.ty) then return false
+
+        self.arr.set(id, self.matmul_to(value, l, r, self.read_array(target.span, id)))
         true
 
     // `scalar` emitted with `frame` as the operands its `TChainOperand` leaves read, nothing having
@@ -1484,7 +1606,7 @@ impl Emitter
     // `a = v` or `a op= v` on a whole array place.
     assign_array(*self, span: Span, op: string, target: TExpr, value: TExpr)
         if op == "="
-            if self.par_assign(target, value) || self.fused_assign(target, value) then return
+            if self.par_assign(target, value) || self.fused_assign(target, value) || self.matmul_assign(target, value) then return
 
             self.inout_param(target) match
                 Some(id) ->
@@ -1715,25 +1837,38 @@ impl Emitter
     for_each(*self, span: Span, id: usize, var_id: usize, a: TExpr, body: TExpr) -> string
         val av = self.flat(span, self.ex(a), a.ty)
         val ft = self.view_ty(Ty.Array(elem_of(a.ty), dynamic_axes(1)))
-        val n = self.to_i64(self.dim(span, av, ft, 1))
-        val counter = self.alloca("i64")
-
-        self.op(s"llvm.store ${self.def("arith.constant 0 : i64")}, $counter : i64, !llvm.ptr")
-
-        val l = self.loop_open()
-        self.loop_condition(l, self.def(s"arith.cmpi slt, ${self.def(s"llvm.load $counter : !llvm.ptr -> i64")}, $n : i64"))
-
-        val k = self.def(s"llvm.load $counter : !llvm.ptr -> i64")
-        val x = self.def(s"tensor.extract $av[${self.def(s"arith.index_cast $k : i64 to index")}] : ${self.tensor_ty(span, ft)}")
+        val p = self.passes_open(self.to_i64(self.dim(span, av, ft, 1)), id, body)
+        val x = self.def(s"tensor.extract $av[${self.def(s"arith.index_cast ${p.k} : i64 to index")}] : ${self.tensor_ty(span, ft)}")
 
         self.bind_local(span, var_id)
         self.store(span, self.local_ptr(span, var_id), x, self.prog.locals[var_id].ty)
         self.region(body)
         self.end_pass(id)
-        self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
-        self.loop_close(l)
+        self.passes_close(p)
         self.after_loop(id)
         ""
+
+    // A loop of `n` passes (an `i64`) opens, `id` and `body` the loop and its body, the pass from 0
+    // answered with it: an `scf.for` where no pass can end the loop early, else an `scf.while` on a
+    // counter. Its body follows, then `passes_close`.
+    passes_open(*self, n: string, id: usize, body: TExpr) -> Passes
+        if !leaves_loop(body, id)
+            val l = self.counted_open(self.def(s"arith.index_cast $n : i64 to index"), body)
+
+            return Passes(l, "", self.def(s"arith.index_cast ${l.iv} : index to i64"))
+
+        val counter = self.alloca("i64")
+
+        self.op(s"llvm.store ${self.def("arith.constant 0 : i64")}, $counter : i64, !llvm.ptr")
+
+        val l = self.loop_open()
+
+        self.loop_condition(l, self.def(s"arith.cmpi slt, ${self.def(s"llvm.load $counter : !llvm.ptr -> i64")}, $n : i64"))
+        Passes(l, counter, self.def(s"llvm.load $counter : !llvm.ptr -> i64"))
+
+    passes_close(*self, p: Passes)
+        if p.counter != "" then self.op(s"llvm.store ${self.def(s"arith.addi ${p.k}, %one : i64")}, ${p.counter} : i64, !llvm.ptr")
+        self.loop_close(p.l)
 
     // The elements of `v` in storage order, as a rank-1 tensor of dynamic extent.
     flat(*self, span: Span, v: string, t: Ty) -> string

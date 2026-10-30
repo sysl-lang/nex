@@ -348,25 +348,16 @@ impl Emitter
 
         self.retain_ref(h)
 
-        val n = self.items_count(h)
-        val counter = self.alloca("i64")
-
-        self.op(s"llvm.store %one, $counter : i64, !llvm.ptr")
-
-        val l = self.loop_open()
-
-        self.loop_condition(l, self.def(s"arith.cmpi sle, ${self.def(s"llvm.load $counter : !llvm.ptr -> i64")}, $n : i64"))
-
-        val k = self.def(s"llvm.load $counter : !llvm.ptr -> i64")
+        val p = self.passes_open(self.items_count(h), id, body)
         val m = self.mark()
+        val k = self.def(s"arith.addi ${p.k}, %one : i64")
 
         self.bind_local(span, var_id)
         self.keep(span, self.local_ptr(span, var_id), self.item_load(span, self.item_at(h, k), et), et)
         self.region(body)
         self.release_from(m)
         self.end_pass(id)
-        self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
-        self.loop_close(l)
+        self.passes_close(p)
         self.after_loop(id)
         self.release_ref(h)
         ""

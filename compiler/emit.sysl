@@ -5,11 +5,14 @@
 // with `llvm.load` and written with `llvm.store`; LLVM's `mem2reg` turns them back into registers. So
 // nothing has to thread a variable's current value through a structured region.
 //
-// **Control flow is structured**: `scf.if` and `scf.while`, as bufferization requires of every
-// function (it refuses a `cf` loop). `exit`, `cycle` and `return` cannot leave a region, so a function
-// that has them keeps a control word in memory: `exit` and `cycle` of loop `L` set it to `2L + 2` and
-// `2L + 3`, `return` to 1 with its value stored aside. A statement after one that may set it runs
-// under `scf.if` on the word being 0, a loop runs while it is 0, and the loop it names clears it.
+// **Control flow is structured**: `scf.if`, `scf.for` and `scf.while`, as bufferization requires of
+// every function (it refuses a `cf` loop). `exit`, `cycle` and `return` cannot leave a region, so a
+// function that has them keeps a control word in memory: `exit` and `cycle` of loop `L` set it to
+// `2L + 2` and `2L + 3`, `return` to 1 with its value stored aside. A statement after one that may set
+// it runs under `scf.if` on the word being 0, a loop runs while it is 0, and the loop it names clears
+// it. A loop whose passes are counted on entry and that no pass can leave early — no `return`, no
+// `exit` of it or of a loop around it, no `cycle` of a loop around it — is an `scf.for`; every other
+// loop is an `scf.while` whose condition reads the word.
 //
 // **A local a lambda captures lives in a cell**: an object of the runtime's counted heap, whose
 // address the entry-block slot holds. The lambda's environment is the count of cells it holds and
@@ -874,6 +877,76 @@ may_leave(e: TExpr) -> bool
 
     for c in children(e)
         if may_leave(c) then return true
+
+    false
+
+// Whether `body`, the body of loop `id`, can end the loop before its last pass: it holds a `return`,
+// an `exit` of the loop or of one around it, or a `cycle` of one around it. A `cycle` of the loop
+// itself only ends its pass.
+leaves_loop(body: TExpr, id: usize) -> bool
+    var inner: Buf[usize] = buf()
+
+    loops_in(body, &inner)
+    jumps_out(body, id, inner)
+
+// Whether `e` names the local `id`.
+reads_local(e: TExpr, id: usize) -> bool
+    *e.kind match
+        TLocal(x) -> if x == id then return true
+        _ -> ()
+
+    for c in children(e)
+        if reads_local(c, id) then return true
+
+    false
+
+// Whether `e` may give the array local `id` a value of another shape: it assigns the whole local,
+// alone or in a tuple, or lends it to an `inout` parameter.
+may_reshape(e: TExpr, id: usize) -> bool
+    *e.kind match
+        TAssign(_, t, _) -> if reads_local(t, id) && local_of(t).is_some() then return true
+        TAssignTuple(_, _) -> if reads_local(e, id) then return true
+        TBorrow(p) -> if reads_local(p, id) then return true
+        _ -> ()
+
+    for c in children(e)
+        if may_reshape(c, id) then return true
+
+    false
+
+// The loops `e` holds, pushed onto `out`.
+private loops_in(e: TExpr, out: *Buf[usize])
+    *e.kind match
+        TWhile(id, _, _) -> out.push(id)
+        TFor(id, _, _, _, _, _, _) -> out.push(id)
+        TArray(op) ->
+            *op match
+                TForEach(id, _, _, _) -> out.push(id)
+                _ -> ()
+        TParallel(op) ->
+            *op match
+                TParFor(id, _, _, _) -> out.push(id)
+                _ -> ()
+        _ -> ()
+
+    for c in children(e)
+        loops_in(c, out)
+
+private jumps_out(e: TExpr, id: usize, inner: Buf[usize]) -> bool
+    *e.kind match
+        TReturn(_) -> return true
+        TExit(j) -> if !has_id(inner, j) then return true
+        TCycle(j) -> if j != id && !has_id(inner, j) then return true
+        _ -> ()
+
+    for c in children(e)
+        if jumps_out(c, id, inner) then return true
+
+    false
+
+private has_id(ids: Buf[usize], id: usize) -> bool
+    for x in ids
+        if x == id then return true
 
     false
 

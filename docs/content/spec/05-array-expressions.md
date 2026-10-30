@@ -128,7 +128,9 @@ A reduction takes its operand into the same loop: `sum(x * y)`, `dot(x, y)` and 
 compute each product as they add it, and never build the array of products.
 
 **An assignment writes its target in place** when the expression reads the target only at the
-element it is computing, as `y = alpha * x + y` does. Where the old value is still needed — another
+element it is computing, as `y = alpha * x + y` does, and when the expression does not read the
+target and the target already has the result's shape, as `d = sqrt(x*x + y*y)` in a loop does, and
+`c = a @ b` too. Where the old value is still needed — another
 name holds it (`val before = y`), or the expression reads the target at other elements
 (`v = v[n..1 by -1] + v`) — the compiler copies it first, so the result is always the one the
 expression describes.

@@ -294,18 +294,8 @@ impl Emitter
 
     // `for a in args`: the arguments from the first.
     for_args(*self, span: Span, id: usize, var_id: usize, body: TExpr) -> string
-        val n = self.call("nex_arg_count", "", "", "i64")
-        val counter = self.alloca("i64")
-
-        self.op(s"llvm.store %one, $counter : i64, !llvm.ptr")
-
-        val l = self.loop_open()
-        val more = self.def(s"arith.cmpi sle, ${self.def(s"llvm.load $counter : !llvm.ptr -> i64")}, $n : i64")
-
-        self.loop_condition(l, more)
-
-        val k = self.def(s"llvm.load $counter : !llvm.ptr -> i64")
-
+        val p = self.passes_open(self.call("nex_arg_count", "", "", "i64"), id, body)
+        val k = self.def(s"arith.addi ${p.k}, %one : i64")
         val m = self.mark()
 
         self.bind_local(span, var_id)
@@ -313,8 +303,7 @@ impl Emitter
         self.region(body)
         self.release_from(m)
         self.end_pass(id)
-        self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
-        self.loop_close(l)
+        self.passes_close(p)
         self.after_loop(id)
         ""
 end Emitter
