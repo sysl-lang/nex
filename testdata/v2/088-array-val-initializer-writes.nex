@@ -1,0 +1,52 @@
+// An array `val` whose initializer writes an array on its way to the value: a branch of an `if`
+// that changes an element and answers the array, one that loops over it, a `match` arm, an `if`
+// whose two branches write different arrays, and the same inside a loop.
+
+enum Side =
+  Left
+  Right
+
+def main() =
+  val n = 3
+  var r = [1, 2]
+  val a = if n > 0 then
+    r[1] += 1
+    r
+  else r
+  print(a)
+  print(r)
+
+  val b = if n > 10 then r else
+    for i in 1..n
+      r[2] += i
+    r
+  print(b)
+
+  var s = [10, 20, 30]
+  val side = Left
+  val c = side match
+    Left ->
+      s[3] = 0
+      s
+    Right -> s
+  print(c)
+
+  var u = [1.0]
+  var v = [2.0]
+  val d = if n % 2 == 1 then
+    u[1] = 5.0
+    v
+  else
+    v[1] = 6.0
+    u
+  print(s"$d $u $v")
+
+  var w = [0, 0]
+  for k in 1..2
+    val e = if k == 1 then
+      w[k] = 7
+      w
+    else
+      w[k] = 8
+      w
+    print(e)

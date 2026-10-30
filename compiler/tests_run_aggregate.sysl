@@ -17,7 +17,8 @@ import sysl.text.{join, split}
 private val M4_M5_CATEGORIES = ["structs", "tuple destructuring", "paren-less tuple construction", "sum types (enums)", "closure escape (§4.11)",
     "user generics", "user generic enums", "user generic structs"]
 
-private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates", "views", "arrays", "equality", "items-sliced", "items-rearranged", "traps", "linear-algebra", "recursive"]
+private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates", "views", "arrays", "equality", "items-sliced", "items-rearranged", "traps", "linear-algebra", "recursive",
+                                    "inout-traps"]
 
 @test("every program of PLAN.md's M4 and M5 corpus categories prints its .out")
 run_m4_m5_corpus()
@@ -49,8 +50,8 @@ run_leak_programs()
         reports.push(s"$name: ${leaks_line(leaks.text)}")
 
     finish(b)
-    assert_eq(r.passed, 10)
-    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.\nviews: 0 leaks for 0 total leaked bytes.\narrays: 0 leaks for 0 total leaked bytes.\nequality: 0 leaks for 0 total leaked bytes.\nitems-sliced: 0 leaks for 0 total leaked bytes.\nitems-rearranged: 0 leaks for 0 total leaked bytes.\ntraps: 0 leaks for 0 total leaked bytes.\nlinear-algebra: 0 leaks for 0 total leaked bytes.\nrecursive: 0 leaks for 0 total leaked bytes.")
+    assert_eq(r.passed, 11)
+    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.\nviews: 0 leaks for 0 total leaked bytes.\narrays: 0 leaks for 0 total leaked bytes.\nequality: 0 leaks for 0 total leaked bytes.\nitems-sliced: 0 leaks for 0 total leaked bytes.\nitems-rearranged: 0 leaks for 0 total leaked bytes.\ntraps: 0 leaks for 0 total leaked bytes.\nlinear-algebra: 0 leaks for 0 total leaked bytes.\nrecursive: 0 leaks for 0 total leaked bytes.\ninout-traps: 0 leaks for 0 total leaked bytes.")
 
 @test("only a function holding counted values registers a frame record for a trap's catch, and it is taken off before the return")
 frame_records_only_where_counts_are_held()

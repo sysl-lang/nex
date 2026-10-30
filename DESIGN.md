@@ -942,13 +942,28 @@ to the caller's variable. Every nex function except `main` is emitted `private`;
 `drop-equivalent-buffer-results` before `buffer-deallocation-pipeline`, a result that is its own
 argument's buffer disappears, the function returns nothing and writes the caller's buffer in place
 (`parallel.mlir`, `axpy`). Kept public, the same function returns its argument and the deallocation
-pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer argument. An element
-of an array of numbers passed `inout` (`a[i]`, `m[:, j][i]`) is a value in its array's tensor: its
-indices are evaluated and bounds-checked once before the call, its value crosses in a stack slot whose
-address is the argument (to a `def`, a function value or a C scalar parameter; inside a rank-0
-descriptor to a `[*; ..]` one), and after the call the slot is inserted at the same indices into what
-the array place holds then. An element of an array of anything else has storage of its own and
-crosses as its address. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
+pipeline clones it: a whole-array copy per call. Inside the callee, assigning the whole parameter an
+array of the shape it has (`v = v * s`, `v += 1`) copies the computed value over the argument's
+buffer; only an array of another shape rebinds the parameter, and reaches the caller when the call
+returns.
+
+The callee writes where the caller can see each write as it is made, so a trap leaves them there. An
+array the caller holds in storage — a `var` a lambda captures, a module-level `var`, a field of a
+struct `var` — is first made the only holder of its buffer (copied where another holder shares it or
+the statement around the call is reading it, as a loop over it does), and that buffer itself is what
+the call is lent, whole or as a window; after the call the handed-back value is that buffer, or, where
+the callee rebound the parameter to another shape, a new one stored into the place. An array in SSA
+form needs nothing: a trap leaves its function's frame, and nothing reads it again.
+
+A scalar `inout` is a pointer argument. An element of an array of numbers passed `inout` (`a[i]`,
+`m[:, j][i]`) is a value in its array's tensor: its indices are evaluated and bounds-checked once
+before the call. Where the array is held in storage (made its buffer's only holder as above) or is one
+a `parallel for` body writes in place, the element crosses as its address in that buffer; otherwise
+its value crosses in a stack slot. Either address is the argument (to a `def`, a function value or a C
+scalar parameter; inside a rank-0 descriptor to a `[*; ..]` one). After the call, unless the element
+crossed in an array held in storage, what the address holds is inserted at the same indices into what
+the array place holds then. An element of an array of anything
+else has storage of its own and crosses as its address. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
 a row, a strided or reversed window and a line of a rank-3 array each reach the callee as a
 `memref.subview` of the caller's buffer, with no allocation and no copy, in a `parallel for` body as
 in sequential code. A call through a function value (a local `def`, a lambda, a `val` bound to a
@@ -1298,10 +1313,10 @@ def main() =
   val right = if me < p - 1 then me + 1 else no_rank
   for step in 1..100
     exchange
-      send(u[2], to = left)
-      send(u[n + 1], to = right)
-      recv(u[1], from = left)
-      recv(u[n + 2], from = right)
+      send(u[2..2], to = left)
+      send(u[n + 1..n + 1], to = right)
+      recv(u[1..1], from = left)
+      recv(u[n + 2..n + 2], from = right)
     u[2..n + 1] = 0.5 * (u[1..n] + u[3..n + 2])
   val total = allreduce(sum(u[2..n + 1]), +)
   if me == 0 then print(total)
@@ -1330,11 +1345,27 @@ receive does nothing.
 `size(a)` of an array keep their meaning beside `this_rank()` and `num_ranks()` (Fortran's
 `this_image()` and `num_images()`), and `reduce(a, init, f)` beside `reduce_to(x, op, root)`.
 
+**Two kinds of function.** The module's own nex declares the communicators, the point-to-point
+functions and everything else a generic `def` can write. The collectives below are **intrinsics**,
+as Fortran's `co_sum`, `co_reduce` and `co_broadcast` are: each is declared in `mpi.nex` as an
+`@intrinsic def` without a body (so `import mpi.*`, `import mpi.{allreduce}` and `mpi.allreduce`
+reach it like any member, and nothing else may declare one), and the compiler types each call from
+its operand (`elab_mpi.sysl`), as it types the prelude's reductions. A call becomes calls of the
+shim's entry points over `[*; ..]` descriptors (§10.7) and a fresh result the shim writes. They are
+intrinsics because what they need — one function over a scalar or an array of any rank, any
+element type and any unit, an operator passed as a value, a result one rank higher than the
+operand — is more than a generic `def` expresses. A collective is only called: `val f = allreduce`
+is *"`allreduce` is a collective of `mpi`, typed at each call from its operand, so it is only
+called"*.
+
 **Point to point.** `send(x, to, tag = 0)`, `recv(inout x, from = any_rank, tag = any_tag)`
-answering a `Status` (`source`, `tag`, `count`), `sendrecv(x, to, inout y, from)`. `x` is any
-scalar or array of the types of §9.6.3 — a whole array, a window or a strided view — and the count
-is its element count, never written. A `recv` into an array whose shape is not the message's traps:
-*"recv: the message from rank 2 holds 12 values; the array holds 10"*.
+answering a `Status` (`source`, `tag`, `count`), `sendrecv(x, to, inout y, from, tag = 0)`. They are
+written in nex, generic over `[T: Numeric, R: Rank]` and passing `x` to the shim as `[*; ..]`, so
+`x` is an array of numbers at any rank — a whole array, a window or a strided view — and the count
+is its element count, never written. A scalar and a measured array wait for a generic `[T; R]` that
+admits rank 0 and a `T: Numeric` that admits a unit. A `recv` into an array whose element count is
+not the message's traps: *"recv: the message from rank 2 holds 12 values; the array holds 10"*. A
+`recv` from `no_rank` receives nothing and answers a `Status` of `no_rank` and count 0.
 
 **Nonblocking: the `exchange` block.** A nonblocking send or receive must keep its buffer where it
 lies until it completes, which a call cannot promise (§9.6.1). nex makes that a scope: inside an
@@ -1357,37 +1388,68 @@ The overlap is written by computing on another array (or another part, once the 
 windows disjoint as §9.4 does). There is no `Request` value and no `wait`: a request that is never
 waited on is not expressible.
 
-**Collectives** take the value and answer the result, as nex's own reductions do:
+**Collectives** take the value and answer the result, as nex's own reductions do. Each takes
+`comm = world()` last; its other arguments go by position or by name.
 
 | nex | MPI | answers |
 |---|---|---|
 | `barrier()` | `MPI_Barrier` | nothing |
 | `bcast(x, root = 0)` | `MPI_Bcast` | `x` as `root` had it, on every rank |
-| `reduce_to(x, op, root = 0)` | `MPI_Reduce` | the combination on `root`; `x` elsewhere |
-| `allreduce(x, op)` | `MPI_Allreduce` | the combination, on every rank |
-| `scan(x, op)`, `exscan(x, op)` | `MPI_Scan`, `MPI_Exscan` | the prefix |
-| `gather(x, root = 0)` | `MPI_Gather(v)` | rank-major concatenation on `root`, a rank-(k+1) array of the rank-k pieces when they agree in shape, else rank 1 |
-| `allgather(x)` | `MPI_Allgather(v)` | the same on every rank |
-| `scatter(x, root = 0)` | `MPI_Scatter(v)` | this rank's part of `root`'s `x`, cut along its last axis as evenly as `blocks(n, num_ranks())` cuts |
-| `alltoall(x)` | `MPI_Alltoall(v)` | `x`'s last axis cut in `num_ranks()` parts, part k sent to rank k |
-| `blocks(n, p = num_ranks(), r = this_rank())` | — | the range of `1..n` rank `r` owns: the block decomposition every program writes |
+| `reduce_to(x, op, root = 0, fast = false)` | `MPI_Reduce` | the combination on `root`; `x` elsewhere |
+| `allreduce(x, op, fast = false)` | `MPI_Allreduce` | the combination, on every rank |
+| `scan(x, op, fast = false)` | `MPI_Scan` | on rank r, the combination of ranks 0 to r |
+| `gather(x, root = 0)` | `MPI_Gather` | on `root`, the rank-k pieces along a new last axis, a rank-(k+1) array with one part per rank; elsewhere that array with none |
+| `allgather(x)` | `MPI_Allgather` | `gather`'s result on every rank |
+| `gather_concat(x, root = 0)` | `MPI_Gatherv` | on `root`, the rank-k pieces joined along their last axis in rank order, a rank-k array; elsewhere an empty one |
+| `allgather_concat(x)` | `MPI_Allgatherv` | `gather_concat`'s result on every rank |
+| `scatter(x, root = 0)` | `MPI_Scatter` | part r + 1 of `root`'s rank-(k+1) `x` along its last axis, a rank-k array, on rank r |
+| `scatter_concat(x, root = 0)` | `MPI_Scatterv` | rank r's part of `root`'s `x`, cut along its last axis as `blocks` cuts it |
+| `alltoall(x)` | `MPI_Alltoall` | `x`'s last axis, one part per rank, part k sent to rank k; part k of the result is rank k's |
+| `global_sum(x, offset)`, `global_dot(x, y, offset)`, `global_norm2(x, offset)` | — | §9.6.5 |
+| `blocks(n, p = num_ranks(), r = this_rank())` | — | `(first, last)`, the part of `1..n` rank `r` owns: the block decomposition every program writes, the first `n % p` ranks one element longer |
 
-`op` is any operator of §9.2 — `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc` — or a user
-function `(T, T) -> T`, which becomes an `MPI_Op_create` over a trampoline (§10.2.1), applied
-element by element to an array. `minloc` reduces `(value, index)` pairs, ties going to the lowest
-rank, as `MPI_MINLOC` does. The value forms copy as they must; `x` keeps its value on every rank.
+**Ranks are static.** `gather` and `allgather` of a rank-k operand answer rank k + 1 and `scatter`
+the inverse, so the result's type is known where the call is written; the operands' shapes must
+agree across the ranks, and the call checks it at run time before any data moves — every rank sees
+every rank's shape, so every rank traps alike, naming two of them: *"allreduce: every rank's operand
+has one shape, and rank 1's is [3] where rank 0's is [2]"*. Pieces of differing lengths are the
+`_concat` forms' (MPI's `v` forms), which agree on every axis but the last; `scatter`'s operand has
+one part per rank along its last axis and `alltoall`'s too, or the call traps with the counts. A
+scalar has no axis to cut or join, so `scatter`, `alltoall` and the `_concat` forms refuse one at
+compile time.
+
+`op` is `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc` — §9.2's operators, which a call
+takes as an argument (`allreduce(x, +)`; `+`, `*`, `and` and `or` stand alone only there) — or a
+user function `(T, T) -> T` of the operand's element type, a named `def` or a lambda, applied element
+by element to an array. `+` and `*` take numbers, `min`, `max`, `minloc` and `maxloc` integers and
+reals, `and` and `or` `bool`s; anything else is refused with the operand's type. `minloc` and
+`maxloc` answer a pair, `(value, location)`, where the location is the rank the value came from
+(an `integer`, or an array of them shaped as `x`), ties going to the lowest rank, as `MPI_MINLOC`
+does; on the ranks `reduce_to` leaves alone it is `(x, this_rank())`. The value forms copy as they
+must; `x` keeps its value on every rank.
 
 #### 9.6.3 What crosses: types, views and units
 
-| nex element | MPI datatype |
-|---|---|
-| `int8` … `int64`, `uint8` … `uint64` | `MPI_INT8_T` … `MPI_UINT64_T` |
-| `real32`, `real64` | `MPI_FLOAT`, `MPI_DOUBLE` |
-| `real16` | `MPI_UINT16_T` for moving; reductions run nex's own operator through `MPI_Op_create` |
-| `complex[real32]`, `complex[real64]` | `MPI_C_FLOAT_COMPLEX`, `MPI_C_DOUBLE_COMPLEX` |
-| `bool` | `MPI_C_BOOL` |
-| a `@c` struct | `MPI_Type_create_struct` from the layout nex already computes (§10.2) |
-| a tuple of numbers, a `minloc` pair | a struct type of its fields' |
+**Every element type a `[*; ..]` descriptor carries crosses** (§10.7): a scalar or an array, at any
+rank, of
+
+| nex element | moved as | `fast = true` reduces with |
+|---|---|---|
+| `int8` … `int64`, `uint8` … `uint64` | its bytes | `MPI_INT8_T` … `MPI_UINT64_T` |
+| `real32`, `real64` | its bytes | `MPI_FLOAT`, `MPI_DOUBLE` |
+| `real16` | its bytes | nex's own operator: MPI has no 16-bit real |
+| `complex[real32]`, `complex[real64]` | its bytes | `MPI_C_FLOAT_COMPLEX`, `MPI_C_DOUBLE_COMPLEX` (`+`, `*`) |
+| `complex[real16]` | its bytes | nex's own operator |
+| `bool` | its bytes | `MPI_C_BOOL` (`and`, `or`) |
+
+A message moves as bytes (`MPI_BYTE`), its element count checked by the shim against the
+descriptor's, so the element type is nex's fact on both ends, as a unit is; an operation MPI has no
+operator for (`minloc`, `maxloc`, a 16-bit real) is nex's own whatever `fast` says. **A tuple or a
+struct is refused** — *"`allreduce` takes its operand as a number or a `bool`, or an array of them;
+a tuple or a struct waits for structs by value (DESIGN §15), and this is (real64, real64)"* — until
+structs pass by value; then a `@c` struct crosses as `MPI_Type_create_struct` of the layout nex
+already computes (§10.2). The one pair D2 has is the answer of `minloc` and `maxloc`, a value and a
+rank. A string is refused with its type.
 
 **A view is an MPI datatype, never a copy.** Where §10.3 copies a strided view because C takes a
 bare pointer, MPI takes a pointer *and* a description, so every window crosses where it lies:
@@ -1399,19 +1461,23 @@ bare pointer, MPI takes a pointer *and* a description, so every window crosses w
   `MPI_Type_create_subarray` with `MPI_ORDER_FORTRAN`, which is nex's order.
 
 The module's externs take every buffer as `[*; ..]` (§10.7), so one `send` written in nex covers
-every element type and rank, and the shim reads the element type, the extents and the byte strides
-from the descriptor. The pointer is the window's first element, as in §10.3. A committed datatype is cached by (element,
-extents, strides), so a halo exchange in a loop commits once. A dense array is the element type and
-a count.
+every element type and rank, and one entry point of the shim serves each collective; the shim reads
+the element type, the extents and the byte strides from the descriptor. The pointer is the window's
+first element, as in §10.3. Until D3 builds the datatypes, the shim packs a view that is not one
+dense block into a buffer of its own and unpacks a received one, which is correct for a blocking
+call. A committed datatype is cached by (element, extents, strides), so a halo exchange in a loop
+commits once. A dense array is the element type and a count.
 
 **Units cross as their numbers.** A unit is a static fact of the program and a message carries
 none; each end's types are checked locally, against its own declarations, as in any SPMD program.
 A collective answers its operand's unit: `allreduce(e, +)` of `[real J]` is `[real J]`, `max` keeps
 it, and `*` of a measured value is refused as `product` is (§13.4).
 
-**Shapes.** A rank-k array's shape is known on each rank, and `recv` and the collectives check the
-counts MPI reports against it; the `v` variants (`MPI_Gatherv` and the rest) are chosen automatically
-where pieces may differ, with an `MPI_Allgather` of the counts first.
+**Shapes.** A rank-k array's shape is known on each rank. A collective `MPI_Allgather`s every
+rank's shape before it moves data and traps on every rank where they disagree (§9.6.2); `recv`
+checks the message's count against its array's. The `v` variants (`MPI_Gatherv` and the rest) are
+the `_concat` forms', written where the pieces' lengths differ, their counts taken from the
+gathered shapes.
 
 #### 9.6.4 Errors
 
@@ -1431,21 +1497,30 @@ by message size, rank count and topology, so the bits can change with `-np`, wit
 and between MPI versions. nex promises:
 
 1. **A distributed reduction is reproducible for a given rank count**, run to run, node layout to
-   node layout, implementation to implementation: `reduce_to`, `allreduce` and `scan` of a real or
-   complex with a built-in operator, and every user operator, combine the ranks' contributions in
-   §9.2.1's fixed pairwise tree over the rank numbers, the same bits on every rank. They are built
-   from an `MPI_Allgather` of the contributions (a scalar, or a block of an array at a time) and a
-   local combination, or a fixed binomial tree of point-to-point messages for large arrays; never
-   `MPI_Allreduce` with `MPI_SUM`. Integer, `min`, `max`, `and`, `or`, `minloc` and `maxloc`
-   reductions are exact and use MPI's own operators.
+   node layout, implementation to implementation: `reduce_to`, `allreduce` and `scan` with a
+   built-in operator combine the ranks' contributions in §9.2.1's fixed pairwise tree over the rank
+   numbers (for `scan` on rank r, over ranks 0 to r), the same bits on every rank. The shim builds
+   them from an `MPI_Allgather` of the contributions — `MPI_Gather` to the root for `reduce_to` —
+   about 4 MB at a time, and a local combination in C, each product and sum rounded on its own as
+   nex rounds them (the shim is compiled with `-ffp-contract=off`); never `MPI_Allreduce` with
+   `MPI_SUM`. Every built-in operator takes this path, the exact ones too (integers, `min`, `max`,
+   `and`, `or`, `minloc`, `maxloc`), so an integer overflow traps as nex's does (*"allreduce: int64
+   overflow"*) and a real `min` or `max` follows §7.4's `nan` rule. A **user operator** is folded by
+   the compiled program itself, in rank order (`f(f(x0, x1), x2)` …), over an `allgather` of the
+   contributions, element by element: the same bits on every rank and every run.
 2. **A distributed sum of a distributed array is independent of the rank count**:
-   `global_sum(x_local, offset)`, where `offset` is the global index of `x_local`'s first element,
-   reduces each rank's §9.2.1 blocks *aligned to the global numbering*, gathers the block partials
-   (one number per 4096 elements: 2 MB for a billion), and runs the whole tree on every rank — the
-   bits of `sum` over the undistributed array, for any `-np`, as `OMP_NUM_THREADS` changes nothing.
-   `global_dot`, `global_norm2` the same.
-3. **`fast = true`** on a reduction hands it to `MPI_Allreduce` with MPI's operator, for the code
-   that measures the difference and accepts MPI's bits.
+   `global_sum(x_local, offset)`, where `x_local` is a vector of numbers and `offset` the global
+   index of its first element, reduces the §9.2.1 blocks *aligned to the global numbering* — a block
+   a rank holds whole by that rank, a block split between ranks from their pieces' terms in global
+   order — gathers the block partials (one number per 4096 elements: 2 MB for a billion), and runs
+   the whole tree on every rank: the bits of `sum` over the undistributed array, for any `-np` and
+   any cut, as `OMP_NUM_THREADS` changes nothing. The pieces cover `1..n` once each, in any order of
+   the ranks, or every rank traps (*"global_sum: the ranks' pieces cover 1..6 once each, and none
+   begins at 3"*). `global_dot(x, y, offset)` (the terms `conj(x[i]) * y[i]`) and
+   `global_norm2(x, offset)` (of reals and complexes) the same, against `dot` and `norm2`.
+3. **`fast = true`** on a reduction hands it to `MPI_Allreduce`, `MPI_Reduce` or `MPI_Scan` with
+   MPI's operator, for the code that measures the difference and accepts MPI's bits; where MPI has
+   no operator for the type (§9.6.3) the reproducible path runs. A user operator takes no `fast`.
 
 #### 9.6.6 `parallel` inside an MPI program
 
@@ -1468,7 +1543,8 @@ environment `module load` gave the build. A program that does not import `mpi` l
 shim.
 
 **One binary is built for one MPI.** The module's shim (`mpi/nex_mpi.c`, beside the module's nex
-text `mpi/mpi.nex`, both part of nex) — a small C file that includes the found `mpi.h`, compiled by
+text `mpi/mpi.nex`, both part of nex) — a C file that includes the found `mpi.h` and the
+descriptor's `nex_desc.h` (written beside it), compiled with `-ffp-contract=off` by
 the found `mpicc` (by clang with `pkg-config`'s flags where that found the MPI) and kept in nex's cache
 directory under a key of its text, the compiler and its flags, so each MPI compiles it once — turns
 handles into what nex can hold:
@@ -1502,8 +1578,8 @@ how it runs in the playground's compiled mode and in `nex test` without `--np`.
    *Decided: the block*, with `Request` left out until a program needs a request that
    outlives a scope.
 4. **The shim's language.** C compiled by the found `mpicc` (the cluster's own source of headers
-   and flags), or sysl in the runtime built per MPI. *Decided: C through `mpicc`*, a few
-   hundred lines that exist only to read `mpi.h`; everything else in the module is nex.
+   and flags), or sysl in the runtime built per MPI. *Decided: C through `mpicc`*, the one file
+   that includes `mpi.h`, which also packs buffers and combines reductions.
 5. **Default reduction determinism.** Reproducible for a fixed rank count by default with
    `fast = true` to opt out (above), or MPI's own by default with `reproducible = true` to opt in.
    *Decided: reproducible by default*, the rule `parallel` already follows; the cost is one
@@ -1515,6 +1591,15 @@ how it runs in the playground's compiled mode and in `nex test` without `--np`.
    a Krylov solver needs and the only place rank-count independence is cheap.
 7. **Errors.** Traps only (above), or a `Result` form for the errors a fault-tolerant program
    handles. *Decided: traps only*, with fault tolerance as its own later item.
+8. **Where the module's functions live.** All in nex over `[*; ..]` externs, or the collectives as
+   compiler intrinsics. *Decided: the collectives are intrinsics, as Fortran's `co_sum`,
+   `co_reduce` and `co_broadcast` are* (§9.6.2): one function over a scalar or an array of any rank,
+   element type and unit, an operator as an argument and a result one rank higher than the operand
+   are more than a generic `def` says. The communicators, `send`/`recv`/`sendrecv`, `this_rank`,
+   `num_ranks`, `blocks` and the launch are nex.
+9. **Ranks of gathered values.** *Decided: static*: `gather` of rank k is rank k + 1, the shapes
+   checked at run time; pieces of differing lengths are the `_concat` forms', which keep rank k.
+   Structs and tuples wait for structs by value (§15).
 
 ### 9.7 Coarrays (planned)
 

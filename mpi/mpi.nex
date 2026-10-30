@@ -39,3 +39,114 @@ def num_ranks(comm: Comm = world()): integer = nex_mpi_size(comm.handle)
 
 // Waits until every rank of `comm` has reached it.
 def barrier(comm: Comm = world()) = nex_mpi_barrier(comm.handle)
+
+// -- point to point -----------------------------------------------------------------------------
+
+// What a receive matched: the rank it came from, its tag, and how many values it held.
+struct Status
+  source: integer
+  tag: integer
+  count: integer
+
+private extern def nex_mpi_any_source(): integer
+private extern def nex_mpi_any_tag(): integer
+private extern def nex_mpi_send(x: [*; ..], to: integer, tag: integer, comm: int32)
+private extern def nex_mpi_recv(x: inout [*; ..], from: integer, tag: integer, comm: int32, status: inout [*; ..])
+private extern def nex_mpi_sendrecv(x: [*; ..], to: integer, send_tag: integer, y: inout [*; ..], from: integer, recv_tag: integer, comm: int32, status: inout [*; ..])
+
+// A receive from any rank, or of any tag: `MPI_ANY_SOURCE` and `MPI_ANY_TAG`.
+val any_rank: integer = nex_mpi_any_source()
+val any_tag: integer = nex_mpi_any_tag()
+
+private def status_of(s: [integer]): Status = Status(s[1], s[2], s[3])
+
+// Sends `x` to rank `to`, which receives it with `recv`; returns once `x` may be changed.
+def send[T: Numeric, R: Rank](x: [T; R], to: integer, tag: integer = 0, comm: Comm = world()) =
+  nex_mpi_send(x, to, tag, comm.handle)
+
+// Receives a message into `x`, whose shape is the message's: one of another count traps.
+def recv[T: Numeric, R: Rank](x: inout [T; R], from: integer = any_rank, tag: integer = any_tag, comm: Comm = world()): Status =
+  var s: [integer] = zeros(3)
+  nex_mpi_recv(x, from, tag, comm.handle, s)
+  status_of(s)
+
+// Sends `x` to `to` while receiving `y` from `from`, so a ring of them never deadlocks.
+def sendrecv[T: Numeric, R: Rank, U: Numeric, Q: Rank](x: [T; R], to: integer, y: inout [U; Q], from: integer, tag: integer = 0, comm: Comm = world()): Status =
+  var s: [integer] = zeros(3)
+  nex_mpi_sendrecv(x, to, tag, y, from, tag, comm.handle, s)
+  status_of(s)
+
+// -- collectives --------------------------------------------------------------------------------
+//
+// Each is a function the compiler types at each call from its operand (`elab_mpi.sysl`), as
+// Fortran's `co_sum` and `co_broadcast` are intrinsics: the operand `x` is a number or a `bool`, or
+// an array of them at any rank, whatever its unit, and the result keeps the unit. Every one takes
+// `comm = world()` last.
+
+private extern def nex_mpi_reduce(name: int32, x: inout [*; ..], loc: inout [*; ..], op: int32, root: integer, fast: bool, comm: int32)
+private extern def nex_mpi_bcast(x: inout [*; ..], root: integer, comm: int32)
+private extern def nex_mpi_gathered(name: int32, x: [*; ..], root: integer, comm: int32): integer
+private extern def nex_mpi_gather(name: int32, x: [*; ..], into: inout [*; ..], root: integer, comm: int32)
+private extern def nex_mpi_scattered(name: int32, x: [*; ..], extents: inout [*; ..], root: integer, comm: int32)
+private extern def nex_mpi_scatter(name: int32, x: [*; ..], into: inout [*; ..], root: integer, comm: int32)
+private extern def nex_mpi_alltoall(x: [*; ..], into: inout [*; ..], comm: int32)
+private extern def nex_mpi_global(name: int32, x: [*; ..], y: [*; ..], into: inout [*; ..], offset: integer, comm: int32)
+
+// `allreduce(x, op, fast = false)`: every rank's `x` combined by `op` — `+`, `*`, `min`, `max`,
+// `and`, `or`, `minloc`, `maxloc`, or a function `(T, T) -> T` of the elements — element by element,
+// on every rank. `minloc` and `maxloc` answer `(value, rank)`, ties going to the lowest rank.
+@intrinsic def allreduce()
+
+// `reduce_to(x, op, root = 0, fast = false)`: the combination on `root`; `x` on every other rank.
+@intrinsic def reduce_to()
+
+// `scan(x, op, fast = false)`: on rank r, the combination of ranks 0 to r's `x`.
+@intrinsic def scan()
+
+// `bcast(x, root = 0)`: `root`'s `x`, on every rank, whose `x` has its shape.
+@intrinsic def bcast()
+
+// `gather(x, root = 0)`: on `root`, every rank's `x` along a new last axis, one part per rank; that
+// array with no parts elsewhere. The ranks' `x` agree in shape.
+@intrinsic def gather()
+
+// `allgather(x)`: `gather`'s result on every rank.
+@intrinsic def allgather()
+
+// `gather_concat(x, root = 0)`: on `root`, every rank's `x` joined along its last axis in rank order,
+// the pieces agreeing on every other axis; an empty array elsewhere.
+@intrinsic def gather_concat()
+
+// `allgather_concat(x)`: `gather_concat`'s result on every rank.
+@intrinsic def allgather_concat()
+
+// `scatter(x, root = 0)`: part r + 1 of `root`'s `x` along its last axis, on rank r; that axis has
+// one part per rank.
+@intrinsic def scatter()
+
+// `scatter_concat(x, root = 0)`: `root`'s `x` cut along its last axis as `blocks` cuts it, rank r's
+// part on rank r.
+@intrinsic def scatter_concat()
+
+// `alltoall(x)`: part k of `x`'s last axis, which has one part per rank, sent to rank k; part k of
+// the result is rank k's.
+@intrinsic def alltoall()
+
+// `global_sum(x, offset)`: the `sum` of the distributed vector whose piece on this rank is `x`,
+// beginning at global index `offset` — the bits `sum` of the whole vector gives, at every rank count.
+@intrinsic def global_sum()
+
+// `global_dot(x, y, offset)`: the `dot` of two distributed vectors, as `global_sum`.
+@intrinsic def global_dot()
+
+// `global_norm2(x, offset)`: the `norm2` of a distributed vector, as `global_sum`.
+@intrinsic def global_norm2()
+
+// The part of `1..n` rank `r` of `p` owns, `(first, last)`: the block decomposition, the first
+// `n % p` ranks one element more than the rest; `last < first` where the part is empty.
+def blocks(n: integer, p: integer = num_ranks(), r: integer = this_rank()): (integer, integer) =
+  val q = n div p
+  val extra = n % p
+  val first = r * q + min(r, extra) + 1
+  val count = if r < extra then q + 1 else q
+  (first, first + count - 1)

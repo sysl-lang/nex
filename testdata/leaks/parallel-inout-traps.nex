@@ -1,0 +1,46 @@
+// A trap in a `parallel for` body, or in a function the body passes an element or a row `inout`,
+// leaves what the trapping iteration wrote before it (DESIGN §8.4, §9). Which other iterations ran
+// is unspecified, so only the iteration that traps, and the loops of one iteration, are printed.
+
+def set_el(x: inout integer) =
+  x = 42
+  assert(false, "boom")
+
+def wt(v: inout [integer]) =
+  v[1] = 99
+  assert(false, "boom")
+
+def fill_to(v: inout [integer], last: integer) =
+  parallel for i in 1..length(v)
+    v[i] = i
+    if i == last then assert(false, "boom")
+
+def elements(v: inout [integer]) =
+  parallel for i in 1..length(v)
+    set_el(v[i])
+
+def by_rows(m: inout [integer; :, :]) =
+  parallel for i in 1..extent(m, 1)
+    wt(m[i, :])
+
+def main() =
+  var a = [0, 0, 0, 0, 0, 0, 0, 0]
+  assert_traps(() -> fill_to(a, 1), "boom")
+  print(a[1])
+  var b = [0, 0, 0, 0, 0, 0, 0, 0]
+  assert_traps(() -> fill_to(b[3..6], 1), "boom")
+  print(b[3])
+  var one = [0]
+  assert_traps(() -> elements(one), "boom")
+  print(one)
+  var many = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  for k in 1..200
+    assert_traps(() -> elements(many), "boom")
+  print(sum(many) % 42)
+  var row = [[0, 0, 0]]
+  assert_traps(() -> by_rows(row), "boom")
+  print(row)
+  var m = [[0, 0], [0, 0], [0, 0]]
+  for k in 1..200
+    assert_traps(() -> by_rows(m), "boom")
+  print(sum(m[:, 2]))
