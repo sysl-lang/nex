@@ -523,8 +523,15 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       window writes and the constructors move machine numbers; the arithmetic operators, the
       comparisons, `and`/`or`/`not`, negation and the reductions (`sum`, `product`, `dot` of reals,
       `norm2` of reals, `minval`/`maxval`, `count`/`any`/`all`) are loops over them
-      (`interp_kernels.sysl`). `^`, conversions, elemental functions, `map`/`filter`/`reduce`, the
-      locations and the inline product still run value by value over the typed storage.
+      (`interp_kernels.sysl`). So are `^` (an exponent of the base's type or any integer type, the
+      compiled power's traps), the numeric conversions and their range and `--fpe-trap` checks, the
+      elemental prelude (the real functions at their width through `sysl.math.Float`, `abs`, `sign`,
+      `min`, `max`, `atan2`, `hypot`, the complex functions), `minloc`/`maxloc`, `product` of complex
+      numbers, `dot` of integers and complex numbers, and the inline product below BLAS's size, which
+      keeps `linalg.matmul`'s order with each product and sum rounded on its own, never fused
+      (`interp_kernels_fn.sysl`, `interp_la.sysl`). A user's `@elemental` function and `map` call
+      their scalar body per element, reading each operand from a typed copy taken before the body
+      runs; `filter`, `reduce` and the parallel forms run value by value.
       Measured (`bench/interp-elementwise.nex`: 200 000 `real64` elements, 50 passes of two
       element-wise statements and a `sum`, then an element loop): 0.02 s compiled; interpreted 0.64 s
       with values as storage, 0.69 s → 0.31 s (and 0.91 s → 0.29 s in a second, interleaved run
@@ -533,6 +540,16 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       `bench/interp-solve.nex` (50 solves of 500 × 500 with 50 right-hand sides): 0.086 s → 0.090 s
       (0.125 s → 0.090 s) — the copies the typed storage removes were a small part of either. Median
       of 5 (then 7) `nex run --interp` runs, through `take-slot`, outputs identical.
+      The loops for the rest, measured the same way (median of 7, interleaved, under load 16):
+      `bench/interp-elemental.nex` (200 000 `real64` elements, 20 passes of `^`, a conversion there
+      and back, `sqrt`/`exp`/`sin`/`max`, an `@elemental` function, `map` with a lambda and `maxloc`)
+      1.73 s → 1.00 s; `bench/interp-small-matmul.nex` (20 000 products of 16 × 16 matrices and as
+      many matrix-vector products, all inline) 1.25 s → 0.063 s; `bench/interp-elementwise.nex`
+      0.30 s → 0.28 s. Of the 1.00 s left in the first, the `@elemental` call and the `map` are
+      0.39 s and 0.34 s: about 95 ns and 85 ns an element, against 22 ns for the same per-element
+      frame with a prelude function as its body, so the call itself — a frame per element — is
+      three quarters of it. Compiling an elemental function's body into the element loop, its
+      parameters in the loop's slots, would save most of that; it is a change to the call path.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel
