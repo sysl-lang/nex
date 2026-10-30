@@ -61,6 +61,22 @@ disjoint_windows_cost_nothing()
     assert_eq(occurrences(buffers, "memref.alloc"), 1)
     assert_eq(occurrences(buffers, "memref.copy"), 0)
 
+@test("reverse with no axis reverses axis 1 of an array of numbers or of non-numbers, at rank 1 and 2")
+reverse_with_no_axis()
+    val b = bench()
+    val out = ran(b, "def main() =\n  var a = [1, 2, 3, 4]\n  val r = reverse(a)\n  a[1] = 9\n  print(r)\n  print(reverse([[1, 2], [3, 4]]))\n  print(reverse([\"a\", \"b\", \"c\"]))\n  print(reverse([[\"a\", \"b\"], [\"c\", \"d\"]]))\n  print(reverse([(1, \"x\"), (2, \"y\")]))\n")
+
+    finish(b)
+    assert_eq(out.text, "[4, 3, 2, 1]\n[[3, 4], [1, 2]]\n[c, b, a]\n[[c, d], [a, b]]\n[(2, y), (1, x)]\n")
+
+@test("empty windows of an array of non-numbers read and write nothing, and an array written into a window of itself is read whole first")
+items_empty_and_self_windows()
+    val b = bench()
+    val out = ran(b, "def main() =\n  var xs = [\"a\", \"b\", \"c\"]\n  print(xs[2..1])\n  xs[2..1] = \"z\"\n  xs[3..2] = xs[1..0]\n  print(xs)\n  var m = [[\"a\", \"b\"], [\"c\", \"d\"]]\n  print(m[2..1, :])\n  print(size(m[:, 2..1]))\n  xs[.. by -1] = xs\n  print(xs)\n  m[.. by -1, :] = m\n  m[:, 2] = m[:, 1]\n  print(m)\n")
+
+    finish(b)
+    assert_eq(out.text, "[]\n[a, b, c]\n[]\n0\n[c, b, a]\n[[c, c], [a, a]]\n")
+
 @test("a negative slice stride compiles, and a stride of 0 still traps")
 negative_strides_compile()
     val b = bench()

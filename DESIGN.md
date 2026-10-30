@@ -691,6 +691,14 @@ and bufferization copies only when a later write would be visible (`view-then-wr
 Element access through a dynamic strided view needs `lower-affine` after `expand-strided-metadata`,
 which the pipeline gains (PLAN.md).
 
+**An array whose elements are not numbers** — strings, functions, tuples, structs, enums — is not a
+tensor but a counted object holding its elements, and the same windows (offset, extent and stride per
+axis, `by` and `origin` included) are taken of it with the same checks. Read as a value, a slice of
+one is a new array holding a count on each element of the window: one allocation, the elements
+shared rather than copied, which only the cost tells apart from a view. Slice assignment, a write
+through a slice of a place, and an `inout` slice write the source's own elements in place, so a
+callee that traps leaves its earlier writes in the caller's array (§8.4).
+
 ### 6.4 Offset views: `origin`
 
 Arrays are 1-based, always; there are no declared lower bounds. Where a computation reads better

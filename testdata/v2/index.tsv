@@ -26,3 +26,4 @@ file	category	name
 025-arrays-inside-aggregates-are-values	prelude	an array in a struct, read into a local or returned, then the struct written; a module-level array copied, then written; arrays a `match` arm writes
 026-arrays-of-non-numbers	prelude	arrays of structs, strings and closures written through elements and shared by value; `enumerate`, `zip`; an array of strings in a struct
 027-rearranging-locating-and-reducing-along-a-computed-axis	prelude	`permute` written and computed, `reverse` on a computed axis, `dim =` computed, `minloc`/`maxloc` at ranks 1–3 and along an axis, `assert_approx` and the traps of each
+028-arrays-of-non-numbers-at-every-rank-and-sliced	prelude	arrays of strings, structs, enums, tuples and closures at ranks 2 and 3: slices, negative strides, `reverse`, `origin`, writes through windows and slices of slices, `inout` windows, `map` into and out of them, and the traps of each
