@@ -1,0 +1,76 @@
+// Reductions of reals. `allreduce`, `scan` and `reduce_to` combine the ranks' contributions in
+// DESIGN §9.2.1's pairwise tree over the rank numbers, so their bits are the tree's, the same run to
+// run. `global_sum`, `global_dot` and `global_norm2` of a distributed vector are the bits `sum`,
+// `dot` and `norm2` give over the whole vector, at every rank count and however it is cut. A rank
+// prints a line only for a check that fails; rank 0 then prints the values themselves.
+
+import mpi.*
+
+// Element i of the distributed vector, inexact in binary.
+def term(i: integer): real = 1.0 / i + 0.1 * sin(1.0 * i)
+
+// Rank r's contribution to the reductions, inexact too.
+def contribution(r: integer): real = 1.0 / (r + 3) + 1.0e-3 * r
+
+// The pairwise tree of §9.2.1 over `xs`: in rounds, 1 with 2, 3 with 4, …, an odd last one carried.
+def tree(xs: [real]): real =
+  var parts = xs
+  var m = size(parts)
+  while m > 1
+    var k = 0
+    var j = 1
+    while j + 1 <= m
+      k += 1
+      parts[k] = parts[j] + parts[j + 1]
+      j += 2
+    if j == m
+      k += 1
+      parts[k] = parts[j]
+    m = k
+  parts[1]
+
+def report(name: string, oks: [bool]): integer =
+  for k in 1..size(oks)
+    if not oks[k] then print(s"BAD rank ${this_rank()}: ${name} ${k}")
+  size(oks)
+
+def main() =
+  val me = this_rank()
+  val p = num_ranks()
+  var checks = 0
+  var cs: [real] = zeros(p)
+  for r in 1..p
+    cs[r] = contribution(r - 1)
+
+  val total = allreduce(contribution(me), +)
+  val pair = allreduce([contribution(me), 3.0 * contribution(me)], +)
+  val rooted = reduce_to(contribution(me), +, root = p - 1)
+
+  checks += report("tree", [total == tree(cs), pair[1] == tree(cs), pair[2] == tree(3.0 * cs), scan(contribution(me), +) == tree(cs[1..me + 1]), if me == p - 1 then rooted == tree(cs) else rooted == contribution(me), allreduce(contribution(me), (a, b) -> a + b) == tree(cs) or p > 2])
+
+  // The whole vector, and two ways of cutting it among the ranks: `blocks`' and one whose pieces
+  // run in the reverse order of the ranks.
+  val n = 10007
+  var whole: [real] = zeros(n)
+  for i in 1..n
+    whole[i] = term(i)
+  val single = map(whole, (x) -> real32(x))
+  val cx = map(whole, (x) -> complex(x, 1.0 - x))
+  val (f, l) = blocks(n)
+  val (g, h) = blocks(n, p, p - 1 - me)
+
+  checks += report("global", [global_sum(whole[f..l], f) == sum(whole), global_sum(whole[g..h], g) == sum(whole), global_dot(whole[f..l], whole[f..l], f) == dot(whole, whole), global_norm2(whole[g..h], g) == norm2(whole), global_sum(single[f..l], f) == sum(single), global_norm2(single[g..h], g) == norm2(single), global_sum(cx[g..h], g) == sum(cx), global_dot(cx[f..l], cx[f..l], f) == dot(cx, cx), global_norm2(cx[f..l], f) == norm2(cx)])
+
+  // A vector shorter than the ranks are many: some pieces are empty.
+  val (a, b) = blocks(5)
+
+  checks += report("short", [global_sum(whole[a..b], a) == sum(whole[1..5]), global_sum(whole[1..0], 1) == 0.0])
+
+  print(s"rank ${me}: ${checks} checks")
+
+  // Every rank takes part in a collective; rank 0 alone prints.
+  val values = s"global ${global_sum(whole[f..l], f)} ${global_dot(whole[f..l], whole[f..l], f)} ${global_norm2(whole[f..l], f)}"
+
+  if me == 0
+    print(s"allreduce ${total} ${pair}")
+    print(values)

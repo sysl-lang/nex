@@ -167,8 +167,10 @@ form and the usual one.
 
 **Elemental functions.** A scalar function marked `@elemental` applies to arrays element by element,
 as Fortran's `ELEMENTAL` procedures and every math function of the prelude do. Called on an array of
-any rank it returns an array of the same shape, and the call fuses into the surrounding whole-array
-expression:
+any rank it returns an array of the same shape. Since it may print or trap, the call is computed for
+every element before the surrounding whole-array expression uses it, so what it prints comes in
+element order; under `parallel` it fuses into the expression's loop
+([Array expressions §5.4](/spec/05-array-expressions/)):
 
 ```nex
 @elemental

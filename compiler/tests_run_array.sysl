@@ -40,15 +40,11 @@ lowered_until(b: Bench, m: string, last: string) -> string
 
 occurrences(text: string, what: string) -> usize = split(text, what).len - 1
 
-@test("313-02's whole-array expression, three linalg.generic operations as emitted, is one loop after fusion")
+@test("313-02's whole-array expression of three operations is emitted as one linalg.generic")
 fused_point_distance()
-    val b = bench()
     val m = emitted(read_text(repo("testdata/corpus/313-02-arrays-element-wise-fusion-point-distance.nex")).unwrap()).unwrap()
-    val fused = lowered_until(b, m, "func.func(linalg-fuse-elementwise-ops)")
 
-    finish(b)
-    assert_eq(occurrences(m, "linalg.generic"), 3)
-    assert_eq(occurrences(fused, "linalg.generic"), 1)
+    assert_eq(occurrences(m, "linalg.generic"), 1)
 
 @test("== on arrays, [uint8] among them, is element-wise, and all of it says whether two are equal")
 run_array_equality()

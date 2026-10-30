@@ -135,19 +135,12 @@ sysl test .
    flow are `arith`, `math`, `scf` and `func`; an array of shape `(d1, …, dk)` is a
    `tensor<dk×…×d1×T>` (axes reversed, so the default layout is column-major, and each 1-based nex
    index is lowered by subtracting 1, which folds into loop bounds); an array expression
-   is a `linalg.generic` per operator, and fusing them is MLIR's job, not ours; a slice is a
+   is one `linalg.generic` where it is quiet (fused, DESIGN §7.1) and one per operator otherwise; a slice is a
    `tensor.extract_slice`; complex numbers are the `complex` dialect with multiplication and
    division written out (below). Every function but `main` is `private`.
 4. **The pipeline**: one `mlir-opt` run with a fixed pass list, `mlir-translate --mlir-to-llvmir`,
-   and `clang -O2` with the runtime. Today's pass list is `experiments/mlir/pipeline.txt`:
-
-   ```
-   func.func(linalg-fuse-elementwise-ops), canonicalize, cse,
-   one-shot-bufferize{bufferize-function-boundaries}, buffer-deallocation-pipeline,
-   convert-linalg-to-loops, convert-scf-to-cf, convert-complex-to-standard,
-   expand-strided-metadata, finalize-memref-to-llvm, convert-math-to-llvm, convert-complex-to-llvm,
-   convert-arith-to-llvm, convert-func-to-llvm, convert-cf-to-llvm, reconcile-unrealized-casts
-   ```
+   and `clang -O2` with the runtime. The pass list is `experiments/mlir/pipeline.txt`, set out
+   under "The pipeline, revised" below.
 
    It changes as the design needs (next section). The tools are driven through
    `sysl.process.capture`: a module goes to `mlir-opt` as a file in a `make_temp_dir` directory, or
@@ -187,7 +180,7 @@ The design's proofs (`views.mlir`, `view-then-write.mlir`, `parallel.mlir`, `bla
 `tests_toolchain.sysl` take them on in the milestone that first needs them. **Sequential:**
 
 ```
-canonicalize, cse, func.func(linalg-fuse-elementwise-ops), canonicalize, cse,
+canonicalize, cse,
 one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops},
 canonicalize, drop-equivalent-buffer-results, canonicalize, cse, canonicalize,
 buffer-deallocation-pipeline, convert-bufferization-to-memref,
@@ -199,10 +192,13 @@ reconcile-unrealized-casts
 
 Each pass and setting below is new, forced by a program that fails or copies without it:
 
-- `canonicalize, cse` before fusion — the emitter checks the shapes of element-wise operands and
-  sizes each result from an operand's extents, and those `tensor.dim` uses of an intermediate
-  result stop `linalg-fuse-elementwise-ops`, which fuses only a producer with one use. Folded
-  first, they go, and 313-02's three operators are one loop (`tests_run_array.sysl`).
+- `canonicalize, cse` before bufferization — the emitter checks the shapes of element-wise operands
+  and sizes each result from an operand's extents; folded first, the checks of shapes known when
+  compiling go.
+- **No `linalg-fuse-elementwise-ops`.** The emitter fuses a quiet element-wise expression itself
+  (DESIGN §7.1), and the pass, fusing a producer whose body calls a function that may print or trap
+  (an `@elemental` function, a trap), keeps the producer for its side effects as well, so every
+  element was computed twice.
 - `allow-return-allocs-from-loops` — a loop that rebinds an array local to a new value
   (`a = a * 2` in a `for`, a growing `flatMap` result) carries a fresh buffer round the loop.
 
@@ -228,9 +224,11 @@ the program links `libomp` from `$NEX_LLVM_HOME/lib` (`driver.sysl`'s `pipeline_
 
 ## What MLIR gives, and what it does not
 
-- **Elementwise fusion is free.** `313-02` (point distance) emits three `linalg.generic`s, one per
-  operator; `linalg-fuse-elementwise-ops` makes them one loop, and its one allocation is freed by
-  `buffer-deallocation-pipeline`. Emission never fuses by hand. It holds at rank 3 (`views.mlir`).
+- **Elementwise fusion is the emitter's.** `313-02` (point distance) emits one `linalg.generic` for
+  its three operators, its body the whole scalar computation (`fused_scalar`, which `parallel` uses
+  too), and its one allocation is freed by `buffer-deallocation-pipeline`. An assignment to a local
+  the expression reads writes the local's buffer in place; bufferization copies it only where the
+  old value is still read (`tests_run_fusion.sysl`).
 - **Views are free.** A `tensor.extract_slice` bufferizes to a strided `memref.subview` of its
   source, with no allocation and no copy, for a column, a row, a window strided on both axes and a
   plane of a rank-3 array, each handed to a function as a dynamic-shape tensor (`views.mlir`). When
@@ -612,12 +610,17 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       interpreter's refusal. *Exit*: a hello-ranks program at `-np 1, 2, 4, 7`; a trap on rank 2
       ends a 4-rank job with `rank 2:` in front of its message and a non-zero status, no hang.
     - **D2 — point to point and collectives** of every element type of §9.6.3, units and complexes
-      included: `send`/`recv`/`sendrecv`, `bcast`, `reduce_to`/`allreduce`/`scan` with every §9.2
-      operator and a user one, `gather`/`allgather`/`scatter`/`alltoall` (the `v` forms chosen
-      automatically), `blocks`; the reproducible reductions and `global_sum` of §9.6.5. *Exit*: each
-      collective against a sequential oracle at `-np 1, 2, 3, 4, 7`; `allreduce` of reals gives
-      identical bits run to run and on both MPIs; `global_sum` equals the undistributed `sum`'s
-      bits at every `-np`; a shape mismatch traps with the counts.
+      included. The collectives are compiler intrinsics of the module, typed by
+      `sh/sysl/nex/elab_mpi.sysl` (DESIGN §9.6.2, decision 8): `bcast`,
+      `reduce_to`/`allreduce`/`scan` with every §9.2 operator and a user one, `gather`/`allgather`
+      (rank k → k + 1), `gather_concat`/`allgather_concat` (MPI's `v` forms), `scatter`/
+      `scatter_concat`, `alltoall`, and `global_sum`/`global_dot`/`global_norm2` of §9.6.5;
+      `send`/`recv`/`sendrecv`, `Status` and `blocks` are nex in `mpi.nex`. Structs and tuples wait
+      for §15, `minloc`/`maxloc`'s pair aside. *Exit*: each collective against a sequential oracle
+      at `-np 1, 2, 3, 4, 7` (`testdata/mpi/collectives.nex`); `allreduce` of reals gives the
+      pairwise tree's bits, identical run to run (`testdata/mpi/reproducible.nex`; the other MPI is
+      D5's); `global_sum` equals the undistributed `sum`'s bits at every `-np`; a shape mismatch
+      traps with the counts; every refusal with its diagnostic (`compiler/tests_mpi_module.sysl`).
     - **D3 — views as datatypes and the `exchange` block**: every window and strided view of
       §9.6.3 crossing with no copy (checked: no `nex_c_gather` in the emitted module), the datatype
       cache, `exchange` with §8.3's borrow of a received place. *Exit*: the strided `mpi_irecv`

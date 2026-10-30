@@ -318,7 +318,9 @@ impl Elab
 
         if self.is_prelude_constant(span, n) then return self.constant(span, n, want)
 
-        if is_builtin(n) || is_array_builtin(n)
+        if self.is_intrinsic(g)
+            self.fail(span, s"`${n}` is a collective of `mpi`, typed at each call from its operand, so it is only called: `${n}(x, …)`")
+        elif is_builtin(n) || is_array_builtin(n)
             self.later(span, s"the prelude function `${n}` as a value")
         elif scalar_named(n).is_some()
             self.fail(span, s"`${n}` is a type; call it to convert a value: `${n}(x)`")

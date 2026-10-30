@@ -1,10 +1,12 @@
 module sh.sysl.nex
 
-// Fusion of an element-wise expression under `parallel` (DESIGN §9.5): the operators, elemental
-// calls, conversions, widenings and rescalings of a whole element-wise expression become one scalar
+// Fusion of an element-wise expression (DESIGN §7.1, §9.5): the operators, elemental calls,
+// conversions, widenings and rescalings of a whole element-wise expression become one scalar
 // computation over the arrays and values at its leaves, so each element is computed whole before the
 // next. Both engines compute a `parallel` element-wise expression and a `parallel` reduction's
-// operand from this one form, so a trap is the same one on each.
+// operand from this one form, so a trap is the same one on each. Without `parallel` the compiled
+// engine fuses an expression only where it is `quiet`, and the interpreter computes operation by
+// operation; the two agree because nothing a quiet expression does tells them apart.
 
 import sysl.buf.{Buf, buf}
 
@@ -58,6 +60,62 @@ private fused_args(args: Buf[TExpr], leaves: *Buf[TExpr]) -> Buf[TExpr]
         out.push(fused_scalar(a, leaves))
 
     out
+
+// The operands of `e`, a fusible operation, in source order: the order `fused_scalar` meets its
+// leaves in.
+fused_operands(e: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    *e.kind match
+        TPromote(v) -> out.push(v)
+        TRescale(v, _) -> out.push(v)
+        TArray(op) -> *op match
+            TElementwise(_, l, r) ->
+                out.push(l)
+                out.push(r)
+            TElementwiseUnary(_, v) -> out.push(v)
+            TElemental(_, args) -> return args
+            TElementalConvert(v, _) -> out.push(v)
+            TElementalCall(_, args) -> return args
+            _ -> ()
+        _ -> ()
+
+    out
+
+// Whether `s`, a scalar made by `fused_scalar`, can neither trap nor print, so that computing it
+// element by element, each element whole, is indistinguishable from computing it operation by
+// operation over whole arrays. Real and complex arithmetic is quiet without `--fpe-trap` (`fpe`), but
+// complex division, which traps on a zero divisor; a comparison is quiet over any numbers; integer
+// arithmetic traps on overflow, a conversion that checks its range traps, and an `@elemental`
+// function may trap or print, so none of them is.
+quiet(s: TExpr, fpe: bool) -> bool = *s.kind match
+    TChainOperand(_) -> true
+    TPromote(v) -> quiet(v, fpe) && (is_floating(s.ty) && !fpe || is_int(base_of(s.ty)) && is_int(base_of(v.ty)))
+    TRescale(v, _) -> !fpe && is_floating(s.ty) && quiet(v, fpe)
+    TUnary(o, v) -> quiet(v, fpe) && (o == "not" || o == "-" && !fpe && is_floating(v.ty))
+    TBinary(o, a, b) ->
+        if !quiet(a, fpe) || !quiet(b, fpe) then return false
+
+        if o == "==" || o == "!=" || o == "<" || o == "<=" || o == ">" || o == ">=" then return true
+        if fpe then return false
+
+        // A real raised to any power.
+        if o == "^" then return is_real(base_of(a.ty)) && (is_floating(b.ty) || is_int(base_of(b.ty)))
+        if !is_floating(a.ty) || !is_floating(b.ty) then return false
+
+        o == "+" || o == "-" || o == "*" || o == "/" && is_real(base_of(b.ty)) && is_real(base_of(a.ty))
+    TBuiltin(_, args) ->
+        if fpe || !is_floating(s.ty) then return false
+
+        for a in args
+            if !is_floating(a.ty) || !quiet(a, fpe) then return false
+
+        true
+    TConvert(v, traps) -> !traps && !fpe && is_floating(s.ty) && is_floating(v.ty) && quiet(v, fpe)
+    _ -> false
+
+// Whether `t` is a real or a complex number, measured or not.
+private is_floating(t: Ty) -> bool = is_real(base_of(t)) || is_complex(base_of(t))
 
 // An operand of a scalar body: the `k`th value of the innermost chain frame, of `e`'s element type.
 chain_leaf(e: TExpr, k: usize) -> TExpr = texpr(e.span, elem_of(e.ty), TChainOperand(k))

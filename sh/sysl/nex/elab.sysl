@@ -40,7 +40,7 @@ elaborate_modules(p: Program, mods: Modules) -> Result[TProgram, Buf[Diagnostic]
     Ok(e.program())
 
 private elab(p: Program, mods: Modules) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf(), buf())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf(), buf(), buf())
 
 // How far a declaration has got.
 enum Progress
@@ -185,6 +185,9 @@ struct Elab
     // The functions whose defaults are being elaborated, innermost last: a default that reaches one
     // of them again is a cycle.
     defaulting: Buf[usize]
+    // The `@intrinsic` functions of the `mpi` module, by internal name: declared there, typed at each
+    // call by the compiler (`elab_mpi.sysl`).
+    intrinsics: Buf[string]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -284,7 +287,9 @@ struct Elab
 
                     self.note_private(d, name)
 
-                    if test && (tparams.len() > 0 || params.len() > 0) then
+                    if has_intrinsic(d.attrs) then
+                        self.collect_intrinsic(d, name, body.is_some())
+                    elif test && (tparams.len() > 0 || params.len() > 0) then
                         self.fail(d.span, s"a test takes no parameters: `@test def ${n}()`")
                     elif test && !self.mods.test_build then
                         // A test exists only in `nex test`'s build.
@@ -333,7 +338,7 @@ struct Elab
 
     // Whether `name` is free at the top level; if not, says so.
     declare(*self, span: Span, name: string) -> bool
-        if self.find_top(name).is_some() || self.is_aggregate_name(name) || self.find_generic_fun(name).is_some()
+        if self.find_top(name).is_some() || self.is_aggregate_name(name) || self.find_generic_fun(name).is_some() || self.is_intrinsic(name)
             self.fail(span, s"redeclaration of `${name}`")
             return false
 
@@ -782,6 +787,10 @@ struct Elab
     unknown_name(*self, span: Span, name: string)
         // An import that named nothing has been reported where it stands.
         if self.refused_import(span, name) then return
+
+        if is_operator_word(name)
+            self.fail(span, s"`${name}` stands alone only as the operator of one of `mpi`'s reductions, `allreduce(x, ${name})`")
+            return
 
         nearest_name(name, self.visible_names(span)) match
             Some(near) -> self.fail(span, s"unknown name `${name}`; did you mean `${near}`?")

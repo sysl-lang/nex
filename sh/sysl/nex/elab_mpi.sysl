@@ -1,0 +1,711 @@
+module sh.sysl.nex
+
+// The collectives of the `mpi` module (DESIGN §9.6.2), typed: `allreduce`, `reduce_to`, `scan`,
+// `bcast`, `gather`, `allgather`, `gather_concat`, `allgather_concat`, `scatter`, `scatter_concat`,
+// `alltoall`, `global_sum`, `global_dot` and `global_norm2`. The module declares each as an
+// `@intrinsic def` without a body, which makes it a name `import mpi.*` and `mpi.allreduce` reach;
+// this file types each call from its operand, as the prelude's reductions are typed, the way
+// Fortran's `co_sum` and `co_broadcast` are intrinsics rather than library code.
+//
+// **The operand is any number or `bool`, or an array of them at any rank** — whole, a window or a
+// strided view — of the element types a `[*; ..]` descriptor carries (DESIGN §10.7), whatever its
+// unit; a tuple or a struct is refused until structs pass by value (§15). The result keeps the
+// operand's unit, except where an operator changes it as `product` does.
+//
+// **A call becomes a block of the module's shim calls** over hidden locals (`#x`, `#r`, …, names no
+// source can write): the result is a fresh `var` the shim writes through a `[*; ..]` descriptor, so
+// nothing reaches the emitter but locals, `zeros`, `extent` and calls of the module's `extern`s.
+// A user operator is folded here instead, in rank order, over the pieces an `allgather` brought.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The collectives in the order of the shim's names for them (`nex_mpi.c`'s `NAMES`).
+private val COLLECTIVES = ["allreduce", "reduce_to", "scan", "bcast", "gather", "allgather", "gather_concat", "allgather_concat", "scatter", "scatter_concat", "alltoall", "global_sum", "global_dot", "global_norm2"]
+
+// The built-in operators, in the order of the shim's codes for them, from 1.
+private val OPERATORS = ["+", "*", "min", "max", "and", "or", "minloc", "maxloc"]
+
+// Whether `name` is an operator word that only a reduction's operator position takes as a value.
+is_operator_word(name: string) -> bool = name == "+" || name == "*" || name == "and" || name == "or"
+
+private index_in(name: string, names: []const string) -> usize
+    for k in 0..<names.len
+        if names[k] == name then return k
+
+    names.len
+
+// The parameters of collective `c`, in order, and how many of them have no default.
+private params_of(c: string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    out.push("x")
+
+    if c == "global_dot" then out.push("y")
+    if c == "allreduce" || c == "scan" || c == "reduce_to" then out.push("op")
+    if c == "reduce_to" || c == "bcast" || c == "gather" || c == "gather_concat" || c == "scatter" || c == "scatter_concat" then out.push("root")
+    if c == "allreduce" || c == "scan" || c == "reduce_to" then out.push("fast")
+    if c.starts_with("global_") then out.push("offset")
+
+    out.push("comm")
+    out
+
+private required_of(c: string) -> usize = if c == "global_dot" then 3 elif c == "allreduce" || c == "scan" || c == "reduce_to" || c == "global_sum" || c == "global_norm2" then 2 else 1
+
+// What collective `c` is said to take, for a call with the wrong arguments.
+private wants_of(c: string) -> string
+    var out = ""
+    val ps = params_of(c)
+
+    for k in 0..<ps.len()
+        if k > 0 then out += ", "
+        out += if k < required_of(c) then s"`${ps[k]}`" else s"`${ps[k]} =`"
+
+    out
+
+// An operator: a built-in one by its code, or a user function `(T, T) -> T`, elaborated.
+private enum MpiOp
+    Builtin(code: int)
+    User(f: TExpr)
+
+private nm(span: Span, n: string) -> Expr = Expr(span, ExprKind.Name(n))
+
+private num(span: Span, v: i128) -> Expr = Expr(span, ExprKind.IntLit(v))
+
+private stmt(e: Expr) -> BlockItem = BlockItem.Stmt(e)
+
+private assign(span: Span, target: Expr, value: Expr) -> Expr = Expr(span, ExprKind.Assign("=", target, value))
+
+private index(span: Span, target: Expr, indices: Buf[Expr]) -> Expr = Expr(span, ExprKind.Index(target, indices))
+
+private range_for(span: Span, v: string, lo: Expr, hi: Expr, body: Expr) -> Expr =
+    Expr(span, ExprKind.For(None, Pattern(span, PatternKind.Name(v)), Expr(span, ExprKind.Range(Some(lo), Some(hi), true, None)), body))
+
+private block(span: Span, items: Buf[BlockItem]) -> Expr = Expr(span, ExprKind.Block(items, Expr(span, ExprKind.UnitLit)))
+
+private var_item(span: Span, n: string, init: Expr) -> BlockItem =
+    BlockItem.Item(Decl(span, buf(), false, DeclKind.Bind(BindKind.Var, Pattern(span, PatternKind.Name(n)), None, init)))
+
+// The element at `at` of piece `p` of `#all`.
+private piece(span: Span, at: Buf[Expr], p: Expr) -> Expr
+    var ix: Buf[Expr] = buf()
+
+    for a in at
+        ix.push(a)
+
+    ix.push(p)
+    index(span, nm(span, "#all"), ix)
+
+private int_lit(span: Span, v: i128) -> TExpr = texpr(span, INTEGER, TLiteral(IntVal(v), false))
+
+// A zero of the scalar type `t`, its unit kept.
+private zero_value(span: Span, t: Ty) -> TExpr = base_of(t) match
+    Complex(b) ->
+        val z = texpr(span, Real(b), TLiteral(RealVal(0.0), false))
+
+        texpr(span, t, TMakeComplex(z, z))
+    Real(_) -> texpr(span, t, TLiteral(RealVal(0.0), false))
+    Bool -> texpr(span, t, TLiteral(BoolVal(false), false))
+    _ -> texpr(span, t, TLiteral(IntVal(0), false))
+
+// `axes` with `last` after them.
+private axes_then(axes: Buf[Extent], upto: usize, last: Extent) -> Buf[Extent]
+    var out: Buf[Extent] = buf()
+
+    for k in 0..<upto
+        out.push(axes[k])
+
+    out.push(last)
+    out
+
+private axes_upto(axes: Buf[Extent], upto: usize) -> Buf[Extent]
+    var out: Buf[Extent] = buf()
+
+    for k in 0..<upto
+        out.push(axes[k])
+
+    out
+
+// `#comm.handle`, the communicator as the shim takes it.
+private handle(span: Span) -> Expr = Expr(span, ExprKind.Field(nm(span, "#comm"), "handle"))
+
+// A new array of type `t` with every element zero, or a zero where `t` is a scalar.
+private zeros_of(span: Span, t: Ty, extents: Buf[TExpr]) -> TExpr = if is_array(t) then texpr(span, t, TBuiltin("zeros", extents)) else zero_value(span, t)
+
+// An array of `elem` over `axes`, or `elem` itself where there are none.
+private array_or_scalar(elem: Ty, axes: Buf[Extent]) -> Ty = if axes.len() == 0 then elem else Ty.Array(elem, axes)
+
+impl Elab
+    // Whether `internal` names one of the `mpi` module's intrinsics.
+    is_intrinsic(self, internal: string) -> bool
+        for n in self.intrinsics
+            if n == internal then return true
+
+        false
+
+    // `@intrinsic def name()`: a function the compiler types at each call, which only the `mpi`
+    // module nex ships declares.
+    collect_intrinsic(*self, d: Decl, internal: string, has_body: bool)
+        val m = self.mods.module_at(d.span.start)
+
+        if self.mods.names[m] != MPI_MODULE
+            self.fail(d.span, "`@intrinsic` marks a function the compiler types itself, which only the `mpi` module nex ships declares")
+        elif has_body || index_in(internal[MPI_MODULE.len + 1..], COLLECTIVES) == COLLECTIVES.len
+            self.fail(d.span, s"`${internal}` is no collective the compiler knows, or has a body")
+        elif self.declare(d.span, internal)
+            self.intrinsics.push(internal)
+            self.note_private(d, internal)
+
+    // A call of the collective `internal` (`mpi.allreduce`, …).
+    mpi_call(*self, span: Span, internal: string, args: Buf[Expr]) -> TExpr
+        val c = internal[MPI_MODULE.len + 1..]
+        val ps = params_of(c)
+        var bound: Buf[Option[Expr]] = buf()
+        var positional = true
+
+        for _ in 0..<ps.len()
+            bound.push(None)
+
+        var next: usize = 0
+
+        for a in args
+            *a.kind match
+                NamedArg(n, v) ->
+                    positional = false
+
+                    val k = index_in(n, ps.view())
+
+                    if k == ps.len() || k == 0
+                        self.fail(a.span, s"`$c` takes ${wants_of(c)}, and no `$n =`")
+                        return self.invalid(span)
+
+                    if bound[k].is_some()
+                        self.fail(a.span, s"`$c`'s `$n` is given twice")
+                        return self.invalid(span)
+
+                    bound.set(k, Some(v))
+                _ ->
+                    if !positional
+                        self.fail(a.span, s"`$c`'s arguments by position come before the named ones")
+                        return self.invalid(span)
+
+                    if next == ps.len() then return self.arity(span, c, wants_of(c))
+
+                    bound.set(next, Some(a))
+                    next += 1
+
+        for k in 0..<required_of(c)
+            if bound[k].is_none() then return self.arity(span, c, wants_of(c))
+
+        val comm = bound[ps.len() - 1] match
+            Some(e) -> self.check(e, Nominal(s"$MPI_MODULE.Comm", buf()), "`comm`")
+            None -> self.world(span)
+
+        if is_error(comm.ty) then return self.invalid(span)
+
+        if c == "allreduce" || c == "reduce_to" || c == "scan" then return self.mpi_reduction(span, c, bound, comm)
+        if c.starts_with("global_") then return self.mpi_global(span, c, bound, comm)
+
+        self.mpi_movement(span, c, bound, comm)
+    end mpi_call
+
+    // `world()`, the communicator a collective uses where none is given.
+    private world(*self, span: Span) -> TExpr = self.find_top(s"$MPI_MODULE.world") match
+        Some(TopFun(k)) -> self.call_fun(span, span, k, buf())
+        _ -> self.invalid(span)
+
+    // The operand of collective `c`: a number or `bool`, or an array of them, at a rank the call can
+    // count (not a rank parameter's).
+    private mpi_operand(*self, c: string, e: Expr, what: string) -> TExpr
+        val v = self.infer(e)
+
+        if is_wild(v.ty) then return self.invalid(e.span)
+
+        val et = base_of(elem_of(v.ty))
+        val tuple_like = et match
+            Ty.Tuple(_) -> true
+            Nominal(_, _) -> true
+            _ -> false
+
+        if tuple_like
+            self.fail(e.span, s"`$c` takes $what as a number or a `bool`, or an array of them; a tuple or a struct waits for structs by value (DESIGN §15), and this is ${self.shown(v)}")
+            return self.invalid(e.span)
+
+        val generic = et match
+            Param(_, _, _) -> true
+            _ -> false
+
+        var ranked = false
+
+        for x in axes_of(v.ty)
+            x match
+                Extent.Named(_) -> ranked = true
+                _ -> ()
+
+        if generic || ranked
+            self.fail(e.span, s"`$c` is typed from its operand's element type and rank, which a generic body does not know; call it where they are known: this is ${self.shown(v)}")
+            return self.invalid(e.span)
+
+        if !described(et)
+            self.fail(e.span, s"`$c` takes $what as an integer, a real, a complex or a `bool`, or an array of them; this is ${self.shown(v)}")
+            return self.invalid(e.span)
+
+        v
+
+    // A scalar argument of `c` named `p`, of type `t`, or `fallback` where it is not given.
+    private mpi_scalar(*self, b: Buf[Option[Expr]], ps: Buf[string], p: string, t: Ty, fallback: TExpr) -> TExpr
+        val k = index_in(p, ps.view())
+
+        if k == ps.len() then return fallback
+
+        b[k] match
+            Some(e) -> self.check(e, t, s"`$p`")
+            None -> fallback
+
+    // `v` bound to a new hidden local `#name` of the open scope, a `var` where `var_`: the binding.
+    private hold(*self, span: Span, name: string, v: TExpr, var_: bool) -> TExpr =
+        self.bind_local(span, span, s"#$name", v.ty, if var_ then LVar else LVal, v)
+
+    // A call of the module's shim `name` with the arguments `args`, written as source over the
+    // hidden locals.
+    private shim(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr = self.find_top(s"$MPI_MODULE.$name") match
+        Some(TopExtern(k)) -> self.call_extern(span, span, k, args)
+        _ ->
+            self.fail(span, s"the `mpi` module has no `$name`")
+            self.invalid(span)
+
+    // The extent of axis `k` (from 1) of the local `name`.
+    private extent_of(*self, span: Span, name: string, k: usize) -> TExpr
+        var args: Buf[TExpr] = buf()
+
+        args.push(self.infer(nm(span, name)))
+        args.push(int_lit(span, i128(k)))
+        texpr(span, INTEGER, TBuiltin("extent", args))
+
+    // The block of `items` answering `result`, its hidden locals' scope closed.
+    private finished(*self, span: Span, items: Buf[TExpr], result: TExpr) -> TExpr
+        self.close()
+        texpr(span, result.ty, TBlock(items, result))
+
+    // -- reductions -------------------------------------------------------------------------------
+
+    // `allreduce(x, op)`, `reduce_to(x, op, root)` and `scan(x, op)`: the combination of every rank's
+    // `x` (on `root` alone for `reduce_to`, which answers `x` elsewhere; of ranks 0 to this one for
+    // `scan`). A built-in operator is the shim's, reproducible unless `fast = true`; a user one is
+    // folded here.
+    private mpi_reduction(*self, span: Span, c: string, b: Buf[Option[Expr]], comm: TExpr) -> TExpr
+        val ps = params_of(c)
+        val x = self.mpi_operand(c, b[0].unwrap(), "its operand")
+
+        if is_error(x.ty) then return self.invalid(span)
+
+        val e = b[1].unwrap()
+        val op = self.mpi_op(c, e, x.ty)
+
+        val code = op match
+            Some(Builtin(k)) -> k
+            Some(User(_)) -> 0
+            None -> return self.invalid(span)
+
+        val root = self.mpi_scalar(b, ps, "root", INTEGER, int_lit(span, 0))
+        val fast = self.mpi_scalar(b, ps, "fast", Bool, texpr(span, Bool, TLiteral(BoolVal(false), false)))
+
+        if is_error(root.ty) || is_error(fast.ty) then return self.invalid(span)
+
+        if code == 0 && index_in("fast", ps.view()) < ps.len() && b[index_in("fast", ps.view())].is_some()
+            self.fail(span, s"`fast = true` hands a built-in operator to MPI's own; a user function is always folded in rank order, so `$c` takes no `fast` with one")
+            return self.invalid(span)
+
+        var items: Buf[TExpr] = buf()
+
+        self.open()
+        items.push(self.hold(span, "comm", comm, false))
+        items.push(self.hold(span, "root", root, false))
+
+        op match
+            Some(User(f)) ->
+                items.push(self.hold(span, "f", f, false))
+                return self.mpi_fold(span, c, x, items)
+            _ -> ()
+
+        items.push(self.hold(span, "fast", fast, false))
+        items.push(self.hold(span, "r", x, true))
+
+        val located = code == 7 || code == 8
+        val r = rank_of(x.ty)
+        var extents: Buf[TExpr] = buf()
+
+        if located
+            for k in 1..r
+                extents.push(self.extent_of(span, "#r", k))
+
+        val loc_ty = with_elem(x.ty, INTEGER)
+
+        items.push(self.hold(span, "loc", if located then zeros_of(span, loc_ty, extents) else int_lit(span, 0), true))
+
+        var call: Buf[Expr] = buf()
+
+        call.push(num(span, i128(index_in(c, COLLECTIVES))))
+        call.push(nm(span, "#r"))
+        call.push(nm(span, "#loc"))
+        call.push(num(span, i128(code)))
+        call.push(nm(span, "#root"))
+        call.push(nm(span, "#fast"))
+        call.push(handle(span))
+        items.push(self.shim(span, "nex_mpi_reduce", call))
+
+        val value = self.infer(nm(span, "#r"))
+
+        if !located then return self.finished(span, items, value)
+
+        var pair: Buf[TExpr] = buf()
+        var tys: Buf[Ty] = buf()
+
+        pair.push(value)
+        pair.push(self.infer(nm(span, "#loc")))
+        tys.push(x.ty)
+        tys.push(loc_ty)
+        self.finished(span, items, texpr(span, Ty.Tuple(tys), TTuple(pair)))
+    end mpi_reduction
+
+    // The operator `e` of collective `c` over an operand of type `t`: a built-in one the element type
+    // admits, or a function `(T, T) -> T` of its element type `T`.
+    private mpi_op(*self, c: string, e: Expr, t: Ty) -> Option[MpiOp]
+        val et = elem_of(t)
+        val base = base_of(et)
+
+        val word = *e.kind match
+            ExprKind.Name(n) -> if self.lookup_local(n).is_none() && !self.top_exists(self.global(e.span, n)) && index_in(n, OPERATORS) < OPERATORS.len then n else ""
+            _ -> ""
+
+        if word == ""
+            val fty = fn_type(two(et), reads2(), et)
+
+            self.pass_lambda(e)
+
+            val f = self.elab(e, Some(fty))
+
+            if is_wild(f.ty) then return None
+
+            val ok = f.ty match
+                Fn(_) -> ty_eq(f.ty, fty)
+                _ -> false
+
+            if !ok
+                self.fail(e.span, s"`$c`'s operator is `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc` or a function `${show_ty(fty)}` of the operand's elements; this is ${self.shown(f)}")
+                return None
+
+            return Some(User(f))
+
+        val code = int(index_in(word, OPERATORS)) + 1
+        val numeric = is_int(base) || is_real(base) || is_complex(base)
+        val ordered = is_int(base) || is_real(base)
+        val boolean = base match
+            Bool -> true
+            _ -> false
+
+        val ok = if word == "+" || word == "*" then numeric elif word == "and" || word == "or" then boolean else ordered
+
+        if !ok
+            val kinds = if word == "+" || word == "*" then "numbers" elif word == "and" || word == "or" then "`bool`s" else "integers and reals, which are ordered"
+
+            self.fail(e.span, s"`$c` with `$word` combines $kinds; this operand is ${show_ty(t)}")
+            return None
+
+        if word == "*" && !is_one(unit_of(et))
+            self.fail(e.span, s"`$c` with `*` of ${show_ty(t)} is in ${spell(unit_of(et))} to the power of the number of ranks, which is not static, as `product`'s is not; strip the unit to multiply the numbers: `$c(strip(x), *)`")
+            return None
+
+        Some(Builtin(code))
+    end mpi_op
+
+    // A user operator `#f` folded over the pieces of every rank's `x`, in rank order: element by
+    // element where `x` is an array.
+    private mpi_fold(*self, span: Span, c: string, x: TExpr, items0: Buf[TExpr]) -> TExpr
+        var items = items0
+        val r = rank_of(x.ty)
+        val code = i128(index_in(c, COLLECTIVES))
+
+        items.push(self.hold(span, "x", x, false))
+
+        var gathered: Buf[Expr] = buf()
+
+        gathered.push(num(span, code))
+        gathered.push(nm(span, "#x"))
+        gathered.push(nm(span, "#root"))
+        gathered.push(handle(span))
+        items.push(self.hold(span, "pieces", self.shim(span, "nex_mpi_gathered", gathered), false))
+
+        var extents: Buf[TExpr] = buf()
+
+        for k in 1..r
+            extents.push(self.extent_of(span, "#x", k))
+
+        extents.push(self.infer(nm(span, "#pieces")))
+
+        val all_ty = Ty.Array(elem_of(x.ty), axes_then(axes_of(x.ty), r, Dynamic))
+
+        items.push(self.hold(span, "all", zeros_of(span, all_ty, extents), true))
+
+        var call: Buf[Expr] = buf()
+
+        call.push(num(span, code))
+        call.push(nm(span, "#x"))
+        call.push(nm(span, "#all"))
+        call.push(nm(span, "#root"))
+        call.push(handle(span))
+        items.push(self.shim(span, "nex_mpi_gather", call))
+        items.push(self.hold(span, "r", self.infer(nm(span, "#x")), true))
+
+        // How many pieces fold: every rank's, or for `scan` those of ranks 0 to this one.
+        var n = self.infer(nm(span, "#pieces"))
+
+        if c == "scan"
+            var rk: Buf[Expr] = buf()
+
+            rk.push(handle(span))
+            n = texpr(span, INTEGER, TBinary("+", self.shim(span, "nex_mpi_rank", rk), int_lit(span, 1)))
+
+        items.push(self.hold(span, "n", n, false))
+
+        for k in 1..r
+            items.push(self.hold(span, s"e$k", self.extent_of(span, "#x", k), false))
+
+        items.push(self.elab(self.fold_source(span, r), None))
+        self.finished(span, items, self.infer(nm(span, "#r")))
+    end mpi_fold
+
+    // The fold as source over the hidden locals: `#r` from the first `#n` pieces of `#all`, through
+    // `#f`, element by element over the `r` axes `#e1` … of `#x`.
+    private fold_source(self, span: Span, r: usize) -> Expr
+        var at: Buf[Expr] = buf()
+
+        for k in 1..r
+            at.push(nm(span, s"#i$k"))
+
+        var inner: Buf[BlockItem] = buf()
+        val acc = if r == 0 then nm(span, "#r") else nm(span, "#a")
+
+        if r == 0 then inner.push(stmt(assign(span, acc, piece(span, at, num(span, 1))))) else inner.push(var_item(span, "#a", piece(span, at, num(span, 1))))
+
+        var step: Buf[Expr] = buf()
+
+        step.push(acc)
+        step.push(piece(span, at, nm(span, "#q")))
+
+        var body: Buf[BlockItem] = buf()
+
+        body.push(stmt(assign(span, acc, Expr(span, ExprKind.Call(nm(span, "#f"), step)))))
+        inner.push(stmt(range_for(span, "#q", num(span, 2), nm(span, "#n"), block(span, body))))
+
+        if r > 0 then inner.push(stmt(assign(span, index(span, nm(span, "#r"), at), acc)))
+
+        var loop_ = block(span, inner)
+
+        for k in 1..r
+            var wrap: Buf[BlockItem] = buf()
+
+            wrap.push(stmt(range_for(span, s"#i$k", num(span, 1), nm(span, s"#e$k"), loop_)))
+            loop_ = block(span, wrap)
+
+        Expr(span, ExprKind.If(Expr(span, ExprKind.BinOp(">", nm(span, "#n"), num(span, 0))), loop_, None))
+    end fold_source
+
+    // -- moving values ----------------------------------------------------------------------------
+
+    // `bcast`, `gather`, `allgather`, `gather_concat`, `allgather_concat`, `scatter`,
+    // `scatter_concat` and `alltoall`.
+    private mpi_movement(*self, span: Span, c: string, b: Buf[Option[Expr]], comm: TExpr) -> TExpr
+        val ps = params_of(c)
+        val x = self.mpi_operand(c, b[0].unwrap(), "its operand")
+
+        if is_error(x.ty) then return self.invalid(span)
+
+        val root = self.mpi_scalar(b, ps, "root", INTEGER, int_lit(span, 0))
+
+        if is_error(root.ty) then return self.invalid(span)
+
+        val r = rank_of(x.ty)
+        val axes = axes_of(x.ty)
+        val et = elem_of(x.ty)
+        val code = i128(index_in(c, COLLECTIVES))
+        val concat = c.ends_with("_concat")
+        val scatter = c.starts_with("scatter")
+
+        if r == 0 && (concat || scatter || c == "alltoall")
+            val why = if concat then "concatenates pieces along their last axis" elif scatter then "cuts its operand along the last axis, one part per rank" else "sends part k of its operand's last axis to rank k"
+
+            self.fail(b[0].unwrap().span, s"`$c` $why, and a scalar has no axis; this is ${self.shown(x)}")
+            return self.invalid(span)
+
+        var items: Buf[TExpr] = buf()
+
+        self.open()
+        items.push(self.hold(span, "comm", comm, false))
+        items.push(self.hold(span, "root", root, false))
+
+        if c == "bcast" || c == "alltoall"
+            items.push(self.hold(span, "x", x, false))
+            items.push(self.hold(span, "r", self.infer(nm(span, "#x")), true))
+
+            var call: Buf[Expr] = buf()
+
+            if c == "alltoall" then call.push(nm(span, "#x"))
+            call.push(nm(span, "#r"))
+            if c == "bcast" then call.push(nm(span, "#root"))
+            call.push(handle(span))
+            items.push(self.shim(span, if c == "bcast" then "nex_mpi_bcast" else "nex_mpi_alltoall", call))
+            return self.finished(span, items, self.infer(nm(span, "#r")))
+
+        items.push(self.hold(span, "x", x, false))
+
+        var extents: Buf[TExpr] = buf()
+        var ty = x.ty
+
+        if scatter
+            // The parts' extents are the root's: asked of the shim before the result is made.
+            val kept = if concat then r else r - 1
+
+            ty = array_or_scalar(et, if concat then axes_then(axes, r - 1, Dynamic) else axes_upto(axes, r - 1))
+
+            if kept > 0
+                var shape: Buf[TExpr] = buf()
+
+                shape.push(int_lit(span, i128(kept)))
+                items.push(self.hold(span, "shape", texpr(span, Ty.Array(INTEGER, dynamic_axes(1)), TBuiltin("zeros", shape)), true))
+
+                var ask: Buf[Expr] = buf()
+
+                ask.push(num(span, code))
+                ask.push(nm(span, "#x"))
+                ask.push(nm(span, "#shape"))
+                ask.push(nm(span, "#root"))
+                ask.push(handle(span))
+                items.push(self.shim(span, "nex_mpi_scattered", ask))
+
+                for k in 1..kept
+                    var at: Buf[Expr] = buf()
+
+                    at.push(num(span, i128(k)))
+                    extents.push(self.infer(index(span, nm(span, "#shape"), at)))
+        else
+            var ask: Buf[Expr] = buf()
+
+            ask.push(num(span, code))
+            ask.push(nm(span, "#x"))
+            ask.push(nm(span, "#root"))
+            ask.push(handle(span))
+            items.push(self.hold(span, "pieces", self.shim(span, "nex_mpi_gathered", ask), false))
+
+            val kept = if concat then r - 1 else r
+
+            for k in 1..kept
+                extents.push(self.extent_of(span, "#x", k))
+
+            extents.push(self.infer(nm(span, "#pieces")))
+            ty = Ty.Array(et, axes_then(axes, kept, Dynamic))
+
+        items.push(self.hold(span, "r", zeros_of(span, ty, extents), true))
+
+        var call: Buf[Expr] = buf()
+
+        call.push(num(span, code))
+        call.push(nm(span, "#x"))
+        call.push(nm(span, "#r"))
+        call.push(nm(span, "#root"))
+        call.push(handle(span))
+        items.push(self.shim(span, if scatter then "nex_mpi_scatter" else "nex_mpi_gather", call))
+        self.finished(span, items, self.infer(nm(span, "#r")))
+    end mpi_movement
+
+    // -- the reductions of a distributed vector ---------------------------------------------------
+
+    // `global_sum(x, offset)`, `global_dot(x, y, offset)` and `global_norm2(x, offset)`: `x` (and
+    // `y`) a rank's piece of one vector, beginning at the global index `offset`; the answer is the
+    // undistributed vector's `sum`, `dot` or `norm2`, the same bits at every rank count.
+    private mpi_global(*self, span: Span, c: string, b: Buf[Option[Expr]], comm: TExpr) -> TExpr
+        val ps = params_of(c)
+        val x = self.mpi_vector(c, b[0].unwrap(), if c == "global_dot" then "`x`" else "its operand")
+
+        if is_error(x.ty) then return self.invalid(span)
+
+        val dot = c == "global_dot"
+        val y = if dot then self.mpi_vector(c, b[1].unwrap(), "`y`") else x
+
+        if is_error(y.ty) then return self.invalid(span)
+
+        val bx = base_of(elem_of(x.ty))
+        val ux = unit_of(elem_of(x.ty))
+
+        if dot && !ty_eq(bx, base_of(elem_of(y.ty)))
+            self.fail(span, s"`global_dot` takes two vectors of one number type; these are ${self.shown(x)} and ${self.shown(y)}")
+            return self.invalid(span)
+
+        if c != "global_sum" && is_int(bx)
+            self.fail(b[0].unwrap().span, s"`$c` works in reals and complexes; this is ${self.shown(x)}")
+            return self.invalid(span)
+
+        var rt = elem_of(x.ty)
+
+        if c == "global_norm2" then rt = measured(Real(bits_of(bx)), ux)
+        if dot then rt = measured(bx, unit_mul(ux, unit_of(elem_of(y.ty))))
+
+        val offset = self.check(b[index_in("offset", ps.view())].unwrap(), INTEGER, "`offset`")
+
+        if is_error(offset.ty) then return self.invalid(span)
+
+        var items: Buf[TExpr] = buf()
+
+        self.open()
+        items.push(self.hold(span, "comm", comm, false))
+        items.push(self.hold(span, "x", x, false))
+        items.push(self.hold(span, "y", if dot then y else self.infer(nm(span, "#x")), false))
+        items.push(self.hold(span, "offset", offset, false))
+        items.push(self.hold(span, "r", zero_value(span, rt), true))
+
+        var call: Buf[Expr] = buf()
+
+        call.push(num(span, i128(index_in(c, COLLECTIVES))))
+        call.push(nm(span, "#x"))
+        call.push(nm(span, "#y"))
+        call.push(nm(span, "#r"))
+        call.push(nm(span, "#offset"))
+        call.push(handle(span))
+        items.push(self.shim(span, "nex_mpi_global", call))
+        self.finished(span, items, self.infer(nm(span, "#r")))
+    end mpi_global
+
+    // A rank's piece of a distributed vector: an operand of rank 1, of numbers.
+    private mpi_vector(*self, c: string, e: Expr, what: string) -> TExpr
+        val v = self.mpi_operand(c, e, what)
+
+        if is_error(v.ty) then return v
+
+        val base = base_of(elem_of(v.ty))
+
+        if rank_of(v.ty) != 1 || !(is_int(base) || is_real(base) || is_complex(base))
+            self.fail(e.span, s"`$c` takes $what as a rank's piece of a distributed vector: a vector of numbers; this is ${self.shown(v)}")
+            return self.invalid(e.span)
+
+        v
+end Elab
+
+private two(t: Ty) -> Buf[Ty]
+    var out: Buf[Ty] = buf()
+
+    out.push(t)
+    out.push(t)
+    out
+
+private reads2() -> Buf[Mode]
+    var out: Buf[Mode] = buf()
+
+    out.push(Read)
+    out.push(Read)
+    out
+
+has_intrinsic(attrs: Buf[Attribute]) -> bool
+    for a in attrs
+        if a.name == "intrinsic" then return true
+
+    false

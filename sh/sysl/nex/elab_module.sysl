@@ -37,7 +37,7 @@ impl Elab
 
     // Whether some declaration has this internal name.
     top_exists(self, internal: string) -> bool =
-        self.find_top(internal).is_some() || self.is_aggregate_name(internal) || self.find_generic_fun(internal).is_some()
+        self.find_top(internal).is_some() || self.is_aggregate_name(internal) || self.find_generic_fun(internal).is_some() || self.is_intrinsic(internal)
 
     // The internal name the top-level name `n`, written at `span`, denotes; a name nothing declares
     // where it is written comes back as one no declaration has.
@@ -242,6 +242,9 @@ impl Elab
 
         for g in self.gen.funs
             all.push(g.name)
+
+        for n in self.intrinsics
+            all.push(n)
 
         val prefix = s"${self.mods.names[m]}."
         var out: Buf[string] = buf()

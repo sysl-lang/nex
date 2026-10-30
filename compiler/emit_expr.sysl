@@ -66,7 +66,11 @@ impl Emitter
         TBlock(items, result) -> self.block_from(items, 0, result, e.ty)
         TLet(id, init) ->
             if self.in_ssa(id)
-                self.arr.set(id, self.var_start(e.span, id, init, self.lasting(init)))
+                // The value first: an initializer that writes an array (an `if` whose branch does)
+                // replaces the table of arrays the local's entry is set in.
+                val v = self.var_start(e.span, id, init, self.lasting(init))
+
+                self.arr.set(id, v)
                 self.note_origin(e.span, id, init)
                 return ""
 
