@@ -76,6 +76,9 @@ enum Ty
     Measured(base: &Ty, unit: &Unit)
     // `c_ptr`, C's `void *`: opaque, legal only in an `extern` declaration (DESIGN §10.2.1).
     CPtr
+    // `[*; ..]`: any array of numbers or `bool`, or one such scalar, crossing to C as a descriptor;
+    // only a C `extern`'s parameter has it (DESIGN §10.7).
+    Assumed
     Error
 end Ty
 
@@ -251,6 +254,9 @@ ty_eq(a: Ty, b: Ty) -> bool = a match
     CPtr -> b match
         CPtr -> true
         _ -> false
+    Assumed -> b match
+        Assumed -> true
+        _ -> false
     Error -> b match
         Error -> true
         _ -> false
@@ -394,6 +400,7 @@ show_ty(t: Ty) -> string = t match
     Param(name, _, _) -> name
     Measured(base, unit) -> show_ty(*base) + "<" + spell(*unit) + ">"
     CPtr -> "c_ptr"
+    Assumed -> "[*; ..]"
     Error -> "?"
 
 private show_tys(ts: Buf[Ty]) -> string

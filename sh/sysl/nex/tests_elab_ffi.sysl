@@ -54,6 +54,47 @@ extern_c_ptr()
     assert_eq(refused("extern def f(p: @keep c_ptr)\n" + M), "error: `@keep` is not an attribute of an `extern` parameter's type, which takes `@data(f)` @1:23")
     assert_eq(refused("extern def f(f: (real, c_ptr) -> real, p: @data(f) c_ptr, q: @data(f) c_ptr)\n" + M), "error: `f` has one user data, and a second `@data(f)` names it @1:71")
 
+// -- `[*; ..]` descriptors --------------------------------------------------------------------------
+
+private val DESC = "extern def r(x: [*; ..]): int64\nextern def w(x: inout [*; ..])\n"
+private val ELSEWHERE = "`[*; ..]` is an array of any element type at any rank, which only a C `extern`'s parameter takes; a `def` over any array is generic, `def f[T: Numeric, R: Rank](x: [T; R])`"
+
+@test("a [*; ..] parameter takes any array of numbers or bool at any rank, a scalar, a measured value as its number, and a generic body's [T; R]")
+described_accepted()
+    assert_eq(elaborated(DESC + M), "(extern r ([*; ..]) -> int64)\n(extern w (inout [*; ..]) -> void)\n(def main () void ())")
+    assert_eq(refused(DESC + "struct C\n  n: uint16\ndef main() =\n  var a = [1.0, 2.0]\n  var m: [int8; :, :] = zeros((2, 2))\n  var c = C(1)\n  var b = true\n  print(r(a) + r(m[1, :]) + r([1i]) + r(2.5) + r(true) + r([1.0<m>]) + r(reshape([1, 2, 3, 4, 5, 6, 7, 8], 2, 2, 2)))\n  w(a)\n  w(m[2..1 by -1, :])\n  w(c.n)\n  w(b)\n"), "ok")
+    assert_eq(refused(DESC + "def f[T: Numeric, R: Rank](x: [T; R], y: inout [T; R]): int64 =\n  w(y)\n  r(x)\ndef g[T: Float](x: T): int64 = r(x)\ndef main() =\n  var y = [1.0]\n  print(f([2.0], y) + g(real32(1.0)))\n"), "ok")
+
+@test("[*; ..] is only a C extern's parameter: not a def's, a result, a callback's, a variable's, a @host or @fortran extern's, nor @strided")
+described_refused_where()
+    assert_eq(refused("def f(x: [*; ..]) = ()\n" + M), s"error: $ELSEWHERE @1:10")
+    assert_eq(refused("extern def f(): [*; ..]\n" + M), s"error: $ELSEWHERE @1:17")
+    assert_eq(refused("extern def f(g: ([*; ..]) -> real)\n" + M), s"error: $ELSEWHERE @1:18")
+    assert_eq(refused("def main() =\n  val x: [*; ..] = [1.0]\n"), s"error: $ELSEWHERE @2:10")
+    assert_eq(refused("@host extern def f(x: [*; ..])\n" + M), s"error: $ELSEWHERE @1:23")
+    assert_eq(refused("@fortran\nextern def f(x: [*; ..])\n" + M), "error: a plain Fortran procedure takes no descriptor, so `x` cannot be `[*; ..]`; a `type(*), dimension(..)` dummy is a `bind(c)` procedure's, reached through a C wrapper declared as a C `extern` @2:17")
+    assert_eq(refused("extern def f(@strided x: [*; ..])\n" + M), "error: `x` is `[*; ..]`, whose descriptor carries every stride, so every view crosses as it lies and `@strided` says nothing @1:26")
+    assert_eq(refused(DESC + "def main() =\n  val f = r\n"), "error: `r` is an `extern` taking or returning more than numbers, `bool` and complexes by value, which only a call of it passes; call it, or wrap the call in a `def` @4:11")
+
+@test("[*; ..] is spelt whole: any element type goes with any rank, and `..` with any element type")
+described_spelling()
+    assert_eq(refused("extern def f(x: [*])\n" + M), "error: an array of any element type is of any rank too: `[*; ..]` @1:17")
+    assert_eq(refused("extern def f(x: [*; :])\n" + M), "error: an array of any element type is of any rank too: `[*; ..]` @1:17")
+    assert_eq(refused("extern def f(x: [real; ..])\n" + M), "error: `..` is an assumed rank, which an array of any element type has: `[*; ..]`; an array of one element type has its axes, `[real; :, :]`, or a rank parameter, `[T; R]` @1:24")
+
+@test("a [*; ..] argument is numbers or bool: a string, a struct, a tuple, a function, a type parameter admitting more, or a value for an inout one is refused; an inout one is the only access to its place")
+described_args_refused()
+    assert_eq(refused(DESC + "def main() = print(r(\"s\"))\n"), "error: a `[*; ..]` parameter takes an array of numbers or `bool`, or one such value, which C reads through a descriptor, and argument 1 is string @3:22")
+    assert_eq(refused(DESC + "def main() = print(r([\"s\"]))\n"), "error: a `[*; ..]` parameter takes an array of numbers or `bool`, or one such value, which C reads through a descriptor, and argument 1 is [string] @3:22")
+    assert_eq(refused(DESC + "@c\nstruct P\n  x: real\ndef main() = print(r([P(1.0)]))\n"), "error: a `[*; ..]` parameter takes an array of numbers or `bool`, or one such value, which C reads through a descriptor, and argument 1 is [P] @6:22")
+    assert_eq(refused(DESC + "def main() = print(r((1.0, 2.0)))\n"), "error: a `[*; ..]` parameter takes an array of numbers or `bool`, or one such value, which C reads through a descriptor, and argument 1 is (real64, real64) @3:23")
+    assert_eq(refused(DESC + "def main() = print(r(main))\n"), "error: a `[*; ..]` parameter takes an array of numbers or `bool`, or one such value, which C reads through a descriptor, and argument 1 is () -> void @3:22")
+    assert_eq(refused(DESC + "def f[T: Eq](x: [T]): int64 = r(x)\n" + M), "error: a `[*; ..]` parameter takes an array of numbers or `bool`, or one such value, which C reads through a descriptor, and argument 1 is [T], whose `T: Eq` admits more than numbers and `bool`: constrain it `T: Numeric` @3:33")
+    assert_eq(refused(DESC + "def main() =\n  var s = [\"a\"]\n  w(s)\n"), "error: a `[*; ..]` parameter takes an array of numbers or `bool`, or one such value, which C reads through a descriptor, and argument 1 is [string] @5:5")
+    assert_eq(refused(DESC + "def main() = w([1.0])\n"), "error: an `inout` argument is a variable the callee can write to @3:16")
+    assert_eq(refused(DESC + "def main() =\n  val a = [1.0]\n  w(a)\n"), "error: `a` cannot be assigned: it is a `val` @5:5")
+    assert_eq(refused("extern def add(a: inout [*; ..], b: [*; ..])\ndef main() =\n  var a = [1.0, 2.0]\n  add(a[1..1], a)\n"), "error: `a` is read while the call runs, and overlaps `a[1..1]`, which the call borrows `inout`; an `inout` argument must be the only access to its place @4:16")
+
 // -- callbacks --------------------------------------------------------------------------------------
 
 private val INTEGRATE = "extern def integrate(f: (real, c_ptr) -> real, data: @data(f) c_ptr, a: real, b: real): real\nextern def plain(f: (real) -> real, x: real): real\ndef sq(x: real) = x * x\n"

@@ -96,6 +96,7 @@ Each nex parameter type has one C meaning:
 | a `@c` struct, `inout` | `S *` |
 | a function type `(A, B) -> R` | a C function pointer (§11.6) |
 | `c_ptr` | `void *`, opaque; only as the `@data` partner of a callback (§11.6) |
+| `[*; ..]`, read mode or `inout` | `const nex_desc *`: any array of numbers or `bool` at any rank, or a scalar (§11.10) |
 | return: a scalar, a complex, or `void` | the value, or C `void` |
 
 Remember the aliases: `integer` is `int64`, `real` is `real64`, `complex` is `complex[real64]`. A
@@ -205,7 +206,7 @@ print(opt.iters, opt.residual)
 ```
 
 A struct **by value** — a C function that takes or returns `cg_options` itself rather than a
-pointer to it — does not cross yet (§11.10).
+pointer to it — does not cross yet (§11.11).
 
 ## 11.5 Arrays: contiguity and the leading dimension
 
@@ -646,7 +647,77 @@ if info > 0
   eprint("not positive definite: leading minor", info)
 ```
 
-## 11.10 Not yet
+## 11.10 Any type, any rank: `[*; ..]`
+
+A C library with one entry point for every element type — MPI's `send`, HDF5's `write`, a PETSc
+vector — is declared once with a **`[*; ..]`** parameter: any array of numbers or `bool`, at any
+rank, or a single such value. It is Fortran 2018's `type(*), dimension(..)`: `*` for the element
+type, `..` for the axes. C receives a **descriptor** of the argument, as a `bind(c)` Fortran
+procedure receives a `CFI_cdesc_t`:
+
+```nex
+@link("mylib")
+extern def lib_write(x: [*; ..], tag: int32)
+@link("mylib")
+extern def lib_read(x: inout [*; ..], tag: int32)
+
+def write[T: Numeric, R: Rank](x: [T; R], tag: integer = 0) = lib_write(x, int32(tag))
+
+def main() =
+  write([1.0, 2.0, 3.0])                       // real64, rank 1
+  write(reshape([1, 2, 3, 4], 2, 2)[:, 2])     // int64, a column
+  lib_write(2.5i, 7)                           // complex[real64], rank 0
+  var m: [real32; :, :] = zeros((4, 4))
+  lib_read(m[2..3, 4..1 by -1], 1)             // C writes where the view lies
+```
+
+```c
+#include "nex_desc.h"
+
+void lib_write(const nex_desc *x, int32_t tag) {
+    /* x->type is NEX_REAL64, NEX_INT64, … ; x->rank axes in x->dim[], nex's first axis first */
+    int64_t n = nex_desc_count(x);
+    ...
+}
+```
+
+**The descriptor** is `nex_desc`, from the header `nex_desc.h` that nex ships (`include/` in its
+source tree):
+
+| field | meaning |
+|---|---|
+| `void *base` | the first element of the argument as it lies (index 1 along every axis) |
+| `int64_t elem_size` | bytes of one element |
+| `int32_t type` | the element type: `NEX_INT8` … `NEX_UINT64`, `NEX_REAL16`, `NEX_REAL32`, `NEX_REAL64`, `NEX_COMPLEX_REAL16`, `NEX_COMPLEX_REAL32`, `NEX_COMPLEX_REAL64`, `NEX_BOOL` |
+| `int32_t rank` | the number of axes; 0 for a scalar |
+| `int32_t contiguous` | 1 where the elements are one dense column-major block |
+| `int32_t writable` | 1 where the parameter is `inout` |
+| `nex_dim dim[rank]` | per axis, `extent` (elements) and `stride` (**bytes**, negative for a reversed view) |
+
+Element (i₀, i₁, …), counting from 0, is at `(char *)base + i₀ * dim[0].stride + i₁ * dim[1].stride
++ …`; the header's `nex_desc_at` computes the address and `nex_desc_count` the number of elements.
+The fields follow `CFI_cdesc_t` where the two agree — `base_addr`, `elem_len`, `extent`, `sm` in bytes,
+the first axis first — so C written against Fortran's descriptor reads nex's with little change.
+
+- **Every view crosses where it lies, with no copy**: a window of a matrix, a row, a strided view, a
+  reversed one. The strides say how to walk it; a C routine that needs a flat buffer checks
+  `contiguous` and copies only when it is 0. `@strided` (§11.5) has nothing to add and is refused here.
+- **A scalar is rank 0**, `base` pointing at it. An `inout` scalar may be a `var` or a field of one.
+- **A measured value crosses as its numbers**, no `strip` needed: the descriptor carries no unit.
+- **A generic body passes its `[T; R]` or `T`** where `T`'s constraint admits only numbers (`Numeric`,
+  `Float`, `Integral`, `Real`, `Complex`); each instance describes its own element type and rank.
+- **`inout` makes the argument writable**, borrowed for the call like any `inout` argument; C writes
+  through `base` into exactly the elements the view names.
+- **The descriptor and its memory are valid for the call only.** A C function must not keep either
+  after it returns.
+
+A `[*; ..]` parameter refuses a `string`, a struct (a `@c` one too), a tuple, an enum, a function,
+or an array of any of these. Only a C `extern`'s parameter may be `[*; ..]` — not a `def`'s, whose
+generic form is `[T; R]`; not a result, a variable or a callback's parameter; not a `@fortran`
+extern's, since a plain Fortran procedure takes no descriptor; not a `@host` function's. `[*]` and
+`[real; ..]` are not types: the two wildcards go together. Like every `extern`, it runs compiled only.
+
+## 11.11 Not yet
 
 These are decided directions that the first language does not include:
 

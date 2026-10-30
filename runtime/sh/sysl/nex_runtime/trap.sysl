@@ -47,7 +47,8 @@ trap_with(message: string) -> never
 note_trap(message: string)
     if depth == 0 then
         flush_output()
-        put(2, uncaught_text(message))
+        put(2, job_prefix() + uncaught_text(message))
+        abort_job(TRAP_STATUS)
         abort()
 
     last_message = message
@@ -94,16 +95,62 @@ trap_complex_div_zero() -> never
     note_trap(COMPLEX_DIVISION_BY_ZERO)
     raise_trap()
 
-// `stop n`: what was printed is written out, and the program ends with status `n`.
+// `stop n`: what was printed is written out, and the program ends with status `n`. In an MPI job,
+// `stop 0` ends this rank's part in it; any other status is a failure, said with the rank in front,
+// and ends the whole job with it.
 @export("nex_stop")
 stop(code: int) -> never
     flush_output()
+
+    if code != 0 && job_rank >= 0 then put(2, s"${job_prefix()}stop $code\n")
+
+    if code != 0 then abort_job(code)
+
+    leave_job()
     exit(code)
 
-// The end of `main`: what was printed is written out.
+// The end of `main`: what was printed is written out, and an MPI program leaves its job.
 @export("nex_finish")
 finish()
     flush_output()
+    leave_job()
+
+// -- an MPI job --------------------------------------------------------------------------------------
+//
+// A program importing `mpi` (DESIGN §9.6) starts in its module's shim, which initialises MPI and
+// tells the runtime which rank it is and how to end the job: `job_abort` is `MPI_Abort` on the world,
+// `job_finalize` is `MPI_Finalize`. The runtime never names MPI, so a program without it links none.
+
+// The status the job ends with after a trap nothing caught: what a process ended by `abort` reports.
+private val TRAP_STATUS = 134
+
+private var job_rank: i32 = -1
+private var job_abort: Option[*extern(i32) -> unit] = None
+private var job_finalize: Option[*extern() -> unit] = None
+
+// The shim's call once MPI is initialised: this process is rank `rank` of the world.
+@export("nex_mpi_joined")
+joined(rank: i32, abort_fn: *extern(i32) -> unit, finalize_fn: *extern() -> unit)
+    job_rank = rank
+    job_abort = Some(abort_fn)
+    job_finalize = Some(finalize_fn)
+
+// What a message about this process starts with: its rank in an MPI job, nothing otherwise.
+private job_prefix() -> string = if job_rank >= 0 then s"rank $job_rank: " else ""
+
+// The whole job ended with `code`, where this process is in one; it returns where it is not.
+private abort_job(code: int)
+    job_abort match
+        Some(f) -> f(i32(code))
+        None -> ()
+
+// This process's part in its MPI job ended, once.
+private leave_job()
+    job_finalize match
+        Some(f) ->
+            job_finalize = None
+            f()
+        None -> ()
 
 // Run `body`, answering true if it trapped and false if it returned. What it printed before the trap
 // stays printed; the trap's message is not written, and `nex_last_trap_message` answers it.

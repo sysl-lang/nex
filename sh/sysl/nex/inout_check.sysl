@@ -53,12 +53,13 @@ private struct Reach
     first: Option[Bound]
     last: Option[Bound]
 
-// Whether two paths overlap, and where they meet at an index list, the text of the array it is
-// taken from and its rank.
+// Whether two paths overlap, and where they meet at an index list: the text of the array it is
+// taken from, the first place's subscripts there, the first axis on which the two differ (from 0),
+// and whether both are an integer index on it.
 private enum Verdict
     Disjoint
     Overlap
-    OverlapAt(base: string, rank: usize)
+    OverlapAt(base: string, subs: Buf[TSub], axis: usize, element: bool)
 
 // What a call's arguments write while they are evaluated: the module-level `var`s and the locals a
 // split point may not mention.
@@ -385,22 +386,54 @@ private compare(a: Path, b: Path, w: Writes) -> Verdict
             (SIndex(xs), SIndex(ys)) ->
                 if disjoint_subs(xs, ys, w) then return Disjoint
 
-                if !same_subs(xs, ys) then return OverlapAt(a.bases[k], xs.len())
+                if !same_subs(xs, ys)
+                    val axis = first_difference(xs, ys)
+                    val element = (xs[axis], ys[axis]) match
+                        (TSubAt(_), TSubAt(_)) -> true
+                        _ -> false
+
+                    return OverlapAt(a.bases[k], xs, axis, element)
             _ -> return Overlap
 
     Overlap
 end compare
 
-// The split form a diagnostic suggests on an array of `rank` axes taken from `base`.
-private split_hint(base: string, rank: usize) -> string
-    if rank <= 1 then return s"borrow `${base}[1..e]` and `${base}[e+1..]` at one split point `e`"
+// The first axis (from 0) on which two index lists of one length differ.
+private first_difference(xs: Buf[TSub], ys: Buf[TSub]) -> usize
+    for k in 0..<xs.len()
+        var one: Buf[TSub] = buf()
+        var other: Buf[TSub] = buf()
 
-    var lead = ""
+        one.push(xs[k])
+        other.push(ys[k])
 
-    for _ in 1..<rank
-        lead = lead + ":, "
+        if !same_subs(one, other) then return k
 
-    s"borrow `${base}[${lead}..e]` and `${base}[${lead}e+1..]` at one split point `e`"
+    0
+
+// The split form a diagnostic suggests where two places of the array `base` may meet on `axis` of
+// the index list `subs`: two elements `e` and `e+1` on that axis, the other subscripts kept, where
+// both places are elements there; otherwise two windows `..e` and `e+1..` on it, every other axis
+// whole.
+private split_hint(p: TProgram, base: string, subs: Buf[TSub], axis: usize, element: bool) -> string
+    var lo: Buf[string] = buf()
+    var hi: Buf[string] = buf()
+
+    for k in 0..<subs.len()
+        if k == axis
+            lo.push(if element then "e" elif subs.len() == 1 then "1..e" else "..e")
+            hi.push(if element then "e+1" else "e+1..")
+        elif element
+            var one: Buf[TSub] = buf()
+
+            one.push(subs[k])
+            lo.push(subs_text(p, one))
+            hi.push(subs_text(p, one))
+        else
+            lo.push(":")
+            hi.push(":")
+
+    s"borrow `${base}[${join(lo.view(), ", ")}]` and `${base}[${join(hi.view(), ", ")}]` at one split point `e`"
 
 // -- the summaries of what a call reaches -------------------------------------------------------------
 
@@ -568,7 +601,7 @@ impl Elab
                             compare(mine, other, w) match
                                 Disjoint -> ()
                                 Overlap -> self.fail(args[j].span, s"`${a}` and `${b}` are both passed `inout` and overlap; an `inout` argument must be the only access to its place while the call runs")
-                                OverlapAt(base, rank) -> self.fail(args[j].span, s"`${a}` and `${b}` may overlap; ${split_hint(base, rank)}")
+                                OverlapAt(base, subs, axis, element) -> self.fail(args[j].span, s"`${a}` and `${b}` may overlap; ${split_hint(p, base, subs, axis, element)}")
                         None -> ()
                 elif is_fn_ty(args[j].ty)
                     reached(fx, args[j]) match
@@ -584,7 +617,7 @@ impl Elab
                             compare(mine, other, w) match
                                 Disjoint -> ()
                                 Overlap -> self.fail(args[j].span, s"`${b}` is read while the call runs, and overlaps `${a}`, which the call borrows `inout`; an `inout` argument must be the only access to its place")
-                                OverlapAt(base, rank) -> self.fail(args[j].span, s"`${b}` is read while the call runs and may overlap `${a}`, which the call borrows `inout`; ${split_hint(base, rank)}")
+                                OverlapAt(base, subs, axis, element) -> self.fail(args[j].span, s"`${b}` is read while the call runs and may overlap `${a}`, which the call borrows `inout`; ${split_hint(p, base, subs, axis, element)}")
                         None -> ()
     end check_call
 

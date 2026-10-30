@@ -1,0 +1,139 @@
+// An element of an array place passed `inout` (DESIGN §8.2): of a vector, a matrix and a rank-3
+// array; through a window, a strided and a reversed one; `end`; an index with an effect, evaluated
+// once; an element of a struct's array field and a field of an array's element; a complex element
+// and a string one; an element of an `inout` parameter passed on; two elements of one array the
+// source shows apart (§8.3), and an element beside a disjoint window of its own array; through a
+// function value and a local `def`; in a `parallel for`, each iteration its own element; and an
+// index out of bounds trapping before the call.
+
+struct P
+  x: real
+  y: real
+
+struct S
+  v: [integer]
+  n: integer
+
+var calls = 0
+
+def at(k: integer): integer =
+  calls += 1
+  k
+
+def bump(x: inout integer, by: integer) =
+  x = x + by
+
+def sw(x: inout integer, y: inout integer) =
+  val t = x
+  x = y
+  y = t
+
+def scale(z: inout complex, k: real) =
+  z = z * k
+
+def nudge(x: inout real) =
+  x = x + 0.5
+
+def shout(s: inout string) =
+  s = s + "!"
+
+def ends(v: inout [integer]) =
+  bump(v[end], 1000)
+  bump(v[1], 1)
+
+def mix(w: inout [integer], x: inout integer) =
+  w = w * 10
+  x = x + sum(w)
+
+def loud(x: inout integer) =
+  print("called")
+  x = 0
+
+def main() =
+  var a = [1, 2, 3, 4, 5, 6, 7, 8]
+  bump(a[2], 10)
+  bump(a[end], 100)
+  print(a)
+  bump(a[2..5][2], 1000)
+  bump(a[1..7 by 2][4], 2000)
+  bump(a[.. by -1][1], 3000)
+  bump(a[.. by -3][2], 4000)
+  print(a)
+
+  var m = [[1, 2, 3], [4, 5, 6]]
+  bump(m[2, 3], 60)
+  bump(m[:, 2][1], 20)
+  bump(m[2, :][end], 1)
+  print(m)
+
+  var t = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+  bump(t[2, 1, 2], 600)
+  bump(t[1, :, 2][2], 400)
+  print(t)
+
+  var b = [0, 0, 0, 0]
+  bump(b[at(3)], 7)
+  print(b)
+  print(calls)
+
+  var s = S([1, 2, 3], 0)
+  bump(s.v[2], 20)
+  bump(s.n, 5)
+  print(s.v)
+  print(s.n)
+
+  var ps = [P(1.0, 2.0), P(3.0, 4.0)]
+  nudge(ps[2].x)
+  nudge(ps[1].y)
+  print(s"${ps[1].x} ${ps[1].y} ${ps[2].x} ${ps[2].y}")
+
+  var zs = [1 + 2i, 3 - 1i]
+  scale(zs[2], 2.0)
+  print(zs)
+
+  var names = ["a", "b", "c"]
+  shout(names[2])
+  print(names)
+
+  var e = [1, 2, 3]
+  ends(e)
+  print(e)
+
+  var c = [1, 2, 3, 4]
+  sw(c[1], c[4])
+  val k = 2
+  sw(c[k], c[k + 1])
+  print(c)
+  sw(m[1, 1], m[2, 1])
+  print(m)
+
+  var d = [1, 2, 3, 4]
+  mix(d[1..3], d[4])
+  print(d)
+  mix(d[2..], d[1])
+  print(d)
+
+  val f = bump
+  f(a[1], 9)
+  def inc(x: inout integer) =
+    x = x + 1
+  inc(a[1])
+  print(a[1])
+
+  var r = fill(6, 0)
+  parallel for i in 1..6
+    bump(r[i], i * i)
+  print(r)
+  var g = fill((3, 4), 0)
+  parallel for i in 1..3, j in 1..4
+    bump(g[i, j], 10 * i + j)
+  print(g)
+
+  var q = [1, 2, 3]
+  assert_traps(() -> loud(q[4]), "out of bounds")
+  print(q)
+  var q0 = [1, 2, 3]
+  assert_traps(() -> loud(q0[0]), "out of bounds")
+  var n = [[1, 2], [3, 4]]
+  assert_traps(() -> loud(n[3, 1]), "out of bounds")
+  print("an index out of bounds traps before the call")

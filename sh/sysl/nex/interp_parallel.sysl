@@ -374,7 +374,7 @@ impl Interp
 
             while lo < n
                 val hi = if lo + PAR_BLOCK < n then lo + PAR_BLOCK else n
-                var acc = r.identity
+                var acc = r.seed
 
                 for j in lo..<hi
                     for k in 0..<vals.len()

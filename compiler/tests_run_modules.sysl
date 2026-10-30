@@ -43,6 +43,20 @@ mod_run_extern()
     finish(b)
     assert_eq(out, "3.0\n")
 
+@test("a module shaped like `mpi` hands C any array or scalar through one generic def over a private [*; ..] extern")
+mod_run_extern_described()
+    val b = bench()
+    val links = ffi_fixture(b)
+    val comm = "module comm\n@link(\"nexffi\")\nprivate extern def nf_desc_count(x: [*; ..]): int64\n@link(\"nexffi\")\nprivate extern def nf_desc_fill(x: inout [*; ..])\ndef elements[T: Numeric, R: Rank](x: [T; R], to: integer = 0): integer = nf_desc_count(x) + to\ndef element[T: Numeric](x: T): integer = nf_desc_count(x)\ndef receive[T: Numeric, R: Rank](x: inout [T; R]) = nf_desc_fill(x)\n"
+    val main = "import comm.*\ndef main() =\n  print(elements([1.0, 2.0, 3.0]))\n  print(elements(reshape([1, 2, 3, 4, 5, 6], 2, 3)[:, 2..3], to = 10))\n  print(element(2.5))\n  var a: [int16] = zeros(4)\n  receive(a[2..3])\n  print(a)\n"
+    val dir = project([("main.nex", main), ("comm/comm.nex", comm)])
+    val out = agreed(runs(b, __FUNCTION__, main + comm, entry = s"${dir}/main.nex", links = links.view()))
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "3\n14\n1\n[0, 1, 2, 0]\n")
+
 @test("a program of several modules runs: imports, aliases, chains, structs, module-level state")
 mod_run()
     val b = bench()
@@ -57,6 +71,15 @@ mod_run()
         ("lib/c.nex", "var count = 10\ndef bump() =\n  count += 1\n")]), "10\n12\n")
     assert_eq(run_project(b, [("main.nex", "import a.{fa}\nimport b.{fb}\ndef helper() = 0\ndef main() = print(fa() + fb() + helper())\n"),
         ("a/a.nex", "def helper() = 1\ndef fa() = helper()\n"), ("b/b.nex", "def helper() = 2\ndef fb() = helper()\n")]), "3\n")
+
+    finish(b)
+
+@test("a default calling another module's function through `m.f` takes that function's own defaults, at every call")
+mod_run_default_forward()
+    val b = bench()
+
+    assert_eq(run_project(b, [("main.nex", "import lib\ndef f(n: integer = lib.g()) = print(n)\ndef main() =\n  f()\n  f()\n  f(1)\n"),
+        ("lib/lib.nex", "var seed = 0\ndef g(k: integer = later()): integer = k * 2\ndef later(j: integer = 5): integer =\n  seed += j\n  seed\n")]), "10\n20\n1\n")
 
     finish(b)
 

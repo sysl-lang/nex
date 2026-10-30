@@ -299,5 +299,8 @@ struct TProgram
     // runs the test its first argument numbers instead of `main`.
     tests: Buf[string]
     test_build: bool
+    // Where the program first imports the `mpi` module nex ships, which makes it an MPI program
+    // (DESIGN §9.6): one the compiled engine starts and ends with MPI, and the interpreter refuses.
+    mpi: Option[Span]
 
 texpr(span: Span, ty: Ty, kind: TKind) -> TExpr = TExpr(span, ty, kind)

@@ -13,7 +13,8 @@
 // program whose `@` or linear-algebra prelude calls BLAS or LAPACK** says so in a `// nex.blas` line,
 // and links the library the runtime's `library` choice names (Accelerate on macOS and OpenBLAS
 // elsewhere by default), or what `NEX_BLAS` names. **A program with
-// a `@fortran` extern links gfortran's runtime**, which a `// nex.fortran` line says.
+// a `@fortran` extern links gfortran's runtime**, which a `// nex.fortran` line says, and **a program
+// importing `mpi` links the found MPI and the module's shim**, which a `// nex.mpi` line says.
 //
 // LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm`; the runtime at `NEX_RUNTIME`, else
 // `libnex_rt.a` beside the `nex` executable.
@@ -22,7 +23,7 @@ import nex.sh.sysl.nex.*
 import nex_runtime.sh.sysl.nex_runtime.{la_libraries, la_pkg_config}
 import sysl.buf.{Buf, buf}
 import sysl.env.get_or
-import sysl.fs.{exists, make_temp_dir, remove_dir_all, write_text}
+import sysl.fs.{cache_dir, exists, make_dir_all, make_temp_dir, remove_dir_all, rename, write_text}
 import sysl.process.{Stdio, capture}
 import sysl.text.{from_utf8, replace_all, split}
 
@@ -173,6 +174,199 @@ fortran_runtime(gfortran: string) -> Result[Buf[string], string]
 
     Err(s"nex: the program calls Fortran (`@fortran`), which links gfortran's runtime, and $gfortran finds no libgfortran")
 
+// -- MPI ----------------------------------------------------------------------------------------------
+//
+// **A program importing `mpi` links the cluster's MPI** (DESIGN §9.6.7), which its `// nex.mpi` line
+// says. The MPI is found as `NEX_MPICC`, else `mpicc` on `PATH`, either asked for its options
+// (`--showme:compile`/`--showme:link`, Open MPI's; `-compile_info`/`-link_info`, MPICH's), else
+// `pkg-config` of `ompi-c` or `mpich`. The module's shim (`mpi/nex_mpi.c`) is compiled by that
+// `mpicc`, or by clang with `pkg-config`'s options, and the object is kept in nex's cache directory
+// under a key of the shim's text, the compiler and its options, so each MPI compiles it once. Each
+// `-L` directory of the link is also the program's run-time search path, so the program runs
+// without the environment `module load` gave the build.
+
+private val MPI_SHIM = from_utf8(embed("../mpi/nex_mpi.c")).unwrap()
+
+// The MPI a program links: the `mpicc` that compiles the shim (none where `pkg-config` found the MPI,
+// and the toolchain's clang compiles it), the options it compiles with, and the link's options.
+struct Mpi
+    cc: Option[string]
+    compile: Buf[string]
+    link: Buf[string]
+
+// Whether the module's lines before it say the program imports `mpi`.
+uses_mpi(mlir: string) -> bool
+    for line in split(mlir, "\n")
+        if line == "module {" then return false
+        if line == "// nex.mpi" then return true
+
+    false
+
+// The MPI found as DESIGN §9.6.7 orders it, or why there is none.
+find_mpi() -> Result[Mpi, string]
+    val chosen = get_or("NEX_MPICC", "")
+
+    if chosen != ""
+        val cc = if chosen.contains("/") then chosen else on_path(chosen).unwrap_or(chosen)
+
+        if !exists(cc) then return Err(s"nex: the program imports `mpi`, and NEX_MPICC names no compiler: $chosen")
+
+        return wrapper_mpi(cc)
+
+    on_path("mpicc") match
+        Some(cc) -> return wrapper_mpi(cc)
+        None -> ()
+
+    for pc in ["ompi-c", "mpich"]
+        val known = capture("pkg-config", ["--exists", pc], stderr = true) match
+            Ok(out) -> out.status.ok()
+            Err(_) -> false
+
+        if known then return Ok(Mpi(None, words(tool("pkg-config", ["--cflags", pc], Inherit)?), words(tool("pkg-config", ["--libs", pc], Inherit)?)))
+
+    Err("nex: the program imports `mpi`, which links an MPI, and none was found: NEX_MPICC is not set, there is no mpicc on PATH, and pkg-config knows neither ompi-c nor mpich; load an MPI (`module load openmpi`) or set NEX_MPICC")
+
+// The MPI whose compiler wrapper is `cc`: Open MPI's options where it answers `--showme`, else
+// MPICH's, whose answers begin with the compiler it wraps.
+private wrapper_mpi(cc: string) -> Result[Mpi, string]
+    val open_mpi = capture(cc, ["--showme:link"], stderr = true) match
+        Ok(out) -> if out.status.ok() then Some(out.text) else None
+        Err(e) -> return Err(s"nex: cannot run $cc: $e")
+
+    open_mpi match
+        Some(link) -> return Ok(Mpi(Some(cc), words(tool(cc, ["--showme:compile"], Inherit)?), words(link)))
+        None -> ()
+
+    val compile = words(tool(cc, ["-compile_info"], Inherit).map_err((e) -> s"nex: $cc answers neither Open MPI's --showme:link nor MPICH's -compile_info:\n$e")?)
+    val link = words(tool(cc, ["-link_info"], Inherit)?)
+
+    Ok(Mpi(Some(cc), after_first(compile), after_first(link)))
+
+// The shim compiled for `mpi`, from nex's cache where it was compiled before; the object's path.
+mpi_shim(mpi: Mpi, work: string, tc: Toolchain) -> Result[string, string]
+    var key = MPI_SHIM + "\n" + mpi.cc.unwrap_or(s"${tc.llvm_bin}/clang")
+
+    for a in mpi.compile
+        key += "\n" + a
+
+    val name = s"nex_mpi-${hash_str(key)}.o"
+    val cached = mpi_cache_dir()
+    val obj = if cached == "" then s"$work/$name" else s"$cached/$name"
+
+    if exists(obj) then return Ok(obj)
+
+    val source = s"$work/nex_mpi.c"
+
+    write_text(source, MPI_SHIM).map_err((e) -> s"nex: cannot write $source: $e")?
+
+    // Compiled beside where it is kept and moved there whole, so a build running alongside never
+    // links half an object.
+    val pending = if cached == "" then obj else s"$obj.${hash_str(work)}.pending"
+    var args: Buf[string] = buf()
+
+    for a in ["-O2", "-fPIC", "-c", source, "-o", pending]
+        args.push(a)
+
+    mpi.cc match
+        Some(cc) -> tool(cc, args.view(), Inherit)?
+        None ->
+            for a in mpi.compile
+                args.push(a)
+
+            tool(s"${tc.llvm_bin}/clang", args.view(), Inherit)?
+
+    if pending != obj then rename(pending, obj).map_err((e) -> s"nex: cannot keep the MPI shim at $obj: $e")?
+
+    Ok(obj)
+
+// Where compiled shims are kept: nex's directory in the machine's cache directory, made where it is
+// missing; `""` where there is none to be had, and the shim is compiled into the build's own.
+private mpi_cache_dir() -> string
+    val base = cache_dir() match
+        Some(d) -> d
+        None -> return ""
+    val dir = s"$base/nex/mpi"
+
+    make_dir_all(dir) match
+        Ok(_) -> dir
+        Err(_) -> ""
+
+// The link's options for `mpi`, each `-L` directory also a run-time search path.
+mpi_link_options(mpi: Mpi) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for a in mpi.link
+        out.push(a)
+
+    for a in mpi.link
+        if a.starts_with("-L") && a.len > 2 then out.push(s"-Wl,-rpath,${a[2..]}")
+
+    out
+
+// The command that runs `np` copies of a program as one MPI job, before the program's path:
+// `NEX_MPIRUN` split at its spaces, else `srun` inside a Slurm allocation (`SLURM_JOB_ID` set), else
+// the `mpirun` beside the found MPI's `mpicc`, else `mpirun` or `mpiexec` on `PATH`; each given
+// `-n np`.
+mpi_launcher(np: int) -> Result[Buf[string], string]
+    var out: Buf[string] = buf()
+    val chosen = get_or("NEX_MPIRUN", "")
+
+    if chosen != ""
+        out = words(chosen)
+    elif get_or("SLURM_JOB_ID", "") != ""
+        out.push("srun")
+    else
+        out.push(find_mpirun()?)
+
+    out.push("-n")
+    out.push(s"$np")
+    Ok(out)
+
+private find_mpirun() -> Result[string, string]
+    val chosen = get_or("NEX_MPICC", "")
+    val cc = if chosen != "" then (if chosen.contains("/") then Some(chosen) else on_path(chosen)) else on_path("mpicc")
+
+    cc match
+        Some(c) ->
+            val beside = s"${dir_of(c)}/mpirun"
+
+            if exists(beside) then return Ok(beside)
+        None -> ()
+
+    for name in ["mpirun", "mpiexec"]
+        on_path(name) match
+            Some(p) -> return Ok(p)
+            None -> ()
+
+    Err("nex: --np runs the program as an MPI job, and there is no mpirun or mpiexec on PATH; load an MPI or set NEX_MPIRUN")
+
+// The file `name` in the first directory of `PATH` that has one.
+private on_path(name: string) -> Option[string]
+    for d in split(get_or("PATH", ""), ":")
+        if d != "" && exists(s"$d/$name") then return Some(s"$d/$name")
+
+    None
+
+// A tool's answer split at its white space.
+private words(text: string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for line in split(text, "\n")
+        for w in split(line, " ")
+            val t = w.trim()
+
+            if t != "" then out.push(t)
+
+    out
+
+private after_first(ws: Buf[string]) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for k in 1..<ws.len()
+        out.push(ws[k])
+
+    out
+
 // An MLIR module lowered to LLVM IR in `work`; the file's path.
 private translate(mlir: string, work: string, tc: Toolchain) -> Result[string, string]
     val input = s"$work/program.mlir"
@@ -215,6 +409,14 @@ lower_module(mlir: string, out: string, work: string, tc: Toolchain, links: []co
     if calls_fortran(mlir)
         // The gfortran at `NEX_GFORTRAN`, else Homebrew's.
         for a in fortran_runtime(get_or("NEX_GFORTRAN", "/opt/homebrew/bin/gfortran"))?
+            args.push(a)
+
+    if uses_mpi(mlir)
+        val mpi = find_mpi()?
+
+        args.push(mpi_shim(mpi, work, tc)?)
+
+        for a in mpi_link_options(mpi)
             args.push(a)
 
     args.push("-lm")

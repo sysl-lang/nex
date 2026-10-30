@@ -293,6 +293,7 @@ show_type(t: Type) -> string = *t.kind match
         if out.len() == 1 && out[0] == ":" then return "[" + show_type(elem) + "]"
 
         "[" + show_type(elem) + "; " + join(out.view(), ", ") + "]"
+    Assumed -> "[*; ..]"
     Tuple(elems) -> "(" + types(elems) + ")"
     Func(params, modes, ret) ->
         var out: Buf[string] = buf()

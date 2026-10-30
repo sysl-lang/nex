@@ -26,6 +26,21 @@ run_conversion_overflow()
     assert_eq(trapped.err.unwrap_or(""), "trap: floating-point overflow\n")
     assert(!trapped.status.ok())
 
+@test("asin, acos, atan and atan2 give angles on both engines: scalars and arrays, real32 and real64, a measured atan2, round trips and degrees")
+run_inverse_trig_angles()
+    val b = bench()
+    val program = "def main() =\n  print(asin(0.5))\n  print(acos(0))\n  val y: real32 = 1.0\n  print(atan(y))\n  print(atan2(1.0<m>, 1000.0<mm>))\n" +
+                  "  print(atan2(1.0, -1.0))\n  print(sin(asin(0.5)))\n  print(cos(acos(0.25)) == 0.25)\n  print(sin(asin(0.25)))\n  print(to<deg>(atan(1.0)))\n  print(to<deg>(atan2(1.0<ft>, 12.0<in>)))\n" +
+                  "  print(strip(asin(1.0)) * 2.0)\n  val a: real<deg> = acos(-1.0)\n  print(a)\n  print(asin([0.0, 1.0]))\n  val v: [real32] = [1.0, -1.0]\n  print(atan(v))\n" +
+                  "  print(to<deg>(atan2([1.0, 0.0, -1.0]<m>, 0.0<m>)))\n  print(acos([1.0, 0.0]) * 2.0<m>)\n  print(s\"${atan(1.0)}\")\n  print((asin([0.0, 1.0]), atan(1.0)))\n  print(arcsin(real32(0.5)))\n" +
+                  "\ndef arcsin[T: Float](x: T) = asin(x)\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "0.5235987755982988 rad\n1.5707963267948966 rad\n0.7853982 rad\n0.7853981633974483 rad\n2.356194490192345 rad\n0.49999999999999994\ntrue\n0.25\n" +
+                        "45.0 deg\n45.0 deg\n3.141592653589793\n180.0 deg\n[0.0, 1.5707963267948966] rad\n[0.7853982, -0.7853982] rad\n[90.0, 0.0, -90.0] deg\n" +
+                        "[0.0, 3.141592653589793] m\n0.7853981633974483 rad\n([0.0 rad, 1.5707963267948966 rad], 0.7853981633974483 rad)\n0.5235988 rad\n")
+
 @test("an extern takes the stripped number and its result gets a unit by multiplying")
 run_extern_units()
     val b = bench()

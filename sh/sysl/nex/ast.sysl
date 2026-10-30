@@ -137,6 +137,9 @@ enum TypeKind
     Func(params: Buf[Type], modes: Buf[Mode], ret: Type)
     // `real<m>`, `complex<V>`: a scalar type carrying a unit.
     Measured(base: Type, unit: UnitExpr)
+    // `[*; ..]`: an array of any element type at any rank, or a scalar as rank 0, which only an
+    // `extern` parameter declares; C receives a descriptor of it (DESIGN §10.7).
+    Assumed
 
 struct UnitExpr
     span: Span

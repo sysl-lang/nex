@@ -3,7 +3,8 @@
 //
 // **A test is run in a process of its own**, the program given the test's number: each test starts
 // from the module-level bindings' initial values, and a trap ends only the test that trapped, which
-// is reported and the next run. A test passes when its process ends with status 0. What a passing
+// is reported and the next run. A test passes when its process ends with status 0. Under `--np N`
+// each test is an N-rank MPI job, run by the launcher the driver finds. What a passing
 // test prints is not shown; a failing one is reported by its trap's message. Interpreted, each test is
 // a run of its own the same way, with nothing built.
 
@@ -21,7 +22,7 @@ struct TestRun
 
 // The tests of the project whose root module is `file` whose names contain `filter`, built and run;
 // or why they could not be built.
-run_tests(file: string, prelude: Option[string], filter: string, tc: Toolchain, fpe_trap: bool) -> Result[TestRun, string]
+run_tests(file: string, prelude: Option[string], filter: string, tc: Toolchain, fpe_trap: bool, np: int = 0) -> Result[TestRun, string]
     val l = load(file, LoadOptions(prelude, true))?
     val t = l.program
 
@@ -38,7 +39,19 @@ run_tests(file: string, prelude: Option[string], filter: string, tc: Toolchain, 
             _ = remove_dir_all(work)
             return Err(m)
 
-    val r = tally(t, filter, (k) -> capture(exe, [s"$k"], stderr = true) match
+    // Under `--np`, each test's process is the launcher's argument.
+    var line: Buf[string] = buf()
+
+    if np > 0
+        line = mpi_launcher(np) match
+            Ok(l) -> l
+            Err(m) ->
+                _ = remove_dir_all(work)
+                return Err(m)
+
+    line.push(exe)
+
+    val r = tally(t, filter, (k) -> capture(line[0], with_test(line.view()[1..], k).view(), stderr = true) match
         Ok(out) -> if out.status.ok() then None else Some(failure(out))
         Err(e) -> Some(s"the test program could not be run: $e")
     )
@@ -88,10 +101,26 @@ private tally(t: TProgram, filter: string, one: &Fn(usize) -> Option[string]) ->
     r.lines.push(summary)
     r
 
-// Why a test's process did not end with status 0: its trap's message, or how it ended.
+// The arguments that run test `k`: `args`, then its number.
+private with_test(args: []const string, k: usize) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for a in args
+        out.push(a)
+
+    out.push(s"$k")
+    out
+
+// Why a test's process did not end with status 0: its trap's message, the rank in front where an
+// MPI job's rank trapped, or how it ended.
 private failure(out: Output) -> string
     for line in split(out.err.unwrap_or(""), "\n")
         if line.starts_with("trap: ") then return line[6..]
+
+        if line.starts_with("rank ") && line.contains(": trap: ")
+            val at = line.index_of(": trap: ").unwrap()
+
+            return line[0..<at + 2] + line[at + 8..]
 
     out.status match
         Exited(code) -> s"stopped with status $code"

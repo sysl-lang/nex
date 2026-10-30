@@ -801,6 +801,12 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
 - `minloc(a)` and `maxloc(a)` return the index of the extreme element, a tuple of indices for rank
   ≥ 2; ties go to the first in storage order. A `nan` is never the extreme unless every element is
   one, when the location is the first; an empty array's location is `0`.
+- `minval(a)` and `maxval(a)` pass over a `nan` as `minloc` and `maxloc` do, and as Fortran's
+  `MINVAL` and `MAXVAL` do: a `nan` is never the extreme unless every element is one, when the
+  result is `nan`; along a `dim =` the rule holds lane by lane, and under `parallel` it holds across
+  blocks, whatever the thread count (a block of only `nan` is a `nan` partial, which every number
+  beats). The elemental `min` and `max` (§7.3), and a `min` or `max` operator of a `parallel for`
+  `reduce` clause (§9.2), are not reductions of an array and carry a `nan` through.
 - **Every reduction takes a named `dim =` argument**, reducing along that axis to rank R − 1:
   `sum(m, dim = 2)`, `maxval(a, dim = 1)`, `maxloc(a, dim = 1)`.
 - `min` and `max` are elemental (§7.3), never reductions: `max(a, 0.0)` clamps, and the extremes of
@@ -812,7 +818,7 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
 - `dot(x, y)` conjugates `x` when complex, as Fortran's `dot_product` and BLAS's `zdotc` do. `@`
   never conjugates.
 - The `minval` / `maxval` of an empty integer array are the type's largest / smallest values (the
-  identities of §9.2), and `+inf` / `-inf` for reals.
+  identities of §9.2), and `+inf` / `-inf` for reals: an empty array has no `nan` to give.
 
 ---
 
@@ -874,7 +880,9 @@ the checker rejects:
 
    Every other pair of places on one root is a compile error, and the message suggests the split
    form: *"`a[1..k]` and `a[j..n]` may overlap; borrow `a[1..e]` and `a[e+1..]` at one split point
-   `e`"*. No run-time disjointness check is made.
+   `e`"*, on the first axis where the two places differ — two windows `..e` and `e+1..` there, every
+   other axis whole, or, where both are elements, `m[e, 1]` and `m[e+1, 1]` with the other subscripts
+   kept. No run-time disjointness check is made.
 
    The three forms are one rule: on one axis, two subscripts are disjoint when the last index one
    reaches and the first the other reaches are **the same base plus two constants, the first
@@ -934,8 +942,13 @@ to the caller's variable. Every nex function except `main` is emitted `private`;
 `drop-equivalent-buffer-results` before `buffer-deallocation-pipeline`, a result that is its own
 argument's buffer disappears, the function returns nothing and writes the caller's buffer in place
 (`parallel.mlir`, `axpy`). Kept public, the same function returns its argument and the deallocation
-pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer argument
-*(unverified)*. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
+pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer argument. An element
+of an array of numbers passed `inout` (`a[i]`, `m[:, j][i]`) is a value in its array's tensor: its
+indices are evaluated and bounds-checked once before the call, its value crosses in a stack slot whose
+address is the argument (to a `def`, a function value or a C scalar parameter; inside a rank-0
+descriptor to a `[*; ..]` one), and after the call the slot is inserted at the same indices into what
+the array place holds then. An element of an array of anything else has storage of its own and
+crosses as its address. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
 a row, a strided or reversed window and a line of a rank-3 array each reach the callee as a
 `memref.subview` of the caller's buffer, with no allocation and no copy, in a `parallel for` body as
 in sequential code. A call through a function value (a local `def`, a lambda, a `val` bound to a
@@ -1213,6 +1226,335 @@ Every operator of §9.2 reduces this way — real and complex `+`, `*`, `min` an
 and reals, `and`, `or`, `minloc`, `maxloc` and a user operator — since the combination is nex's own
 code, not an `omp.declare_reduction`, whose order would follow the thread count.
 
+### 9.6 Distributed memory: MPI (PROPOSED)
+
+`parallel` (§9.1–9.5) uses the cores of one node. A cluster is many nodes with no shared memory,
+and the Fortran answer to it is MPI, with coarrays (§9.7) built on top. nex takes the same road:
+**MPI first, as an `mpi` module shipped with nex; coarrays later, over MPI's one-sided operations.**
+The model is Fortran's and C's: SPMD, every process (a **rank**) runs the same `main`, and data
+moves only where the program moves it.
+
+**MPI is compiled-engine only.** The interpreter never calls C (§16), so a program importing `mpi`
+is refused where it imports it: *"`mpi` is not interpreted: the interpreter never calls C, so a
+program importing `mpi` runs compiled"* — the wording of the refusal of an `extern` (`interp.sysl`)
+with the module named. `import mpi` always names the module nex ships, never a directory `mpi`
+beside the program.
+
+#### 9.6.1 What `extern def` reaches today
+
+Every probe below is a test in `compiler/tests_mpi.sysl`, run with Open MPI 5.0.11 under
+`mpirun -np 4` (each skips, saying so, without `mpirun`). They fix what the module has to provide.
+
+- **The C binding's handles are pointers nex cannot spell.** Open MPI's `MPI_Comm` is
+  `struct ompi_communicator_t *`; MPICH's is an `int`. `c_ptr` is only a callback's data (§10.2.1):
+  `extern def MPI_Comm_rank(comm: c_ptr, rank: inout int32): int32` is *"a `c_ptr` is a callback's
+  user data: declare `comm: @data(f) c_ptr`, naming the callback parameter it goes with"*.
+- **The predefined handles are macros, and in Open MPI they are addresses of globals.**
+  `MPI_COMM_WORLD` is `((MPI_Comm) &ompi_mpi_comm_world)`, `MPI_DOUBLE` `&ompi_mpi_double`, `MPI_SUM`
+  `&ompi_mpi_op_sum`; MPICH's are integer constants (`MPI_COMM_WORLD` is `0x44000000`, `MPI_SUM`
+  `0x58000003`). nex has no way to name a C global: `extern val ompi_mpi_comm_world: int64` is
+  *"expected 'def', found 'val'"*. `MPI_IN_PLACE` is `(void *) 1` in Open MPI and `(void *) -1` in
+  MPICH, a pointer no array argument can carry.
+- **`MPI_Init(int *argc, char ***argv)` wants null pointers**, which nex has no spelling for.
+- **The C binding runs only through puns**: declared with each handle as an `int64` obtained from
+  `MPI_Comm_f2c(0)`, `MPI_Type_f2c(17)`, `MPI_Op_f2c(3)`, and `argv` as `inout int64` holding zero,
+  `MPI_Allreduce` sums across four ranks correctly. It relies on a pointer passing as a 64-bit
+  integer, true of LP64 and of nothing the type system knows, and on Open MPI's Fortran handle
+  numbers — a workaround, not a binding.
+- **The Fortran binding crosses as it is.** Its handles are `INTEGER`s and every argument is by
+  reference, which is exactly a `@fortran` extern (§10.6): `mpi_init`, `mpi_comm_rank`,
+  `mpi_allreduce`, `mpi_irecv`, `mpi_wait` with `inout [int32]` for the status all run, linked with
+  `-lmpi_mpifh -lmpi`. But the constants are each implementation's `mpif.h` values (Open MPI:
+  `MPI_COMM_WORLD = 0`, `MPI_DOUBLE_PRECISION = 17`, `MPI_SUM = 3`; MPICH's are its C integers), so a
+  program is written for one MPI; and `MPI_IN_PLACE`, `MPI_BOTTOM` and `MPI_STATUS_IGNORE` are
+  addresses of common blocks (`mpi_fortran_in_place_`), again unnameable.
+- **A nonblocking call outlives the §10.3 copy.** A unit-stride window crosses in place, so
+  `mpi_irecv(dense[2..3], …)` then `mpi_wait` lands the message where the window lies. A strided one
+  is gathered into a temporary that is valid for the call: `mpi_irecv(strided[1..4 by 3], …)` posted
+  before the matching send returns, the temporary is scattered back (zeros) and freed, and the
+  message arrives later into freed memory — the variable prints `[0.0, 0.0, 0.0, 0.0]`.
+- **An MPI error aborts the job.** The default handler, `MPI_ERRORS_ARE_FATAL`, kills every rank from
+  inside the C call; no nex trap is raised and `assert_traps` sees nothing.
+- **There is no standard ABI to declare against yet.** MPI 5.0 fixes one (`mpi_abi.h`, handles and
+  constants identical across implementations, a `libmpi_abi`). Open MPI 5.0.11 ships no `mpi_abi.h`;
+  its `mpi.h` says `MPI_VERSION 3`, `MPI_SUBVERSION 1`. MPICH 4.3 builds it with `--enable-mpi-abi`;
+  Open MPI's support is in its 6.x line. Neither is what a cluster has today.
+
+**So the module is not a header transcription.** Its handles, its constants, its buffers' lifetimes
+and its errors all need something `extern def` does not have, and the design below supplies them in
+one place, the module's shim, rather than in the language.
+
+#### 9.6.2 The module
+
+```nex
+import mpi.*
+
+def main() =
+  val me = this_rank()                  // in world(), 0 .. num_ranks() - 1
+  val p = num_ranks()
+  val n = 1000
+  var u: [real] = zeros(n + 2)          // one ghost cell at each end
+  val left = if me > 0 then me - 1 else no_rank
+  val right = if me < p - 1 then me + 1 else no_rank
+  for step in 1..100
+    exchange
+      send(u[2], to = left)
+      send(u[n + 1], to = right)
+      recv(u[1], from = left)
+      recv(u[n + 2], from = right)
+    u[2..n + 1] = 0.5 * (u[1..n] + u[3..n + 2])
+  val total = allreduce(sum(u[2..n + 1]), +)
+  if me == 0 then print(total)
+```
+
+**Initialisation is implicit.** A program that imports `mpi` has `MPI_Init_thread` called before
+its module-level bindings are initialised and `MPI_Finalize` after `main` returns or `stop` runs,
+as a Fortran coarray program has; `init` and `finalize` are not functions the program calls.
+`stop n` with `n ≠ 0` on any rank, and a trap nothing catches, call `MPI_Abort(world, status)` after
+writing the message with the rank in front (`rank 3: trap: index 11 out of bounds 1..10`; `stop n`'s
+is `rank 3: stop n`), so one rank's failure ends the job instead of hanging the others in their next
+collective. The status is `n` for `stop n` and 134 for a trap, a process ended by `abort`'s. `stop 0`
+ends only its own rank's part, through `MPI_Finalize`, which waits for the other ranks to reach
+theirs.
+
+**Communicators** are values of type `Comm`: `world()`, `self()`, `split(comm, color, key = this_rank())`
+(`MPI_Comm_split`; a color of `no_color` takes the rank out), `dup(comm)`, `split_shared(comm)`
+(the ranks of one node, `MPI_COMM_TYPE_SHARED`), `cart(comm, dims, periodic)` with `shift(c, axis,
+by)` answering `(from, to)` for a halo. A `Comm` is reference counted and freed when its last value
+goes (`MPI_Comm_free`), so there is no `free` to forget. Every function below takes
+`comm: Comm = world()` as its last parameter, so a program that never splits never names one.
+`this_rank(comm)` and `num_ranks(comm)` are `int`s; `no_rank` is `MPI_PROC_NULL`, to which a send or
+receive does nothing.
+
+**No name in the module is a prelude function's**, so `import mpi.*` hides nothing: `rank(a)` and
+`size(a)` of an array keep their meaning beside `this_rank()` and `num_ranks()` (Fortran's
+`this_image()` and `num_images()`), and `reduce(a, init, f)` beside `reduce_to(x, op, root)`.
+
+**Point to point.** `send(x, to, tag = 0)`, `recv(inout x, from = any_rank, tag = any_tag)`
+answering a `Status` (`source`, `tag`, `count`), `sendrecv(x, to, inout y, from)`. `x` is any
+scalar or array of the types of §9.6.3 — a whole array, a window or a strided view — and the count
+is its element count, never written. A `recv` into an array whose shape is not the message's traps:
+*"recv: the message from rank 2 holds 12 values; the array holds 10"*.
+
+**Nonblocking: the `exchange` block.** A nonblocking send or receive must keep its buffer where it
+lies until it completes, which a call cannot promise (§9.6.1). nex makes that a scope: inside an
+`exchange` block, `send` and `recv` are `MPI_Isend` and `MPI_Irecv`, and the block's end is
+`MPI_Waitall` on all of them. A place named by a `recv` in the block is borrowed by it until the
+end, under §8.3's exclusivity rule — reading or writing it inside the block is a compile error —
+and a sent array is held by the request (its buffer reference counted, so a later write copies
+rather than changing what is in flight, value semantics for free). Code in the block that touches
+neither runs while the messages move, which is the overlap of computation and communication a halo
+exchange wants:
+
+```nex
+exchange
+  send(u[:, 2], to = west)
+  recv(u[:, 1], from = west)
+  interior(u)                // error: `u` is borrowed by the `recv` above until the block ends
+```
+
+The overlap is written by computing on another array (or another part, once the checker proves
+windows disjoint as §9.4 does). There is no `Request` value and no `wait`: a request that is never
+waited on is not expressible.
+
+**Collectives** take the value and answer the result, as nex's own reductions do:
+
+| nex | MPI | answers |
+|---|---|---|
+| `barrier()` | `MPI_Barrier` | nothing |
+| `bcast(x, root = 0)` | `MPI_Bcast` | `x` as `root` had it, on every rank |
+| `reduce_to(x, op, root = 0)` | `MPI_Reduce` | the combination on `root`; `x` elsewhere |
+| `allreduce(x, op)` | `MPI_Allreduce` | the combination, on every rank |
+| `scan(x, op)`, `exscan(x, op)` | `MPI_Scan`, `MPI_Exscan` | the prefix |
+| `gather(x, root = 0)` | `MPI_Gather(v)` | rank-major concatenation on `root`, a rank-(k+1) array of the rank-k pieces when they agree in shape, else rank 1 |
+| `allgather(x)` | `MPI_Allgather(v)` | the same on every rank |
+| `scatter(x, root = 0)` | `MPI_Scatter(v)` | this rank's part of `root`'s `x`, cut along its last axis as evenly as `blocks(n, num_ranks())` cuts |
+| `alltoall(x)` | `MPI_Alltoall(v)` | `x`'s last axis cut in `num_ranks()` parts, part k sent to rank k |
+| `blocks(n, p = num_ranks(), r = this_rank())` | — | the range of `1..n` rank `r` owns: the block decomposition every program writes |
+
+`op` is any operator of §9.2 — `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc` — or a user
+function `(T, T) -> T`, which becomes an `MPI_Op_create` over a trampoline (§10.2.1), applied
+element by element to an array. `minloc` reduces `(value, index)` pairs, ties going to the lowest
+rank, as `MPI_MINLOC` does. The value forms copy as they must; `x` keeps its value on every rank.
+
+#### 9.6.3 What crosses: types, views and units
+
+| nex element | MPI datatype |
+|---|---|
+| `int8` … `int64`, `uint8` … `uint64` | `MPI_INT8_T` … `MPI_UINT64_T` |
+| `real32`, `real64` | `MPI_FLOAT`, `MPI_DOUBLE` |
+| `real16` | `MPI_UINT16_T` for moving; reductions run nex's own operator through `MPI_Op_create` |
+| `complex[real32]`, `complex[real64]` | `MPI_C_FLOAT_COMPLEX`, `MPI_C_DOUBLE_COMPLEX` |
+| `bool` | `MPI_C_BOOL` |
+| a `@c` struct | `MPI_Type_create_struct` from the layout nex already computes (§10.2) |
+| a tuple of numbers, a `minloc` pair | a struct type of its fields' |
+
+**A view is an MPI datatype, never a copy.** Where §10.3 copies a strided view because C takes a
+bare pointer, MPI takes a pointer *and* a description, so every window crosses where it lies:
+
+- rank 1 with stride `s` (negative included): `MPI_Type_create_hvector(n, 1, s * bytes, elem)`;
+- rank 2, a window of a column-major root with leading dimension `ld`: `MPI_Type_vector(columns,
+  rows, ld, elem)`, and the hvector of a hvector when the first axis is strided too;
+- rank k: one `hvector` per axis, innermost first; a box of a dense root is
+  `MPI_Type_create_subarray` with `MPI_ORDER_FORTRAN`, which is nex's order.
+
+The module's externs take every buffer as `[*; ..]` (§10.7), so one `send` written in nex covers
+every element type and rank, and the shim reads the element type, the extents and the byte strides
+from the descriptor. The pointer is the window's first element, as in §10.3. A committed datatype is cached by (element,
+extents, strides), so a halo exchange in a loop commits once. A dense array is the element type and
+a count.
+
+**Units cross as their numbers.** A unit is a static fact of the program and a message carries
+none; each end's types are checked locally, against its own declarations, as in any SPMD program.
+A collective answers its operand's unit: `allreduce(e, +)` of `[real J]` is `[real J]`, `max` keeps
+it, and `*` of a measured value is refused as `product` is (§13.4).
+
+**Shapes.** A rank-k array's shape is known on each rank, and `recv` and the collectives check the
+counts MPI reports against it; the `v` variants (`MPI_Gatherv` and the rest) are chosen automatically
+where pieces may differ, with an `MPI_Allgather` of the counts first.
+
+#### 9.6.4 Errors
+
+Every communicator nex creates has `MPI_ERRORS_RETURN`, and a failed call **traps**, as the value
+forms of LAPACK do (§10.5): the message names the operation in nex's terms and the cause from
+`MPI_Error_string` — *"send: rank 9 does not exist in a communicator of 8"*, *"recv: message
+truncated: 12 values into an array of 10"*. A trap can be caught locally by `assert_traps`, but no
+MPI error leaves the other ranks in a known state, so an uncaught one aborts the job (§9.6.2). MPI
+reports no error a program could handle the way `solve_inplace` reports a singular matrix, so there
+is no `Result` form; fault tolerance (ULFM's `MPI_Comm_shrink`, Fortran's `stat_failed_image`) is §15.
+
+#### 9.6.5 Determinism of reductions
+
+§9.2.1 makes a reduction independent of the thread count. `MPI_Allreduce` gives no such promise:
+the standard leaves the bracketing of a commutative operation to the implementation, which chooses
+by message size, rank count and topology, so the bits can change with `-np`, with the node layout
+and between MPI versions. nex promises:
+
+1. **A distributed reduction is reproducible for a given rank count**, run to run, node layout to
+   node layout, implementation to implementation: `reduce_to`, `allreduce` and `scan` of a real or
+   complex with a built-in operator, and every user operator, combine the ranks' contributions in
+   §9.2.1's fixed pairwise tree over the rank numbers, the same bits on every rank. They are built
+   from an `MPI_Allgather` of the contributions (a scalar, or a block of an array at a time) and a
+   local combination, or a fixed binomial tree of point-to-point messages for large arrays; never
+   `MPI_Allreduce` with `MPI_SUM`. Integer, `min`, `max`, `and`, `or`, `minloc` and `maxloc`
+   reductions are exact and use MPI's own operators.
+2. **A distributed sum of a distributed array is independent of the rank count**:
+   `global_sum(x_local, offset)`, where `offset` is the global index of `x_local`'s first element,
+   reduces each rank's §9.2.1 blocks *aligned to the global numbering*, gathers the block partials
+   (one number per 4096 elements: 2 MB for a billion), and runs the whole tree on every rank — the
+   bits of `sum` over the undistributed array, for any `-np`, as `OMP_NUM_THREADS` changes nothing.
+   `global_dot`, `global_norm2` the same.
+3. **`fast = true`** on a reduction hands it to `MPI_Allreduce` with MPI's operator, for the code
+   that measures the difference and accepts MPI's bits.
+
+#### 9.6.6 `parallel` inside an MPI program
+
+A rank is one process and its `parallel` constructs use `OMP_NUM_THREADS` threads, the hybrid
+MPI+OpenMP layout of every modern cluster (`srun --ntasks-per-node=4 --cpus-per-task=16`). An `mpi`
+call is not `@pure`, so §9.4 already refuses it in a parallel body: only the thread that runs `main`
+calls MPI, which is **`MPI_THREAD_FUNNELED`**. The program decides the level, as it decides libomp
+(§9.5): one with a `parallel` construct asks for `FUNNELED`, one without for `SINGLE`, and a library
+providing less traps at start-up with the level it gave.
+
+#### 9.6.7 Building, linking and launching
+
+**The link follows the cluster's MPI**, found in this order: `NEX_MPICC`, else `mpicc` on `PATH`
+(what `module load openmpi` or `module load mpich` puts there), asked for its flags —
+`mpicc --showme:compile` / `--showme:link` for Open MPI, `mpicc -compile_info` / `-link_info` for
+MPICH — else `pkg-config` of `ompi-c` or `mpich`. A program importing `mpi` without one is refused at
+the link, naming what was looked for, as a `@fortran` program without gfortran is (§10.6). Each `-L`
+directory of the link is also the program's run-time search path, so the executable runs without the
+environment `module load` gave the build. A program that does not import `mpi` links no MPI and no
+shim.
+
+**One binary is built for one MPI.** The module's shim (`mpi/nex_mpi.c`, beside the module's nex
+text `mpi/mpi.nex`, both part of nex) — a small C file that includes the found `mpi.h`, compiled by
+the found `mpicc` (by clang with `pkg-config`'s flags where that found the MPI) and kept in nex's cache
+directory under a key of its text, the compiler and its flags, so each MPI compiles it once — turns
+handles into what nex can hold:
+`MPI_Comm_c2f` integers (an `int32` inside `Comm` and the datatype cache) and the predefined
+constants read from the header, so nex declares no implementation's numbers. A binary is for the
+MPI it was linked against, as a Fortran or C MPI program is. **Where `mpi_abi.h` is found** (MPI
+5.0's ABI: MPICH 4.3 built with it, Open MPI 6), the shim is compiled against it and links
+`libmpi_abi`, and the binary runs under any MPI that implements the ABI — chosen at run time by the
+library path, as the ABI intends.
+
+**Launching.** `nex build` writes an ordinary executable, launched as every MPI program is:
+`mpirun -np 64 ./heat` or, in a Slurm batch script, `srun ./heat`. `nex run --np N file.nex` builds
+and runs it under `mpirun -n N`, the `mpirun` beside the found `mpicc`, else `mpirun` or `mpiexec` on
+`PATH` (`NEX_MPIRUN`, split at its spaces, overrides the launcher, and `-n N` follows it; inside a
+Slurm allocation — `SLURM_JOB_ID` set — it is `srun -n N`). `nex test --np N` runs each test as an
+N-rank job, and a test that traps on a rank fails with the rank in front of its message (`FAIL t:
+rank 2: index out of bounds`). `--np` is not `--interp`'s, which never starts a job. A program
+importing `mpi` run without a launcher is a single rank (`MPI_Init` gives a world of one), which is
+how it runs in the playground's compiled mode and in `nex test` without `--np`.
+
+#### 9.6.8 Decisions
+
+1. **Rank numbering.** MPI numbers ranks from 0; nex indexes from 1 and Fortran's `this_image()`
+   from 1. *Decided: 0-based ranks in `mpi`*, since a rank is an identity, not an index, and
+   every `mpirun` message, Slurm's `SLURM_PROCID` and MPI document are 0-based; coarray images
+   (§9.7) are 1-based, as Fortran's are.
+2. **Implicit `MPI_Init`/`MPI_Finalize`.** *Decided: implicit, by importing `mpi`*, as
+   coarrays are; an explicit `init()` is one more thing to forget and to call twice.
+3. **The nonblocking form.** The `exchange` block (scoped, checked, no request values) or a
+   `Request` value with `wait` (MPI's shape, flexible, not checkable without linear types).
+   *Decided: the block*, with `Request` left out until a program needs a request that
+   outlives a scope.
+4. **The shim's language.** C compiled by the found `mpicc` (the cluster's own source of headers
+   and flags), or sysl in the runtime built per MPI. *Decided: C through `mpicc`*, a few
+   hundred lines that exist only to read `mpi.h`; everything else in the module is nex.
+5. **Default reduction determinism.** Reproducible for a fixed rank count by default with
+   `fast = true` to opt out (above), or MPI's own by default with `reproducible = true` to opt in.
+   *Decided: reproducible by default*, the rule `parallel` already follows; the cost is one
+   allgather of partials, small next to the computation of a real code, and `fast = true` is there
+   for the code that measures otherwise.
+6. **`global_sum`'s np-independence across rank counts.** Worth a separate entry point, or folded
+   into `allreduce` of a distributed array once arrays know their distribution (coarrays).
+   *Decided: the separate `global_sum`/`global_dot`/`global_norm2` now*, since they are what
+   a Krylov solver needs and the only place rank-count independence is cheap.
+7. **Errors.** Traps only (above), or a `Result` form for the errors a fault-tolerant program
+   handles. *Decided: traps only*, with fault tolerance as its own later item.
+
+### 9.7 Coarrays (planned)
+
+Fortran 2008/2018 coarrays are the distributed-memory model in the language rather than in a
+library, and parity with them is the goal after `mpi`. The sketch, each part to be designed when it
+is built:
+
+- **Images.** `this_image()` and `num_images()`, 1-based; every image runs `main` (SPMD). An image
+  is an MPI rank.
+- **Coarrays.** A module-level `var` or a local declared with a codimension — the spelling is
+  open: `var u: [real; 100] on *` reads like Fortran's `u(100)[*]` — exists once per image, the same
+  shape on all. `u{p}[i]` (or another spelling) reads or writes image `p`'s element; without a
+  coindex it is this image's, an ordinary array. A remote window `u{p}[2..9]` is a view (§6) over
+  another image, so it crosses as a datatype.
+- **Synchronisation.** `sync all`, `sync images(list)`, `sync memory`, `critical` blocks, `lock`
+  and `unlock` on a lock variable; segment ordering as Fortran's.
+- **Collectives.** `co_sum`, `co_min`, `co_max`, `co_reduce(x, op)`, `co_broadcast(x, source)`,
+  in place, as Fortran's subroutines are — reproducible as §9.6.5 is.
+- **Teams.** `form team`, `change team … end team`, `team_number`, `get_team`; an image's world
+  inside `change team` is its team.
+- **Events.** `event post(e{p})`, `event wait(e, until_count = n)`, `event_query`.
+
+**Built over MPI one-sided communication**, as OpenCoarrays builds gfortran's `-fcoarray=lib`: a
+coarray is one `MPI_Win_allocate` (collective, symmetric, so its allocation is an implicit
+`sync all`), the windows are opened once with `MPI_Win_lock_all` (passive target); a remote read is
+`MPI_Get` + `MPI_Win_flush`, a write `MPI_Put`, completed at the next image control statement;
+`sync all` is `MPI_Win_flush_all` + `MPI_Barrier`; `sync images` point-to-point messages; events
+and locks `MPI_Fetch_and_op` / `MPI_Compare_and_swap` on a counter window; `form team` is
+`MPI_Comm_split`, and each team's coarrays live in windows of its communicator. The `mpi` module's
+shim, datatype cache and determinism rule are what coarrays reuse; failed images
+(`stat_failed_image`) wait for ULFM.
+
+**Decisions for coarrays.**
+
+8. **Coindex spelling.** Fortran's square brackets are nex's indexing. *Decided: braces*,
+   `u{p}[i]` — free in expressions today (only import lists use them), short, and visibly not an
+   index.
+9. **Mixing `mpi` and coarrays in one program.** *Decided: allowed*, with `world()` the
+   initial team's communicator, as Fortran compilers built over MPI allow it in practice.
+
 ---
 
 ## 10. C FFI, BLAS and LAPACK
@@ -1268,6 +1610,7 @@ believes without proof.
 | a `@c` struct, read mode or `inout` | `const S *` / `S *` to the struct, laid out as C lays it out |
 | a function type `(A, B) -> R` | a C function pointer (§10.2.1) |
 | `c_ptr` | `void *`, opaque, only as a callback's `@data` partner (§10.2.1) |
+| `[*; ..]`, read mode or `inout` | `const nex_desc *`: any array of numbers or `bool` at any rank, or a scalar, described (§10.7) |
 | return: a scalar, a complex or `void` | the value, or C `void` |
 
 **Complex scalars cross by value.** nex mirrors clang's ABI for `_Complex` on each target, so
@@ -1560,6 +1903,134 @@ own: a Fortran shared library names its runtime itself. The Fortran library come
 line; a procedure no linked library defines is the linker's undefined-symbol error naming the
 mangled symbol (`_fdot_`).
 
+### 10.7 Any type, any rank: `[*; ..]` and its descriptor
+
+Fortran 2018 lets a `bind(c)` procedure take an argument of **any type at any rank** —
+`type(*), dimension(..)` — which C receives as a `CFI_cdesc_t *` from `ISO_Fortran_binding.h`: the
+base address, the element type and size, the rank, and an extent and byte stride per axis. It is how
+MPI's Fortran 2008 bindings (`mpi_f08`) give one `MPI_Send` for every buffer, and how a library such
+as HDF5, NetCDF or PETSc offers one entry point over every element type. nex has the same thing, for
+the same reason: **one `extern` takes any array of numbers or `bool`, at any rank, or a scalar, and C
+gets a pointer, the shape, the strides and the element type.**
+
+```nex
+extern def nex_send(x: [*; ..], to: int32, tag: int32)
+extern def nex_recv(x: inout [*; ..], from: int32, tag: int32): int32
+
+def send[T: Numeric, R: Rank](x: [T; R], to: integer, tag: integer = 0) =
+  nex_send(x, int32(to), int32(tag))
+```
+
+```c
+#include "nex_desc.h"
+void nex_send(const nex_desc *x, int32_t to, int32_t tag);
+int32_t nex_recv(const nex_desc *x, int32_t from, int32_t tag);
+```
+
+Without it a library over every element type could not be written in nex: a generic body cannot
+hand its `[T; R]` to an `extern`, whose parameter has one element type and one rank; an `extern`
+is not generic; and nex has no overloading by type to give one `extern` per element type.
+
+**The spelling `[*; ..]` (PROPOSED)** is nex's array type `[T; axes]` with Fortran's two wildcards in
+their places: `*` for the element type, as `type(*)`, and `..` for the axes, as `dimension(..)`. It
+reads as what it is, an array type, and needs no new keyword. The two go together: `[*]` and
+`[real; ..]` are refused (*"an array of any element type is of any rank too: `[*; ..]`"*, and *"`..`
+is an assumed rank, which an array of any element type has: …"*), since a parameter of one element
+type at any rank is what a generic `def` over `[T; R]` already writes.
+
+**What may be passed:**
+
+- **an array of any element type C has a code for** — `int8` … `int64`, `uint8` … `uint64`,
+  `real16`, `real32`, `real64`, `complex[real16]`, `complex[real32]`, `complex[real64]`, `bool` — at
+  any rank, whole, a window, a strided view or a reversed one;
+- **a scalar of those types, as rank 0**: `nex_send(2.5, …)`, `nex_recv(count, …)`;
+- **a measured value or array, as its numbers**: the unit is a static fact and the descriptor
+  carries none (§13.7), so neither `strip` nor a unit-free declaration is needed;
+- **a generic body's `[T; R]` or `T`**, where `T`'s constraint admits only numbers and `bool`
+  (`Numeric`, `Float`, `Integral`, `Real`, `Complex`): the body is checked once against the
+  constraint (§2.6), and each instance hands C the descriptor of its own element type and rank.
+  `T: Eq` admits `string`, so it is refused: *"…, and argument 1 is [T], whose `T: Eq` admits more
+  than numbers and `bool`: constrain it `T: Numeric`"*.
+
+**`inout` makes it writable**, as for any `extern` parameter: the argument is a place (§8), borrowed
+for the call under §8.3's exclusivity rule, and C writes where the view lies — through a strided or
+reversed view, into the elements the view names. A read-mode argument is a promise that C does not
+write, as in §10.2. The descriptor says which it is.
+
+**The descriptor** is the C struct `nex_desc` of `include/nex_desc.h`, which nex ships:
+
+```c
+typedef enum nex_type {
+    NEX_INT8 = 1, NEX_INT16, NEX_INT32, NEX_INT64,          /* 1-4 */
+    NEX_UINT8, NEX_UINT16, NEX_UINT32, NEX_UINT64,          /* 5-8 */
+    NEX_REAL16, NEX_REAL32, NEX_REAL64,                     /* 9-11 */
+    NEX_COMPLEX_REAL16, NEX_COMPLEX_REAL32, NEX_COMPLEX_REAL64, /* 12-14 */
+    NEX_BOOL                                                /* 15 */
+} nex_type;
+
+typedef struct nex_dim { int64_t extent; int64_t stride; } nex_dim;
+
+typedef struct nex_desc {
+    void *base;          /* the first element: index 1 along every axis */
+    int64_t elem_size;   /* bytes of one element */
+    int32_t type;        /* a nex_type */
+    int32_t rank;        /* 0 for a scalar */
+    int32_t contiguous;  /* 1 where the elements are one dense column-major block */
+    int32_t writable;    /* 1 for an inout parameter */
+    nex_dim dim[];       /* rank axes, nex's first axis first */
+} nex_desc;
+```
+
+C receives `const nex_desc *` for every `[*; ..]` parameter, read mode or `inout`. Element
+(i₀, i₁, …), each counted from 0, is at `(char *)base + i₀·dim[0].stride + i₁·dim[1].stride + …`; the
+header's `nex_desc_at` computes it and `nex_desc_count` the element count. It follows `CFI_cdesc_t`
+where the two agree, so a C routine written against one reads the other: `base` is `base_addr`,
+`elem_size` is `elem_len`, `dim[k].extent` and `dim[k].stride` are `extent` and `sm` — **strides in
+bytes**, which is what lets one descriptor describe a column of a matrix and a view into an array of
+complexes alike — and `dim[0]` is the first axis, Fortran's order. It leaves out `lower_bound`, since
+C counts from 0 whatever the nex array's origin (§6.4), and the `version` and `attribute` fields,
+whose job `writable` and `contiguous` do. A `bool` element is one byte, 0 or 1, C's `bool`; a
+`complex[real16]` is two `_Float16`, the real part first.
+
+**Views cross with no copy.** Where §10.3 copies a strided view because C gets a bare pointer, a
+descriptor carries the strides, so every view crosses where it lies: `m[2..3, 2..3]` of a 3×4 matrix
+is `base` at `m[2, 2]` with strides 8 and 24; `x[4..1 by -1]` is `base` at `x[4]` with stride −8;
+`m[1..3 by 2, 4..1 by -3]` has strides 16 and −72. `contiguous` is 1 exactly where the elements form
+one dense column-major block from `base` (an axis of extent 0 or 1 is dense whatever its stride), so
+a C routine that wants a flat buffer tests it and copies only where it must. `@strided` says nothing
+of a `[*; ..]` parameter and is refused on one. This is the ground of §9.6.3's views as MPI
+datatypes: the module's shim builds the datatype from the descriptor's extents and strides.
+
+**Lifetime: the descriptor and what it points at are valid for the call only.** The descriptor lies
+in the caller's frame, and an `inout` window is the caller's buffer only while the call runs (§10.3);
+a C function that keeps either past its return reads freed or reused memory. A nonblocking operation
+that must outlive its call is §9.6.2's `exchange` block, which holds the buffer itself.
+
+**What is refused:**
+
+- an argument that is a `string`, a struct (a `@c` one included), a tuple, an enum or a function, or
+  an array of any of them: *"a `[*; ..]` parameter takes an array of numbers or `bool`, or one such
+  value, which C reads through a descriptor, and argument 1 is [P]"*. A `@c` struct has a C type of
+  its own and is declared as such (§10.2); an array of them in a descriptor is for later (§15);
+- `[*; ..]` anywhere but a C `extern`'s parameter — a `def`'s parameter, a variable, a field, a
+  result, a callback's parameter, a `@host` function's: *"`[*; ..]` is an array of any element type
+  at any rank, which only a C `extern`'s parameter takes; a `def` over any array is generic,
+  `def f[T: Numeric, R: Rank](x: [T; R])`"*;
+- on a `@fortran` extern: a plain Fortran procedure takes no descriptor, and a `type(*),
+  dimension(..)` dummy is a `bind(c)` procedure's, whose `CFI_cdesc_t` is reached through a C wrapper
+  declared as a C `extern`;
+- `@strided` on it, as above; and an extern with one is only called, never a function value (§10.2.1).
+
+**Compiled only**, like every `extern`: the interpreter never calls C (§16).
+
+**Lowering.** The descriptor is an `llvm.struct<(ptr, i64, i32, i32, i32, i32, array<R x
+struct<(i64, i64)>>)>` filled where the call is made, from `memref.extract_strided_metadata` of the
+argument's buffer — the aligned pointer plus the offset for `base`, the buffer's sizes and strides
+(times the element's bytes) for the axes, nex's first axis being the buffer's last dimension (§3.2)
+— and stored in a slot of the caller's frame, whose address is the argument. A scalar is stored in a
+slot of its own and described at rank 0. An `inout` window goes through the wrapper of §10.3, the
+descriptor built inside it over the subview of the root's buffer; nothing is gathered or scattered.
+
 ---
 
 ## 11. Lexical changes
@@ -1672,21 +2143,46 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
   and the callee cannot tell it was left out. The rules:
   - **It is evaluated at every call that leaves the argument out, afresh**, in its parameter's
     place among the arguments, which a call evaluates in parameter order: `id: integer = next_id()`
-    calls `next_id` once per such call.
+    calls `next_id` once per such call, and not at all in a call that gives `id`.
     Nothing is evaluated once and shared, so a default never remembers an earlier call.
   - **It sees the module-level names of the function's own module**, as a module-level binding's
     initializer does — functions (declared anywhere in it), bindings, constants, and the private
-    ones too, wherever the call is. **It may not name a parameter**, its own or another's
-    (`h: real = 2 * r` is a compile error): it is evaluated before any parameter is bound. Nor does
-    it see the caller's locals.
+    ones too, wherever the call is — **and the parameters before its own**:
+    `cylinder(r: real<m>, h: real<m> = 2 * r)`, `total(xs: [integer], n: integer = length(xs))`.
+    A parameter it reads holds that call's argument, or that parameter's own default where the call
+    left it out too; each argument is still evaluated once, before the defaults after it. A
+    parameter's name hides a module-level name in the defaults after it. **It may not name its own
+    parameter or a later one** (`h: real = 2 * r` before `r` is a compile error naming both), nor
+    does it see the caller's locals.
+  - **A default may call a function declared after it, and that call may leave out arguments the
+    later function defaults** (`n: integer = g()` before `def g(k: integer = 3)`): every function's
+    defaults are known before any call fills them in, whatever the declaration order and across
+    modules. **A default may not reach its own function**, directly (`def f(n: integer = f(1))`)
+    or through other functions' defaults (`def f(x = g())` with `def g(y = f())`): the cycle is a
+    compile error naming each function on it, at the call that closes it, even where that call
+    gives every argument. A function body may call the function with every argument given; a body
+    elaborated while the defaults are (its result type undeclared, needed by a default) that
+    leaves out an argument whose default is in the cycle is refused the same way.
+  - **A default may read an `inout` parameter before it** (`by: integer = length(v)` after
+    `v: inout [integer]`): it is an argument evaluated before the call starts, so the borrow rules
+    of an argument beside a borrow apply (§8.3 rule 2) — a value computed from the place is legal, a
+    read-mode array that is the place is refused at the call, as `f(a, a)` is. A default reading
+    an `inout` parameter reads the place the call borrows, so that place may not call a function
+    in a subscript (`f(a[g()])`), which would be evaluated twice.
+  - **A lambda in a default captures no parameter**: the default is filled in at the call, where a
+    lambda cannot capture the callee's parameter. It takes the value as an argument instead.
+  - **An `@elemental` function applied to an array** does not fill a default that reads the
+    parameter that array is passed for, which would see the whole array and not one element: such
+    a call gives that argument. A default reading a scalar argument beside the array is filled.
   - **It is checked against its parameter's type** as an initializer is (§2.2–§2.4): a literal adopts
     it (`x: real = 1`), an integer widens, a narrowing is an error, and a measured parameter needs a
     default of its dimension (`r: real<mm> = 5<mm>`; `= 5.0` is an error, and `= 0.5<cm>` converts).
     In a generic `def`, it must have its parameter's type for every instance, so a parameter of type
     `T` takes no literal default.
-  - **Any parameter may have one, in any position.** Positional arguments fill the leading
-    parameters, so a defaulted parameter before a required one is left out only by naming the later
-    one (`f(b = 2)`), as a Fortran `optional` dummy before a required one is.
+  - **Defaults come last.** Once a parameter has a default, every parameter after it has one, so a
+    call by position leaves out a trailing run; a named argument leaves out any defaulted parameter
+    (`damp(10.0, floor = 6.0)`). A parameter without a default after one with a default is a compile
+    error at the first such parameter, naming both.
   - **An `inout` parameter has none** (it borrows the caller's variable), **nor has an `extern`'s**
     (an `extern` transcribes the C prototype; a default belongs to a `def` that wraps it).
   - **A function value carries no defaults.** A function type has no parameter names or defaults,
@@ -1703,9 +2199,11 @@ with these rules (**PROPOSED** where marked).
   Fortran structure constructor's keyword components: `Point(y = 2.0, x = 1.0)`,
   `Rect(h = 2, w = 1)`. **PROPOSED.**
 - **A struct's field may have a default** (`segments: integer = 64`), which a constructor that
-  leaves the field out takes, under exactly the rules of a parameter's default (§11.3): evaluated
-  afresh at each such constructor, seeing the struct's module and no other field, checked against
-  the field's type. A field with no default is given. A generic struct's field whose type names a
+  leaves the field out takes, under the rules of a parameter's default (§11.3) but two: evaluated
+  afresh at each such constructor, checked against the field's type, it **sees the struct's module
+  and no field**, not even an earlier one, and **a defaulted field may stand anywhere**, before a
+  field without one, since a struct is declared as data and a constructor that leaves a field out
+  names the fields after it. A field with no default is given. A generic struct's field whose type names a
   type parameter has no default, as a generic parameter of type `T` takes no literal one. **A
   variant's field has no default**: a variant is built and matched with all of its fields, and a
   pattern that left one out would not say which.
@@ -2050,14 +2548,18 @@ unit psi = lbf / in^2
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
   `sign(x)` and `arg(z)` return a plain number: the sign is −1, 0 or 1 whatever `x` measures, and
   `arg(z)` is in radians.
-  `atan2(y, x)` takes two values of one dimension and returns a plain number, in radians.
+  `atan2(y, x)` takes two values of one dimension and returns an angle, a `real<rad>`: the unit
+  they share cancels, so `atan2(1.0<m>, 2.0<mm>)` is an angle like `atan2(1.0, 2.0)`.
 - **`sin`, `cos` and `tan` take an angle**, in any angle unit, converted to radians
   (`sin(30.0<deg>)`), **or a plain number, which is radians**, as in Fortran; another unit, `sr`
   among them, is a compile error. They return a plain number.
 - `exp`, `log`, `asin`, `acos`, `atan` and the other elementary functions need a dimensionless
-  argument — an angle is not one — and return a dimensionless result. **The inverse functions and
-  `atan2` return a plain number, in radians**, as in Fortran; `asin(x) * 1.0<rad>` makes it an
-  angle.
+  argument — an angle is not one. **The inverse functions `asin`, `acos` and `atan`, and `atan2`,
+  return an angle**, a `real<rad>` of the argument's width (`real64<rad>` for an integer argument),
+  and element by element an array of angles; the others return a dimensionless result. The angle
+  goes back into `sin` unchanged (`sin(asin(x))`), converts with `to<deg>(atan(x))`, and is refused
+  where a plain number is expected, as any angle is: `strip(asin(x))` is its number in radians.
+  `asin`, `acos` and `atan` do not take a complex argument.
 - `product(a)` has unit `U^n`; for an `a` that carries a unit, `n` must be a static extent
   (**PROPOSED**), and otherwise it is a compile error that suggests `strip`.
 - `print` and string interpolation show the unit after the value, separated by a space: with
@@ -2196,7 +2698,7 @@ is in `K` until the affine units of §15 arrive.
 | Reductions | §10 | §7.4 | Fortran names: `minval`, `maxval`, `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`; `dim =` in place of the reference's `sum_axis`; `dot` conjugates |
 | Array elements | §3.3 | §3.1 | any element type but an array; structs and tuples of scalars stored inline |
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
-| Default arguments | §6.5 | §11.3 | a defaulted parameter may stand anywhere, not only in a trailing run; a default sees the function's module and no parameter; `inout`, `extern` and local-`def` parameters and function values take none |
+| Default arguments | §6.5 | §11.3 | defaults come last; a default sees the function's module and the parameters before its own; `inout`, `extern` and local-`def` parameters and function values take none |
 | Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; a struct's field may have a default, a variant's may not; variant fields of any type; no type contains itself by value |
 | Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
 | Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed, and a bare `import m` gives qualified access, `m.x`; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |
@@ -2233,6 +2735,9 @@ each has an item in PLAN.md's later list.
   **difference** converts without the offset — a rise of 20 °C is a rise of 20 K — so an affine unit
   needs two types, a point and a difference, with point − point giving a difference and point + point
   refused. That is a rule of its own, not a factor in the table of §13.9.
+- **Arrays of `@c` structs in a `[*; ..]` descriptor** (§10.7): a type code for "a struct of
+  `elem_size` bytes" and a way to name its layout to C, should a library want one entry point over
+  records as well as numbers.
 - **Unit-polymorphic externs**: an `extern` declaration whose parameters carry units (§13.7), so a C
   routine can be given its units once in its declaration instead of `strip` at every call.
 

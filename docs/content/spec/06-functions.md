@@ -187,7 +187,8 @@ message suggests marking it `@elemental` or calling `map`.
 ## 6.5 Parameters, defaults and named arguments
 
 Each parameter is `name: type`, optionally followed by a mode (§6.8) and a default. Parameters with
-defaults must come last, so a positional call may leave trailing arguments off:
+defaults must come last, so a positional call may leave trailing arguments off; a parameter without
+a default after one with a default is a compile error:
 
 ```nex
 def damp(x: real, factor: real = 0.5, floor: real = 0.0) =
@@ -205,7 +206,37 @@ twice, or one left unfilled with no default, is a compile error. As with Fortran
 arguments, the names are part of the function's interface.
 
 A default expression is evaluated at **each call** that uses it, not once when the function is
-declared.
+declared, and only by a call that leaves its argument out.
+
+A default may use the **parameters before its own**, which hold that call's arguments, or their own
+defaults where the call left them out too:
+
+```nex
+def cylinder(r: real<m>, h: real<m> = 2.0 * r) = print(3.0 * r * r * h)
+def total(xs: [integer], n: integer = length(xs), from: integer = 1): integer = sum(xs[from..n])
+
+cylinder(1.0<m>)                   // h is 2.0 m
+total([1, 2, 3, 4], from = 3)      // n is 4: 7
+```
+
+The call evaluates its arguments once each, in parameter order, and each default after the
+arguments before it. A default that uses its own parameter or a later one is a compile error, and
+it never sees the caller's locals. A default may read an `inout` parameter before it as any other
+argument beside the borrow may (§6.8): `by: integer = length(v)` after `v: inout [integer]` is
+legal. A lambda written in a default may not capture a parameter.
+
+A default may call a function declared later in the file, or in another module, and that call may
+leave out arguments the later function defaults in turn. A default may not reach its own function,
+directly or through other functions' defaults; the cycle is a compile error naming each function on
+it:
+
+```nex
+def label(n: integer = first_id()) = print(n)
+def first_id(seed: integer = 1): integer = seed * 100      // label() prints 100
+
+def f(x: integer = g()): integer = x
+def g(y: integer = f()): integer = y    // error: `f` → `g` → `f`
+```
 
 Defaults and named arguments need a call to one named, non-overloaded `def`. A call to an overloaded
 name, to a function value (§6.7) or through method notation (`x.f(…)`) passes every argument by
@@ -376,7 +407,11 @@ The argument to an `inout` parameter is a **place** rooted in something mutable:
 | a slice | `scale(m[:, j], 2.0)`, `scale(a[1..n by 2], -1.0)` |
 
 A slice argument borrows exactly that window of the array and the callee writes it in place. Column
-`j` of `m` is scaled where it lies; the rest of `m` is untouched.
+`j` of `m` is scaled where it lies; the rest of `m` is untouched. An element may be taken through
+any number of slices (`a[2..][k]`, `m[:, j][i]`, `a[.. by -1][1]`), and its indices are evaluated
+once and checked against the array's bounds before the call starts, so an index out of bounds traps
+before the callee runs. The same holds for an `extern` taking a scalar `inout` or a `[*; ..]`
+parameter, which receives the element as a descriptor of rank 0.
 
 {{< note >}}
 That an `inout` slice is written in place without any temporary copy, including a strided one, is the
@@ -429,13 +464,16 @@ so:
 
 ```nex
 swap(a, a)                         // error: the same place twice
-swap(a[i], a[j])                   // error: i and j may be equal
+swap(a[i], a[j])                   // error: a[i] and a[j] may overlap;
+                                   //        borrow a[e] and a[e+1] at one split point e
 f(a[1..k], a[j..n])                // error: a[1..k] and a[j..n] may overlap;
                                    //        borrow a[1..e] and a[e+1..] at one split point e
 ```
 
-The message for overlapping windows suggests the split form, which is how such code is written. No
-run-time check is made: the rule is decided by the source, so a program that compiles cannot fail it.
+The message suggests the split form, which is how such code is written, on the first axis where the
+two places differ: two windows `..e` and `e+1..` there, or, where both places are elements, the
+elements `e` and `e+1` with the other subscripts kept (`m[e, 1]` and `m[e+1, 1]`). No run-time check
+is made: the rule is decided by the source, so a program that compiles cannot fail it.
 
 The split form is what divide-and-conquer algorithms need. The fast Walsh–Hadamard transform updates
 the two halves of the array against each other and then recurses into each:

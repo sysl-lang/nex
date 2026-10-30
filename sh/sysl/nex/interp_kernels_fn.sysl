@@ -503,6 +503,7 @@ private complex_fn1(name: string, bits: int) -> Option[Cx1]
                  elif name == "log" then (re, im) -> complex_log(re, im, bits)
                  elif name == "sin" then (re, im) -> complex_sin(re, im, bits)
                  elif name == "cos" then (re, im) -> complex_cos(re, im, bits)
+                 elif name == "tan" then (re, im) -> complex_tan(re, im, bits)
                  else return None
 
     Some(f)

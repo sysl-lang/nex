@@ -669,6 +669,8 @@ impl Emitter
         var back: Buf[Held] = buf()
         // The `inout` windows of arrays of non-numbers, which are written back after the call.
         var lent: Buf[ItemsLent] = buf()
+        // The elements of arrays of numbers lent as `inout` scalars, which are written back after it.
+        var elements: Buf[ElementLent] = buf()
 
         for a in args
             var v = ""
@@ -689,7 +691,7 @@ impl Emitter
                         v = l.lent
                         t = "!llvm.ptr"
                     else
-                        v = self.place_ptr(place)
+                        v = self.lent_ptr(place, &elements)
                         t = "!llvm.ptr"
                 _ ->
                     v = self.ex(a)
@@ -711,6 +713,9 @@ impl Emitter
 
         for l in lent
             self.items_hand_back(l)
+
+        for l in elements
+            self.element_back(span, l)
 
         result
     end call_value

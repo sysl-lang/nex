@@ -31,6 +31,8 @@ Each of these is a settled direction, kept here so it is not lost. None of them 
   two temperatures refused.
 - **Units in `extern` declarations**, so a C or Fortran routine is given its units once, where it
   is declared, instead of `strip` at every call.
+- **Arrays of `@c` structs through a `[*; ..]` descriptor** (see [C and Fortran](/spec/11-interop/)),
+  for a library that wants one entry point over records as well as numbers.
 
 ## Not planned
 

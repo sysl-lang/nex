@@ -84,65 +84,65 @@ private reaches_blas(x: &Arr, y: &Arr) -> bool
 // rounded once at the width (a complex product as nex writes it), or an integer's wrapped at its
 // width, as `arith.muli` and `arith.addi` do.
 private trait InlineStep
-    naught() ->Self
+    zero() ->Self
     step(acc: Self, a: Self, b: Self) -> Self
 
 impl InlineStep for i8
-    naught() ->i8 = 0
+    zero() ->i8 = 0
     step(acc: i8, a: i8, b: i8) -> i8 = acc +% a *% b
 
 impl InlineStep for i16
-    naught() ->i16 = 0
+    zero() ->i16 = 0
     step(acc: i16, a: i16, b: i16) -> i16 = acc +% a *% b
 
 impl InlineStep for i32
-    naught() ->i32 = 0
+    zero() ->i32 = 0
     step(acc: i32, a: i32, b: i32) -> i32 = acc +% a *% b
 
 impl InlineStep for long
-    naught() ->long = 0
+    zero() ->long = 0
     step(acc: long, a: long, b: long) -> long = acc +% a *% b
 
 impl InlineStep for u8
-    naught() ->u8 = 0
+    zero() ->u8 = 0
     step(acc: u8, a: u8, b: u8) -> u8 = acc +% a *% b
 
 impl InlineStep for u16
-    naught() ->u16 = 0
+    zero() ->u16 = 0
     step(acc: u16, a: u16, b: u16) -> u16 = acc +% a *% b
 
 impl InlineStep for u32
-    naught() ->u32 = 0
+    zero() ->u32 = 0
     step(acc: u32, a: u32, b: u32) -> u32 = acc +% a *% b
 
 impl InlineStep for u64
-    naught() ->u64 = 0
+    zero() ->u64 = 0
     step(acc: u64, a: u64, b: u64) -> u64 = acc +% a *% b
 
 // A `real16` product and sum are computed in `real64`, where the product is exact, and rounded.
 impl InlineStep for f16
-    naught() ->f16 = 0.0
+    zero() ->f16 = 0.0
     step(acc: f16, a: f16, b: f16) -> f16
         val p = f16(real(a) * real(b))
 
         f16(real(acc) + real(p))
 
 impl InlineStep for f32
-    naught() ->f32 = 0.0
+    zero() ->f32 = 0.0
     step(acc: f32, a: f32, b: f32) -> f32
         val p = a * b
 
         acc + p
 
 impl InlineStep for real
-    naught() ->real = 0.0
+    zero() ->real = 0.0
     step(acc: real, a: real, b: real) -> real
         val p = a * b
 
         acc + p
 
 impl[F: Float] InlineStep for Cx[F]
-    naught() ->Cx[F] = Cx(F(0.0), F(0.0))
+    zero() ->Cx[F] = Cx(F(0.0), F(0.0))
 
     step(acc: Cx[F], a: Cx[F], b: Cx[F]) -> Cx[F]
         val bits = if const sizeof(F) == 4 then 32 else 64
@@ -188,7 +188,7 @@ private inline_product[T: Elem + InlineStep](x: &Arr, y: &Arr) -> Answer
     val yk = y.str[0]
 
     if ra == 1 && rb == 1
-        var acc = T.naught()
+        var acc = T.zero()
 
         for l in 0..<k
             acc = T.step(acc, xs[usize(x.offset + l * xk)], ys[usize(y.offset + l * yk)])
@@ -205,7 +205,7 @@ private inline_product[T: Elem + InlineStep](x: &Arr, y: &Arr) -> Answer
 
     for j in 0..<n
         for i in 0..<m
-            var acc = T.naught()
+            var acc = T.zero()
             var p = x.offset + i * xi
             var q = y.offset + j * yj
 

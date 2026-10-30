@@ -579,13 +579,13 @@ impl Emitter
             val ft = self.view_ty(vt)
             val f = self.cast(span, v, vt, ft)
 
-            self.op(s"$r = scf.for $iv = $lo to $hi step ${self.index_const(1)} iter_args($acc = ${self.identity_of(span, name, t)}) -> ($rt) {")
+            self.op(s"$r = scf.for $iv = $lo to $hi step ${self.index_const(1)} iter_args($acc = ${self.seed_of(span, name, t)}) -> ($rt) {")
 
             val x = self.def(s"tensor.extract $f[$iv] : ${self.tensor_ty(span, ft)}")
 
             self.op(s"scf.yield ${self.step(span, name, acc, x, et, t)} : $rt")
             self.op("}")
-            return if name == "norm2" && !tree_reduction(name) then self.def(s"math.sqrt $r : $rt") else r
+            return if name == "norm2" && !tree_reduction(name) then self.def(s"math.sqrt $r : $rt") else self.or_identity(span, name, t, lo, hi, r)
 
         // The index of element `lo` on each axis, tensor order: the last axis varies fastest.
         val dims = self.dims(span, v, vt)
@@ -605,7 +605,7 @@ impl Emitter
             q = self.def(s"arith.divui $q, $d : index")
 
         var ivs: Buf[string] = buf()
-        var inits = s"$acc = ${self.identity_of(span, name, t)}"
+        var inits = s"$acc = ${self.seed_of(span, name, t)}"
         var tys = rt
 
         for k in 0..<rank
@@ -640,7 +640,7 @@ impl Emitter
 
         val out = s"$r#0"
 
-        if name == "norm2" && !tree_reduction(name) then self.def(s"math.sqrt $out : $rt") else out
+        if name == "norm2" && !tree_reduction(name) then self.def(s"math.sqrt $out : $rt") else self.or_identity(span, name, t, lo, hi, out)
     end reduce_range
 
     // The accumulator after element `x`.
@@ -671,12 +671,34 @@ impl Emitter
     combine(*self, span: Span, name: string, a: string, b: string, t: Ty) -> string
         if name == "sum" || name == "dot" || name == "count" || name == "norm2" then return self.binary(span, "+", a, b, t)
         if name == "product" then return self.binary(span, "*", a, b, t)
-        if name == "minval" then return self.min_max("min", a, b, t)
-        if name == "maxval" then return self.min_max("max", a, b, t)
+        if name == "minval" then return self.min_max_number("min", a, b, t)
+        if name == "maxval" then return self.min_max_number("max", a, b, t)
         if name == "any" then return self.def(s"arith.ori $a, $b : i1")
         if name == "all" then return self.def(s"arith.andi $a, $b : i1")
 
         self.unsupported(span, s"the reduction `$name`")
+
+    // `min_max` of two partial results of `minval` / `maxval`, passing over a `nan` (DESIGN §7.4): the
+    // other where one is a `nan`, a `nan` only where both are. An integer has none.
+    min_max_number(*self, name: string, a: string, b: string, t: Ty) -> string = base_of(t) match
+        Real(bits) ->
+            val a_nan = self.def(s"arith.cmpf uno, $a, $a : f$bits")
+            val b_nan = self.def(s"arith.cmpf uno, $b, $b : f$bits")
+
+            self.def(s"arith.select $a_nan, $b, ${self.def(s"arith.select $b_nan, $a, ${self.min_max(name, a, b, t)} : f$bits")} : f$bits")
+        _ -> self.min_max(name, a, b, t)
+
+    // The value a run of `name` starts from: the identity, except that a real `minval` / `maxval` starts
+    // from a `nan`, which any number replaces, so a run of only `nan` gives one.
+    seed_of(*self, span: Span, name: string, t: Ty) -> string = base_of(t) match
+        Real(bits) -> if name == "minval" || name == "maxval" then self.nan_const(bits) else self.identity_of(span, name, t)
+        _ -> self.identity_of(span, name, t)
+
+    // `r`, the `name` of elements `lo` to `hi − 1`, or the identity where there are none: a run of a real
+    // `minval` / `maxval` starts from a `nan`, which is no answer over no elements.
+    or_identity(*self, span: Span, name: string, t: Ty, lo: string, hi: string, r: string) -> string = base_of(t) match
+        Real(bits) -> if name == "minval" || name == "maxval" then self.def(s"arith.select ${self.def(s"arith.cmpi eq, $lo, $hi : index")}, ${self.identity_of(span, name, t)}, $r : f$bits") else r
+        _ -> r
 
     // The value `name` starts from (DESIGN §9.2).
     identity_of(*self, span: Span, name: string, t: Ty) -> string

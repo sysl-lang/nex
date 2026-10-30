@@ -46,6 +46,17 @@ struct Held
     place: TExpr
     frames: Buf[Opened]
 
+// An element of an array of numbers lent to a call as an `inout` scalar: the array place `src` it
+// is taken from, the slices opened on the way to `src`, its index list and checked indices (tensor
+// order), and the slot holding its value while the call runs (DESIGN §8.2).
+struct ElementLent
+    src: TExpr
+    frames: Buf[Opened]
+    subs: Buf[TSub]
+    idx: Buf[string]
+    slot: string
+    t: Ty
+
 // A local bound to an `origin` view, and its shifts by axis.
 struct OriginLocal
     id: usize
@@ -217,6 +228,53 @@ impl Emitter
                 else self.def(s"tensor.insert_slice $x into ${root.cur}${self.slice_text(s, o, z, t)} : $xt into $tt")
 
         self.set_place(root.src, v, true)
+
+    // -- elements lent to a call ------------------------------------------------------------------
+
+    // The address an `inout` scalar argument `place` crosses at. A place with storage of its own is
+    // its address; an element of an array of numbers (`a[i]`, `m[i, j]`, `a[2..][k]`, `s.v[k]`) is a
+    // value in a tensor, so its indices are evaluated and checked once, here, before the call, its
+    // value is copied to a slot whose address crosses, and `elements` gains it: `element_back`
+    // writes the slot into the element once the call has returned.
+    lent_ptr(*self, place: TExpr, elements: *Buf[ElementLent]) -> string
+        *place.kind match
+            TArray(op) -> *op match
+                TIndex(src, subs) ->
+                    if is_arr(src.ty) && !is_items(src.ty) && !is_arr(place.ty)
+                        var frames: Buf[Opened] = buf()
+                        val cur = self.open_place(src, &frames)
+                        val idx = self.indices(place.span, cur, src.ty, subs, self.shifts_of(src))
+                        val slot = self.alloca(self.mem_ty(place.span, place.ty))
+
+                        self.store(place.span, slot, self.def(s"tensor.extract $cur[${joined(idx)}] : ${self.tensor_ty(place.span, src.ty)}"), place.ty)
+                        elements.push(ElementLent(src, frames, subs, idx, slot, place.ty))
+                        return slot
+                _ -> ()
+            _ -> ()
+
+        self.place_ptr(place)
+
+    // The element `l` lent to a call written back from its slot into the array its place holds now,
+    // which another `inout` argument of the same call may have rebound.
+    element_back(*self, span: Span, l: ElementLent)
+        val x = self.load(span, l.slot, l.t)
+
+        if l.frames.len() == 0
+            val now = self.place_value(l.src)
+
+            self.set_place(l.src, self.def(s"tensor.insert $x into $now[${joined(l.idx)}] : ${self.tensor_ty(span, l.src.ty)}"), true)
+            return
+
+        var frames = l.frames
+        val root = frames[0]
+        var ones: Buf[string] = buf()
+
+        frames.set(0, Opened(root.src, root.slot, self.place_value(root.src), root.subs, root.offs, root.sizes, root.strides, root.view))
+
+        for _ in l.idx
+            ones.push(self.index_const(1))
+
+        self.insert_through(span, frames, l.subs, backwards(l.idx), ones, ones, x, "")
 
     // The window `subs` (offsets, extents and strides by axis, nex order) of the slice place the first
     // `upto` of `frames` opened, as a window of the root place's array: the windows compose.

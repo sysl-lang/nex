@@ -78,6 +78,35 @@ emit_extern_copies()
         assert(!m.contains("nex_c_scatter"), m)
         assert(!m.contains("memref.copy"), m)
 
+@test("a [*; ..] parameter is the address of a descriptor built where the view lies: never gathered, scattered or copied")
+emit_described()
+    val decls = "extern def r(x: [*; ..], n: int8): int32\nextern def w(x: inout [*; ..])\n"
+    val m = emitted(decls + "def main() =\n  val a = [1.0, 2.0, 3.0, 4.0]\n  var b = [1, 2, 3, 4]\n  var k = 1.5\n  print(r(a[4..1 by -2], 1))\n  print(r(2i, 2))\n  w(b[1..4 by 3])\n  w(k)\n  print(b)\n").unwrap()
+
+    assert(m.contains("func.func private @\"r\"(!llvm.ptr, i8 {llvm.signext}) -> (i32)"), m)
+    assert(m.contains("func.func private @\"w\"(!llvm.ptr)"), m)
+    assert(m.contains("!llvm.struct<(ptr, i64, i32, i32, i32, i32, array<1 x struct<(i64, i64)>>)>"), m)
+    assert(m.contains("!llvm.struct<(ptr, i64, i32, i32, i32, i32, array<0 x struct<(i64, i64)>>)>"), m)
+    assert(m.contains("memref.subview"), m)
+    assert(m.contains("bufferization.materialize_in_destination"), m)
+    assert(!m.contains("nex_c_gather"), m)
+    assert(!m.contains("nex_c_scatter"), m)
+    assert(!m.contains("memref.copy"), m)
+
+@test("the descriptor header nex ships compiles as C and as C++, and lays a descriptor out as the emitter does")
+described_header()
+    val b = bench()
+    val probe = s"${b.work}/desc.c"
+
+    write_text(probe, "#include <stddef.h>\n#include \"nex_desc.h\"\n_Static_assert(offsetof(nex_desc, base) == 0, \"base\");\n_Static_assert(offsetof(nex_desc, elem_size) == 8, \"elem_size\");\n_Static_assert(offsetof(nex_desc, type) == 16, \"type\");\n_Static_assert(offsetof(nex_desc, rank) == 20, \"rank\");\n_Static_assert(offsetof(nex_desc, contiguous) == 24, \"contiguous\");\n_Static_assert(offsetof(nex_desc, writable) == 28, \"writable\");\n_Static_assert(offsetof(nex_desc, dim) == 32, \"dim\");\n_Static_assert(sizeof(nex_dim) == 16, \"nex_dim\");\n_Static_assert(NEX_INT8 == 1 && NEX_UINT8 == 5 && NEX_REAL16 == 9 && NEX_COMPLEX_REAL16 == 12 && NEX_BOOL == 15, \"codes\");\n").unwrap()
+
+    val c = capture(s"${b.tc.llvm_bin}/clang", ["-std=c11", "-Wall", "-Werror", "-pedantic", "-I", repo("include"), "-c", probe, "-o", s"${b.work}/desc.o"], stderr = true).unwrap()
+    val cxx = capture(s"${b.tc.llvm_bin}/clang", ["-x", "c++", "-std=c++17", "-Wall", "-Werror", "-Wno-c99-extensions", "-Wno-unused-function", "-I", repo("include"), "-fsyntax-only", repo("include/nex_desc.h")], stderr = true).unwrap()
+
+    finish(b)
+    assert(c.status.ok(), c.err.unwrap_or(""))
+    assert(cxx.status.ok(), cxx.err.unwrap_or(""))
+
 @test("the extern declarations nex lowers to are clang's for the same C functions")
 extern_abi_matches_clang()
     val b = bench()
@@ -101,7 +130,7 @@ extern_abi_matches_clang()
     val clang = declarations(read_text(ll).unwrap(), "define ")
     var checked = 0
 
-    for file in ["065-ffi-libm-and-scalars", "066-ffi-arrays-strides-and-leading-dimension", "067-ffi-complex-by-value", "068-ffi-c-struct-by-reference", "069-ffi-callbacks"]
+    for file in ["065-ffi-libm-and-scalars", "066-ffi-arrays-strides-and-leading-dimension", "067-ffi-complex-by-value", "068-ffi-c-struct-by-reference", "069-ffi-callbacks", "085-ffi-descriptors"]
         val out = ran(b, read_text(repo(s"testdata/v2/$file.nex")).unwrap(), links = ffi_fixture(b).view())
 
         assert(out.status.ok(), out.err.unwrap_or(""))

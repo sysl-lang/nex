@@ -17,7 +17,7 @@ module sh.sysl.nex
 // nothing the frames between hold is lost.
 //
 // **It never calls C** (PLAN.md): a program declaring an `extern` is refused, and runs on the
-// compiled engine alone. Printing, formatting and the words of every trap are the runtime's sysl
+// compiled engine alone; so is one importing `mpi`, refused where it imports it. Printing, formatting and the words of every trap are the runtime's sysl
 // functions, which the compiled program calls through C, so the two engines write the same bytes.
 //
 // What the interpreter does not run yet it refuses before running anything: every construct it meets
@@ -371,6 +371,14 @@ impl Interp
         var tuples: Buf[TGlobalTuple] = buf()
         var funs: Buf[TFun] = buf()
 
+        // An MPI program is refused where it imports `mpi`, and only there: the module's own externs
+        // are what that refusal is about.
+        self.prog.mpi match
+            Some(span) ->
+                self.diags.push(error(span, "`mpi` is not interpreted: the interpreter never calls C, so a program importing `mpi` runs compiled"))
+                return buf()
+            None -> ()
+
         for _ in 0..<self.prog.locals.len()
             self.slot.push(-1)
             self.captured.push(false)
@@ -495,9 +503,10 @@ impl Interp
             Ok(VVoid)
         , self.next, "module level", g.span)
 
-    // By function, each parameter's default compiled to run in a frame of its own: a default sees only
-    // module-level names (DESIGN §11.3), so it needs no caller's frame. The frame a trap in it leaves
-    // is the function's, at the default.
+    // By function, each parameter's default compiled to run in a frame of its own, the function's
+    // parameters in its first slots as a call's frame holds them: a default sees module-level names
+    // and the parameters before its own (DESIGN §11.3), so it needs no caller's frame. The frame a
+    // trap in it leaves is the function's, at the default.
     defaults(*self) -> Buf[Buf[Option[Compiled]]]
         var out: Buf[Buf[Option[Compiled]]] = buf()
 
@@ -510,6 +519,9 @@ impl Interp
                         each.push(x match
                             Some(e) ->
                                 self.begin()
+
+                                for p in f.params
+                                    self.slot_of(p)
 
                                 val code = self.ex(e)
 

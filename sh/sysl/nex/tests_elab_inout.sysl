@@ -18,7 +18,7 @@ ino_same_root()
     assert_eq(in_main(SW, "  var a = 1\n  sw(a, a)\n"),
         "error: `a` and `a` are both passed `inout` and overlap; an `inout` argument must be the only access to its place while the call runs @7:9")
     assert_eq(in_main(SW, "  var a = [1, 2, 3]\n  val i = 1\n  val j = 2\n  sw(a[i], a[j])\n"),
-        "error: `a[i]` and `a[j]` may overlap; borrow `a[1..e]` and `a[e+1..]` at one split point `e` @9:12")
+        "error: `a[i]` and `a[j]` may overlap; borrow `a[e]` and `a[e+1]` at one split point `e` @9:12")
     assert_eq(in_main(F, "  var a: [real] = zeros(8)\n  val k = 4\n  val j = 5\n  f(a[1..k], a[j..8])\n"),
         "error: `a[1..k]` and `a[j..8]` may overlap; borrow `a[1..e]` and `a[e+1..]` at one split point `e` @6:14")
     assert_eq(in_main("def h(x: inout [real], y: inout real) = ()\n", "  var a: [real] = zeros(8)\n  h(a, a[1])\n"),
@@ -42,6 +42,23 @@ ino_disjoint_forms()
     assert_eq(in_main("struct P\n  x: integer\n  y: integer\n" + SW, "  var a = [P(1, 2), P(3, 4)]\n  val k = 1\n  sw(a[k].x, a[k].y)\n"), "ok")
     assert_eq(in_main("struct P\n  x: integer\n  y: integer\n" + SW, "  var a = [P(1, 2), P(3, 4)]\n  val k = 1\n  sw(a[k].x, a[k].x)\n"),
         "error: `a[k].x` and `a[k].x` are both passed `inout` and overlap; an `inout` argument must be the only access to its place while the call runs @11:14")
+
+@test("two elements of one array, or an element beside a read of its array, are told apart as windows are; the hint names the axis they differ on")
+ino_elements()
+    val h = "def h(x: inout integer, v: [integer]) = ()\n"
+
+    assert_eq(in_main(SW, "  var m = fill((3, 4), 0)\n  val i = 1\n  val j = 2\n  sw(m[i, 1], m[j, 1])\n"),
+        "error: `m[i, 1]` and `m[j, 1]` may overlap; borrow `m[e, 1]` and `m[e+1, 1]` at one split point `e` @9:15")
+    assert_eq(in_main(SW, "  var m = fill((3, 4), 0)\n  val i = 1\n  val j = 2\n  sw(m[2, i], m[2, j])\n"),
+        "error: `m[2, i]` and `m[2, j]` may overlap; borrow `m[2, e]` and `m[2, e+1]` at one split point `e` @9:15")
+    assert_eq(in_main(SW, "  var m = fill((3, 4), 0)\n  val i = 1\n  sw(m[i, 1], m[i, 2])\n  sw(m[1, i], m[2, i])\n  sw(m[i, 2], m[i+1, 2])\n"), "ok")
+    assert_eq(in_main(G, "  var m: [real; :, :] = zeros((3, 3))\n  val i = 1\n  val j = 2\n  g(m[1..i, :], m[j..3, :])\n"),
+        "error: `m[1..i, :]` and `m[j..3, :]` may overlap; borrow `m[..e, :]` and `m[e+1.., :]` at one split point `e` @6:17")
+    assert_eq(in_main(h, "  var a = fill(4, 0)\n  h(a[1], a)\n"),
+        "error: `a` is read while the call runs, and overlaps `a[1]`, which the call borrows `inout`; an `inout` argument must be the only access to its place @4:11")
+    assert_eq(in_main(h, "  var a = fill(4, 0)\n  val i = 1\n  val j = 2\n  h(a[i], a[j..])\n"),
+        "error: `a[j..]` is read while the call runs and may overlap `a[i]`, which the call borrows `inout`; borrow `a[1..e]` and `a[e+1..]` at one split point `e` @6:11")
+    assert_eq(in_main(h, "  var a = fill(4, 0)\n  h(a[1], a[2..])\n  h(a[end], a[..end-1])\n"), "ok")
 
 @test("a split point is one expression on both sides, and nothing the call evaluates may change it")
 ino_split_point()

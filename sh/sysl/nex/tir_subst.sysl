@@ -1,0 +1,175 @@
+module sh.sysl.nex
+
+// A default that reads earlier parameters, filled into a call (DESIGN §11.3): the default's nodes
+// rebuilt with each read of a parameter replaced by what the call passes for it. A lambda's body is
+// not inside the expression that makes it, so this never reaches one; a default holds no lambda that
+// captures a parameter (`sig_defaults` refuses one).
+
+import sysl.buf.{Buf, buf}
+
+private struct Subst
+    from: Buf[usize]
+    to: Buf[TExpr]
+    // By index into `from`: whether the expression reads that local.
+    hits: Buf[bool]
+
+// `e` with each `TLocal(from[i])` replaced by `to[i]`.
+subst_locals(e: TExpr, from: Buf[usize], to: Buf[TExpr]) -> TExpr
+    var s = Subst(from, to, buf())
+
+    for _ in from
+        s.hits.push(false)
+
+    ex(&s, e)
+
+// By index into `ids`: whether `e` reads that local.
+reads_locals(e: TExpr, ids: Buf[usize]) -> Buf[bool]
+    var to: Buf[TExpr] = buf()
+    var s = Subst(ids, to, buf())
+
+    for _ in ids
+        s.hits.push(false)
+
+    ex(&s, e)
+    s.hits
+
+private ex(s: *Subst, e: TExpr) -> TExpr
+    *e.kind match
+        TLocal(id) ->
+            for i in 0..<s.from.len()
+                if s.from[i] == id
+                    s.hits.set(i, true)
+
+                    if i < s.to.len() then return s.to[i]
+
+            e
+        _ -> texpr(e.span, e.ty, kind_of(s, *e.kind))
+
+private opt(s: *Subst, x: Option[TExpr]) -> Option[TExpr] = x match
+    Some(v) -> Some(ex(s, v))
+    None -> None
+
+private exs(s: *Subst, xs: Buf[TExpr]) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    for x in xs
+        out.push(ex(s, x))
+
+    out
+
+private kind_of(s: *Subst, k: TKind) -> TKind = k match
+    TPromote(v) -> TPromote(ex(s, v))
+    TConvert(v, traps) -> TConvert(ex(s, v), traps)
+    TRescale(v, f) -> TRescale(ex(s, v), f)
+    TUnitAs(v) -> TUnitAs(ex(s, v))
+    TMakeComplex(re, im) -> TMakeComplex(ex(s, re), ex(s, im))
+    TComplexPart(v, imag) -> TComplexPart(ex(s, v), imag)
+    TBinary(op, l, r) -> TBinary(op, ex(s, l), ex(s, r))
+    TLogical(op, l, r) -> TLogical(op, ex(s, l), ex(s, r))
+    TUnary(op, v) -> TUnary(op, ex(s, v))
+    TChain(operands, links) ->
+        var ls: Buf[Link] = buf()
+
+        for l in links
+            ls.push(Link(l.op, ex(s, l.lhs), ex(s, l.rhs)))
+
+        TChain(exs(s, operands), ls)
+    TCall(callee, args) -> TCall(ex(s, callee), exs(s, args))
+    TBuiltin(name, args) -> TBuiltin(name, exs(s, args))
+    TBorrow(place) -> TBorrow(ex(s, place))
+    TInterp(parts, format) ->
+        var ps: Buf[TPart] = buf()
+
+        for part in parts
+            ps.push(part match
+                TText(t) -> TText(t)
+                TValue(v, spec) -> TValue(ex(s, v), spec))
+
+        TInterp(ps, format)
+    TIf(cond, a, b) -> TIf(ex(s, cond), ex(s, a), opt(s, b))
+    TWhile(id, cond, body) -> TWhile(id, ex(s, cond), ex(s, body))
+    TFor(id, v, lo, hi, inclusive, step, body) -> TFor(id, v, ex(s, lo), ex(s, hi), inclusive, opt(s, step), ex(s, body))
+    TBlock(items, result) -> TBlock(exs(s, items), ex(s, result))
+    TLet(id, init) -> TLet(id, ex(s, init))
+    TAssign(op, target, value) -> TAssign(op, ex(s, target), ex(s, value))
+    TAssignTuple(target, value) -> TAssignTuple(target_of(s, target), ex(s, value))
+    TReturn(v) -> TReturn(opt(s, v))
+    TStop(code) -> TStop(opt(s, code))
+    TTuple(elems) -> TTuple(exs(s, elems))
+    TTupleField(v, k) -> TTupleField(ex(s, v), k)
+    TNew(args) -> TNew(exs(s, args))
+    TField(v, name, k) -> TField(ex(s, v), name, k)
+    TVariant(name, tag, args) -> TVariant(name, tag, exs(s, args))
+    TMatch(scrutinee, arms) ->
+        var out: Buf[TArm] = buf()
+
+        for a in arms
+            out.push(TArm(a.pat, ex(s, a.body)))
+
+        TMatch(ex(s, scrutinee), out)
+    TDestructure(kind, pat, init) -> TDestructure(kind, pat, ex(s, init))
+    TArray(a) -> TArray(arr_of(s, *a))
+    TParallel(op) -> TParallel(par_of(s, *op))
+    _ -> k
+end kind_of
+
+private target_of(s: *Subst, t: TTarget) -> TTarget = t match
+    TPlace(place) -> TPlace(ex(s, place))
+    TDrop -> TDrop
+    TTargets(elems) ->
+        var out: Buf[TTarget] = buf()
+
+        for x in elems
+            out.push(target_of(s, x))
+
+        TTargets(out)
+
+private subs_of(s: *Subst, subs: Buf[TSub]) -> Buf[TSub]
+    var out: Buf[TSub] = buf()
+
+    for x in subs
+        out.push(x match
+            TSubAt(i) -> TSubAt(ex(s, i))
+            TSubAll -> TSubAll
+            TSubWindow(lo, hi, inclusive, stride) -> TSubWindow(opt(s, lo), opt(s, hi), inclusive, opt(s, stride)))
+
+    out
+
+private arr_of(s: *Subst, a: TArr) -> TArr = a match
+    TArrayLit(items) -> TArrayLit(exs(s, items))
+    TRangeValue(lo, hi, inclusive, step) -> TRangeValue(ex(s, lo), ex(s, hi), inclusive, opt(s, step))
+    TIndex(target, subs) -> TIndex(ex(s, target), subs_of(s, subs))
+    TView(target, subs) -> TView(ex(s, target), subs_of(s, subs))
+    TOrigin(source, firsts) -> TOrigin(ex(s, source), exs(s, firsts))
+    TCopy(v, why) -> TCopy(ex(s, v), why)
+    TTransfer(v, d) -> TTransfer(ex(s, v), d)
+    TElementwise(op, l, r) -> TElementwise(op, ex(s, l), ex(s, r))
+    TElementwiseUnary(op, v) -> TElementwiseUnary(op, ex(s, v))
+    TMatMul(l, r) -> TMatMul(ex(s, l), ex(s, r))
+    TElemental(name, args) -> TElemental(name, exs(s, args))
+    TElementalConvert(v, traps) -> TElementalConvert(ex(s, v), traps)
+    TElementalCall(callee, args) -> TElementalCall(ex(s, callee), exs(s, args))
+    TBroadcast(v) -> TBroadcast(ex(s, v))
+    TShapeCheck(v) -> TShapeCheck(ex(s, v))
+    TReduction(name, args, dim) -> TReduction(name, exs(s, args), opt(s, dim))
+    TForEach(id, var_id, xs, body) -> TForEach(id, var_id, ex(s, xs), ex(s, body))
+    _ -> a
+end arr_of
+
+private par_of(s: *Subst, p: TPar) -> TPar = p match
+    TParFor(id, clauses, reductions, body) ->
+        var cs: Buf[TParClause] = buf()
+
+        for c in clauses
+            cs.push(TParClause(c.var_id, ex(s, c.lo), ex(s, c.hi), c.inclusive, opt(s, c.step)))
+
+        var rs: Buf[TReduce] = buf()
+
+        for r in reductions
+            rs.push(TReduce(ex(s, r.target), r.op match
+                RBuiltin(name) -> RBuiltin(name)
+                RUser(f) -> RUser(ex(s, f))))
+
+        TParFor(id, cs, rs, ex(s, body))
+    TContribute(target, value, index) -> TContribute(ex(s, target), ex(s, value), opt(s, index))
+    TParExpr(v) -> TParExpr(ex(s, v))

@@ -8,7 +8,7 @@
 package {
   name    = "embed"
   version = "0.0.1"
-  sysl    = "0.7.9"
+  sysl    = "0.8.4"
 }
 
 dependencies {

@@ -303,7 +303,6 @@ itp_closure_traps()
 
 @test("what the interpreter does not run yet is refused before anything runs, at the construct")
 itp_refusals()
-    assert_eq(interpreted(main_of(["val z = 1.5 - 0.5i", "print(tan(z))"])), "refused: `tan` of a complex is not interpreted yet @3:9")
     assert_eq(interpreted(main_of(["var z = 1.0 + 2.0i", "z.re = 3.0", "print(z)"])), "refused: a complex's part as a place is not interpreted yet @3:3")
     assert_eq(interpreted("extern def cos(x: real): real\n" + main_of(["print(cos(0.0))"])),
               "refused: a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled @1:1")

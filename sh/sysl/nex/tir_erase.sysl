@@ -23,7 +23,7 @@ erased(p: TProgram) -> TProgram
     for l in p.lambdas
         lambdas.push(TLambda(l.name, l.params, erase(l.ret), l.captures, ex(l.body), l.escapes, l.copies))
 
-    TProgram(decls, locals, lambdas, p.loops, p.tests, p.test_build)
+    TProgram(decls, locals, lambdas, p.loops, p.tests, p.test_build, p.mpi)
 
 // A struct's and an enum's fields keep their units, which printing one shows; every operation on a
 // field dispatches on the type under its unit.

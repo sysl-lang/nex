@@ -241,6 +241,8 @@ private magnitude(x: real) -> real = x.copysign(1.0)
 
 private val INFINITY = 1.0 / 0.0
 
+private val NAN = 0.0 / 0.0
+
 // Under `--fpe-trap`, a NaN made from operands that were not, and an infinity made from finite ones,
 // trap as gfortran's `invalid` and `overflow` do.
 private[nex] fpe_checked(r: real, a: real, b: real, fpe: bool) -> Answer
@@ -408,6 +410,30 @@ private[nex] complex_cos(re: real, im: real, bits: int) -> Value
 
     VComplex(rnd(rnd(q + p, bits) * libm1(LIBM_COS, re, bits), bits), rnd(rnd(q - p, bits) * libm1(LIBM_SIN, re, bits), bits))
 
+// `tan(z)`, as MLIR's lowering: -i tanh(iz), the hyperbolic half through `expm1` of ±2 im(-z).
+private[nex] complex_tan(re: real, im: real, bits: int) -> Value
+    val t = -im
+    val t2 = rnd(t + t, bits)
+    val m = rnd(-t2, bits)
+    val e1 = expm1_at(t2, bits)
+    val e2 = expm1_at(m, bits)
+    val diff = rnd(e1 - e2, bits)
+    val c = libm1(LIBM_COS, re, bits)
+    val four_cc = rnd(rnd(c * c, bits) * 4.0, bits)
+    val four_cs = rnd(4.0 * rnd(c * libm1(LIBM_SIN, re, bits), bits), bits)
+    val total = rnd(e1 + e2, bits)
+    val den = rnd(total + four_cc, bits)
+    val hyper = if total == INFINITY then (-1.0).copysign(t) else rnd(diff / den, bits)
+    val trig = rnd(four_cs / den, bits)
+    val t_inf_in = magnitude(t) == INFINITY
+    val nan_trig = is_nan(four_cs)
+    val out_hyper = if nan_trig && !t_inf_in then NAN else hyper
+    val out_trig = if re == 0.0 || (t_inf_in && nan_trig) then 0.0 else trig
+
+    VComplex(out_trig, rnd(out_hyper * -1.0, bits))
+
+private expm1_at(x: real, bits: int) -> real = if bits == 64 then x.expm1() else rnd(real(f32(x).expm1()), bits)
+
 // -- the prelude's real functions -------------------------------------------------------------------
 
 // `minimum` and `maximum` as `arith.minimumf` and `arith.maximumf`: a NaN wins, and -0 is below +0.
@@ -424,6 +450,13 @@ private[nex] maximum(x: real, y: real) -> real
     if x == y then return if x.bits() >> 63 != 0 then y else x
 
     if x > y then x else y
+
+// `minimum` and `maximum` passing over a NaN: the other argument where one is a NaN, a NaN only where
+// both are. These are the whole-array `minval` / `maxval` (DESIGN §7.4); the elemental `min` and `max`
+// keep `minimum` and `maximum`.
+private[nex] minimum_number(x: real, y: real) -> real = if is_nan(x) then y elif is_nan(y) then x else minimum(x, y)
+
+private[nex] maximum_number(x: real, y: real) -> real = if is_nan(x) then y elif is_nan(y) then x else maximum(x, y)
 
 // The functions of the C library the prelude names, by their `real64` names; `real32` adds `f`.
 private[nex] val PRELUDE_LIBM = ["cbrt", "exp", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "atan2", "hypot"]

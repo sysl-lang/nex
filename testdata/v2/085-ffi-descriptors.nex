@@ -1,0 +1,118 @@
+// Arrays crossing to C as `[*; ..]` descriptors (DESIGN §10.7): one extern taking any element type
+// at any rank, a scalar as rank 0. `nf_desc_read` writes back what the descriptor says — type code,
+// element size, rank, contiguity, writability, each axis's extent and byte stride — then the elements
+// in column-major order, a complex as its two parts. Strided, reversed and windowed views cross where
+// they lie, their strides in the descriptor; `nf_desc_fill` writes 1, 2, 3 … through an `inout` one,
+// which lands in the elements the view names. A generic body passes its `[T; R]` and its `T`, and a
+// measured array crosses as its numbers.
+
+@link("nexffi")
+extern def nf_desc_read(x: [*; ..], out: inout [real]): int32
+@link("nexffi")
+extern def nf_desc_fill(x: inout [*; ..])
+@link("nexffi")
+extern def nf_desc_count(x: [*; ..]): int64
+@link("nexffi")
+extern def nf_desc_add(a: inout [*; ..], b: [*; ..])
+
+var out: [real] = zeros(64)
+
+def show(n: int32) = print(out[1..int64(n)])
+
+def described[T: Numeric, R: Rank](x: [T; R]): int32 = nf_desc_read(x, out)
+
+def described_one[T: Numeric](x: T): int32 = nf_desc_read(x, out)
+
+def filled[T: Numeric, R: Rank](x: inout [T; R]) = nf_desc_fill(x)
+
+struct Counter
+  n: int16
+
+def main() =
+  // Every element type, at rank 1.
+  val i8: [int8] = [-1, 2]
+  val i16: [int16] = [-3, 4]
+  val i32: [int32] = [-5, 6]
+  val i64: [int64] = [-7, 8]
+  val u8: [uint8] = [1, 255]
+  val u16: [uint16] = [2, 65535]
+  val u32: [uint32] = [3, 7]
+  val u64: [uint64] = [4, 9]
+  val r16: [real16] = [0.5, 1.5]
+  val r32: [real32] = [2.5, 3.5]
+  val r64 = [4.5, 5.5]
+  val z16: [complex[real16]] = [1 + 2i, 3 - 4i]
+  val z32: [complex[real32]] = [5 + 6i, 7 - 8i]
+  val z64 = [9 + 10i, 11 - 12i]
+  val b = [true, false]
+  show(nf_desc_read(i8, out))
+  show(nf_desc_read(i16, out))
+  show(nf_desc_read(i32, out))
+  show(nf_desc_read(i64, out))
+  show(nf_desc_read(u8, out))
+  show(nf_desc_read(u16, out))
+  show(nf_desc_read(u32, out))
+  show(nf_desc_read(u64, out))
+  show(nf_desc_read(r16, out))
+  show(nf_desc_read(r32, out))
+  show(nf_desc_read(r64, out))
+  show(nf_desc_read(z16, out))
+  show(nf_desc_read(z32, out))
+  show(nf_desc_read(z64, out))
+  show(nf_desc_read(b, out))
+
+  // Rank 0: a scalar of each kind, by value.
+  show(nf_desc_read(2.5, out))
+  show(nf_desc_read(int8(-9), out))
+  show(nf_desc_read(1 - 2i, out))
+  show(nf_desc_read(true, out))
+
+  // Ranks 2 and 3, a window of a matrix, a row, a strided and a reversed view.
+  val m = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], 3, 4)
+  show(nf_desc_read(m, out))
+  show(nf_desc_read(m[2..3, 2..3], out))
+  show(nf_desc_read(m[2, :], out))
+  show(nf_desc_read(m[1..3 by 2, 4..1 by -3], out))
+  show(nf_desc_read(reshape([1, 2, 3, 4, 5, 6, 7, 8], 2, 2, 2), out))
+  show(nf_desc_read(r64[2..1 by -1], out))
+  print(nf_desc_count(m[1..2, :]))
+
+  // `inout`: C writes where the view lies.
+  var a = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  nf_desc_fill(a[6..1 by -2])
+  print(a)
+  var w: [int32; :, :] = zeros((3, 3))
+  nf_desc_fill(w[2..3, 2..3])
+  print(w)
+  nf_desc_fill(w[3, :])
+  print(w)
+  var z: [complex] = zeros(3)
+  nf_desc_fill(z)
+  print(z)
+  var flags = [false, false, false]
+  nf_desc_fill(flags)
+  print(flags)
+  var k: int32 = 0
+  nf_desc_fill(k)
+  print(k)
+  var c = Counter(0)
+  nf_desc_fill(c.n)
+  print(c.n)
+  var s = [1.0, 2.0, 3.0]
+  nf_desc_add(s, [10.0, 20.0, 30.0])
+  print(s)
+
+  // From a generic body, at each instance.
+  show(described(i32))
+  show(described(m[1..2, 1..2]))
+  show(described_one(real32(1.5)))
+  var g: [real32; :, :] = zeros((2, 2))
+  filled(g)
+  print(g)
+
+  // A measured array crosses as its numbers.
+  val d = [1.0<m>, 2.0<m>]
+  show(nf_desc_read(d, out))
+  var e = [0.0<s>, 0.0<s>]
+  nf_desc_fill(e)
+  print(e)
