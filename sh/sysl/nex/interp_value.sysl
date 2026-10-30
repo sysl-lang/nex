@@ -37,8 +37,19 @@ private[nex] enum Value
     VStr(v: string)
     // A top-level function, by its number among the program's functions.
     VFn(k: usize)
-    // An `inout` parameter's place: slot `k` of a frame, or of the module-level bindings.
-    VRef(cells: &Cells, k: usize)
+    // A lambda or a local `def`, by its number among the machine's lambdas, with what it captures: for
+    // each captured local, in `TLambda.captures` order, the `VRef` to its cell, or to the caller's place
+    // for a captured `inout` parameter.
+    VClosure(k: usize, env: Buf[Value])
+    // A struct, a tuple or a variant of an enum: the variant's `tag` (0 for a struct or a tuple) and
+    // the fields in declaration order. The fields may be shared with another value, so they are never
+    // written in place: storing a field makes a new aggregate (`with_field`), which is what gives an
+    // aggregate the value semantics of the compiled program's.
+    VAgg(tag: usize, fields: Buf[Value])
+    // A place: slot `k` of a frame, of the module-level bindings or of a captured local's cell, and the
+    // fields followed into it, outermost first. An `inout` parameter holds one, and so does a local a
+    // lambda captures, whose cell both the function and the lambda reach.
+    VRef(cells: &Cells, k: usize, path: Buf[usize])
     VVoid
 
 // How a computation stopped other than by giving its value: a trap, `stop`, or a `return`, `exit` or
@@ -81,6 +92,70 @@ private[nex] bool_of(v: Value) -> bool = v match
 private[nex] str_of(v: Value) -> string = v match
     VStr(s) -> s
     _ -> ""
+
+// -- aggregates and places --------------------------------------------------------------------------
+
+private[nex] tag_of(v: Value) -> usize = v match
+    VAgg(tag, _) -> tag
+    _ -> 0
+
+// Field `k` of an aggregate.
+private[nex] field_at(v: Value, k: usize) -> Value = v match
+    VAgg(_, fields) -> fields[k]
+    _ -> VVoid
+
+// `v` with field `k` replaced by `x`, the fields copied so that no other value sharing them sees it.
+private[nex] with_field(v: Value, k: usize, x: Value) -> Value = v match
+    VAgg(tag, fields) ->
+        var out: Buf[Value] = buf()
+
+        for f in fields
+            out.push(f)
+
+        out.set(k, x)
+        VAgg(tag, out)
+    _ -> v
+
+// The part of `v` the fields `path` lead to, from the `from`th.
+private[nex] at_path(v: Value, path: Buf[usize], from: usize) -> Value =
+    if from == path.len() then v else at_path(field_at(v, path[from]), path, from + 1)
+
+// `v` with the part `path` leads to, from the `from`th field, replaced by `x`.
+private[nex] put_path(v: Value, path: Buf[usize], from: usize, x: Value) -> Value
+    if from == path.len() then return x
+
+    val k = path[from]
+
+    with_field(v, k, put_path(field_at(v, k), path, from + 1, x))
+
+// A new cell holding `v`: what a local a lambda captures is held in.
+private[nex] cell(v: Value) -> Value
+    var one: Buf[Value] = buf()
+
+    one.push(v)
+    VRef(Cells(one), 0, buf())
+
+// The value at a place, or the value itself where it is not one.
+private[nex] deref(v: Value) -> Value = v match
+    VRef(cells, k, path) -> at_path(cells.v[k], path, 0)
+    _ -> v
+
+// `v` stored at the place `r`.
+private[nex] store_through(r: Value, v: Value) = r match
+    VRef(cells, k, path) -> cells.v.set(k, if path.len() == 0 then v else put_path(cells.v[k], path, 0, v))
+    _ -> ()
+
+// Field `k` of the place `r`.
+private[nex] deeper(r: Value, k: usize) -> Value = r match
+    VRef(cells, slot, path) ->
+        var longer: Buf[usize] = buf()
+
+        for p in path
+            longer.push(p)
+
+        longer.push(k)
+        VRef(cells, slot, longer)
+    _ -> r
 
 // -- integers ---------------------------------------------------------------------------------------
 

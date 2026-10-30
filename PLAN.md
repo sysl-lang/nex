@@ -487,7 +487,12 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       `interpret(program, args, write, fpe_trap, test)`, and `interpretable(program)` lists what it
       refuses without running anything.
     - **I2 — aggregates and closures**: structs, tuples, enums, `match` on them, generic instances,
-      lambdas and local `def`s with their captures.
+      lambdas and local `def`s with their captures. Built: an aggregate is its tag and its fields,
+      never written in place — a field stored makes a new one — so assignment copies as the compiled
+      program's does; a place (`p.x`, `t.2`, an `inout` field) is a slot and the fields followed into
+      it. A local a lambda captures lives in a cell its slot points to, made at each binding, which
+      the lambda's environment holds too; a local `def` that calls itself finds itself in its own
+      frame. Printing an aggregate takes its punctuation from the runtime, which the emitter shares.
     - **I3 — arrays, views and the prelude**: rank-N arrays, slices as views, `inout` windows,
       element-wise expressions, the array prelude and the linear-algebra prelude, computed natively.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the

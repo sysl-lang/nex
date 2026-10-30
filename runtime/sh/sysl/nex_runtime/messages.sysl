@@ -87,3 +87,20 @@ real_spec_text(v: real, spec: string) -> string = format_real(v, spec, 0, 0)
 
 // `${s}%-8s`: any value's text, through the width and precision a string takes.
 str_spec_text(s: string, spec: string) -> string = format_str(s, spec, 0, 0)
+
+// -- the text of an aggregate -----------------------------------------------------------------------
+
+// The pieces `print` writes around an aggregate's fields (DESIGN §11.4): a tuple `(1, a)`, a struct
+// `Point { x=1.0, y=2.0 }`, a variant `Converged(3.14)` or `Diverged`. Each field is spelled as `print`
+// spells it alone, between these.
+val TUPLE_OPEN = "("
+val TUPLE_CLOSE = ")"
+val FIELD_SEPARATOR = ", "
+val STRUCT_CLOSE = " }"
+
+// A struct's text up to its first field, `name` being the struct's own, without its module or type
+// arguments.
+struct_open(name: string) -> string = s"$name { "
+
+// What comes before a struct's field: `x=`.
+field_label(name: string) -> string = s"$name="
