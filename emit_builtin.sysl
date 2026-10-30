@@ -25,13 +25,17 @@ private among(name: string, names: []const string) -> bool
 impl Emitter
     builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
         if name == "print" || name == "eprint"
-            val sink = self.def(s"arith.constant ${if name == "print" then 1 else 2} : i64")
+            val dest = self.def(s"arith.constant ${if name == "print" then 1 else 2} : i64")
+            // A program that runs threads gathers the line and writes it at once (DESIGN §9.4).
+            val sink = if self.threaded then self.call("nex_sink_new", "", "", "i64") else dest
 
             *args[0].kind match
                 TInterp(parts, _) -> self.interp_into(sink, parts)
                 _ -> self.put_value(args[0].span, sink, self.ex(args[0]), args[0].ty)
 
-            self.call("nex_put_newline", sink, "i64", "")
+            if self.threaded then self.call("nex_line_end", s"$sink, $dest", "i64, i64", "")
+            else self.call("nex_put_newline", sink, "i64", "")
+
             return ""
 
         if is_arr(t) || (args.len() > 0 && is_arr(args[0].ty) && !self.is_args(args[0])) then return self.array_builtin(span, name, args, t)

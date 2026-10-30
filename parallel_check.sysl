@@ -306,6 +306,14 @@ impl Elab
                             self.walk_subs(p, fx, subs, b)
                             return
                         None -> ()
+                // A slice read as a value: `m[:, j]` beside the write `m[:, j] = …`.
+                TView(target, subs) ->
+                    owned_of(*b, target) match
+                        Some(o) ->
+                            self.read_owned(p, e.span, o, *b, subs)
+                            self.walk_subs(p, fx, subs, b)
+                            return
+                        None -> ()
                 _ -> ()
             TCall(callee, args) ->
                 *callee.kind match

@@ -10,8 +10,14 @@
 // Generated code retains a reference where it keeps one (a store into a local, a field, a cell, a
 // returned value) and releases it where that keeping ends; a null reference is accepted and ignored
 // by both, since a slot nothing was stored into yet holds zero.
+//
+// **Counts are atomic.** Code a `parallel` region runs on several threads may retain and release one
+// object together — a string an iteration reads from outside the loop, a lambda's environment — so
+// every count changes by one indivisible add (DESIGN §9.4). Uncontended, that costs about what the
+// plain add did; only an object two threads really share pays for the shared cache line.
 
 import sysl.raw.ptr_cast
+import sysl.sync.{AcqRel, Relaxed}
 
 @needs(os)
 extern calloc(n: usize, size: usize) -> *u8
@@ -44,7 +50,7 @@ retain(p: *u8)
 
     val h = header(p)
 
-    if h.count >= 0 then h.count += 1
+    if h.count >= 0 then atomic_add(&h.count, 1, Relaxed)
 
 @export("nex_release")
 release(p: *u8)
@@ -54,9 +60,9 @@ release(p: *u8)
 
     if h.count < 0 then return
 
-    h.count -= 1
-
-    if h.count > 0 then return
+    // The thread that takes the count from 1 to 0 frees the object, after every other thread's last
+    // use of it (the acquire half of `AcqRel`).
+    if atomic_sub(&h.count, 1, AcqRel) > 1 then return
     if h.drop != null then h.drop(p)
 
     free(ptr_cast(h))

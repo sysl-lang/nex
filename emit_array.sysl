@@ -674,7 +674,10 @@ impl Emitter
             ins.push(vals[k])
             in_tys.push(self.tensor_ty(span, operands[k].ty))
 
+        if self.par_kernel then return self.map_kernel(span, out, operands, vals, scalar, self.dynamic_dims(span, first, first_ty, out))
+
         val empty = self.def(s"tensor.empty(${joined(self.dynamic_dims(span, first, first_ty, out))}) : $ot")
+
         val m = identity_map(r)
         var maps = m
 

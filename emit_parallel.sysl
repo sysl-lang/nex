@@ -1,0 +1,905 @@
+// Emission of parallelism (DESIGN §9): `parallel for`, its reductions, and the `parallel`
+// expressions, each lowered to one OpenMP region.
+//
+// **A region is outlined code that every thread of the team runs on its own share.** The function
+// that meets a `parallel` construct gathers what the region reads into an *environment* — a struct
+// in its frame — and opens an `omp.parallel` whose every thread calls the runtime's `nex_par_run`
+// with the region's code `@"p.N"(env, worker, workers)`. The code is an ordinary function emitted
+// after the one that runs it, so its locals are its own entry-block slots: each thread has its own
+// copy of every local a body binds, its own loop counter and its own control word. `nex_par_run`
+// runs the code under a catch, so a trap ends the region and is raised after it in the thread that
+// started it (`runtime/trap.sysl`).
+//
+// **What a body reaches crosses by address or as a buffer.** A local the body reads crosses as the
+// address of its storage. An array held as a value crosses as a memref descriptor: one the body only
+// reads as `to_buffer read_only`; one the body writes element by element (DESIGN §9.4 rule 1) as the
+// buffer itself, written in place by every thread at the elements it owns, and read back as the
+// array's new value after the region. Inside, the code takes the buffer as a `restrict writable`
+// tensor and writes the final tensor back into it, which bufferization makes a no-op: the stores the
+// threads make are the only writes.
+//
+// **The order of a reduction never depends on the thread count** (DESIGN §9.2.1). The iteration
+// space is numbered with the first clause's index varying fastest and cut into blocks of 4096; a
+// thread reduces whole blocks, each from the operator's identity into the block's own partial, and
+// after the region the partials are combined in the fixed pairwise tree, then once with the
+// variable's starting value. Threads decide only who computes which block.
+//
+// **A `parallel` expression is a kernel region of the same shape.** Under `parallel`, each
+// element-wise operation and each `map` writes a new array whose elements the threads divide, and a
+// reduction's block partials are computed by the threads and combined after the region in the tree
+// the sequential reduction uses, so adding `parallel` never changes a result's bits.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.str_builder
+import sh.sysl.parsing.Span
+
+// The block a reduction reduces sequentially (DESIGN §9.2.1).
+private val PAR_BLOCK: usize = 4096
+
+// What a region's code is made from.
+enum ParKind
+    // A `parallel for`: its `TParallel` node.
+    JLoop(e: TExpr)
+    // `scalar` over the elements of `operands`, each an array of `out`'s shape or a value broadcast,
+    // into a new array of type `out`.
+    JMap(out: Ty, operands: Buf[TExpr], scalar: TExpr)
+    // The block partials of the reduction `name` over a rank-1 array of `et`, each a `t`.
+    JReduce(name: string, et: Ty, t: Ty)
+
+// How a local of the function running a `parallel for` reaches its body.
+enum ParCap
+    // The address of its storage.
+    CAddr(id: usize)
+    // An array held as a value, crossing as a buffer the body reads, or also `writes`.
+    CArray(id: usize, writes: bool)
+
+// A region's code, emitted after the function that runs it: its kind, the types of its
+// environment's fields in order, and for a loop the locals that cross.
+struct ParJob
+    kind: ParKind
+    fields: Buf[string]
+    caps: Buf[ParCap]
+
+// A reduction inside a loop's code: its variable, the slot its block accumulates in, its operator
+// and its type.
+struct ParAcc
+    target: TExpr
+    acc: string
+    op: TRedOp
+    t: Ty
+
+impl Emitter
+    par(*self, e: TExpr, p: TPar) -> string = p match
+        TParFor(id, clauses, reds, body) -> self.par_for(e, id, clauses, reds, body)
+        TContribute(target, value, index) -> self.contribute(e.span, target, value, index)
+        TParExpr(v) ->
+            self.par_kernel = true
+
+            val r = self.ex(v)
+
+            self.par_kernel = false
+            r
+
+    // -- environments and regions -----------------------------------------------------------------
+
+    // The address of field `k` of the environment at `env`, of type `ty`.
+    env_at(*self, env: string, ty: string, k: usize) -> string =
+        self.def(s"llvm.getelementptr $env[0, $k] : (!llvm.ptr) -> !llvm.ptr, $ty")
+
+    // A new environment in the frame holding `vals`, field `k` of MLIR type `fields[k]`; a field whose
+    // value is `""` is filled later.
+    env_of(*self, fields: Buf[string], vals: Buf[string]) -> string
+        val ty = env_ty(fields)
+        val env = self.alloca(ty)
+
+        for k in 0..<fields.len()
+            if vals[k] != "" then self.op(s"llvm.store ${vals[k]}, ${self.env_at(env, ty, k)} : ${fields[k]}, !llvm.ptr")
+
+        env
+
+    // Field `k` of the environment a region's code was handed.
+    env_get(*self, fields: Buf[string], k: usize) -> string =
+        self.def(s"llvm.load ${self.env_at("%env", env_ty(fields), k)} : !llvm.ptr -> ${fields[k]}")
+
+    // The tensor `v` of type `t` as a buffer and its descriptor: one the region only reads, or one it
+    // `writes` in place.
+    par_out(*self, span: Span, v: string, t: Ty, writes: bool) -> (string, string)
+        val b = self.boundary_ty(span, t)
+        val m = self.def(s"bufferization.to_buffer $v${if writes then "" else " read_only"} : ${self.tensor_ty(span, t)} to $b")
+
+        (m, self.def(s"builtin.unrealized_conversion_cast $m : $b to ${self.desc_ty(rank_of(t))}"))
+
+    // In a region's code, the descriptor `d` of an array of type `t` as its buffer and a tensor over
+    // it, `writable` where the code writes it.
+    par_in(*self, span: Span, d: string, t: Ty, writes: bool) -> (string, string)
+        val b = self.boundary_ty(span, t)
+        val m = self.def(s"builtin.unrealized_conversion_cast $d : ${self.desc_ty(rank_of(t))} to $b")
+
+        (m, self.def(s"bufferization.to_tensor $m restrict${if writes then " writable" else ""} : $b to ${self.tensor_ty(span, t)}"))
+
+    // The array tensor `v` written back over its buffer `m`: in place, so nothing is copied.
+    par_back(*self, span: Span, v: string, m: string, t: Ty)
+        self.op(s"bufferization.materialize_in_destination $v in restrict writable $m : (${self.tensor_ty(span, t)}, ${self.boundary_ty(span, t)}) -> ()")
+
+    // Region `n`'s code run by every thread of an OpenMP team over the environment `env`; a trap it
+    // raised, raised here.
+    run_region(*self, n: usize, env: string)
+        val fty = "(!llvm.ptr, i64, i64) -> ()"
+        val f = self.def(s"func.constant @\"p.$n\" : $fty")
+        val code = self.def(s"builtin.unrealized_conversion_cast $f : $fty to !llvm.ptr")
+
+        self.external("omp_get_thread_num", "", "i32")
+        self.external("omp_get_num_threads", "", "i32")
+        self.external("nex_par_run", "!llvm.ptr, !llvm.ptr, i64, i64", "")
+        self.call("nex_par_begin", "", "", "")
+        self.op("omp.parallel {")
+
+        val w = self.def(s"arith.extsi ${self.def("func.call @omp_get_thread_num() : () -> i32")} : i32 to i64")
+        val nw = self.def(s"arith.extsi ${self.def("func.call @omp_get_num_threads() : () -> i32")} : i32 to i64")
+
+        self.op(s"func.call @nex_par_run($code, $env, $w, $nw) : (!llvm.ptr, !llvm.ptr, i64, i64) -> ()")
+        self.op("omp.terminator")
+        self.op("}")
+        self.call("nex_par_end", "", "", "")
+
+    // Of `n` things (`i64`), the first and one past the last that worker `w` of `nw` takes: a
+    // contiguous run, the first `n % nw` workers one more than the rest.
+    share(*self, n: string, w: string, nw: string) -> (string, string)
+        val q = self.def(s"arith.divsi $n, $nw : i64")
+        val r = self.def(s"arith.remsi $n, $nw : i64")
+        val lo = self.def(s"arith.addi ${self.def(s"arith.muli $w, $q : i64")}, ${self.def(s"arith.minsi $w, $r : i64")} : i64")
+        val extra = self.def(s"arith.extui ${self.def(s"arith.cmpi slt, $w, $r : i64")} : i1 to i64")
+
+        (lo, self.def(s"arith.addi ${self.def(s"arith.addi $lo, $q : i64")}, $extra : i64"))
+
+    // A loop of a counter from `lo` up to `hi − 1` (`i64`), where `checked` one whose next pass does
+    // not start once a trap has ended the region; the body follows, the counter's value answered
+    // with the loop.
+    count_open(*self, lo: string, hi: string, checked: bool) -> (Loop, string, string)
+        val ptr = self.alloca("i64")
+
+        self.op(s"llvm.store $lo, $ptr : i64, !llvm.ptr")
+
+        val l = self.loop_open()
+        val k = self.def(s"llvm.load $ptr : !llvm.ptr -> i64")
+        var go = self.def(s"arith.cmpi slt, $k, $hi : i64")
+
+        if checked
+            val stop = self.def(s"llvm.load ${self.par_stop} atomic monotonic {alignment = 4 : i64} : !llvm.ptr -> i32")
+
+            go = self.def(s"arith.andi $go, ${self.def(s"arith.cmpi eq, $stop, ${self.def("arith.constant 0 : i32")} : i32")} : i1")
+
+        self.loop_condition(l, go)
+        (l, ptr, self.def(s"llvm.load $ptr : !llvm.ptr -> i64"))
+
+    count_close(*self, l: Loop, ptr: string, k: string)
+        self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $ptr : i64, !llvm.ptr")
+        self.loop_close(l)
+
+    // The address of element `k` (`i64`) of storage `p` holding values stored as `mt`.
+    elem_at(*self, p: string, k: string, mt: string) -> string =
+        self.def(s"llvm.getelementptr $p[$k] : (!llvm.ptr, i64) -> !llvm.ptr, $mt")
+
+    // Storage for `count` (`i64`) values of `t`, which `nex_array_free` gives back.
+    partials(*self, span: Span, t: Ty, count: string) -> string
+        val z = self.def("llvm.mlir.zero : !llvm.ptr")
+        val bytes = self.def(s"llvm.ptrtoint ${self.elem_at(z, count, self.mem_ty(span, t))} : !llvm.ptr to i64")
+
+        self.call("nex_array_alloc", bytes, "i64", "!llvm.ptr")
+
+    // -- `parallel for` ---------------------------------------------------------------------------
+
+    par_for(*self, e: TExpr, loop_id: usize, clauses: Buf[TParClause], reds: Buf[TReduce], body: TExpr) -> string
+        val span = e.span
+        var fields: Buf[string] = buf()
+        var vals: Buf[string] = buf()
+        var total = self.def("arith.constant 1 : i64")
+
+        for c in clauses
+            val (lo, step, count) = self.clause_trip(span, c)
+
+            fields.push("i64")
+            fields.push("i64")
+            fields.push("i64")
+            vals.push(lo)
+            vals.push(step)
+            vals.push(count)
+            total = self.def(s"arith.muli $total, $count : i64")
+
+        val nb = self.def(s"arith.ceildivsi $total, ${self.def(s"arith.constant $PAR_BLOCK : i64")} : i64")
+        var parts: Buf[string] = buf()
+
+        for r in reds
+            if self.managed(r.target.ty) then self.later(span, s"a reduction over ${show_ty(r.target.ty)}, which holds a count,")
+
+            val p = self.partials(span, r.target.ty, nb)
+
+            parts.push(p)
+            fields.push("!llvm.ptr")
+            vals.push(p)
+
+        if writes_global_array(body) then self.later(span, "a parallel body writing a module-level array")
+
+        // Every local bound here may be one the body reads. An array crosses through the launcher
+        // (`launch`), which fills its field.
+        var caps: Buf[ParCap] = buf()
+        var arrays: Buf[usize] = buf()
+        var writes: Buf[bool] = buf()
+        var slots: Buf[usize] = buf()
+
+        for id in 0..<self.prog.locals.len()
+            if self.args_local == Some(id) then continue
+
+            val t = self.prog.locals[id].ty
+
+            if self.in_ssa(id)
+                if self.arr[id] == "" then continue
+
+                val w = writes_local(body, id)
+
+                caps.push(ParCap.CArray(id, w))
+                fields.push(self.desc_ty(rank_of(t)))
+                vals.push("")
+                arrays.push(id)
+                writes.push(w)
+                slots.push(fields.len() - 1)
+            elif self.slot[id] != ""
+                if is_arr(t) && writes_local(body, id) then self.later(span, "a parallel body writing an array a lambda captures")
+
+                caps.push(ParCap.CAddr(id))
+                fields.push("!llvm.ptr")
+                vals.push(self.local_ptr(span, id))
+
+        val env = self.env_of(fields, vals)
+        val n = self.par_jobs.len()
+
+        self.par_jobs.push(ParJob(ParKind.JLoop(e), fields, caps))
+
+        if arrays.len() == 0 then self.run_region(n, env)
+        else self.launch(span, n, env, fields, arrays, writes, slots)
+
+        for j in 0..<reds.len()
+            self.reduce_tree(span, reds[j], parts[j], nb)
+
+        ""
+    end par_for
+
+    // Region `n` run through a launcher, `@"q.N"(env, arrays…) -> (written arrays…)`, that takes every
+    // array the body reaches and gives back each it writes: it fills their fields of the environment
+    // with their buffers and runs the region. Bufferization sees one call that reads some arrays and
+    // writes others as an `inout` argument is written (DESIGN §8), so a written one crosses in place —
+    // inside a loop too — and is copied first only where the caller still needs its old value, or
+    // where it is also an array the call reads. The locals are rebound to what the launcher gave
+    // back.
+    launch(*self, span: Span, n: usize, env: string, fields: Buf[string], arrays: Buf[usize], writes: Buf[bool], slots: Buf[usize])
+        val outer = self.body
+        val dirty = self.dirty
+        var params: Buf[string] = buf()
+        var args: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+        var bufs: Buf[string] = buf()
+
+        self.body = str_builder()
+        self.dirty = false
+
+        for k in 0..<arrays.len()
+            val t = self.prog.locals[arrays[k]].ty
+            val tt = self.tensor_ty(span, t)
+
+            params.push(s"%t$k: $tt")
+            tys.push(tt)
+            args.push(self.arr[arrays[k]])
+
+            val (m, d) = self.par_out(span, s"%t$k", t, writes[k])
+
+            bufs.push(m)
+            self.op(s"llvm.store $d, ${self.env_at("%env", env_ty(fields), slots[k])} : ${fields[slots[k]]}, !llvm.ptr")
+
+        self.run_region(n, "%env")
+
+        // Each written array as the region left its buffer, written over the argument: the buffer is
+        // the argument's, so this copies nothing, and the result is the argument, handed back.
+        var names: Buf[string] = buf()
+        var out_tys: Buf[string] = buf()
+        var out_ids: Buf[usize] = buf()
+
+        for k in 0..<arrays.len()
+            if !writes[k] then continue
+
+            val t = self.prog.locals[arrays[k]].ty
+            val tt = self.tensor_ty(span, t)
+            val now = self.def(s"bufferization.to_tensor ${bufs[k]} restrict : ${self.boundary_ty(span, t)} to $tt")
+
+            names.push(self.def(s"bufferization.materialize_in_destination $now in %t$k : ($tt, $tt) -> $tt"))
+            out_tys.push(tt)
+            out_ids.push(arrays[k])
+
+        val count = out_ids.len()
+        val results = if count == 0 then "" else s" -> (${joined(out_tys)})"
+
+        if count == 0 then self.op("func.return") else self.op(s"func.return ${joined(names)} : ${joined(out_tys)}")
+        self.funcs.push(s"  func.func private @\"q.$n\"(%env: !llvm.ptr, ${joined(params)})$results {\n")
+        self.funcs.push(self.body.finish())
+        self.funcs.push("  }\n\n")
+        self.body = outer
+        self.dirty = dirty
+
+        val r = self.fresh()
+
+        self.op(s"${result_def(r, count)}func.call @\"q.$n\"($env, ${joined(args)}) : (!llvm.ptr, ${joined(tys)}) -> (${joined(out_tys)})")
+
+        for k in 0..<count
+            self.arr.set(out_ids[k], result_name(r, k, count))
+
+    // A clause's first value, step and trip count as `i64`, worked out as a `for` header's are; a
+    // step of 0 traps.
+    clause_trip(*self, span: Span, c: TParClause) -> (string, string, string)
+        val vt = self.prog.locals[c.var_id].ty
+        val bits = bits_of(vt)
+        val signed = is_signed(vt)
+        val t = s"i$bits"
+        val lo = self.ex(c.lo)
+        val hi = self.ex(c.hi)
+        val zero = self.int_const("0", bits)
+        val step = c.step match
+            Some(s) -> self.ex(s)
+            None -> self.int_const("1", bits)
+
+        if c.step.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), "a `for` step of 0")
+
+        val up = if signed then self.def(s"arith.cmpi sgt, $step, $zero : $t") else self.def("arith.constant true")
+        val lt = if signed then "slt" else "ult"
+        val le = if signed then "sle" else "ule"
+        val empty_up = self.def(s"arith.cmpi ${if c.inclusive then lt else le}, $hi, $lo : $t")
+        val empty_down = self.def(s"arith.cmpi ${if c.inclusive then lt else le}, $lo, $hi : $t")
+        val empty = self.def(s"arith.select $up, $empty_up, $empty_down : i1")
+        var distance = self.def(s"arith.select $up, ${self.def(s"arith.subi $hi, $lo : $t")}, ${self.def(s"arith.subi $lo, $hi : $t")} : $t")
+
+        if !c.inclusive then distance = self.def(s"arith.subi $distance, ${self.int_const("1", bits)} : $t")
+
+        val magnitude = self.def(s"arith.select $up, $step, ${self.def(s"arith.subi $zero, $step : $t")} : $t")
+        val passes = self.def(s"arith.divui $distance, $magnitude : $t")
+        val wide = if bits == 64 then passes else self.def(s"arith.extui $passes : $t to i64")
+        val count = self.def(s"arith.select $empty, ${self.def("arith.constant 0 : i64")}, ${self.def(s"arith.addi $wide, %one : i64")} : i64")
+
+        (self.widen64(lo, bits, signed), self.widen64(step, bits, signed), count)
+
+    // The code of `parallel for` job `n`: this worker's share of the iterations, or of the blocks
+    // where the loop reduces.
+    loop_code(*self, n: usize, job: ParJob, e: TExpr)
+        *e.kind match
+            TParallel(p) -> *p match
+                TParFor(id, clauses, reds, body) -> self.loop_body_code(n, job, e.span, id, clauses, reds, body)
+                _ -> ()
+            _ -> ()
+
+    loop_body_code(*self, n: usize, job: ParJob, span: Span, loop_id: usize, clauses: Buf[TParClause], reds: Buf[TReduce], body: TExpr)
+
+        self.begin(Void, body)
+        self.par_stop = self.call("nex_par_stop_word", "", "", "!llvm.ptr")
+
+        var los: Buf[string] = buf()
+        var steps: Buf[string] = buf()
+        var counts: Buf[string] = buf()
+        var f = 0
+
+        for _ in clauses
+            los.push(self.env_get(job.fields, f))
+            steps.push(self.env_get(job.fields, f + 1))
+            counts.push(self.env_get(job.fields, f + 2))
+            f += 3
+
+        var parts: Buf[string] = buf()
+
+        for _ in reds
+            parts.push(self.env_get(job.fields, f))
+            f += 1
+
+        var written: Buf[usize] = buf()
+        var bufs: Buf[string] = buf()
+
+        for c in job.caps
+            c match
+                CAddr(id) ->
+                    val a = self.env_get(job.fields, f)
+
+                    if self.boxed[id] || is_inout(self.prog.locals[id].kind) then self.bind_borrowed(id, a)
+                    else self.slot.set(id, a)
+                CArray(id, writes) ->
+                    val (m, t) = self.par_in(span, self.env_get(job.fields, f), self.prog.locals[id].ty, writes)
+
+                    self.arr.set(id, t)
+
+                    if writes
+                        written.push(id)
+                        bufs.push(m)
+
+            f += 1
+
+        self.par_accs = buf()
+
+        for r in reds
+            self.par_accs.push(ParAcc(r.target, self.alloca(self.mem_ty(span, r.target.ty)), r.op, r.target.ty))
+
+        var total = self.def("arith.constant 1 : i64")
+
+        for c in counts
+            total = self.def(s"arith.muli $total, $c : i64")
+
+        // A thread checks for a trap that has ended the region between blocks of iterations, so the
+        // iterations themselves stay a plain loop.
+        val block = self.def(s"arith.constant $PAR_BLOCK : i64")
+
+        if reds.len() == 0
+            // This worker's run of iterations, in blocks.
+            val (lo, hi) = self.share(total, "%w", "%nw")
+            val (l, ptr, b) = self.count_open(self.def("arith.constant 0 : i64"), self.def(s"arith.ceildivsi ${self.def(s"arith.subi $hi, $lo : i64")}, $block : i64"), true)
+            val first = self.def(s"arith.addi $lo, ${self.def(s"arith.muli $b, $block : i64")} : i64")
+
+            self.iterations(span, first, self.def(s"arith.minsi ${self.def(s"arith.addi $first, $block : i64")}, $hi : i64"), loop_id, clauses, los, steps, counts, body)
+            self.count_close(l, ptr, b)
+        else
+            // This worker's run of the blocks every reduction is cut into.
+            val (blo, bhi) = self.share(self.def(s"arith.ceildivsi $total, $block : i64"), "%w", "%nw")
+            val (l, ptr, b) = self.count_open(blo, bhi, true)
+
+            for a in self.par_accs
+                self.store(span, a.acc, self.red_identity(span, a), a.t)
+
+            val lo = self.def(s"arith.muli $b, $block : i64")
+
+            self.iterations(span, lo, self.def(s"arith.minsi ${self.def(s"arith.addi $lo, $block : i64")}, $total : i64"), loop_id, clauses, los, steps, counts, body)
+
+            for k in 0..<self.par_accs.len()
+                val a = self.par_accs[k]
+
+                self.store(span, self.elem_at(parts[k], b, self.mem_ty(span, a.t)), self.load(span, a.acc, a.t), a.t)
+
+            self.count_close(l, ptr, b)
+
+        for k in 0..<written.len()
+            self.par_back(span, self.arr[written[k]], bufs[k], self.prog.locals[written[k]].ty)
+
+        self.par_accs = buf()
+        self.finish_body(span, "")
+        self.end(s"  func.func private @\"p.$n\"(%env: !llvm.ptr, %w: i64, %nw: i64)")
+    end loop_body_code
+
+    // Iterations `lo` to `hi − 1` of the box the clauses span, numbered with the first clause's index
+    // varying fastest: each sets the indices and runs the body.
+    iterations(*self, span: Span, lo: string, hi: string, loop_id: usize, clauses: Buf[TParClause], los: Buf[string], steps: Buf[string], counts: Buf[string], body: TExpr)
+        val (l, ptr, t) = self.count_open(lo, hi, false)
+        var rest = t
+
+        for k in 0..<clauses.len()
+            val last = k + 1 == clauses.len()
+            val idx = if last then rest else self.def(s"arith.remui $rest, ${counts[k]} : i64")
+
+            if !last then rest = self.def(s"arith.divui $rest, ${counts[k]} : i64")
+
+            val id = clauses[k].var_id
+            val vt = self.prog.locals[id].ty
+            val bits = bits_of(vt)
+            val v = self.def(s"arith.addi ${los[k]}, ${self.def(s"arith.muli $idx, ${steps[k]} : i64")} : i64")
+
+            self.bind_local(span, id)
+            self.store(span, self.local_ptr(span, id), if bits == 64 then v else self.def(s"arith.trunci $v : i64 to i$bits"), vt)
+
+        self.region(body)
+        self.end_pass(loop_id)
+        self.dirty = false
+        self.count_close(l, ptr, t)
+
+    // `v op= e` inside a body: `e`, with its index for a location, into this block's accumulator.
+    contribute(*self, span: Span, target: TExpr, value: TExpr, index: Option[TExpr]) -> string
+        val found = self.acc_for(target)
+
+        if found.is_none() then return self.unsupported(span, "a contribution outside its loop")
+
+        val a = found.unwrap()
+        val v = self.ex(value)
+        val x = index match
+            Some(i) -> self.pair(span, a.t, v, self.ex(i))
+            None -> v
+
+        self.store(span, a.acc, self.red_combine(span, a.op, a.t, self.load(span, a.acc, a.t), x), a.t)
+        ""
+
+    acc_for(*self, target: TExpr) -> Option[ParAcc]
+        for a in self.par_accs
+            if same_place(a.target, target) then return Some(a)
+
+        None
+
+    // The tuple `(v, i)` of type `t`.
+    pair(*self, span: Span, t: Ty, v: string, i: string) -> string
+        val at = self.ty(span, t)
+        val u = self.def(s"llvm.mlir.undef : $at")
+
+        self.def(s"llvm.insertvalue $i, ${self.def(s"llvm.insertvalue $v, $u[0] : $at")}[1] : $at")
+
+    // -- reductions -------------------------------------------------------------------------------
+
+    // The value a block starts from: the operator's identity, or for a user operator the variable's
+    // value before the loop.
+    red_identity(*self, span: Span, a: ParAcc) -> string = a.op match
+        RBuiltin(name) ->
+            if name == "+" then self.one_or_zero(span, a.t, false)
+            elif name == "*" then self.one_or_zero(span, a.t, true)
+            elif name == "min" then self.identity_of(span, "minval", a.t)
+            elif name == "max" then self.identity_of(span, "maxval", a.t)
+            elif name == "and" then self.def("arith.constant true")
+            elif name == "or" then self.def("arith.constant false")
+            else
+                // A location: the worst value at the largest index, which every candidate beats.
+                val (vt, it) = pair_types(a.t)
+                val v = self.identity_of(span, if name == "minloc" then "minval" else "maxval", vt)
+                val i = it match
+                    Int(b, signed) -> self.def(s"arith.constant ${if signed then s"${(i128(1) << (b - 1)) - 1}" else "-1"} : i$b")
+                    _ -> self.zero_of(span, it)
+
+                self.pair(span, a.t, v, i)
+        RUser(_) -> self.load(span, self.place_ptr(a.target), a.t)
+
+    // `a` and `b`, two partial results of a reduction of type `t`, combined, `a` the earlier. A name
+    // that is not a reduction operator is one of the whole-array reductions (`sum`, `minval`, …).
+    red_combine(*self, span: Span, op: TRedOp, t: Ty, a: string, b: string) -> string = op match
+        RBuiltin(name) ->
+            if name == "+" || name == "*" then self.binary(span, name, a, b, t)
+            elif name == "min" || name == "max" then self.min_max(name, a, b, t)
+            elif name == "and" then self.def(s"arith.andi $a, $b : i1")
+            elif name == "or" then self.def(s"arith.ori $a, $b : i1")
+            elif name == "minloc" || name == "maxloc" then self.location_pick(span, name, t, a, b)
+            else self.combine(span, name, a, b, t)
+        RUser(f) ->
+            var leaves: Buf[TExpr] = buf()
+            var frame: Buf[string] = buf()
+
+            leaves.push(texpr(span, t, TChainOperand(0)))
+            leaves.push(texpr(span, t, TChainOperand(1)))
+            frame.push(a)
+            frame.push(b)
+            self.in_frame(frame, texpr(span, t, TCall(f, leaves)))
+
+    // Of two (value, index) pairs, the better value, and on a tie the lower index (DESIGN §9.2).
+    location_pick(*self, span: Span, name: string, t: Ty, a: string, b: string) -> string
+        val at = self.ty(span, t)
+        val (vt, it) = pair_types(t)
+        val av = self.def(s"llvm.extractvalue $a[0] : $at")
+        val bv = self.def(s"llvm.extractvalue $b[0] : $at")
+        val ai = self.def(s"llvm.extractvalue $a[1] : $at")
+        val bi = self.def(s"llvm.extractvalue $b[1] : $at")
+        val better = self.binary(span, if name == "minloc" then "<" else ">", bv, av, vt)
+        val tie = self.def(s"arith.andi ${self.binary(span, "==", bv, av, vt)}, ${self.binary(span, "<", bi, ai, it)} : i1")
+
+        self.def(s"arith.select ${self.def(s"arith.ori $better, $tie : i1")}, $b, $a : $at")
+
+    // The block partials at `p`, `nb` of them, combined in place in the fixed pairwise tree: in rounds,
+    // each pairing neighbours, an odd last one carried up as it is, until the first holds the result.
+    tree(*self, span: Span, p: string, nb: string, op: TRedOp, t: Ty)
+        val mt = self.mem_ty(span, t)
+        val left = self.alloca("i64")
+        val two = self.def("arith.constant 2 : i64")
+
+        self.op(s"llvm.store $nb, $left : i64, !llvm.ptr")
+        self.op("scf.while : () -> () {")
+        self.op(s"scf.condition(${self.def(s"arith.cmpi sgt, ${self.def(s"llvm.load $left : !llvm.ptr -> i64")}, %one : i64")})")
+        self.op("} do {")
+
+        val m = self.def(s"llvm.load $left : !llvm.ptr -> i64")
+        val half = self.def(s"arith.divsi $m, $two : i64")
+        val iv = self.fresh()
+
+        self.op(s"scf.for $iv = ${self.index_const(0)} to ${self.def(s"arith.index_cast $half : i64 to index")} step ${self.index_const(1)} {")
+
+        val k = self.to_i64(iv)
+        val l = self.def(s"arith.muli $k, $two : i64")
+        val x = self.load(span, self.elem_at(p, l, mt), t)
+        val y = self.load(span, self.elem_at(p, self.def(s"arith.addi $l, %one : i64"), mt), t)
+
+        self.store(span, self.elem_at(p, k, mt), self.red_combine(span, op, t, x, y), t)
+        self.op("}")
+
+        val odd = self.def(s"arith.remsi $m, $two : i64")
+
+        self.op(s"scf.if ${self.def(s"arith.cmpi ne, $odd, ${self.def("arith.constant 0 : i64")} : i64")} {")
+        self.store(span, self.elem_at(p, half, mt), self.load(span, self.elem_at(p, self.def(s"arith.subi $m, %one : i64"), mt), t), t)
+        self.op("}")
+        self.op(s"llvm.store ${self.def(s"arith.addi $half, $odd : i64")}, $left : i64, !llvm.ptr")
+        self.op("scf.yield")
+        self.op("}")
+
+    // After a `parallel for`: reduction `r`'s partials at `p` combined in the tree, then once with the
+    // variable's starting value, into the variable; the partials given back.
+    reduce_tree(*self, span: Span, r: TReduce, p: string, nb: string)
+        val t = r.target.ty
+        val rt = self.ty(span, t)
+
+        self.tree(span, p, nb, r.op, t)
+
+        val place = self.place_ptr(r.target)
+        val start = self.load(span, place, t)
+        val res = self.fresh()
+
+        self.op(s"$res = scf.if ${self.def(s"arith.cmpi eq, $nb, ${self.def("arith.constant 0 : i64")} : i64")} -> ($rt) {")
+        self.op(s"scf.yield $start : $rt")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.red_combine(span, r.op, t, start, self.load(span, p, t))} : $rt")
+        self.op("}")
+        self.keep(span, place, res, t)
+        self.call("nex_array_free", p, "!llvm.ptr", "")
+
+    // -- `parallel` expressions -------------------------------------------------------------------
+
+    // Under `parallel`: a new array of type `out` and the dynamic extents `dims` (tensor order) filled
+    // with `scalar` over the elements of `operands` (whose values are `vals`) by the threads of a
+    // region. Its buffer is allocated here rather than taken from a `tensor.empty`, two of which of
+    // one shape fold into one.
+    map_kernel(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], scalar: TExpr, dims: Buf[string]) -> string
+        var fields: Buf[string] = buf()
+        var env_vals: Buf[string] = buf()
+        val b = self.boundary_ty(span, out)
+        val a = self.def(s"memref.alloc(${joined(dims)}) : ${self.memref_ty(span, out)}")
+        val m = self.def(s"memref.cast $a : ${self.memref_ty(span, out)} to $b")
+        val d = self.def(s"builtin.unrealized_conversion_cast $m : $b to ${self.desc_ty(rank_of(out))}")
+
+        fields.push(self.desc_ty(rank_of(out)))
+        env_vals.push(d)
+
+        for k in 0..<operands.len()
+            val t = operands[k].ty
+
+            if is_arr(t)
+                val (_, od) = self.par_out(span, vals[k], t, false)
+
+                fields.push(self.desc_ty(rank_of(t)))
+                env_vals.push(od)
+            else
+                fields.push(self.mem_ty(span, t))
+                env_vals.push(self.to_mem(vals[k], t))
+
+        val env = self.env_of(fields, env_vals)
+        val n = self.par_jobs.len()
+
+        self.par_jobs.push(ParJob(ParKind.JMap(out, operands, scalar), fields, buf()))
+        self.run_region(n, env)
+        self.def(s"bufferization.to_tensor $a restrict writable : ${self.memref_ty(span, out)} to ${self.tensor_ty(span, out)}")
+
+    // The code of map job `n`: this worker's share of the output's elements, in storage order.
+    map_code(*self, n: usize, job: ParJob, out: Ty, operands: Buf[TExpr], scalar: TExpr)
+        val span = scalar.span
+
+        self.begin(Void, scalar)
+
+        val (m, o) = self.par_in(span, self.env_get(job.fields, 0), out, true)
+        var frame: Buf[string] = buf()
+        var arrays: Buf[string] = buf()
+
+        for k in 0..<operands.len()
+            val t = operands[k].ty
+            val v = self.env_get(job.fields, k + 1)
+
+            if is_arr(t)
+                val (_, a) = self.par_in(span, v, t, false)
+
+                arrays.push(a)
+                frame.push("")
+            else
+                arrays.push("")
+                frame.push(self.from_mem(v, t))
+
+        val r = rank_of(out)
+        val ot = self.tensor_ty(span, out)
+        var dims: Buf[string] = buf()
+        var total = self.index_const(1)
+
+        for a in 0..<r
+            val d = self.def(s"tensor.dim $o, ${self.index_const(a)} : $ot")
+
+            dims.push(d)
+            total = self.def(s"arith.muli $total, $d : index")
+
+        val (lo, hi) = self.share(self.to_i64(total), "%w", "%nw")
+        val iv = self.fresh()
+        val acc = self.fresh()
+        val res = self.fresh()
+
+        self.op(s"$res = scf.for $iv = ${self.def(s"arith.index_cast $lo : i64 to index")} to ${self.def(s"arith.index_cast $hi : i64 to index")} step ${self.index_const(1)} iter_args($acc = $o) -> ($ot) {")
+
+        // The element's tensor indices, the last axis varying fastest.
+        var idx: Buf[string] = buf()
+        var rest = iv
+        var a = r
+
+        while a > 0
+            a -= 1
+            idx.push(if a == 0 then rest else self.def(s"arith.remui $rest, ${dims[a]} : index"))
+            if a > 0 then rest = self.def(s"arith.divui $rest, ${dims[a]} : index")
+
+        var at: Buf[string] = buf()
+        var j = idx.len()
+
+        while j > 0
+            j -= 1
+            at.push(idx[j])
+
+        var here = copy_strings(frame)
+
+        for k in 0..<operands.len()
+            if arrays[k] != "" then here.set(k, self.def(s"tensor.extract ${arrays[k]}[${joined(at)}] : ${self.tensor_ty(span, operands[k].ty)}"))
+
+        val y = self.in_frame(here, scalar)
+
+        self.op(s"scf.yield ${self.def(s"tensor.insert $y into $acc[${joined(at)}] : $ot")} : $ot")
+        self.op("}")
+        self.par_back(span, res, m, out)
+        self.finish_body(span, "")
+        self.end(s"  func.func private @\"p.$n\"(%env: !llvm.ptr, %w: i64, %nw: i64)")
+    end map_code
+
+    // Under `parallel`: the reduction `name` over the rank-1 tensor `f` of `et`, giving a `t`, its
+    // blocks reduced by the threads of a region and combined after it in the tree the sequential
+    // reduction uses.
+    reduce_kernel(*self, span: Span, name: string, f: string, et: Ty, t: Ty) -> string
+        val ft = Ty.Array(et, dynamic_axes(1))
+        val rt = self.ty(span, t)
+        val n = self.to_i64(self.dim(span, f, ft, 1))
+        val nb = self.def(s"arith.ceildivsi $n, ${self.def(s"arith.constant $PAR_BLOCK : i64")} : i64")
+        val p = self.partials(span, t, nb)
+        val (_, d) = self.par_out(span, f, ft, false)
+        var fields: Buf[string] = buf()
+        var vals: Buf[string] = buf()
+
+        fields.push(self.desc_ty(1))
+        fields.push("!llvm.ptr")
+        vals.push(d)
+        vals.push(p)
+
+        val env = self.env_of(fields, vals)
+        val job = self.par_jobs.len()
+
+        self.par_jobs.push(ParJob(ParKind.JReduce(name, et, t), fields, buf()))
+        self.run_region(job, env)
+
+        val op = TRedOp.RBuiltin(name)
+
+        self.tree(span, p, nb, op, t)
+
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if ${self.def(s"arith.cmpi eq, $nb, ${self.def("arith.constant 0 : i64")} : i64")} -> ($rt) {")
+        self.op(s"scf.yield ${self.identity_of(span, name, t)} : $rt")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.load(span, p, t)} : $rt")
+        self.op("}")
+        self.call("nex_array_free", p, "!llvm.ptr", "")
+
+        if name == "norm2" then self.def(s"math.sqrt $r : $rt") else r
+
+    // The code of reduction job `n`: this worker's share of the blocks, each reduced sequentially from
+    // the identity into its partial.
+    reduce_code(*self, n: usize, job: ParJob, name: string, et: Ty, t: Ty)
+        val span = Span(0, 0)
+
+        self.begin(Void, texpr(span, Void, TLiteral(VoidVal, false)))
+
+        val ft = Ty.Array(et, dynamic_axes(1))
+        val (_, f) = self.par_in(span, self.env_get(job.fields, 0), ft, false)
+        val p = self.env_get(job.fields, 1)
+        val count = self.dim(span, f, ft, 1)
+        val block = self.index_const(PAR_BLOCK)
+        val nb = self.to_i64(self.def(s"arith.ceildivui $count, $block : index"))
+        val (blo, bhi) = self.share(nb, "%w", "%nw")
+        val iv = self.fresh()
+
+        self.op(s"scf.for $iv = ${self.def(s"arith.index_cast $blo : i64 to index")} to ${self.def(s"arith.index_cast $bhi : i64 to index")} step ${self.index_const(1)} {")
+
+        val lo = self.def(s"arith.muli $iv, $block : index")
+        val hi = self.def(s"arith.minui ${self.def(s"arith.addi $lo, $block : index")}, $count : index")
+        val partial = self.reduce_range(span, name, f, et, t, lo, hi)
+
+        self.store(span, self.elem_at(p, self.to_i64(iv), self.mem_ty(span, t)), partial, t)
+        self.op("}")
+        self.finish_body(span, "")
+        self.end(s"  func.func private @\"p.$n\"(%env: !llvm.ptr, %w: i64, %nw: i64)")
+
+    // The code of region `n`.
+    par_code(*self, n: usize)
+        val job = self.par_jobs[n]
+
+        job.kind match
+            JLoop(e) -> self.loop_code(n, job, e)
+            JMap(out, operands, scalar) -> self.map_code(n, job, out, operands, scalar)
+            JReduce(name, et, t) -> self.reduce_code(n, job, name, et, t)
+end Emitter
+
+// The MLIR type of an environment of `fields`.
+env_ty(fields: Buf[string]) -> string = s"!llvm.struct<(${joined(fields)})>"
+
+// The value and index types of a (value, index) pair.
+private pair_types(t: Ty) -> (Ty, Ty) = t match
+    Tuple(es) -> (es[0], es[1])
+    _ -> (t, t)
+
+private same_place(a: TExpr, b: TExpr) -> bool = *a.kind match
+    TLocal(x) -> *b.kind match
+        TLocal(y) -> x == y
+        _ -> false
+    TGlobalRef(x) -> *b.kind match
+        TGlobalRef(y) -> x == y
+        _ -> false
+    _ -> false
+
+// The local a place is part of: `a`, `a[i]`, `a[:, j]`, `p.x`.
+private root_local(e: TExpr) -> Option[usize] = *e.kind match
+    TLocal(id) -> Some(id)
+    TField(v, _, _) -> root_local(v)
+    TTupleField(v, _) -> root_local(v)
+    TArray(a) -> *a match
+        TIndex(t, _) -> root_local(t)
+        TView(t, _) -> root_local(t)
+        _ -> None
+    _ -> None
+
+// Whether `e` writes local `id`, or part of it: by assignment, or by passing it `inout`.
+writes_local(e: TExpr, id: usize) -> bool
+    *e.kind match
+        TAssign(_, target, _) -> if root_local(target) == Some(id) then return true
+        TBorrow(place) -> if root_local(place) == Some(id) then return true
+        _ -> ()
+
+    for c in children(e)
+        if writes_local(c, id) then return true
+
+    false
+
+// Whether `e` writes a module-level array, or part of one.
+private writes_global_array(e: TExpr) -> bool
+    val place = *e.kind match
+        TAssign(_, target, _) -> Some(target)
+        TBorrow(p) -> Some(p)
+        _ -> None
+
+    place match
+        Some(p) -> if is_arr(root_global_ty(p)) then return true
+        None -> ()
+
+    for c in children(e)
+        if writes_global_array(c) then return true
+
+    false
+
+// The type of the module-level binding a place is part of; `void` where it is not one's.
+private root_global_ty(e: TExpr) -> Ty = *e.kind match
+    TGlobalRef(_) -> e.ty
+    TArray(a) -> *a match
+        TIndex(t, _) -> root_global_ty(t)
+        TView(t, _) -> root_global_ty(t)
+        _ -> Ty.Void
+    _ -> Ty.Void
+
+// Whether the program has a `parallel` construct anywhere, which makes it run threads.
+uses_parallel(p: TProgram) -> bool
+    for d in p.decls
+        val found = d match
+            FunDecl(f) -> holds_parallel(f.body)
+            GlobalDecl(g) -> holds_parallel(g.init)
+            TupleGlobalDecl(g) -> holds_parallel(g.init)
+            _ -> false
+
+        if found then return true
+
+    for l in p.lambdas
+        if holds_parallel(l.body) then return true
+
+    false
+
+private holds_parallel(e: TExpr) -> bool
+    *e.kind match
+        TParallel(_) -> return true
+        _ -> ()
+
+    for c in children(e)
+        if holds_parallel(c) then return true
+
+    false

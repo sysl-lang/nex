@@ -124,9 +124,7 @@ impl Emitter
             self.call("nex_stop", c, "i32", "")
             ""
         TArray(op) -> self.array(e, *op)
-        TParallel(_) ->
-            self.later(e.span, "a parallel construct")
-            ""
+        TParallel(p) -> self.par(e, *p)
         TTuple(elems) -> self.aggregate(e.span, e.ty, elems)
         TTupleField(v, k) -> self.field_of(v, k, e.ty)
         TNew(args) -> self.aggregate(e.span, e.ty, args)

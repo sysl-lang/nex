@@ -95,6 +95,16 @@ struct Emitter
     // The types whose retain, release and cell-release functions the module needs, by number.
     helpers: Buf[Ty]
 
+    // The parallel regions whose code is still to be emitted, and those emitted (`emit_parallel.sysl`);
+    // inside a `parallel for`'s code, its reductions' accumulators; whether a `parallel` expression is
+    // being emitted; whether the program runs threads at all.
+    par_jobs: Buf[ParJob]
+    par_accs: Buf[ParAcc]
+    par_kernel: bool
+    threaded: bool
+    // Inside a `parallel for`'s code, the word a trap in the region sets.
+    par_stop: string
+
     // -- diagnostics ------------------------------------------------------------------------------
 
     // A construct the emitter does not compile yet: reported once per function, at the first, since
@@ -656,18 +666,28 @@ struct Emitter
                 StructDecl(_) -> ()
                 EnumDecl(_) -> ()
 
-        // Each lambda is emitted after the function that makes it, and may make more.
+        // Each lambda and each parallel region's code is emitted after the function that makes it,
+        // and may make more.
         var k = 0
+        var j = 0
 
-        while k < self.lambdas_wanted.len()
-            self.lambda(self.lambdas_wanted[k])
-            k += 1
+        while k < self.lambdas_wanted.len() || j < self.par_jobs.len()
+            if k < self.lambdas_wanted.len()
+                self.lambda(self.lambdas_wanted[k])
+                k += 1
+            else
+                self.par_code(j)
+                j += 1
 
         self.entry_point(globals, tuples)
 
-        while k < self.lambdas_wanted.len()
-            self.lambda(self.lambdas_wanted[k])
-            k += 1
+        while k < self.lambdas_wanted.len() || j < self.par_jobs.len()
+            if k < self.lambdas_wanted.len()
+                self.lambda(self.lambdas_wanted[k])
+                k += 1
+            else
+                self.par_code(j)
+                j += 1
 
         self.helper_bodies()
 
@@ -734,7 +754,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
                     buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf(),
-                    buf(), buf(), selves, buf())
+                    buf(), buf(), selves, buf(), buf(), buf(), false, uses_parallel(p), "")
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)

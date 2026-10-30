@@ -4,6 +4,10 @@
 // `clang -O2` compiles that and links it against the runtime archive (`runtime/`, built by
 // `sysl build-c`).
 //
+// **A program with a `parallel` construct is lowered through OpenMP, with no flag** (DESIGN §9.5):
+// its module holds an `omp.parallel` region, so the pass list gains `convert-openmp-to-llvm` and
+// the link gains LLVM's `libomp`. A program without one links no OpenMP runtime at all.
+//
 // LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm`; the runtime at `NEX_RUNTIME`, else
 // `libnex_rt.a` beside the `nex` executable.
 
@@ -11,10 +15,21 @@ import sysl.buf.{Buf, buf}
 import sysl.env.get_or
 import sysl.fs.{exists, make_temp_dir, read_bytes, remove_dir_all, write_text}
 import sysl.process.{Stdio, capture}
-import sysl.text.{from_utf8, split}
+import sysl.text.{from_utf8, replace_all, split}
 import sh.sysl.parsing.{Diagnostic, Source, full_report, source}
 
 private val PIPELINE = from_utf8(embed("experiments/mlir/pipeline.txt")).unwrap().trim()
+
+// The pass the OpenMP pipeline adds, and where: before the function conversion, which would leave
+// the region's operands in types `omp.parallel` does not convert itself.
+private val OPENMP_PASS = "convert-openmp-to-llvm,"
+private val OPENMP_BEFORE = "convert-func-to-llvm"
+
+// The pass list for `mlir`: the OpenMP one where it holds a parallel region.
+pipeline_for(mlir: string) -> string
+    if !mlir.contains("omp.parallel") then return PIPELINE
+
+    replace_all(PIPELINE, OPENMP_BEFORE, OPENMP_PASS + OPENMP_BEFORE)
 
 // Where the tools are, and the runtime every program links.
 struct Toolchain
@@ -88,9 +103,22 @@ lower_module(mlir: string, out: string, work: string, tc: Toolchain) -> Result[u
     val ir = s"$work/program.ll"
 
     write_text(input, mlir).map_err((e) -> s"nex: cannot write $input: $e")?
-    tool(s"${tc.llvm_bin}/mlir-opt", [input, s"--pass-pipeline=$PIPELINE", "-o", lowered], Inherit)?
+    tool(s"${tc.llvm_bin}/mlir-opt", [input, s"--pass-pipeline=${pipeline_for(mlir)}", "-o", lowered], Inherit)?
     write_text(ir, tool(s"${tc.llvm_bin}/mlir-translate", ["--mlir-to-llvmir"], Stdio.FromPath(lowered))?).map_err((e) -> s"nex: cannot write $ir: $e")?
-    tool(s"${tc.llvm_bin}/clang", ["-Wno-override-module", "-O2", ir, tc.runtime, "-lm", "-o", out], Inherit)?
+
+    var args: Buf[string] = buf()
+
+    for a in ["-Wno-override-module", "-O2", ir, tc.runtime, "-lm", "-o", out]
+        args.push(a)
+
+    if mlir.contains("omp.parallel")
+        val lib = s"${dir_of(tc.llvm_bin)}/lib"
+
+        args.push(s"-L$lib")
+        args.push("-lomp")
+        args.push(s"-Wl,-rpath,$lib")
+
+    tool(s"${tc.llvm_bin}/clang", args.view(), Inherit)?
     Ok(())
 
 // A tool run that must succeed, its standard output answered.

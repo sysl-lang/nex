@@ -9,9 +9,16 @@
 // being built, which `nex_sink_new` opens and `nex_sink_finish` closes into a string. So `print(s"…")`
 // writes its pieces straight out, and the same interpolation as a value gathers them, through one set
 // of `nex_put_*` entries.
+//
+// **Threads share the sinks under one lock** (DESIGN §9.4). A `parallel` region runs generated code
+// on several threads at once, and each sink entry holds `io` for its own few instructions, so two
+// threads never touch the table of builders or a standard stream together. A program with a
+// `parallel` construct gathers each `print` line in a sink of its own, which `nex_line_end` writes
+// out whole under the lock: lines from different threads never interleave.
 
 import sysl.buf.{Buf, buf}
 import sysl.fmt.{format_int, format_real, format_str}
+import sysl.sync.SpinLock
 import sysl.text.{StrBuilder, from_utf8_unchecked, str_builder}
 
 @needs(os)
@@ -34,27 +41,62 @@ c_string(s: string) -> *u8
 private var builders: Buf[StrBuilder] = buf()
 private var free_sinks: Buf[long] = buf()
 
+// The lock every sink entry holds while it touches the builders or a standard stream.
+private var io = SpinLock(0)
+
 @export("nex_sink_new")
 sink_new() -> long
+    io.lock()
+    defer io.unlock()
+
     if free_sinks.len() > 0 then return free_sinks.pop().unwrap()
 
     builders.push(str_builder())
     long(builders.len()) + 2
 
-@export("nex_sink_finish")
-sink_finish(sink: long) -> *u8
+// The text sink `sink` gathered, and the sink free for reuse.
+private taken(sink: long) -> string
     val k = usize(sink - 3)
-    val p = c_string(builders[k].finish())
+    val s = builders[k].finish()
 
     builders[k].clear()
     free_sinks.push(sink)
-    p
+    s
+
+@export("nex_sink_finish")
+sink_finish(sink: long) -> *u8
+    io.lock()
+    defer io.unlock()
+
+    c_string(taken(sink))
+
+// The line gathered in `sink` and a newline, written at once to standard output (`dest` 1) or error
+// (2), the sink freed.
+@export("nex_line_end")
+line_end(sink: long, dest: long)
+    io.lock()
+    defer io.unlock()
+
+    unlocked_put(dest, taken(sink) + "\n")
 
 // Text written to a sink.
 put(sink: long, s: string)
+    io.lock()
+    defer io.unlock()
+
+    unlocked_put(sink, s)
+
+private unlocked_put(sink: long, s: string)
     if sink == 1 then prints(s)
     elif sink == 2 then eprints(s)
     else builders[usize(sink - 3)].push(s)
+
+// What was printed, written out, under the lock.
+flush_output()
+    io.lock()
+    defer io.unlock()
+
+    flush()
 
 @export("nex_put_str")
 put_str(sink: long, s: *u8)
