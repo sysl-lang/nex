@@ -62,6 +62,7 @@ impl Emitter
         TLet(id, init) ->
             if self.in_ssa(id)
                 self.arr.set(id, self.ex(init))
+                self.note_origin(e.span, id, init)
                 return ""
 
             // Bound first, so a local `def` that calls itself captures its own cell.
@@ -69,6 +70,7 @@ impl Emitter
 
             val v = self.ex(init)
 
+            self.note_origin(e.span, id, init)
             self.keep(e.span, self.local_ptr(e.span, id), v, self.prog.locals[id].ty)
             ""
         TAssign(op, target, value) ->
@@ -649,7 +651,7 @@ impl Emitter
         var vals = ""
         var tys = ""
         // The `inout` array arguments, which the call hands back.
-        var back: Buf[TExpr] = buf()
+        var back: Buf[Held] = buf()
 
         for a in args
             var v = ""
@@ -658,9 +660,11 @@ impl Emitter
             *a.kind match
                 TBorrow(place) ->
                     if is_arr(place.ty)
-                        v = self.place_value(place)
+                        var frames: Buf[Opened] = buf()
+
+                        v = self.open_place(place, &frames)
                         t = self.ty(a.span, place.ty)
-                        back.push(place)
+                        back.push(Held(place, frames))
                     else
                         v = self.place_ptr(place)
                         t = "!llvm.ptr"

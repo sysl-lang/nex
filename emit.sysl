@@ -94,6 +94,11 @@ struct Emitter
     self_local: Buf[Option[usize]]
     // The types whose retain, release and cell-release functions the module needs, by number.
     helpers: Buf[Ty]
+    // The `origin` views bound to locals, the shifts of the index lists around the cursor (beside
+    // `ends`), and those of the `origin` node emitted last (`emit_view.sysl`).
+    origins: Buf[OriginLocal]
+    end_shifts: Buf[Buf[string]]
+    last_shifts: Buf[string]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -734,7 +739,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
                     buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf(),
-                    buf(), buf(), selves, buf())
+                    buf(), buf(), selves, buf(), buf(), buf(), buf())
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)

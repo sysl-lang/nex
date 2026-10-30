@@ -72,6 +72,7 @@ impl Emitter
         if name == "linspace" then return self.linspace(span, args, t)
         if name == "flatten" then return self.cast(span, self.flat(span, self.ex(args[0]), args[0].ty), self.view_ty(t), t)
         if name == "reshape" then return self.reshape(span, args, t)
+        if name == "reverse" then return self.reversed_at(span, args, t)
         if name == "transpose" then return self.transposed(span, self.ex(args[0]), args[0].ty, t)
         if name == "to_integers" || name == "to_bytes"
             var operands: Buf[TExpr] = buf()
@@ -462,20 +463,22 @@ impl Emitter
 
             vt = Ty.Array(elem_of(e.ty), dynamic_axes(1))
             v = self.mapped_values(e.span, vt, operands, vals, texpr(e.span, elem_of(e.ty), TBinary("*", x, chain_leaf(args[1], 1))))
-            return self.reduce_flat(e.span, "sum", self.flat(e.span, v, vt), elem_of(vt), e.ty)
+            return self.reduce_flat(e.span, "sum", v, vt, e.ty)
 
         dim match
-            None -> self.reduce_flat(e.span, name, self.flat(e.span, v, vt), elem_of(vt), e.ty)
+            None -> self.reduce_flat(e.span, name, v, vt, e.ty)
             Some(d) -> self.reduce_along(e, name, v, vt, d)
 
-    // `name` over a rank-1 tensor `f` of elements of type `et`, giving a `t`.
-    reduce_flat(*self, span: Span, name: string, f: string, et: Ty, t: Ty) -> string
-        val ft = Ty.Array(et, dynamic_axes(1))
-        val ftt = self.tensor_ty(span, ft)
-        val n = self.dim(span, f, ft, 1)
+    // `name` over every element of `f`, of array type `ft` at any rank, in storage order, giving a `t`.
+    reduce_flat(*self, span: Span, name: string, f: string, ft: Ty, t: Ty) -> string
+        var n = self.index_const(1)
+
+        for d in self.dims(span, f, ft)
+            n = self.def(s"arith.muli $n, $d : index")
+
         val rt = self.ty(span, t)
 
-        if !tree_reduction(name) then return self.reduce_range(span, name, f, et, t, self.index_const(0), n)
+        if !tree_reduction(name) then return self.reduce_range(span, name, f, ft, t, self.index_const(0), n)
 
         // The block partials, then rounds of the pairwise tree: each pairs neighbours, an odd last
         // one carried up as it is.
@@ -490,7 +493,7 @@ impl Emitter
         val blocks = self.nest_open(extents, pe, pt)
         val lo = self.def(s"arith.muli ${blocks.ivs[0]}, $block : index")
         val hi = self.def(s"arith.minui ${self.def(s"arith.addi $lo, $block : index")}, $n : index")
-        val partial = self.reduce_range(span, name, f, et, t, lo, hi)
+        val partial = self.reduce_range(span, name, f, ft, t, lo, hi)
         val partials = self.nest_close(blocks, self.def(s"tensor.insert $partial into ${blocks.accs[0]}[${blocks.ivs[0]}] : $pt"))
         val one = self.index_const(1)
         val two = self.index_const(2)
@@ -545,22 +548,84 @@ impl Emitter
         if name == "norm2" then self.def(s"math.sqrt $r : $rt") else r
     end reduce_flat
 
-    // `name` over elements `lo` to `hi − 1` of `f`, sequentially from the identity.
-    reduce_range(*self, span: Span, name: string, f: string, et: Ty, t: Ty, lo: string, hi: string) -> string
-        val ftt = self.tensor_ty(span, Ty.Array(et, dynamic_axes(1)))
+    // `name` over elements `lo` to `hi − 1`, in storage order, of `v` (array type `vt`),
+    // sequentially from the identity. Above rank 1 the loop carries the element's index on every
+    // axis and steps it as an odometer, so a view is read where it lies and nothing is flattened.
+    reduce_range(*self, span: Span, name: string, v: string, vt: Ty, t: Ty, lo: string, hi: string) -> string
+        val et = elem_of(vt)
         val rt = self.ty(span, t)
         val iv = self.fresh()
         val acc = self.fresh()
         val r = self.fresh()
+        val rank = rank_of(vt)
 
-        self.op(s"$r = scf.for $iv = $lo to $hi step ${self.index_const(1)} iter_args($acc = ${self.identity_of(span, name, t)}) -> ($rt) {")
+        if rank == 1
+            val ft = self.view_ty(vt)
+            val f = self.cast(span, v, vt, ft)
 
-        val x = self.def(s"tensor.extract $f[$iv] : $ftt")
+            self.op(s"$r = scf.for $iv = $lo to $hi step ${self.index_const(1)} iter_args($acc = ${self.identity_of(span, name, t)}) -> ($rt) {")
 
-        self.op(s"scf.yield ${self.step(span, name, acc, x, et, t)} : $rt")
+            val x = self.def(s"tensor.extract $f[$iv] : ${self.tensor_ty(span, ft)}")
+
+            self.op(s"scf.yield ${self.step(span, name, acc, x, et, t)} : $rt")
+            self.op("}")
+            return if name == "norm2" && !tree_reduction(name) then self.def(s"math.sqrt $r : $rt") else r
+
+        // The index of element `lo` on each axis, tensor order: the last axis varies fastest.
+        val dims = self.dims(span, v, vt)
+        val zero = self.index_const(0)
+        val one = self.index_const(1)
+        var start: Buf[string] = buf()
+        var q = lo
+        var a = rank
+
+        while a > 0
+            a -= 1
+
+            // An empty axis means no element is read; dividing by 1 keeps the arithmetic defined.
+            val d = self.def(s"arith.select ${self.def(s"arith.cmpi eq, ${dims[a]}, $zero : index")}, $one, ${dims[a]} : index")
+
+            start.push(self.def(s"arith.remui $q, $d : index"))
+            q = self.def(s"arith.divui $q, $d : index")
+
+        var ivs: Buf[string] = buf()
+        var inits = s"$acc = ${self.identity_of(span, name, t)}"
+        var tys = rt
+
+        for k in 0..<rank
+            ivs.push(self.fresh())
+            inits += s", ${ivs[k]} = ${start[rank - 1 - k]}"
+            tys += ", index"
+
+        self.op(s"$r:${rank + 1} = scf.for $iv = $lo to $hi step $one iter_args($inits) -> ($tys) {")
+
+        val x = self.def(s"tensor.extract $v[${joined(ivs)}] : ${self.tensor_ty(span, vt)}")
+        val next = self.step(span, name, acc, x, et, t)
+        var stepped: Buf[string] = buf()
+        var carry = self.def("arith.constant true")
+        var k = rank
+
+        while k > 0
+            k -= 1
+
+            val bumped = self.def(s"arith.addi ${ivs[k]}, ${self.def(s"arith.select $carry, $one, $zero : index")} : index")
+            val wraps = self.def(s"arith.cmpi eq, $bumped, ${dims[k]} : index")
+
+            stepped.push(self.def(s"arith.select $wraps, $zero, $bumped : index"))
+            carry = wraps
+
+        var yields = next
+
+        for j in 0..<rank
+            yields += s", ${stepped[rank - 1 - j]}"
+
+        self.op(s"scf.yield $yields : $tys")
         self.op("}")
 
-        if name == "norm2" && !tree_reduction(name) then self.def(s"math.sqrt $r : $rt") else r
+        val out = s"$r#0"
+
+        if name == "norm2" && !tree_reduction(name) then self.def(s"math.sqrt $out : $rt") else out
+    end reduce_range
 
     // The accumulator after element `x`.
     step(*self, span: Span, name: string, acc: string, x: string, et: Ty, t: Ty) -> string
@@ -703,7 +768,7 @@ impl Emitter
 
         val lt = Ty.Array(elem_of(vt), dynamic_axes(1))
         val lane = self.def(s"tensor.extract_slice $v${self.slice_text(subs, offs, sizes, strides)} : ${self.tensor_ty(e.span, vt)} to ${self.tensor_ty(e.span, lt)}")
-        val x = self.reduce_flat(e.span, name, lane, elem_of(vt), elem_of(t))
+        val x = self.reduce_flat(e.span, name, lane, lt, elem_of(t))
         var idx: Buf[string] = buf()
 
         for iv in nest.ivs
