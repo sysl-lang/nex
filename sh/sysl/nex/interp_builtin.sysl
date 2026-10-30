@@ -385,6 +385,10 @@ private[nex] type Printer = &Fn(Value) -> string
 private[nex] struct PrinterSlot
     p: Buf[Printer]
 
+// The `==` of a type, once it is made.
+private[nex] struct EqualitySlot
+    eq: Buf[Op2]
+
 // The fields of `v` spelled by `parts`, separated.
 private fields_text(parts: Buf[Printer], v: Value) -> string
     var out = ""

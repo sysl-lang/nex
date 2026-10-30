@@ -256,7 +256,7 @@ impl Emitter
             Measured(b, u) ->
                 self.put_value(span, sink, v, *b)
                 self.put_text(sink, " " + spell(*u))
-            _ -> self.put_aggregate(span, sink, v, t)
+            _ -> self.put_aggregate_value(span, sink, v, t)
 
     // A value under an `f"..."` specifier, which the elaborator has checked against its type.
     put_formatted(*self, span: Span, sink: string, v: string, t: Ty, spec: string)

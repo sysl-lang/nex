@@ -54,7 +54,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
         kept.push(a)
 
     val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), buf(), None, false, buf(), buf(), buf())
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf())
     val init = it.program(test)
 
     if it.diags.len() > 0
@@ -70,7 +70,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
 // Nothing is run.
 interpretable(p: TProgram) -> Buf[Diagnostic]
     val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), buf(), None, false, buf(), buf(), buf())
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf())
 
     it.program(None)
     shut(m)
@@ -221,6 +221,8 @@ private[nex] struct Interp
     ends: Buf[usize]
     // The structs and enums whose printers are being made, each with where its printer goes.
     printing: Buf[(string, &PrinterSlot)]
+    // The structs and enums whose `==` is being made, each with where it goes.
+    comparing: Buf[(string, &EqualitySlot)]
     // `main`'s parameter, the program's arguments.
     args_local: Option[usize]
     // Whether the function being compiled has reported what it lacks; one diagnostic is enough.
@@ -910,8 +912,38 @@ impl Interp
         if op == "==" then Some(eq) else Some((a, b) -> Ok(VBool(!bool_of(eq(a, b)?))))
 
     // Whether two aggregates of type `t` are equal (DESIGN §11.4): the same variant, for an enum, and
-    // every field equal as `==` compares the field's type, so a `nan` field makes them unequal.
+    // every field equal as `==` compares the field's type, so a `nan` field makes them unequal. A type
+    // holding itself through an array reaches its own `==` while it is being made, and is given one
+    // that calls it once it is.
     equality(*self, span: Span, t: Ty) -> Option[Op2]
+        val name = t match
+            Nominal(_, _) -> show_ty(t)
+            _ -> return self.fields_equality(span, t)
+
+        for (n, slot) in self.comparing
+            if n == name
+                return Some((a, b) ->
+                    val f = slot.eq[0]
+
+                    f(a, b)
+                )
+
+        val slot: &EqualitySlot = EqualitySlot(buf())
+
+        self.comparing.push((name, slot))
+
+        val eq = self.fields_equality(span, t)
+
+        self.comparing.pop()
+
+        eq match
+            Some(f) -> slot.eq.push(f)
+            None -> ()
+
+        eq
+
+    // The `==` of an aggregate of type `t`, by its fields.
+    fields_equality(*self, span: Span, t: Ty) -> Option[Op2]
         // By variant — the one of a struct or a tuple — the `==` of each field.
         var by: Buf[Buf[Op2]] = buf()
         var kinds: Buf[Buf[Ty]] = buf()
@@ -954,7 +986,7 @@ impl Interp
 
             Ok(VBool(true))
         )
-    end equality
+    end fields_equality
 
     // `base ^ n` with an integer `n` of its own type, the base keeping its type (DESIGN §2.2).
     power(*self, span: Span, at: Ty, nt: Ty) -> Option[Op2]

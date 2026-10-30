@@ -116,6 +116,10 @@ struct Emitter
     // (`emit_own.sysl`).
     guards: Buf[Guard]
     temp_slots: Buf[TempSlot]
+    // The structs and enums whose print and `==` functions the module needs, by number
+    // (`emit_aggregate.sysl`).
+    shown: Buf[Wanted]
+    compared: Buf[Wanted]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -742,6 +746,7 @@ struct Emitter
                 self.par_code(j)
                 j += 1
 
+        self.aggregate_bodies()
         self.helper_bodies()
 
         var out = str_builder()
@@ -829,7 +834,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
                     buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf(),
-                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf())
+                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf(), buf(), buf())
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)
