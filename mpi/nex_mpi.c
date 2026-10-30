@@ -57,8 +57,12 @@ static void abort_job(int32_t code) {
     _Exit(code);
 }
 
+static void scratch_reported(void);
+
 static void finalize_job(void) {
     int finalized = 0;
+
+    scratch_reported();
 
     MPI_Finalized(&finalized);
     if (!finalized) MPI_Finalize();
@@ -229,6 +233,17 @@ static void released(void *p) {
 /* Every scratch buffer taken inside the catch at depth `depth` or deeper, given back. */
 static void scratch_released(int32_t depth) {
     while (held_count > 0 && held[held_count - 1].depth >= depth) (free)(held[--held_count].memory);
+}
+
+/* How many scratch buffers are still held as the job ends, written when `NEX_MPI_REPORT_SCRATCH` is
+ * set. A program whose every call returned or was unwound by a caught trap holds none. */
+static void scratch_reported(void) {
+    int me = 0;
+
+    if (getenv("NEX_MPI_REPORT_SCRATCH") == NULL) return;
+
+    MPI_Comm_rank(MPI_COMM_WORLD, &me);
+    fprintf(stderr, "rank %d: scratch live %d\n", me, held_count);
 }
 
 /* -- buffers ---------------------------------------------------------------------------------- */
