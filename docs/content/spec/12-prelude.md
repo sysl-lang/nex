@@ -70,8 +70,8 @@ of its argument (an integer argument to a transcendental function gives `real64`
 | `exp(x)`, `log(x)` | exponential, natural logarithm | `EXP`, `LOG` |
 | `log2(x)`, `log10(x)` | base-2 and base-10 logarithms | `LOG(x)/LOG(2.0)`, `LOG10` |
 | `sin`, `cos`, `tan` | trigonometric functions, radians | `SIN`, `COS`, `TAN` |
-| `asin`, `acos`, `atan` | inverse trigonometric functions | `ASIN`, `ACOS`, `ATAN` |
-| `atan2(y, x)` | angle of the point (x, y), in (−π, π] | `ATAN2(Y, X)` |
+| `asin`, `acos`, `atan` | inverse trigonometric functions; the result is an angle, a `real<rad>` | `ASIN`, `ACOS`, `ATAN` |
+| `atan2(y, x)` | angle of the point (x, y), in (−π, π], a `real<rad>` | `ATAN2(Y, X)` |
 | `sinh`, `cosh`, `tanh` | hyperbolic functions | `SINH`, `COSH`, `TANH` |
 | `asinh`, `acosh`, `atanh` | inverse hyperbolic functions | `ASINH`, `ACOSH`, `ATANH` |
 | `hypot(x, y)` | √(x² + y²) without intermediate overflow | `HYPOT` |
@@ -200,9 +200,9 @@ flatten(m)            // [1.0, 4.0, 2.0, 5.0, 3.0, 6.0] — column-major
 |---|---|---|
 | `sum(a: [T; R]): T` | the sum of every element | `SUM(a)` |
 | `product(a: [T; R]): T` | the product of every element | `PRODUCT(a)` |
-| `minval(a: [T; R]): T` | the smallest element (ordered types) | `MINVAL(a)` |
-| `maxval(a: [T; R]): T` | the largest element (ordered types) | `MAXVAL(a)` |
-| `minloc(a)`, `maxloc(a)` | the index of the smallest, the largest element; a tuple of indices for rank ≥ 2; ties go to the first in storage order | `MINLOC(a)`, `MAXLOC(a)` |
+| `minval(a: [T; R]): T` | the smallest element (ordered types); a `nan` is passed over, and the result is `nan` only where every element is one | `MINVAL(a)` |
+| `maxval(a: [T; R]): T` | the largest element (ordered types); a `nan` is passed over, and the result is `nan` only where every element is one | `MAXVAL(a)` |
+| `minloc(a)`, `maxloc(a)` | the index of the smallest, the largest element; a tuple of indices for rank ≥ 2; ties go to the first in storage order; a `nan` is passed over, and where every element is one the location is the first | `MINLOC(a)`, `MAXLOC(a)` |
 | `any(a: [bool; R])`, `all(a: [bool; R])` | whether any, every element is `true` | `ANY(a)`, `ALL(a)` |
 | `count(a: [bool; R]): integer` | the number of `true` elements | `COUNT(a)` |
 | `norm2(a)` | the Euclidean norm √(Σ \|aₖ\|²); the Frobenius norm of a matrix | `NORM2(a)` |
@@ -251,7 +251,9 @@ floating-point `sum` can therefore differ in its last bits from a Fortran `DO` l
 one element at a time; a loop written that way in nex accumulates in source order, as written.
 Integer reductions are exact and trap on overflow. The `minval` and `maxval` of an empty integer
 array are the type's largest and smallest values, and of an empty real array `+inf` and `-inf`, as
-in Fortran.
+in Fortran. `minval` and `maxval` pass over a `nan`, as Fortran's do, along a `dim =` lane by lane and
+under `parallel` for every thread count; the elemental `min` and `max`, which are not reductions,
+carry a `nan` through.
 
 ## 12.7 Linear algebra
 

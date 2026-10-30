@@ -209,7 +209,7 @@ formed: it becomes BLAS's transpose flag (§5.5.1). `permute` reorders the axes 
 |---|---|
 | `sum(a)` | the sum of every element |
 | `product(a)` | the product of every element |
-| `minval(a)`, `maxval(a)` | the smallest and largest element |
+| `minval(a)`, `maxval(a)` | the smallest and largest element; a `nan` is passed over unless every element is one |
 | `minloc(a)`, `maxloc(a)` | the index of the smallest and largest element; a tuple of indices for rank ≥ 2 |
 | `any(a)`, `all(a)`, `count(a)` | on a `bool` array: whether any, whether all, how many are `true` |
 | `dot(x, y)` | `Σ conj(x[k]) * y[k]` (`x` conjugated when complex); the lengths must agree, or it traps |

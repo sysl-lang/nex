@@ -1,0 +1,78 @@
+// A default that reads the parameters before its own: evaluated at the call, after the arguments
+// before it, each argument once; a default left out reads the earlier defaults too. Units are
+// checked through the default, an array parameter's length sizes another, a generic function's
+// default reads its own type's parameter, and an `inout` parameter is read before the call borrows it.
+
+var evaluated = 0
+
+def counted(n: integer): integer =
+  evaluated += 1
+  n
+
+def cylinder(r: real<m>, h: real<m> = 2.0 * r, label: string = s"r=${r} h=${h}") =
+  print(s"${label}: volume ${3.0 * r * r * h}")
+
+def thickness(outer: real<cm>, inner: real<mm> = outer / 2.0) = outer - inner
+
+def total(xs: [integer], n: integer = length(xs), from: integer = 1): integer =
+  var t = 0
+  for k in from..n
+    t += xs[k]
+  t
+
+def tagged(x: integer, id: integer = counted(x * 10)) = print(s"${x} tagged ${id}")
+
+def pick[T](a: T, b: T = a, c: T = b) = print(s"${a} ${b} ${c}")
+
+def grow(v: inout [integer], by: integer = length(v)) =
+  for k in 1..length(v)
+    v[k] += by
+
+def area(w: real, h: real = w): real = w * h
+
+def boxed(w: real, a: real = area(w), d: real = a / w) = print(s"${w} ${a} ${d}")
+
+def scaled(x: real, f: (real) -> real = v -> v * 2.0, y: real = f(x)) = print(s"${x} -> ${y}")
+
+@elemental
+def offset(x: real, s: real, by: real = s * 2.0): real = x + by
+
+val made =total([4, 5, 6], from = 2)
+
+def main() =
+  cylinder(1.0<m>)
+  cylinder(1.0<m>, 3.0<m>)
+  cylinder(2.0<m>, label = "named")
+  print(thickness(1.0<cm>))
+  print(thickness(1.0<cm>, 2.0<mm>))
+
+  print(total([1, 2, 3, 4]))
+  print(total([1, 2, 3, 4], 2))
+  print(total([1, 2, 3, 4], from = 3))
+  print(made)
+
+  tagged(counted(1))
+  print(evaluated)
+  tagged(counted(2), 7)
+  print(evaluated)
+  tagged(x = counted(3))
+  print(evaluated)
+
+  pick(1)
+  pick(1.5, 2.5)
+  pick("a", c = "z")
+
+  var v = [1, 2, 3]
+  grow(v)
+  print(v)
+  grow(v, 10)
+  print(v)
+
+  boxed(3.0)
+  boxed(3.0, 12.0)
+  boxed(area(2.0, 4.0))
+  scaled(1.5)
+  scaled(1.5, v -> v + 1.0)
+  scaled(1.5, y = 0.0)
+  print(offset([1.0, 2.0], 0.5))
+  print(offset(1.0, 0.5))

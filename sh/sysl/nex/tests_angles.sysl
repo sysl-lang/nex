@@ -110,14 +110,57 @@ angles_trig()
     assert_eq(refused("def main() = print(cos(1.0<m>))\n"),
         "error: `cos` takes an angle or a plain number, which is radians, and this is real64<m> (length); strip the unit to pass the number: `cos(strip(x))` @1:20")
 
-@test("the other elementary functions refuse an angle; the inverse functions give a plain number")
+@test("the other elementary functions refuse an angle, the inverse functions' results among them")
 angles_other_functions()
     assert_eq(refused("def main() = print(exp(1.0<rad>))\n"), "error: `exp` takes a dimensionless argument, and this is real64<rad> (angle); strip the unit to pass the number: `exp(strip(x))` @1:20")
     assert_eq(refused("def main() = print(asin(1.0<deg>))\n"), "error: `asin` takes a dimensionless argument, and this is real64<deg> (angle); strip the unit to pass the number: `asin(strip(x))` @1:20")
-    assert_eq(elaborated("def main() = print(asin(0.5) * 1.0<rad>)\n"), "(def main () void (print (s (strip:real64 (*:real64<rad> (asin:real64 0.5) 1.0<rad>)) \" rad\")))")
-    assert_eq(refused("def main() =\n  val a: real<rad> = asin(0.5)\n  print(a)\n"),
-        "error: `a` must be real<rad>, but this is real64: a plain number is not an angle; give it a unit by multiplying, `y * 1.0<rad>` for radians or `y * 1.0<deg>` for degrees @2:22")
-    assert_eq(elaborated("def main() = print(atan2(1.0<deg>, 2.0<rad>))\n"), "(def main () void (print (atan2:real64 1.0<deg> (rescale:real64<deg> 57.29577951308232 2.0<rad>))))")
+    assert_eq(refused("def main() = print(exp(asin(0.5)))\n"), "error: `exp` takes a dimensionless argument, and this is real64<rad> (angle); strip the unit to pass the number: `exp(strip(x))` @1:20")
+    assert_eq(refused("def main() = print(atan(atan(1.0)))\n"), "error: `atan` takes a dimensionless argument, and this is real64<rad> (angle); strip the unit to pass the number: `atan(strip(x))` @1:20")
+
+@test("asin, acos, atan and atan2 give an angle in radians, of the argument's width, an integer one widened to real64")
+angles_inverse_trig()
+    assert_eq(elaborated("def main() = print(asin(0.5))\n"), "(def main () void (print (s (strip:real64 (asin:real64<rad> 0.5)) \" rad\")))")
+    assert_eq(elaborated("def main() = print(acos(1))\n"), "(def main () void (print (s (strip:real64 (acos:real64<rad> (promote:real64 1))) \" rad\")))")
+    assert_eq(elaborated("def main() =\n  val y: real32 = 1.0\n  print(atan(y))\n"),
+        "(def main () void (block (val y#0:real32 (adopt:real32 1.0)) (print (s (strip:real32 (atan:real32<rad> y#0)) \" rad\"))))")
+    assert_eq(elaborated("def main() = print(asin(1.0<mm/in>))\n"),
+        "(def main () void (print (s (strip:real64 (asin:real64<rad> (rescale:real64 0.03937007874015748 1.0<mm/in>))) \" rad\")))")
+    assert_eq(elaborated("def main() = print(atan2(1.0, 2.0))\n"), "(def main () void (print (s (strip:real64 (atan2:real64<rad> 1.0 2.0)) \" rad\")))")
+    assert_eq(elaborated("def main() = print(atan2(1.0<deg>, 2.0<rad>))\n"),
+        "(def main () void (print (s (strip:real64 (atan2:real64<rad> 1.0<deg> (rescale:real64<deg> 57.29577951308232 2.0<rad>))) \" rad\")))")
+    assert_eq(elaborated("def f[T: Float](x: T) = asin(x)\ndef main() = print(f(real32(0.5)))\n"),
+        "(def main () void (print (s (strip:real32 (call:real32<rad> f[real32] (adopt:real32 0.5))) \" rad\")))\n(def f[real32] ((x#0 real32)) real32<rad> (asin:real32<rad> x#0))")
+
+@test("an inverse function's angle goes back into sin, converts to degrees, binds where an angle is expected and strips to its number")
+angles_inverse_trig_use()
+    assert_eq(elaborated("def main() = print(sin(asin(0.5)))\n"), "(def main () void (print (sin:real64 (strip:real64 (asin:real64<rad> 0.5)))))")
+    assert_eq(elaborated("def main() = print(to<deg>(atan(1.0)))\n"),
+        "(def main () void (print (s (strip:real64 (rescale:real64<deg> 57.29577951308232 (atan:real64<rad> 1.0))) \" deg\")))")
+    assert_eq(elaborated("def main() =\n  val a: real<deg> = acos(0.0)\n  print(a)\n"),
+        "(def main () void (block (val a#0:real64<deg> (rescale:real64<deg> 57.29577951308232 (acos:real64<rad> 0.0))) (print (s (strip:real64 a#0) \" deg\"))))")
+    assert_eq(elaborated("def main() = print(strip(asin(0.5)))\n"), "(def main () void (print (strip:real64 (asin:real64<rad> 0.5))))")
+
+@test("an inverse function's angle is refused where a plain number is expected; a complex argument is refused")
+angles_inverse_trig_refused()
+    assert_eq(refused("def main() =\n  val x: real = asin(0.5)\n  print(x)\n"), "error: `x` must be real, but this is real64<rad>: strip the unit to take the number, `strip(x)` @2:17")
+    assert_eq(refused("def main() = print(asin(0.5) + 1.0)\n"), "error: cannot add rad and a bare number: " + bare("1.0", "@1:20"))
+    assert_eq(refused("def main() = print(atan2(1.0<m>, 1.0<m>) > 0.5)\n"), "error: cannot compare rad and a bare number: " + bare("0.5", "@1:20"))
+    assert_eq(refused("def half(x: real) = x / 2.0\ndef main() = print(half(acos(0.0)))\n"),
+        "error: argument `x` must be real, but this is real64<rad>: strip the unit to take the number, `strip(x)` @2:25")
+    assert_eq(refused("def main() = print(asin(0.5 + 0.0i))\n"), "error: `asin` does not take complex[real64] @1:20")
+    assert_eq(refused("def main() = print(atan(0.5 + 0.0i))\n"), "error: `atan` does not take complex[real64] @1:20")
+
+@test("an inverse function over an array gives an array of angles, element by element")
+angles_inverse_trig_arrays()
+    assert_eq(elaborated("def main() = print(asin([0.0, 0.5]))\n"), "(def main () void (print (s (strip:[real64] (.asin:[real64<rad>] (array:[real64] 0.0 0.5))) \" rad\")))")
+    assert_eq(elaborated("def main() = print(acos([1, 0]))\n"),
+        "(def main () void (print (s (strip:[real64] (.acos:[real64<rad>] (promote:[real64] (array:[int64] 1 0)))) \" rad\")))")
+    assert_eq(elaborated("def main() = print(atan([1.0, 2.0]<mm/in>))\n"),
+        "(def main () void (print (s (strip:[real64] (.atan:[real64<rad>] (rescale:[real64] 0.03937007874015748 (unit:[real64<mm/in>] (array:[real64] 1.0 2.0))))) \" rad\")))")
+    assert_eq(elaborated("def main() = print(atan2([1.0, 2.0]<m>, 1.0<m>))\n"),
+        "(def main () void (print (s (strip:[real64] (.atan2:[real64<rad>] (unit:[real64<m>] (array:[real64] 1.0 2.0)) 1.0<m>)) \" rad\")))")
+    assert_eq(refused("def main() = print(asin([0.0, 0.5]) + [1.0, 2.0])\n"),
+        "error: cannot add rad and a plain number: a plain number is not an angle; give it a unit by multiplying, `y * 1.0<rad>` for radians or `y * 1.0<deg>` for degrees @1:20")
 
 // -- generic units and arrays -------------------------------------------------------------------------
 

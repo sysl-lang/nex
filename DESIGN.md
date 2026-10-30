@@ -801,6 +801,12 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
 - `minloc(a)` and `maxloc(a)` return the index of the extreme element, a tuple of indices for rank
   ≥ 2; ties go to the first in storage order. A `nan` is never the extreme unless every element is
   one, when the location is the first; an empty array's location is `0`.
+- `minval(a)` and `maxval(a)` pass over a `nan` as `minloc` and `maxloc` do, and as Fortran's
+  `MINVAL` and `MAXVAL` do: a `nan` is never the extreme unless every element is one, when the
+  result is `nan`; along a `dim =` the rule holds lane by lane, and under `parallel` it holds across
+  blocks, whatever the thread count (a block of only `nan` is a `nan` partial, which every number
+  beats). The elemental `min` and `max` (§7.3), and a `min` or `max` operator of a `parallel for`
+  `reduce` clause (§9.2), are not reductions of an array and carry a `nan` through.
 - **Every reduction takes a named `dim =` argument**, reducing along that axis to rank R − 1:
   `sum(m, dim = 2)`, `maxval(a, dim = 1)`, `maxloc(a, dim = 1)`.
 - `min` and `max` are elemental (§7.3), never reductions: `max(a, 0.0)` clamps, and the extremes of
@@ -812,7 +818,7 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
 - `dot(x, y)` conjugates `x` when complex, as Fortran's `dot_product` and BLAS's `zdotc` do. `@`
   never conjugates.
 - The `minval` / `maxval` of an empty integer array are the type's largest / smallest values (the
-  identities of §9.2), and `+inf` / `-inf` for reals.
+  identities of §9.2), and `+inf` / `-inf` for reals: an empty array has no `nan` to give.
 
 ---
 
@@ -1982,21 +1988,37 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
   and the callee cannot tell it was left out. The rules:
   - **It is evaluated at every call that leaves the argument out, afresh**, in its parameter's
     place among the arguments, which a call evaluates in parameter order: `id: integer = next_id()`
-    calls `next_id` once per such call.
+    calls `next_id` once per such call, and not at all in a call that gives `id`.
     Nothing is evaluated once and shared, so a default never remembers an earlier call.
   - **It sees the module-level names of the function's own module**, as a module-level binding's
     initializer does — functions (declared anywhere in it), bindings, constants, and the private
-    ones too, wherever the call is. **It may not name a parameter**, its own or another's
-    (`h: real = 2 * r` is a compile error): it is evaluated before any parameter is bound. Nor does
-    it see the caller's locals.
+    ones too, wherever the call is — **and the parameters before its own**:
+    `cylinder(r: real<m>, h: real<m> = 2 * r)`, `total(xs: [integer], n: integer = length(xs))`.
+    A parameter it reads holds that call's argument, or that parameter's own default where the call
+    left it out too; each argument is still evaluated once, before the defaults after it. A
+    parameter's name hides a module-level name in the defaults after it. **It may not name its own
+    parameter or a later one** (`h: real = 2 * r` before `r` is a compile error naming both), nor
+    does it see the caller's locals.
+  - **A default may read an `inout` parameter before it** (`by: integer = length(v)` after
+    `v: inout [integer]`): it is an argument evaluated before the call starts, so the borrow rules
+    of an argument beside a borrow apply (§8.3 rule 2) — a value computed from the place is legal, a
+    read-mode array that is the place is refused at the call, as `f(a, a)` is. A default reading
+    an `inout` parameter reads the place the call borrows, so that place may not call a function
+    in a subscript (`f(a[g()])`), which would be evaluated twice.
+  - **A lambda in a default captures no parameter**: the default is filled in at the call, where a
+    lambda cannot capture the callee's parameter. It takes the value as an argument instead.
+  - **An `@elemental` function applied to an array** does not fill a default that reads the
+    parameter that array is passed for, which would see the whole array and not one element: such
+    a call gives that argument. A default reading a scalar argument beside the array is filled.
   - **It is checked against its parameter's type** as an initializer is (§2.2–§2.4): a literal adopts
     it (`x: real = 1`), an integer widens, a narrowing is an error, and a measured parameter needs a
     default of its dimension (`r: real<mm> = 5<mm>`; `= 5.0` is an error, and `= 0.5<cm>` converts).
     In a generic `def`, it must have its parameter's type for every instance, so a parameter of type
     `T` takes no literal default.
-  - **Any parameter may have one, in any position.** Positional arguments fill the leading
-    parameters, so a defaulted parameter before a required one is left out only by naming the later
-    one (`f(b = 2)`), as a Fortran `optional` dummy before a required one is.
+  - **Defaults come last.** Once a parameter has a default, every parameter after it has one, so a
+    call by position leaves out a trailing run; a named argument leaves out any defaulted parameter
+    (`damp(10.0, floor = 6.0)`). A parameter without a default after one with a default is a compile
+    error at the first such parameter, naming both.
   - **An `inout` parameter has none** (it borrows the caller's variable), **nor has an `extern`'s**
     (an `extern` transcribes the C prototype; a default belongs to a `def` that wraps it).
   - **A function value carries no defaults.** A function type has no parameter names or defaults,
@@ -2013,9 +2035,11 @@ with these rules (**PROPOSED** where marked).
   Fortran structure constructor's keyword components: `Point(y = 2.0, x = 1.0)`,
   `Rect(h = 2, w = 1)`. **PROPOSED.**
 - **A struct's field may have a default** (`segments: integer = 64`), which a constructor that
-  leaves the field out takes, under exactly the rules of a parameter's default (§11.3): evaluated
-  afresh at each such constructor, seeing the struct's module and no other field, checked against
-  the field's type. A field with no default is given. A generic struct's field whose type names a
+  leaves the field out takes, under the rules of a parameter's default (§11.3) but two: evaluated
+  afresh at each such constructor, checked against the field's type, it **sees the struct's module
+  and no field**, not even an earlier one, and **a defaulted field may stand anywhere**, before a
+  field without one, since a struct is declared as data and a constructor that leaves a field out
+  names the fields after it. A field with no default is given. A generic struct's field whose type names a
   type parameter has no default, as a generic parameter of type `T` takes no literal one. **A
   variant's field has no default**: a variant is built and matched with all of its fields, and a
   pattern that left one out would not say which.
@@ -2360,14 +2384,18 @@ unit psi = lbf / in^2
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
   `sign(x)` and `arg(z)` return a plain number: the sign is −1, 0 or 1 whatever `x` measures, and
   `arg(z)` is in radians.
-  `atan2(y, x)` takes two values of one dimension and returns a plain number, in radians.
+  `atan2(y, x)` takes two values of one dimension and returns an angle, a `real<rad>`: the unit
+  they share cancels, so `atan2(1.0<m>, 2.0<mm>)` is an angle like `atan2(1.0, 2.0)`.
 - **`sin`, `cos` and `tan` take an angle**, in any angle unit, converted to radians
   (`sin(30.0<deg>)`), **or a plain number, which is radians**, as in Fortran; another unit, `sr`
   among them, is a compile error. They return a plain number.
 - `exp`, `log`, `asin`, `acos`, `atan` and the other elementary functions need a dimensionless
-  argument — an angle is not one — and return a dimensionless result. **The inverse functions and
-  `atan2` return a plain number, in radians**, as in Fortran; `asin(x) * 1.0<rad>` makes it an
-  angle.
+  argument — an angle is not one. **The inverse functions `asin`, `acos` and `atan`, and `atan2`,
+  return an angle**, a `real<rad>` of the argument's width (`real64<rad>` for an integer argument),
+  and element by element an array of angles; the others return a dimensionless result. The angle
+  goes back into `sin` unchanged (`sin(asin(x))`), converts with `to<deg>(atan(x))`, and is refused
+  where a plain number is expected, as any angle is: `strip(asin(x))` is its number in radians.
+  `asin`, `acos` and `atan` do not take a complex argument.
 - `product(a)` has unit `U^n`; for an `a` that carries a unit, `n` must be a static extent
   (**PROPOSED**), and otherwise it is a compile error that suggests `strip`.
 - `print` and string interpolation show the unit after the value, separated by a space: with
@@ -2506,7 +2534,7 @@ is in `K` until the affine units of §15 arrive.
 | Reductions | §10 | §7.4 | Fortran names: `minval`, `maxval`, `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`; `dim =` in place of the reference's `sum_axis`; `dot` conjugates |
 | Array elements | §3.3 | §3.1 | any element type but an array; structs and tuples of scalars stored inline |
 | Tuple fields | — | §3.1 | 1-based: `t.1`, `t.2` |
-| Default arguments | §6.5 | §11.3 | a defaulted parameter may stand anywhere, not only in a trailing run; a default sees the function's module and no parameter; `inout`, `extern` and local-`def` parameters and function values take none |
+| Default arguments | §6.5 | §11.3 | defaults come last; a default sees the function's module and the parameters before its own; `inout`, `extern` and local-`def` parameters and function values take none |
 | Struct and variant constructors | §3.5, §3.7 | §11.4 | fields by position or by name; a struct's field may have a default, a variant's may not; variant fields of any type; no type contains itself by value |
 | Tuple conversion, module-level destructuring | §4.17 | §11.4 | a tuple built in place converts element by element; a module-level `val a, b = …` evaluates once |
 | Modules, the source prelude and `nex test` | §9, §10 | §11.5 | the root module is the entry file alone; `import m.*` is allowed, and a bare `import m` gives qualified access, `m.x`; a missing `--prelude-path` is an error; tests run one process each; `@test def` with parameters is an error, not a helper |

@@ -18,7 +18,9 @@ private val BLOCK: usize = 4096
 
 // A reduction: where it starts, how an element joins it, how two partial results combine, and what
 // is done with the result; `tree` where it combines blocks pairwise. `sum` where it is `sum` or
-// `dot` of `real64` with nothing trapping, which `reduce_all` adds directly.
+// `dot` of `real64` with nothing trapping, which `reduce_all` adds directly. `identity` is the
+// answer over no elements; `seed` is what each run of elements starts from, which differs only for
+// a real `minval` / `maxval`, whose runs start from a `nan` so that a run of only `nan` gives one.
 private[nex] struct Red
     tree: bool
     identity: Value
@@ -26,6 +28,7 @@ private[nex] struct Red
     combine: Op2
     finish: Op1
     sum: bool
+    seed: Value
 
 // An integer extent, or why there is none.
 private type Extent64 = &Fn(&Cells) -> Result[long, Signal]
@@ -37,7 +40,9 @@ private[nex] reduce_all(r: Red, xs: Buf[Value]) -> Answer
     val finish = r.finish
 
     if !r.tree
-        var acc = r.identity
+        if xs.len() == 0 then return finish(r.identity)
+
+        var acc = r.seed
 
         for x in xs
             acc = step(acc, x)?
@@ -58,7 +63,7 @@ private[nex] reduce_all(r: Red, xs: Buf[Value]) -> Answer
 
             partials.push(VReal(acc))
         else
-            var acc = r.identity
+            var acc = r.seed
 
             for k in lo..<hi
                 acc = step(acc, xs[k])?
@@ -283,13 +288,13 @@ impl Interp
         if name == "count"
             val add: Op2 = (a, b) -> Ok(VInt(long.wrap(i128(int_of(a)) + i128(int_of(b)))))
 
-            return Some(Red(false, VInt(0), (acc, x) -> Ok(VInt(int_of(acc) + (if bool_of(x) then 1 else 0))), add, same, false))
+            return Some(Red(false, VInt(0), (acc, x) -> Ok(VInt(int_of(acc) + (if bool_of(x) then 1 else 0))), add, same, false, VInt(0)))
 
         if name == "any" || name == "all"
             val all = name == "all"
             val f: Op2 = (a, b) -> Ok(VBool(if all then bool_of(a) && bool_of(b) else bool_of(a) || bool_of(b)))
 
-            return Some(Red(false, VBool(all), f, f, same, false))
+            return Some(Red(false, VBool(all), f, f, same, false, VBool(all)))
 
         if name == "minval" || name == "maxval"
             val high = name == "maxval"
@@ -300,10 +305,13 @@ impl Interp
                     val y = wide(int_of(b), signed)
 
                     Ok(if (x > y) == high then a else b)
-                Real(_) -> (a, b) -> Ok(VReal(if high then maximum(real_of(a), real_of(b)) else minimum(real_of(a), real_of(b))))
+                Real(_) -> (a, b) -> Ok(VReal(if high then maximum_number(real_of(a), real_of(b)) else minimum_number(real_of(a), real_of(b))))
                 _ -> return None
 
-            return Some(Red(false, extreme_identity(high, t), pick, pick, same, false))
+            // A real run starts from a `nan`, which any number replaces (DESIGN §7.4).
+            val seed = if is_real(base_of(t)) then VReal(real.nan) else extreme_identity(high, t)
+
+            return Some(Red(false, extreme_identity(high, t), pick, pick, same, false, seed))
 
         val plus = self.operator(span, "+", t, t) match
             Some(f) -> f
@@ -315,14 +323,14 @@ impl Interp
                 _ -> false
             val fast = wide64 && !self.m.fpe
 
-            return Some(Red(tree, one_or_zero(t, false), plus, plus, same, fast))
+            return Some(Red(tree, one_or_zero(t, false), plus, plus, same, fast, one_or_zero(t, false)))
 
         if name == "product"
             val times = self.operator(span, "*", t, t) match
                 Some(f) -> f
                 None -> return None
 
-            return Some(Red(tree, one_or_zero(t, true), times, times, same, false))
+            return Some(Red(tree, one_or_zero(t, true), times, times, same, false, one_or_zero(t, true)))
 
         if name == "norm2"
             // Each element squared at the result's width and added, unchecked, as the compiled
@@ -343,7 +351,7 @@ impl Interp
 
                 Ok(VReal(rnd(real_of(acc) + sq, b)))
 
-            return Some(Red(tree, VReal(0.0), step, plus, (x) -> Ok(VReal(real_math("sqrt", real_of(x), b))), false))
+            return Some(Red(tree, VReal(0.0), step, plus, (x) -> Ok(VReal(real_math("sqrt", real_of(x), b))), false, VReal(0.0)))
 
         None
     end reducer

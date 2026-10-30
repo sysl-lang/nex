@@ -837,6 +837,8 @@ children(e: TExpr) -> Buf[TExpr]
     *e.kind match
         TPromote(v) -> out.push(v)
         TConvert(v, _) -> out.push(v)
+        TRescale(v, _) -> out.push(v)
+        TUnitAs(v) -> out.push(v)
         TMakeComplex(re, im) ->
             out.push(re)
             out.push(im)

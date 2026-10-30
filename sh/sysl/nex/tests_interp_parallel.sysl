@@ -57,4 +57,4 @@ itp_par_expressions()
                                    "assert_traps(() -> print(parallel a + v), \"shape mismatch\")", "assert_traps(() -> print(parallel sum(a * v)), \"shape mismatch\")",
                                    "val q = [5, 0, 2]", "assert_traps(() -> print(parallel 10 div q + 1), \"integer division by zero\")",
                                    "print(parallel map(a, e -> e * 2.0))", "print(parallel minval([nan, 1.0]))", "print(parallel maxval([1.0, nan]))"])),
-              "true\n5018.259477070494\n(-0.9998890278528063, 1.8414709848078965, 0.0)\n32.2464\n[2.0, 4.0, 6.0]\nnan\nnan\nexit 0")
+              "true\n5018.259477070494\n(-0.9998890278528063, 1.8414709848078965, 0.0)\n32.2464\n[2.0, 4.0, 6.0]\n1.0\n1.0\nexit 0")

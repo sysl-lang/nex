@@ -1082,7 +1082,7 @@ impl Emitter
         val zero = self.index_const(0)
         val one = self.index_const(1)
         var ivs: Buf[string] = buf()
-        var inits = s"$acc = ${self.identity_of(span, name, t)}"
+        var inits = s"$acc = ${self.seed_of(span, name, t)}"
         var tys = rt
 
         if rank == 1

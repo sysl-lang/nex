@@ -247,6 +247,22 @@ emb_call_defaults()
     assert_eq(called(s, "risky", none()), "trap: integer division by zero\n  in risky at t.nex:17:24")
     assert_eq(called(s, "risky", one(int_value(1))), "i64:1")
 
+@test("a host's call fills a default that reads earlier parameters with the arguments given and the defaults before it")
+emb_call_defaults_reading_parameters()
+    val s = loaded("var made = 0\n\ndef next_id(): integer =\n  made += 1\n  made\n\n" +
+        "def chain(a: integer, b: integer = a * 2, c: integer = a + b + next_id()): integer = c\n\n" +
+        "def ratio(a: integer, b: integer = 10 div a): integer = b\n\n" +
+        "def span(w: real<mm>, h: real<cm> = w): real<mm> = w + h\n")
+
+    assert_eq(called(s, "chain", one(int_value(1))), "i64:4")
+    assert_eq(shown(s.get("made").unwrap()), "i64:1")
+    assert_eq(called_named(s, "chain", one(int_value(1)), named_args([("b", 10)])), "i64:13")
+    assert_eq(called_named(s, "chain", none(), named_args([("c", 5), ("a", 1)])), "i64:5")
+    assert_eq(shown(s.get("made").unwrap()), "i64:2")
+    assert_eq(called(s, "ratio", one(int_value(5))), "i64:2")
+    assert_eq(called(s, "ratio", one(int_value(0))), "trap: integer division by zero\n  in ratio at t.nex:9:36")
+    assert_eq(called(s, "span", one(real_value(3.0))), "r64:6")
+
 @test("a host's call names arguments as a nex call does: positional first, then by name in any order, each left out defaulted")
 emb_call_named()
     val s = loaded(DEFAULTS)

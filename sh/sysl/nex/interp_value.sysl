@@ -425,6 +425,13 @@ private[nex] maximum(x: real, y: real) -> real
 
     if x > y then x else y
 
+// `minimum` and `maximum` passing over a NaN: the other argument where one is a NaN, a NaN only where
+// both are. These are the whole-array `minval` / `maxval` (DESIGN §7.4); the elemental `min` and `max`
+// keep `minimum` and `maximum`.
+private[nex] minimum_number(x: real, y: real) -> real = if is_nan(x) then y elif is_nan(y) then x else minimum(x, y)
+
+private[nex] maximum_number(x: real, y: real) -> real = if is_nan(x) then y elif is_nan(y) then x else maximum(x, y)
+
 // The functions of the C library the prelude names, by their `real64` names; `real32` adds `f`.
 private[nex] val PRELUDE_LIBM = ["cbrt", "exp", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "atan2", "hypot"]
 
