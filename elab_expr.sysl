@@ -910,6 +910,10 @@ impl Elab
     end place
 
     assign(*self, span: Span, op: string, target: Expr, value: Expr) -> TExpr
+        *target.kind match
+            ExprKind.Tuple(_) -> return self.assign_tuple(span, target, value)
+            _ -> ()
+
         val p = self.place(target)
 
         if is_array(p.ty) then return self.array_assign(span, op, target, p, value)
