@@ -16,9 +16,9 @@ import sysl.text.{join, split}
 private val M4_M5_CATEGORIES = ["structs", "tuple destructuring", "paren-less tuple construction", "sum types (enums)", "closure escape (§4.11)",
     "user generics", "user generic enums", "user generic structs"]
 
-// The programs of those categories that need an array at run time.
-private val WAITING_ON_ARRAYS = ["210-field-write-through-an-array-element-receiver-mutates-the-sl",
-    "270-return-a-paren-less-tuple-via-the-return-keyword"]
+// The programs of those categories that need an array of structs, which the emitter does not
+// compile yet.
+private val WAITING_ON_ARRAYS = ["210-field-write-through-an-array-element-receiver-mutates-the-sl"]
 
 private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates"]
 
@@ -28,7 +28,7 @@ run_m4_m5_corpus()
 
     assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
     assert_eq(join(r.waiting.view(), "\n"), join(WAITING_ON_ARRAYS[..], "\n"))
-    assert_eq(r.passed, 72)
+    assert_eq(r.passed, 73)
 
 @test("the ownership programs print their .out, read nothing freed under Guard Malloc, and leak nothing")
 run_leak_programs()
@@ -59,8 +59,7 @@ run_leak_programs()
 run_struct_with_array_waits()
     val e = emitted("struct Grid\n  cells: [real]\n\ndef main() =\n  val g = Grid([1.0, 2.0])\n  print(g.cells[1])\n").err().unwrap_or("")
 
-    assert(e.contains("is not compiled yet"), e)
-    assert(e.contains("[real64]"), e)
+    assert_eq(e, "error: an array inside a struct, tuple or enum (Grid) is not compiled yet @5:11")
 
 // `text` compiled into `exe`.
 private compiled(b: Bench, text: string, exe: string)

@@ -1,0 +1,36 @@
+// A rank-3 literal (DESIGN §4.1): the outermost list runs along axis 1, so t[i, j, k] is the k-th
+// item of the j-th list of the i-th. Storage is column-major (§3.2): axis 1 varies fastest.
+
+def main() =
+  val t = [[[1, 2], [3, 4]],
+           [[5, 6], [7, 8]]]
+  print(t[2, 1, 2])
+  print(t[1, 2, 1])
+  print(t[end, end, end])
+  print(t[end - 1, end, 1])
+  print(t)
+  print(size(t))
+  print(rank(t))
+  print(extent(t, 3))
+  print(t[1])
+  print(t[2, 1])
+  print(t[:, 2, :])
+  print(flatten(t))
+
+  // `for x in t` visits storage order.
+  var digits = 0
+  for x in t
+    digits = 10 * digits + x
+  print(digits)
+
+  // A `var` bound from a `val` used again is a copy: writing it leaves the source alone (§8.4).
+  var u = t
+  u[2, 2, 2] = 80
+  u[1, :, 1] = [10, 30]
+  print(u)
+  print(t[2, 2, 2])
+
+  // A computed index out of range traps.
+  val k = 3
+  assert_traps(() -> print(t[1, k, 1]), "out of bounds")
+  print("done")

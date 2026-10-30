@@ -172,8 +172,9 @@ The design's proofs (`views.mlir`, `view-then-write.mlir`, `parallel.mlir`, `bla
 `tests_toolchain.sysl` take them on in the milestone that first needs them. **Sequential:**
 
 ```
-func.func(linalg-fuse-elementwise-ops), canonicalize, cse,
-one-shot-bufferize{bufferize-function-boundaries}, drop-equivalent-buffer-results,
+canonicalize, cse, func.func(linalg-fuse-elementwise-ops), canonicalize, cse,
+one-shot-bufferize{bufferize-function-boundaries allow-return-allocs-from-loops},
+drop-equivalent-buffer-results,
 buffer-deallocation-pipeline, convert-bufferization-to-memref,
 convert-linalg-to-loops, convert-scf-to-cf, convert-complex-to-standard,
 expand-strided-metadata, lower-affine, finalize-memref-to-llvm, convert-math-to-llvm,
@@ -181,7 +182,14 @@ convert-complex-to-llvm, convert-arith-to-llvm, convert-func-to-llvm, convert-cf
 reconcile-unrealized-casts
 ```
 
-Three passes are new, each forced by a proof that fails without it:
+Three passes and two settings are new, each forced by a program that fails without it:
+
+- `canonicalize, cse` before fusion — the emitter checks the shapes of element-wise operands and
+  sizes each result from an operand's extents, and those `tensor.dim` uses of an intermediate
+  result stop `linalg-fuse-elementwise-ops`, which fuses only a producer with one use. Folded
+  first, they go, and 313-02's three operators are one loop (`tests_run_array.sysl`).
+- `allow-return-allocs-from-loops` — a loop that rebinds an array local to a new value
+  (`a = a * 2` in a `for`, a growing `flatMap` result) carries a fresh buffer round the loop.
 
 - `drop-equivalent-buffer-results` — a private function that writes an argument in place and returns
   it returns nothing instead, which is the `inout` calling convention; without it

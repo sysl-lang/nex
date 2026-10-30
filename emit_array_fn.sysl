@@ -709,7 +709,7 @@ impl Emitter
         for iv in nest.ivs
             idx.push(iv)
 
-        self.nest_close(nest, self.def(s"tensor.insert $x into ${nest.accs[0]}[${joined(idx)}] : $tt"))
+        self.nest_close(nest, self.def(s"tensor.insert $x into ${nest.accs[nest.accs.len() - 1]}[${joined(idx)}] : $tt"))
     end reduce_along
 
     // -- `@` --------------------------------------------------------------------------------------

@@ -157,6 +157,34 @@ impl Emitter
 
         self.def(s"tensor.empty(${joined(dims)}) : $t")
 
+    // Whether an aggregate of type `t` has an array among its parts, at any depth. Its storage would
+    // have to take part in the counted heap's ownership, which arrays do not yet. A type that holds
+    // itself is looked into a few levels deep, which is as far as an array can hide.
+    holds_array(*self, t: Ty, depth: int = 0) -> bool
+        if depth > 8 then return false
+
+        t match
+            Array(_, _) -> return true
+            Tuple(es) ->
+                for e in es
+                    if self.holds_array(e, depth + 1) then return true
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) ->
+                        for f in s.fields
+                            if self.holds_array(f.ty, depth + 1) then return true
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) ->
+                        for v in e.variants
+                            for f in v.fields
+                                if self.holds_array(f.ty, depth + 1) then return true
+                    None -> ()
+            _ -> ()
+
+        false
+
     // -- index arithmetic -------------------------------------------------------------------------
 
     index_const(*self, n: usize) -> string = self.def(s"arith.constant $n : index")
@@ -573,16 +601,32 @@ impl Emitter
     // `v` of type `from` given the static shape of `to`, trapping `shape mismatch` where it differs.
     shape_checked(*self, span: Span, v: string, from: Ty, to: Ty) -> string
         val axes = axes_of(to)
+        var ok = ""
 
         for k in 0..<axes.len()
             axes[k] match
                 Fixed(n) ->
                     val d = self.to_i64(self.dim(span, v, from, k + 1))
+                    val same = self.def(s"arith.cmpi eq, $d, ${self.def(s"arith.constant $n : i64")} : i64")
 
-                    self.trap_if(self.def(s"arith.cmpi ne, $d, ${self.def(s"arith.constant $n : i64")} : i64"), "shape mismatch")
+                    ok = if ok == "" then same else self.def(s"arith.andi $ok, $same : i1")
                 _ -> ()
 
-        self.cast(span, v, from, to)
+        if ok == "" then return self.cast(span, v, from, to)
+
+        self.trap_if(self.not(ok), "shape mismatch")
+
+        // The cast only where the shape fits: where the trap is taken and the shape is known when
+        // compiling, the cast would be one between two static shapes that differ, which is invalid.
+        val tt = self.tensor_ty(span, to)
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if $ok -> ($tt) {")
+        self.op(s"scf.yield ${self.cast(span, v, from, to)} : $tt")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.zero_array(span, to)} : $tt")
+        self.op("}")
+        r
 
     // A widened array: its elements converted, or only its static extents forgotten.
     promoted(*self, e: TExpr, v: TExpr) -> string

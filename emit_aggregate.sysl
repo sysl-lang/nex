@@ -40,6 +40,8 @@ impl Emitter
     // -- types ------------------------------------------------------------------------------------
 
     agg_ty(*self, span: Span, t: Ty) -> string
+        if self.holds_array(t) then self.later(span, s"an array inside a struct, tuple or enum (${show_ty(t)})")
+
         t match
             Tuple(es) -> return self.fields_ty(span, es)
             Nominal(name, _) ->

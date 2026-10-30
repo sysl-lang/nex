@@ -22,27 +22,9 @@ private val V2_INDEX = from_utf8(embed("testdata/v2/index.tsv")).unwrap()
 // The categories PLAN.md's M3 counts.
 private val M3_CATEGORIES = ["top-level bindings + print", "scalar arithmetic", "comparison + logical", "chained comparison", "chained comparisons", "control flow", "blocks + scoping", "top-level initialization", "compound assignment", "functions", "string interpolation", "const fn calls", "inout by-ref"]
 
-// The programs of those categories that need an array at run time, which the emitter does not
-// compile yet.
-private val WAITING = ["044-for-over-array", "045-for-over-val-bound-array",
-    "051-range-at-value-position-produces-an-integer-array", "052-inclusive-range-at-value-position",
-    "053-empty-range-at-value-position", "058-for-with-tuple-destructuring-on-enumerate-xs",
-    "060-array-of-lambdas-each-closure-fits-in-16-byte-slots", "061-rank-2-single-index-returns-the-row-as-a-rank-1-array",
-    "062-rank-2-two-integer-index-returns-a-scalar-element", "063-rank-2-indexing-through-a-computed-integer-expression",
-    "065-tensor-typed-param-scalar-return", "066-rank-1-tensor-param-with-prelude-reductions",
-    "067-rank-2-tensor-param-integer-return-via-length", "068-def-returning-a-tensor-rank-1-doubled-via-map",
-    "069-tensor-scalar-params-tensor-return-broadcast-scale", "070-two-tensor-params-element-wise-sum-returned",
-    "071-tensor-returning-if-expression-branches-yield-same-tensor-ty", "084-prelude-hof-map-with-unannotated-lambda-infers-and-runs",
-    "085-prelude-hof-reduce-with-unannotated-lambda-infers-and-runs", "086-prelude-hof-filter-with-unannotated-lambda-infers-and-runs",
-    "087-filter-prints-the-selected-elements-directly", "088-filter-where-no-element-matches-returns-an-empty-array",
-    "089-filter-where-every-element-matches-returns-a-full-length-cop", "090-filter-on-a-dynamic-bound-range",
-    "091-filter-on-real-values-picks-nan-safe-predicate", "092-length-of-filter-result",
-    "093-prelude-hof-flatmap-concatenates-inner-arrays", "094-flatmap-via-method-call-sugar",
-    "095-flatmap-with-single-element-inner-arrays-acts-like-map", "096-flatmap-on-a-dynamic-bound-range-with-two-element-inner-arra",
-    "097-flatmap-where-inner-length-itself-depends-on-the-element-var", "098-length-of-flatmap-result",
-    "099-flatmap-on-real-elements-promotes-through-inner-arrays", "100-sum-of-flatmap-result",
-    "101-prelude-hof-method-call-sugar-xs-map-x-runs", "103-bound-then-called-lambda-runs-through-prelude-hof",
-    "104-top-level-def-passed-as-a-function-value-argument", "342-on-an-array-index-target"]
+// The programs of those categories that need an array whose elements are not scalars, which the
+// emitter does not compile yet: 058 an array of tuples (`enumerate`), 060 an array of closures.
+private val WAITING = ["058-for-with-tuple-destructuring-on-enumerate-xs", "060-array-of-lambdas-each-closure-fits-in-16-byte-slots"]
 
 // A scratch directory and the toolchain, the runtime built into it by the compiler running the tests.
 struct Bench
@@ -162,7 +144,7 @@ run_m3_corpus()
 
     assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
     assert_eq(join(r.waiting.view(), "\n"), join(WAITING[..], "\n"))
-    assert_eq(r.passed, 115)
+    assert_eq(r.passed, 151)
 
 @test("every program of testdata/v2 prints its .out")
 run_v2()
@@ -181,7 +163,7 @@ run_v2()
 
     finish(b)
     assert(failed.len() == 0, join(failed.view(), "\n"))
-    assert_eq(passed, 13)
+    assert_eq(passed, 19)
 
 @test("a trap nothing catches writes its message to standard error after what was printed, and aborts")
 run_uncaught_trap()
@@ -271,8 +253,8 @@ run_fpe_trap()
 
 @test("a program needing what the emitter does not compile yet is refused with a diagnostic naming it")
 emit_refuses_what_waits()
-    assert_eq(emitted("def main() =\n  val xs = [1, 2]\n  print(xs)\n").err().unwrap_or(""), "error: a value of type [int64] is not compiled yet @2:3")
-    assert_eq(emitted("def f(x: integer) = x\ndef main() =\n  val g = f\n  print(g(2))\n  print([f(1)])\n").err().unwrap_or(""), "error: an array is not compiled yet @5:9")
+    assert_eq(emitted("def main() =\n  val xs = [1, 2]\n  print(enumerate(xs))\n").err().unwrap_or(""), "error: `enumerate` on an array is not compiled yet @3:9")
+    assert_eq(emitted("def f(x: integer) = x\ndef main() =\n  val g = f\n  print(g(2))\n  print([f])\n").err().unwrap_or(""), "error: an array of (int64) -> int64 is not compiled yet @5:9")
 
 @test("the module names every symbol with a prefix no C name has, and makes main the only public function")
 emit_symbols()

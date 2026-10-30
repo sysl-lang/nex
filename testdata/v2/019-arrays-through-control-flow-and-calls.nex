@@ -1,0 +1,65 @@
+// Arrays as values through every place a value goes: branches and loops that rebind them, `return`
+// from inside a loop, `inout` parameters at rank 1 and 2 (DESIGN §8), function values taking and
+// giving arrays, an array a lambda captures and writes, and a module-level array.
+
+val primes = [2, 3, 5, 7]
+
+def first_over(xs: [integer], limit: integer) =
+  var seen = zeros(0)
+  for x in xs
+    if x > limit then return seen
+    seen = [x] * 0 + x
+  seen
+
+def bump(v: inout [integer], by: integer) =
+  for k in 1..length(v)
+    v[k] += by
+
+def set_diagonal(m: inout [real; :, :], x: real) =
+  for k in 1..rows(m)
+    m[k, k] = x
+
+def apply(f: ([real]) -> [real], v: [real]) = f(v)
+
+def doubled(v: [real]) = 2.0 * v
+
+def main() =
+  var a = [1, 2, 3]
+  var k = 0
+
+  while k < 3
+    k += 1
+    if k == 2 then a = a * 10 else a[k] = -a[k]
+
+  print(a)
+  print(first_over([4, 9, 2, 12, 1], 10))
+  print(first_over([1, 2], 10))
+
+  bump(a, 1)
+  bump(a, 1)
+  print(a)
+
+  var m = zeros((2, 2)) * 1.0
+  set_diagonal(m, 5.0)
+  print(m)
+
+  print(apply(doubled, [1.0, 2.5]))
+  print(apply(v -> v + 1.0, [1.0, 2.5]))
+
+  var c = [1, 1, 1]
+  def add(i: integer) =
+    c[i] += i
+
+  add(2)
+  add(3)
+  c[1] = 100
+  print(c)
+  print(sum(primes))
+  print(primes[end])
+
+  var b: [uint8] = zeros(3)
+  b[1] = 250
+  b[2] = 5
+  print(to_integers(b) * 2)
+  assert_traps(() -> print(to_bytes([1, 256])), "uint8")
+  print("done")

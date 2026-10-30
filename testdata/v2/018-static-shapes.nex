@@ -1,0 +1,30 @@
+// Static shapes (DESIGN §3.3): a static extent is a static tensor dimension; a static shape passes
+// where a dynamic one is wanted; a dynamic shape converted to a static one is checked when the
+// program runs and traps `shape mismatch`. The compile-time errors of the same rules are tests of
+// `tests_run_array.sysl`.
+
+def trace(m: [real; 3, 3]) = m[1, 1] + m[2, 2] + m[3, 3]
+
+def total(m: [real; :, :]) = sum(m)
+
+def rows_of(n: integer) = reshape(linspace(1.0, 9.0, n), (3, 3))
+
+def main() =
+  val e: [real; 3, 3] = identity(3) * 2.0
+  print(trace(e))
+  print(total(e))
+  print(e @ e)
+  print(e + e)
+
+  // A dynamic shape that happens to fit is accepted.
+  val d: [real; 3, 3] = rows_of(9)
+  print(d)
+  print(trace(d))
+
+  val r: [integer; 2, 3] = [[1, 2, 3], [4, 5, 6]]
+  print(r[:, 2])
+  print(sum(r, dim = 1))
+
+  // One that does not traps.
+  assert_traps(() -> print(trace(reshape(1.0 * (1..4), (2, 2)))), "shape mismatch")
+  print("done")
