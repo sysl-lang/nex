@@ -503,8 +503,9 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     - **I3 — arrays, views and the prelude**: rank-N arrays, slices as views, `inout` windows,
       element-wise expressions, the array prelude and the linear-algebra prelude, computed natively.
       Built. `@` and the linear-algebra prelude call the runtime's `la.sysl` (`interp_la.sysl`), each
-      array copied into machine numbers laid out as the compiled program's lies, two operands lying
-      in one storage copied as one stretch; a product below BLAS's size sums in order with each
+      array handed over as a view of its own storage where its first axis is at unit stride and its
+      columns do not overlap, as compiled code hands it (two operands in one storage are two views of
+      one buffer), and copied dense otherwise; a product below BLAS's size sums in order with each
       product rounded, as the emitter's inline `linalg` operation does. An array is a window onto
       shared storage — an offset, and an extent and a stride per nex axis — so a slice, a reversed
       axis and an `origin` view copy nothing (`interp_array.sysl`). Storage is copied when a place
@@ -514,11 +515,24 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       The copy keeps the layout, so an `inout` window, which is storage positions in the place's
       array, stays a window of it. Element-wise nodes run node by node as the emitter's
       `linalg.generic`s do, a scalar body over frame slots for elemental functions, `map` and
-      conversions; `real64` `+ - * /` loop over the numbers directly. The reductions block and
-      combine as the compiled ones do (`interp_array_prelude.sysl`), so a `sum` has the same bits.
-      Measured (`bench`-style kernel, 200 000 elements, 50 passes of two element-wise statements and
-      a `sum`, then an element loop): 0.02 s compiled, 0.64 s interpreted, about 30× — the
-      element-wise statements dominate, each a pass over boxed values.
+      conversions. The reductions block and combine as the compiled ones do
+      (`interp_array_prelude.sysl`), so a `sum` has the same bits.
+      **Storage is typed** (`interp_store.sysl`): an array of each integer width, each real width,
+      each complex width and `bool` holds a buffer of that machine type, laid out as the compiled
+      program's; strings, closures, aggregates and arrays hold values. Copies, gathers, slices,
+      window writes and the constructors move machine numbers; the arithmetic operators, the
+      comparisons, `and`/`or`/`not`, negation and the reductions (`sum`, `product`, `dot` of reals,
+      `norm2` of reals, `minval`/`maxval`, `count`/`any`/`all`) are loops over them
+      (`interp_kernels.sysl`). `^`, conversions, elemental functions, `map`/`filter`/`reduce`, the
+      locations and the inline product still run value by value over the typed storage.
+      Measured (`bench/interp-elementwise.nex`: 200 000 `real64` elements, 50 passes of two
+      element-wise statements and a `sum`, then an element loop): 0.02 s compiled; interpreted 0.64 s
+      with values as storage, 0.69 s → 0.31 s (and 0.91 s → 0.29 s in a second, interleaved run
+      under load 16) with typed storage, the element loop now most of it. `bench/interp-matmul.nex`
+      (50 products of 500 × 500 `real64`, whole program): 0.15 s → 0.11 s (0.23 s → 0.11 s);
+      `bench/interp-solve.nex` (50 solves of 500 × 500 with 50 right-hand sides): 0.086 s → 0.090 s
+      (0.125 s → 0.090 s) — the copies the typed storage removes were a small part of either. Median
+      of 5 (then 7) `nex run --interp` runs, through `take-slot`, outputs identical.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel

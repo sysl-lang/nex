@@ -172,7 +172,7 @@ private lies_in_place(a: &Arr) -> bool
 // `a`, of rank 1 or 2, as compiled code hands it to the runtime: a view of its own storage where it
 // lies, read with its own leading dimension; otherwise a dense copy. Two arrays lying in one storage
 // are two views of one buffer, the same place where they are the same array.
-private crossing[T: Scalar + Elem](a: &Arr) -> MatrixView[T]
+private[nex] crossing[T: Scalar + Elem](a: &Arr) -> MatrixView[T]
     if !lies_in_place(a) then return gathered(a)
 
     viewed(T.held(a.store.d).view(), a, a.offset)
