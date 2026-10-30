@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Expressions and statements: each AST node to its typed node.
 //
 // **`elab` takes the type its position expects, where it has one**, and the expectation is only ever

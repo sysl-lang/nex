@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // Views, the copies they and `var` arrays need, and `origin` (DESIGN §6, §8.4): each rule with the

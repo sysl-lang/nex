@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // nex's types, as the elaborator knows them once every name in a type has been resolved.
 //
 // **A numeric type is a family and a width.** `int8` … `int64`, `uint8` … `uint64`, `real16` …

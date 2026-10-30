@@ -35,6 +35,7 @@
 // The libraries and frameworks the externs `@link` are written as `// nex.link` lines before the
 // module, which the driver reads (`driver.sysl`).
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.text.str_builder
 import sh.sysl.parsing.Span
@@ -611,10 +612,6 @@ c_ext(t: Ty, mode: Mode) -> string
 
 // The extension of a result of type `t`: none for a Fortran `logical`, which is 32 bits.
 result_ext(t: Ty, fortran: bool) -> string = if fortran && is_logical_ty(t) then "" else c_ext(t, Mode.Read)
-
-is_logical_ty(t: Ty) -> bool = base_of(t) match
-    Bool -> true
-    _ -> false
 
 is_string(t: Ty) -> bool = base_of(t) match
     Str -> true

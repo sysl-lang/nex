@@ -1,0 +1,238 @@
+@tests
+
+// The engines a nex program runs on, and the one way a test runs a program on them. Every program
+// test — a corpus category, the `testdata/v2/` and `testdata/leaks/` programs, a program written into
+// a test, a project of several modules, `nex test` on its fixtures — runs its program on each engine
+// of `ENGINES` through `runs`, `ran`, `check_programs` or `nex_test_on`, so a program checked on one
+// engine is checked on every one and the two cannot drift.
+//
+// **The interpreter never calls C** (PLAN.md), so a program declaring an `extern` runs on the
+// compiled engine alone. Which programs those are is `COMPILED_ONLY`, and the list is exact: a program
+// there that calls no C fails, a program calling C that is not there fails, and so does an entry
+// naming no program at all.
+//
+// What only a compiled program has — its MLIR, its LLVM IR, its link line, Guard Malloc and `leaks`
+// on its executable — is checked on the executable the compiled engine leaves at `<work>/<case>`.
+
+import nex.sh.sysl.nex.LoadOptions
+import sysl.buf.{Buf, buf}
+import sysl.fs.{entries, exists, read_text}
+import sysl.path.{join_all, normalize, parent}
+import sysl.process.{Output, Var, capture}
+import sysl.text.{from_utf8, split}
+
+// Where a program runs: compiled through MLIR to a native program, or interpreted from its typed IR.
+enum Engine
+    Compiled
+    Interpreted
+
+// The engines every program test runs on. The interpreter is not built, so it is not one of them.
+val ENGINES = [Engine.Compiled]
+
+engine_name(e: Engine) -> string = e match
+    Compiled -> "compiled"
+    Interpreted -> "interpreted"
+
+// The programs that run on the compiled engine alone, and why: a `testdata/` program by its file
+// stem, a program written into a test by the test's function name.
+val COMPILED_ONLY = [
+    ("065-ffi-libm-and-scalars", "calls libm through `extern`"),
+    ("066-ffi-arrays-strides-and-leading-dimension", "calls the C test library through `extern`"),
+    ("067-ffi-complex-by-value", "calls the C test library through `extern`"),
+    ("068-ffi-c-struct-by-reference", "calls the C test library through `extern`"),
+    ("069-ffi-callbacks", "calls the C test library through `extern`"),
+    ("070-ffi-fortran-bind-c", "calls the Fortran test library through `extern`"),
+    ("071-ffi-fortran-subroutines", "calls the Fortran test library through `@fortran`"),
+    ("072-ffi-fortran-character-arguments", "calls the Fortran test library through `@fortran`"),
+    ("073-ffi-fortran-callbacks", "calls the Fortran test library through `@fortran`"),
+    ("076-ffi-linear-algebra-units", "calls libm through `extern` beside the prelude's linear algebra"),
+    ("extern_abi_matches_clang", "runs the C programs of testdata/v2"),
+    ("mod_run_extern", "imports a module whose `extern` is libm's"),
+    ("run_callback_traps_uncaught", "calls the C test library through `extern`"),
+    ("run_callbacks_leak_nothing", "runs 069, which calls the C test library"),
+    ("run_callbacks_skipped_and_parallel", "calls the C test library through `extern`"),
+    ("run_extern_roots", "calls the C test library through `extern`"),
+    ("run_extern_shared_root", "calls the C test library through `extern`"),
+    ("run_extern_skipped", "calls the C test library through `extern`"),
+    ("run_extern_units", "calls libm through `extern`"),
+    ("run_fortran_leak_nothing", "runs the Fortran programs of testdata/v2"),
+    ("run_fortran_places_and_callbacks", "calls the Fortran test library through `@fortran`"),
+    ("run_fortran_runtime_linked", "calls the Fortran test library through `@fortran`"),
+]
+
+// A path under the repository's root, found from where this file lies, so that a test reads the same
+// file whatever directory the suite was started from.
+repo(rel: string) -> string = normalize(join_all([parent(__FILE__).unwrap(), "..", rel]))
+
+// Whether a program's text calls C: it declares an `extern`, `@fortran` ones among them.
+calls_c(text: string) -> bool = text.contains("extern def")
+
+private listed(case: string) -> bool
+    for (c, _) in COMPILED_ONLY
+        if c == case then return true
+
+    false
+
+// Whether `case` runs on the compiled engine alone, which its text must agree with.
+compiled_only(case: string, text: string) -> bool
+    val only = listed(case)
+
+    if calls_c(text) && !only then fail_with(s"`$case` calls C, so it runs on the compiled engine alone: add it to COMPILED_ONLY with the reason")
+    if only && !calls_c(text) then fail_with(s"`$case` is in COMPILED_ONLY, but its program calls no C")
+
+    only
+
+// One run of a program: where it ran, and what it wrote and how it ended, or why it did not run.
+struct Run
+    on: string
+    out: Result[Output, string]
+
+// `text` run on every engine of `ENGINES` — or, where `entry` is given, the project whose root module
+// it is, `text` then being every file of it. The compiled engine builds `<work>/<case>` once and runs it
+// at each of `threads` (`""` leaving `OMP_NUM_THREADS` alone); an engine running in one thread runs it
+// once. A program that does not build is a run whose output is the diagnostics.
+runs(b: Bench, case: string, text: string, entry: string = "", args: []const string = [], fpe_trap: bool = false, links: []const string = [],
+     prelude: Option[string] = None, threads: []const string = [""]) -> Buf[Run]
+    val only = compiled_only(case, text)
+    var out: Buf[Run] = buf()
+
+    for e in ENGINES
+        e match
+            Compiled ->
+                for r in compiled_runs(b, case, text, entry, args, fpe_trap, links, prelude, threads)
+                    out.push(r)
+            Interpreted -> if !only then out.push(Run("interpreted", Err("the interpreter is not built")))
+
+    out
+
+private compiled_runs(b: Bench, case: string, text: string, entry: string, args: []const string, fpe_trap: bool, links: []const string,
+                      prelude: Option[string], threads: []const string) -> Buf[Run]
+    var out: Buf[Run] = buf()
+    val built = if entry == "" then emitted(text, fpe_trap) else mlir_of(entry, fpe_trap, LoadOptions(prelude, false))
+
+    val m = built match
+        Ok(m) -> m
+        Err(e) ->
+            out.push(Run("compiled", Err(e)))
+            return out
+
+    val exe = executable(b, case)
+
+    lower_module(m, exe, b.work, b.tc, links) match
+        Ok(_) -> ()
+        Err(e) ->
+            out.push(Run("compiled", Err(e)))
+            return out
+
+    for t in threads
+        var env: Buf[Var] = buf()
+
+        if t != "" then env.push(Var("OMP_NUM_THREADS", t))
+        out.push(Run(if t == "" then "compiled" else s"compiled, $t threads", Ok(capture(exe, args, env = env.view(), stderr = true).unwrap())))
+
+    out
+
+// The executable the compiled engine left for `case`, for what only a compiled program is asked.
+executable(b: Bench, case: string = __FUNCTION__) -> string = s"${b.work}/$case"
+
+// `text` run on every engine, which must agree on what it wrote and how it ended; that output. A
+// program that does not build fails the test.
+ran(b: Bench, text: string, args: []const string = [], fpe_trap: bool = false, links: []const string = [], case: string = __FUNCTION__) -> Output
+    agreed(runs(b, case, text, args = args, fpe_trap = fpe_trap, links = links))
+
+// The output every one of `rs` gave, which must be one.
+agreed(rs: Buf[Run]) -> Output
+    var first: Option[Output] = None
+
+    for r in rs
+        val out = r.out match
+            Ok(o) -> o
+            Err(e) -> fail_with(s"${r.on}: $e")
+
+        first match
+            None -> first = Some(out)
+            Some(f) -> if f.text != out.text || f.err != out.err || f.status != out.status then fail_with(s"${r.on} disagrees: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+
+    first.unwrap()
+
+// What a set of `testdata/` programs did: how many printed their `.out` on every engine, the ones that
+// failed and how, and the ones whose every diagnostic says they wait on a part of the compiler not
+// built yet.
+struct Checked
+    passed: int
+    failed: Buf[string]
+    waiting: Buf[string]
+
+// Every program of `names` in `testdata/<dir>/` run on every engine, at each of `threads`, and
+// compared with its `.out`.
+check_programs(b: Bench, dir: string, names: []const string, links: []const string = [], threads: []const string = [""]) -> Checked
+    var r = Checked(0, buf(), buf())
+
+    for name in names
+        val text = read_text(repo(s"testdata/$dir/$name.nex")).unwrap()
+        val expected = read_text(repo(s"testdata/$dir/$name.out")).unwrap()
+        var ok = true
+
+        for run in runs(b, name, text, links = links, threads = threads)
+            run.out match
+                Ok(out) ->
+                    if !out.status.ok() || out.text != expected
+                        r.failed.push(s"$name (${run.on}): ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+                        ok = false
+                Err(e) ->
+                    if only_later(e) then r.waiting.push(name) else r.failed.push(s"$name (${run.on}): $e")
+                    ok = false
+
+        if ok then r.passed += 1
+
+    r
+
+// Whether every diagnostic says its construct waits on a later part of the compiler.
+private only_later(diagnostics: string) -> bool
+    for line in split(diagnostics, "\n")
+        if !line.contains("is not compiled yet") && !line.contains("is not elaborated yet") then return false
+
+    true
+
+// `nex test` on `e`, of the project whose root module is `entry`, running the tests whose names hold
+// `filter`.
+nex_test_on(e: Engine, b: Bench, entry: string, filter: string) -> Result[TestRun, string] = e match
+    Compiled -> run_tests(entry, None, filter, b.tc, false)
+    Interpreted -> Err("the interpreter is not built")
+
+// The stems of the `.nex` programs of `testdata/<dir>/`.
+private stems(dir: string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for f in entries(repo(s"testdata/$dir")).unwrap()
+        if f.ends_with(".nex") then out.push(f[0..<f.len - 4])
+
+    out
+
+@test("COMPILED_ONLY holds exactly the testdata programs that call C, and each other entry is a test of this project")
+compiled_only_is_exact()
+    var calling: Buf[string] = buf()
+
+    for dir in ["corpus", "v2", "leaks"]
+        for name in stems(dir)
+            val text = read_text(repo(s"testdata/$dir/$name.nex")).unwrap()
+
+            if calls_c(text) then calling.push(name)
+            assert_eq(listed(name), calls_c(text))
+
+    var sources = ""
+
+    for f in entries(repo("compiler")).unwrap()
+        if f.starts_with("tests_") && f.ends_with(".sysl") then sources += read_text(repo(s"compiler/$f")).unwrap()
+
+    for (c, why) in COMPILED_ONLY
+        assert(why != "", c)
+
+        var found = sources.contains(s"\n$c()\n")
+
+        for name in calling
+            if name == c then found = true
+
+        assert(found, s"`$c` in COMPILED_ONLY names no testdata program calling C and no test")
+
+    assert_eq(calling.len(), 10)

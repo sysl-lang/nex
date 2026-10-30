@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The typed IR: the program after elaboration, every name resolved and every type known.
 //
 // **Every expression carries its type, and nothing about it is left implicit.** A widening along

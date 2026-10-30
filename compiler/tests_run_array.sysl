@@ -11,7 +11,7 @@ import sysl.text.{from_utf8, join, split}
 
 private val M6_CATEGORIES = ["arrays", "auto-clone (§8.3)", "[byte] buffer"]
 
-private val STAGES = from_utf8(embed("experiments/mlir/pipeline.txt")).unwrap().trim()
+private val STAGES = from_utf8(embed("../experiments/mlir/pipeline.txt")).unwrap().trim()
 
 @test("every program of PLAN.md's M6 corpus categories prints its .out")
 run_m6_corpus()
@@ -43,7 +43,7 @@ occurrences(text: string, what: string) -> usize = split(text, what).len - 1
 @test("313-02's whole-array expression, three linalg.generic operations as emitted, is one loop after fusion")
 fused_point_distance()
     val b = bench()
-    val m = emitted(read_text("testdata/corpus/313-02-arrays-element-wise-fusion-point-distance.nex").unwrap()).unwrap()
+    val m = emitted(read_text(repo("testdata/corpus/313-02-arrays-element-wise-fusion-point-distance.nex")).unwrap()).unwrap()
     val fused = lowered_until(b, m, "func.func(linalg-fuse-elementwise-ops)")
 
     finish(b)

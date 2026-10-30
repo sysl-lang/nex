@@ -3,6 +3,7 @@
 // function argument once per element; an array it answers shares the source's elements, each
 // counted again, so the result is a value like any other.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

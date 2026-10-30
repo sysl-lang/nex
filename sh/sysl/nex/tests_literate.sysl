@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // Literate nex (spec §2.9): the program is the indented blocks of a Markdown file, and everything else

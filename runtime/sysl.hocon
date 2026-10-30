@@ -4,8 +4,9 @@
 //     sysl build-c runtime -o libnex_rt.a
 //
 // A project of its own rather than a module of the compiler, because it is a different artifact: an
-// archive a C link line takes, beside an object MLIR wrote, where the compiler is a program. The
-// interpreter will call the same functions directly.
+// archive a C link line takes, beside an object MLIR wrote, where the compiler is a program. It is a
+// member of the workspace the repository root declares, so the interpreter can depend on it by name
+// and call the same functions directly.
 
 package {
   name    = "nex-runtime"

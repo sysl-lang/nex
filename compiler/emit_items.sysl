@@ -21,6 +21,7 @@
 // Element access goes through the runtime, which checks the index and answers the element's
 // address; an array not yet given a value has no elements.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // Units of measure (DESIGN §13): the types the elaborator gives values that carry a unit, the

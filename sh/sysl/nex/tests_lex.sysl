@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // The token stream, in the compact form `nex tokens` prints: a keyword or an operator is `K(..)`, a

@@ -5,6 +5,7 @@
 // `eprint` to sink 2, and an interpolation used as a value gathers its pieces in a sink of its own and
 // closes it into a string. So `print(s"$a and $b")` builds no string at all.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

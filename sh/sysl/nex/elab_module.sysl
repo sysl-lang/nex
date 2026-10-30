@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Modules in the elaborator (DESIGN §11.5): which declaration a top-level name written in a module
 // denotes, what an `import` binds, and the `@test` functions.
 //

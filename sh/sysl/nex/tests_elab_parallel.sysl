@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // The typed IR of parallelism and the checker's diagnostics (DESIGN §9): each form with the

@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // The tree the parser builds, in the S-expression form `nex parse` prints. An expression is checked as

@@ -10,6 +10,7 @@
 // the payload's storage and read back out of it, through an entry-block slot that LLVM's SROA dissolves.
 // `match` is an `scf.index_switch` on the tag.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.math.max
 import sysl.text.str_builder

@@ -1,0 +1,152 @@
+@tests
+
+// Programs of several modules (DESIGN §11.5) run on every engine, and `nex test` (DESIGN §11.2) driven
+// on the fixture projects in `testdata/nex_test/` and `testdata/nex_test_qualified/`. What the loader
+// and the elaborator make of a project is the library's `tests_modules.sysl`.
+
+import nex.sh.sysl.nex.parent_dir
+import sysl.fs.{make_dir_all, make_temp_dir, read_text, remove_dir_all, write_text}
+import sysl.text.join
+
+// A project written to a fresh directory, each file at its path; its entry is `main.nex`.
+private project(files: []const (string, string)) -> string
+    val dir = make_temp_dir("nex-modules").unwrap()
+
+    for (rel, text) in files
+        val path = s"${dir}/${rel}"
+
+        make_dir_all(parent_dir(path)).unwrap()
+        write_text(path, text).unwrap()
+
+    dir
+
+// What the project printed, run on every engine, which must agree.
+private run_project(b: Bench, files: []const (string, string), prelude: Option[string] = None, case: string = __FUNCTION__) -> string
+    val dir = project(files)
+    var text = ""
+
+    for (_, t) in files
+        text += t
+
+    val out = agreed(runs(b, case, text, entry = s"${dir}/main.nex", prelude = prelude))
+
+    remove_dir_all(dir).unwrap()
+    out.text
+
+private geom_file() -> (string, string) = ("geom/geom.nex", read_text(repo("testdata/modules/geom.nex")).unwrap())
+
+@test("an extern declared in a module is the C function of its own name, imported and called like a def")
+mod_run_extern()
+    val b = bench()
+    val out = run_project(b, [("main.nex", "import cmath.{cbrt}\ndef main() = print(cbrt(27.0))\n"), ("cmath/libm.nex", "module cmath\n@link(\"m\")\nextern def cbrt(x: real): real\n")])
+
+    finish(b)
+    assert_eq(out, "3.0\n")
+
+@test("a program of several modules runs: imports, aliases, chains, structs, module-level state")
+mod_run()
+    val b = bench()
+
+    assert_eq(run_project(b, [("main.nex", "import helpers.{square, twice as tw}\ndef main() = print(tw(square(3)))\n"),
+        ("helpers/sq.nex", "module helpers\ndef square(x: integer) = x * x\n"), ("helpers/twice.nex", "def twice(x: integer) = x + x\n")]), "18\n")
+    assert_eq(run_project(b, [("main.nex", "import b.{step2}\ndef main() = print(step2(5))\n"),
+        ("a/a.nex", "def step1(x: integer) = x + 10\n"), ("b/b.nex", "import a.{step1}\ndef step2(x: integer) = step1(x) * 2\n")]), "30\n")
+    assert_eq(run_project(b, [("main.nex", "import geom.{Point}\ndef main() =\n  val p = Point(3.0, 4.0)\n  print(p.x)\n  print(p)\n"),
+        ("geom/types.nex", "struct Point\n  x: real\n  y: real\n")]), "3.0\nPoint { x=3.0, y=4.0 }\n")
+    assert_eq(run_project(b, [("main.nex", "import lib.{count, bump}\nval start = count\ndef main() =\n  bump()\n  bump()\n  print(start)\n  print(count)\n"),
+        ("lib/c.nex", "var count = 10\ndef bump() =\n  count += 1\n")]), "10\n12\n")
+    assert_eq(run_project(b, [("main.nex", "import a.{fa}\nimport b.{fb}\ndef helper() = 0\ndef main() = print(fa() + fb() + helper())\n"),
+        ("a/a.nex", "def helper() = 1\ndef fa() = helper()\n"), ("b/b.nex", "def helper() = 2\ndef fb() = helper()\n")]), "3\n")
+
+    finish(b)
+
+@test("a program reaching its modules through bare imports runs, and a local shadowing a module reads its own field")
+mod_run_qualified()
+    val b = bench()
+
+    assert_eq(run_project(b, [("main.nex", "import geom\ndef main() =\n  val p: geom.Point = geom.Point(3.0, 4.0)\n  geom.count = 2\n  geom.count += 1\n  print(geom.dist2(geom.origin, p))\n  print(geom.count)\n  print(geom.Circle(1.5))\n  print(geom.Pair(1, \"a\").snd)\n"), geom_file()]),
+        "25.0\n3\nCircle(1.5)\na\n")
+    assert_eq(run_project(b, [("main.nex", "import lib\nstruct Box\n  x: integer\ndef main() =\n  val lib = Box(7)\n  print(lib.x)\n"), ("lib/c.nex", "val x = 99\n")]), "7\n")
+    assert_eq(run_project(b, [("main.nex", "import a.b\ndef main() = print(a.b.f(a.b.v))\n"), ("a/a.nex", "val top = 1\n"), ("a/b/b.nex", "def f(x: integer) = x + 1\nval v = 2\n")]), "3\n")
+
+    finish(b)
+
+@test("an imported generic function, struct and enum are instantiated where they are used")
+mod_run_generic()
+    val b = bench()
+
+    assert_eq(run_project(b, [("main.nex", "import helpers.{pick_max, same}\ndef main() =\n  print(pick_max(3, 7))\n  print(pick_max(2.5, 1.5))\n  print(same(\"hi\", \"hi\"))\n"),
+        ("helpers/gen.nex", "def pick_max[T: Ord](a: T, b: T): T = if a < b then b else a\ndef same[T: Eq](a: T, b: T): bool = a == b\n")]), "7\n2.5\ntrue\n")
+    assert_eq(run_project(b, [("main.nex", "import shapes.{Pair}\ndef main() =\n  val a = Pair(1, 2)\n  val b = Pair(\"hi\", 3)\n  print(a.fst)\n  print(b.fst)\n  print(b.snd)\n"),
+        ("shapes/p.nex", "struct Pair[A, B]\n  fst: A\n  snd: B\n")]), "1\nhi\n3\n")
+    assert_eq(run_project(b, [("main.nex", "import opt.{Opt, Some, Empty}\ndef main() =\n  val x = Some(42)\n  val y: Opt[integer] = Empty\n  val ms = x match\n    Some(v) -> \"got\"\n    Empty -> \"nothing\"\n  val ns = y match\n    Some(v) -> \"got\"\n    Empty -> \"nothing\"\n  print(ms)\n  print(ns)\n  print(x)\n"),
+        ("opt/o.nex", "enum Opt[T] =\n  Some(value: T)\n  Empty\n")]), "got\nnothing\nSome(42)\n")
+
+    finish(b)
+
+@test("the source prelude's functions run, called from every module")
+mod_run_prelude()
+    val b = bench()
+    val pre = project([("scalar.nex", "module prelude\ndef triple(x: integer) = x * 3\n")])
+
+    assert_eq(run_project(b, [("main.nex", "import lib.{f}\ndef main() = print(triple(7) + f())\n"), ("lib/c.nex", "def f() = triple(1)\n")], Some(pre)), "24\n")
+
+    remove_dir_all(pre).unwrap()
+    finish(b)
+
+// -- nex test ----------------------------------------------------------------------------------------
+
+@test("nex test runs every test in every module, one line per failure, a trap failing only its test")
+mod_nex_test()
+    val b = bench()
+
+    for e in ENGINES
+        val r = nex_test_on(e, b, repo("testdata/nex_test/main.nex"), "").unwrap()
+
+        assert_eq(join(r.lines.view(), "\n"), "FAIL test_fails: assert_eq failed\nFAIL test_traps: index out of bounds\nFAIL test_stops: stopped with status 3\n6 passed, 3 failed")
+        assert_eq(r.failed, 3)
+
+    finish(b)
+
+@test("nex test runs only the tests whose names hold its substring, and passes when they all do")
+mod_nex_test_filter()
+    val b = bench()
+
+    for e in ENGINES
+        val stats = nex_test_on(e, b, repo("testdata/nex_test/main.nex"), "stats").unwrap()
+
+        assert_eq(join(stats.lines.view(), "\n"), "3 passed, 0 failed, 6 filtered out")
+        assert_eq(stats.failed, 0)
+
+        val fails = nex_test_on(e, b, repo("testdata/nex_test/main.nex"), "fails").unwrap()
+
+        assert_eq(join(fails.lines.view(), "\n"), "FAIL test_fails: assert_eq failed\n0 passed, 1 failed, 8 filtered out")
+
+    finish(b)
+
+@test("nex test builds and runs tests that reach their modules through bare imports")
+mod_nex_test_qualified()
+    val b = bench()
+
+    for e in ENGINES
+        val r = nex_test_on(e, b, repo("testdata/nex_test_qualified/main.nex"), "").unwrap()
+
+        assert_eq(join(r.lines.view(), "\n"), "7 passed, 0 failed")
+        assert_eq(r.failed, 0)
+
+    finish(b)
+
+@test("nex test reports a project that does not compile, and runs nothing")
+mod_nex_test_refused()
+    val b = bench()
+    val dir = project([("main.nex", "@test\ndef test_a() = assert_eq(missing(), 1)\n")])
+
+    for e in ENGINES
+        val m = nex_test_on(e, b, s"${dir}/main.nex", "") match
+            Ok(_) -> "ran"
+            Err(m) -> m
+
+        assert_eq(m.contains("unknown name `missing`"), true)
+
+    remove_dir_all(dir).unwrap()
+    finish(b)

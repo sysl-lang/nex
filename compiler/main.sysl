@@ -9,6 +9,7 @@
 // `-l lib` add a library search directory and a library to the link (DESIGN §10.1). Options may
 // stand anywhere before `--`.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, read_bytes, remove_dir_all}
 import sysl.process.run
@@ -120,12 +121,8 @@ main(args: []string)
         exit(2)
 
     if command == "elaborate"
-        val project = load_project(file, opts) match
-            Ok(p) -> p
-            Err(m) -> fail(m)
-
-        elaborate_project(project) match
-            Ok(t) -> print(show_tprogram(t))
+        load(file, opts) match
+            Ok(l) -> print(show_tprogram(l.program))
             Err(m) -> fail(m)
         return
 

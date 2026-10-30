@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Views, `origin`, and every copy an array value needs (DESIGN §6, §8.4).
 //
 // **A slice read as a value is a view, and a view is a `TView`**: the same subscripts as a

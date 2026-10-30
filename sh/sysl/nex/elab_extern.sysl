@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // `extern def`: a C function declared and called (DESIGN §10, §13.7).
 //
 // **An extern's signature is resolved before any body is elaborated**, since it has no body to infer
@@ -377,6 +379,11 @@ private is_callback(ty: Ty) -> bool = base_of(ty) match
 
 private is_c_ptr(ty: Ty) -> bool = base_of(ty) match
     CPtr -> true
+    _ -> false
+
+// Whether `t` is a `bool`, which crosses to Fortran as a 4-byte `logical`.
+is_logical_ty(t: Ty) -> bool = base_of(t) match
+    Bool -> true
     _ -> false
 
 // Whether some parameter is the `@data` partner of parameter `j`.

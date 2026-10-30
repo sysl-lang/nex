@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The nex parser: tokens to the tree in `ast.sysl`, by recursive descent.
 //
 // Each function reads one construct of spec chapters 4 to 9 and is named for it. Precedence is the

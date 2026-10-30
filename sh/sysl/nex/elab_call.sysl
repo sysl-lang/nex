@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Calls: of a `def`, of a function value, of a numeric type name (a conversion, DESIGN §2.4), and of
 // the prelude's scalar functions.
 //

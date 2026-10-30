@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The nex lexer: source text to a token list in which a block is an `Indent` ... `Dedent` pair and a
 // statement ends at a `Newline`, so the parser never looks at a column.
 //

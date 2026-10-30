@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Arrays: literals, ranges as values, index lists and `end`, element and slice assignment, the
 // element-wise operators, `@`, elemental calls and `for` over an array (DESIGN §3–§7).
 //

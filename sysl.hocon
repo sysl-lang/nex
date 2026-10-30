@@ -1,6 +1,18 @@
-// nex, an AOT-compiled array-first numerical language, implemented in sysl.
+// nex, an array-first numerical language, implemented in sysl. This repository is a workspace of
+// three projects:
 //
-//     sysl run . -- run program.nex
+// - **this one, the library `nex`**: the front end every engine shares — the lexer, the parser, the
+//   elaborator and its checks, the typed IR, units of measure and the module loader — in
+//   `sh/sysl/nex/`, module `sh.sysl.nex`. A sysl program reaches it as
+//   `github.com/sysl-lang/nex`; `nex.sysl` is its entry.
+// - **`compiler/`**, the `nex` command: the MLIR emitter, the driver that lowers and links a program,
+//   and the test runner.
+// - **`runtime/`**, the archive every compiled program links.
+//
+//     sysl build compiler -o nex
+//     sysl build-c runtime -o libnex_rt.a
+//     ./nex run program.nex
+//     sysl test .
 //
 // The reference implementation is the Scala one at github.com/edadma/nex; PLAN.md says how this
 // one reaches it. `testdata/corpus/` holds the reference's program corpus, each program beside the
@@ -12,6 +24,8 @@ package {
   sysl    = "0.7.9"
 }
 
+workspace = ["compiler", "runtime"]
+
 // The perf oracle's kernels: nex programs and their C and Fortran twins, which no sysl build compiles.
 exclude = ["bench"]
 
@@ -21,7 +35,8 @@ dependencies {
   parsing { git = "github.com/sysl-lang/parsing", version = "0.13.2" }
 }
 
-// **`os`** to read source files and the corpus; **`heap`** for every tree the compiler builds.
+// **`os`** for the loader, which reads a program's files and the source prelude; **`heap`** for every
+// tree the front end builds.
 requires {
   os   = true
   heap = true

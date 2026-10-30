@@ -4,8 +4,9 @@
 // categories PLAN.md's M4 and M5 count, and the programs of `testdata/leaks/`, which reach the
 // ownership of strings, closures and the aggregates holding them in the places it can go wrong — a
 // value moved between places, a region's value kept past its temporaries, an early `return` out of a
-// `match`, a cell outliving its frame. Those are run three ways: plainly, under Guard Malloc (a
-// released object read again faults), and under `leaks --atExit`, which must find nothing.
+// `match`, a cell outliving its frame. Those run on every engine, and the compiled executables twice
+// more: under Guard Malloc (a released object read again faults), and under `leaks --atExit`, which
+// must find nothing.
 
 import sysl.buf.{Buf, buf}
 import sysl.fs.{exists, read_text}
@@ -31,24 +32,24 @@ run_leak_programs()
     if !exists("/usr/bin/leaks") then skip("no leaks tool")
 
     val b = bench()
+    val r = check_programs(b, "leaks", LEAK_PROGRAMS[..])
     var reports: Buf[string] = buf()
 
+    assert(r.failed.len() == 0 && r.waiting.len() == 0, join(r.failed.view(), "\n"))
+
+    // Guard Malloc and `leaks` ask what only a compiled program has: its heap.
     for name in LEAK_PROGRAMS
-        val expected = read_text(s"testdata/leaks/$name.out").unwrap()
-        val exe = s"${b.work}/$name"
-
-        compiled(b, read_text(s"testdata/leaks/$name.nex").unwrap(), exe)
-
-        val plain = capture(exe, [], stderr = true).unwrap()
+        val expected = read_text(repo(s"testdata/leaks/$name.out")).unwrap()
+        val exe = executable(b, name)
         val guarded = capture(exe, [], env = [Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
         val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], stderr = true).unwrap()
 
-        assert_eq(plain.text, expected)
         assert(guarded.status.ok(), s"$name under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
         assert_eq(guarded.text, expected)
         reports.push(s"$name: ${leaks_line(leaks.text)}")
 
     finish(b)
+    assert_eq(r.passed, 9)
     assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.\nviews: 0 leaks for 0 total leaked bytes.\narrays: 0 leaks for 0 total leaked bytes.\nequality: 0 leaks for 0 total leaked bytes.\nitems-sliced: 0 leaks for 0 total leaked bytes.\nitems-rearranged: 0 leaks for 0 total leaked bytes.\ntraps: 0 leaks for 0 total leaked bytes.\nlinear-algebra: 0 leaks for 0 total leaked bytes.")
 
 @test("only a function holding counted values registers a frame record for a trap's catch, and it is taken off before the return")
@@ -92,16 +93,6 @@ run_rank_n_items_equality()
 
     finish(b)
     assert_eq(out.text, "(true, false, false)\n(true, false, false)\n(true, false, false)\n")
-
-// `text` compiled into `exe`.
-private compiled(b: Bench, text: string, exe: string)
-    val m = emitted(text) match
-        Ok(m) -> m
-        Err(e) -> fail_with(e)
-
-    lower_module(m, exe, b.work, b.tc) match
-        Ok(_) -> ()
-        Err(e) -> fail_with(e)
 
 // The line of a `leaks` report that counts what leaked.
 private leaks_line(report: string) -> string

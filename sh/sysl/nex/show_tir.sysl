@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The printed form of the typed IR: what `nex elaborate` prints and what the elaborator's tests
 // compare against.
 //

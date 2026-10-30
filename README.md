@@ -24,13 +24,27 @@ The port has started: what exists is the command's skeleton and the oracle. `tes
 holds the reference's program corpus — 425 programs, each beside the exact output it must print —
 and six more for units of measure, and every milestone of the port is measured against it.
 
+## Layout
+
+The repository is a sysl workspace of three projects:
+
+- **the library `nex`** at the root (`sh/sysl/nex/`, module `sh.sysl.nex`): the front end both
+  engines share — lexer, parser, elaborator and its checks, typed IR, units of measure, the module
+  loader. `load` and `load_source` in `nex.sysl` take a source to a typed program or its
+  diagnostics. A sysl program depends on it as `github.com/sysl-lang/nex`.
+- **`compiler/`**, the `nex` command: the MLIR emitter, the driver that lowers and links a program,
+  and `nex test`'s runner.
+- **`runtime/`**, the archive every compiled program links.
+
 ```
-sysl build .
+sysl build compiler -o nex
+sysl build-c runtime -o libnex_rt.a
 sysl test .
 ```
 
-Compiling needs LLVM's `mlir-opt`, `mlir-translate` and `clang`, found at `NEX_LLVM_HOME` or else
-Homebrew's `opt/llvm`; without them the toolchain tests skip.
+`nex` finds `libnex_rt.a` beside itself, or at `NEX_RUNTIME`. Compiling needs LLVM's `mlir-opt`,
+`mlir-translate` and `clang`, found at `NEX_LLVM_HOME` or else Homebrew's `opt/llvm`; without them
+the toolchain tests skip.
 
 ## Licence
 

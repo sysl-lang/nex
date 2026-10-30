@@ -7,8 +7,8 @@ static shapes, 1-based indexing and inclusive `..` ranges as in Fortran, the `is
 names, slices as views, `end`-relative indexing with no negative wrap, `inout` borrows,
 reproducible parallel loops and reductions, and C/BLAS/LAPACK/Fortran through `extern`. No part of the
 reference's structure is carried over. The backend is MLIR from the first program compiled, and
-`nex run` compiles and runs. The compiler is the source of truth; an interpreter is a later, gated
-item that executes the compiler's own typed form (below).
+`nex run` compiles and runs. The compiler is the source of truth; the interpreter (M13) executes the
+same typed form, from the same front end, as a sysl library.
 
 This implementation is also a **stressor for sysl**: a real compiler for a real numerical language,
 so every gap it meets in sysl is reported to sysl first (org rule 9) rather than routed around here.
@@ -106,6 +106,21 @@ it. The five MLIR proofs added for the design (below) are each restated there as
 source ──parse──▶ AST ──elaborate──▶ typed IR ──emit──▶ MLIR text ──mlir-opt──▶ LLVM dialect
                                                                      │
        native program ◀──clang -O2 + runtime── LLVM IR ◀──mlir-translate
+```
+
+**The repository is a sysl workspace of three projects.** The root is the library `nex`
+(`sh/sysl/nex/`, module `sh.sysl.nex`): steps 1 and 2 below — the lexer, the parser, the
+elaborator and its checks, the typed IR, units and the module loader — and `nex.sysl`'s `load` and
+`load_source`, which take a source to a typed program or its diagnostics. Both engines are built on
+it, and a sysl program fetches it as `github.com/sysl-lang/nex`. `compiler/` (package `nexc`) is the
+compiled engine and the `nex` command: steps 3 and 4, the driver and the test runner; it depends on
+the library by name. `runtime/` is step 5. `testdata/`, `experiments/`, `bench/` and `docs/` stay at
+the root, and a test finds them from its own file's path, whatever directory the suite runs from.
+
+```
+sysl build compiler -o nex
+sysl build-c runtime -o libnex_rt.a
+sysl test .
 ```
 
 1. **The parser** (`lex`, `parse`, `ast`): the off-side rule and bracket-aware blocks through
@@ -451,8 +466,42 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     summary, filters by a name substring, and keeps running after a test traps. *Exit*: the reference's module loader,
     sysroot, prelude integration and test runner cases ported.
 12. **M12 — performance.** *Exit*: the perf oracle below, met on every kernel.
+13. **M13 — the interpreter.** A second engine in the library: it executes the typed IR the
+    compiler lowers, so there is one front end, and a sysl program embeds it with no toolchain at
+    all. **It never calls C** (user decision): a program declaring an `extern` is refused by it,
+    and runs on the compiled engine alone. The runtime's printing and trap machinery is sysl, and
+    the interpreter calls it as sysl (`runtime/` is a workspace member, depended on by name). For
+    its output to match the compiler's byte for byte, the compiler does not contract floating point
+    (`-ffp-contract=off`) unless nex itself says so, and the reproducible reduction tree (DESIGN
+    §9.2.1) lets a sequential run match a parallel one bit for bit. In stages, each its own item:
+    - **I1 — scalars and control flow**: numbers at every width with their traps, strings,
+      `if`/`match`/loops/`exit`/`cycle`/`return`/`stop`, functions, module-level bindings, `print`.
+    - **I2 — aggregates and closures**: structs, tuples, enums, `match` on them, generic instances,
+      lambdas and local `def`s with their captures.
+    - **I3 — arrays, views and the prelude**: rank-N arrays, slices as views, `inout` windows,
+      element-wise expressions, the array prelude and the linear-algebra prelude, computed natively.
+    - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
+      compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
+      message and `assert_traps`.
+    - **I5 — the embedding API**: load a program and get its diagnostics as values, call a function
+      by name with values, give the program host functions, redirect its output, and turn a trap
+      into an `Err` instead of an abort.
 
-**Later** (DESIGN §15), each its own item once M12 is done, none dropped:
+    **Every program test runs on both engines through one harness** (`compiler/tests_engines.sysl`).
+    `Engine` is `Compiled` or `Interpreted`, and `ENGINES` is the list a test iterates: the corpus
+    categories, the `v2` and `leaks` programs, the programs written into tests, the multi-module
+    projects and `nex test` on its fixtures all go through `runs` (each engine's output),
+    `ran` (the engines must agree), `check_programs` (each run against a `.out`) or `nex_test_on`, so
+    nothing is checked on one engine and not the other. `COMPILED_ONLY` names the programs that call
+    C, each with its reason, and is exact: a program calling C that is missing from it fails, an
+    entry whose program calls no C fails, and so does an entry naming no program or test. What only a
+    compiled program has — its MLIR, its LLVM IR, its link line, Guard Malloc and `leaks` on its
+    executable — is checked on the executable the compiled engine leaves behind, and the tests of
+    emitted IR, fusion, copies and the link stay compiled-only by nature. The interpreted engine joins
+    `ENGINES` with I1. *Exit*: every program test passes on both engines with `ENGINES` holding
+    both, and a fuzzer run of a fixed seed and size gives the same output on each.
+
+**Later** (DESIGN §15), each its own item once M13 is done, none dropped:
 
 - **Structs by value across the FFI** — `@c` structs passed and returned by value, with clang's
   per-target aggregate classification. Kept on the list at the user's request.
@@ -463,16 +512,6 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
 - **Banded and tridiagonal LAPACK solvers**, generalized eigenproblems, `rcond` / `cond`.
 - **Affine temperature units** `degC` / `degF`, with a point type and a difference type.
 - **Unit-polymorphic externs** — units in an `extern` declaration's parameters.
-- **The interpreter.** The compiler stays the source of truth: the interpreter executes the same
-  typed intermediate form the compiler lowers, so there is one front end, and it calls the same
-  runtime (the sysl runtime below) directly. `nex test --interp` runs the tests through it, and
-  `nex test --both` runs every test and every corpus program both ways and byte-diffs the output,
-  plus a fuzzer generating programs for the same diff. For the diff to hold, the compiler does not
-  contract floating point (`-ffp-contract=off`) unless nex itself says so, and the reproducible
-  reduction tree (DESIGN §9.2.1) lets a single-threaded interpreter match parallel runs bit for bit.
-  **Gate**: it is built only if the measured compile + load latency of a typical script exceeds
-  about 0.5 s; otherwise compiling is the interpreter. *Exit*: `nex test --both` is clean over the
-  corpus, the `v2` programs and a fuzzer run of a fixed seed and size.
 - **nex as a 3D modeller's scripting language.** Requirements: fast edit-and-rerun — compile a
   script to a shared library and `dlopen` it, or run it through MLIR's ORC JIT, with a module cache,
   against a stated latency target; small static-shape arrays (`[real; 3]`, `[real; 4, 4]`) held in
@@ -483,8 +522,8 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
   with a transform and a point array, re-runs an edited script within the latency target, and
   refuses a sandboxed script with an `extern`.
 
-**The runtime in sysl.** The runtime is written in sysl: `runtime/`, a project of its own (its own
-`sysl.hocon`, so the compiler's tree stops there), built by `sysl build-c runtime` into
+**The runtime in sysl.** The runtime is written in sysl: `runtime/`, a workspace member of its own
+(its own `sysl.hocon`, so no other tree reaches into it), built by `sysl build-c runtime` into
 `libnex_rt.a` and its header. The three MLIR proofs — 316, 313 and 145 — and `real-spelling` link
 that archive and nothing else, and each prints its `.out` byte for byte. `tests_toolchain.sysl`
 holds it to account: **one `main` and one allocator** — the archive defines neither, so `main` is the
@@ -494,8 +533,8 @@ as MLIR's rank-1 descriptor, and `trap-catch.mlir` prints a stride-2 view from o
 and **catchable traps** — `nex_catch_trap` takes a body's address and runs it under `setjmp`, a
 `nex_trap_*` called two MLIR frames down `longjmp`s back to it (an `@abandons` extern), the catch
 answers true and the program goes on, twice; with nothing catching, the trap writes its message to
-standard error and aborts with what was printed kept. The interpreter later calls this same runtime
-directly.
+standard error and aborts with what was printed kept. The interpreter calls this same runtime as
+sysl, not through C.
 
 **The playground** (its own item, any time after M3). A page in `docs/` with an editor; **Run**
 sends the source to a small service that compiles it with the ordinary pipeline and **runs the

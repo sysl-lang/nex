@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Modules (ref §9, DESIGN §11.5): a program's files, read and put in one text, and the table the
 // elaborator resolves names through.
 //

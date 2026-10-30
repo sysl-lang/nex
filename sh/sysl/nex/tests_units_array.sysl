@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // Arrays whose elements carry a unit (DESIGN §13.6): every element carries the array's one unit, the

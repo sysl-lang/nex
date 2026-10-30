@@ -1,0 +1,17 @@
+module geom
+struct Point
+  x: real
+  y: real
+struct Pair[A, B]
+  fst: A
+  snd: B
+enum Shape =
+  Circle(r: real)
+  Empty
+var count = 0
+val origin = Point(0.0, 0.0)
+def dist2(p: Point, q: Point): real = (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y)
+def twice(x: integer) = x + x
+private def secret() = 1
+private struct Hidden
+  x: real

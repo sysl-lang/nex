@@ -1,4 +1,8 @@
 /nex
+/libnex_rt.a
+/libnex_rt.a.h
+/compiler/nexc
+/runtime/nex-runtime
 /.sysl/
 /docs/_site/
 /docs/public/

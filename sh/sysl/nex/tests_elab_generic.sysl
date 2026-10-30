@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // Generic functions, structs and enums: the instances the elaborator makes of them, which are all the

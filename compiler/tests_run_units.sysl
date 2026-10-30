@@ -4,6 +4,7 @@
 // conversion factor rounded once to each width, a conversion's overflow under `--fpe-trap`, and what
 // units leave for a later part of the compiler.
 
+import nex.sh.sysl.nex.*
 import sysl.text.join
 
 @test("every units-of-measure corpus program prints its .out")

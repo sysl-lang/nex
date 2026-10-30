@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // The exclusivity check of DESIGN §8.3: each rule with a call it refuses, and each disjoint form

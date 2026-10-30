@@ -34,16 +34,16 @@ private tool(program: string, args: []const string, stdin: Stdio = Inherit) -> s
 private runtime_archive(work: string) -> string
     val archive = s"$work/libnex_rt.a"
 
-    tool(compiler(), ["build-c", "runtime", "-o", archive])
+    tool(compiler(), ["build-c", repo("runtime"), "-o", archive])
     archive
 
 // Lower one proof to a native program in `work`, linked against the runtime and `links`, and answer
 // its path.
 private lower(bin: string, work: string, proof: string, links: []const string = []) -> string
-    val pipeline = read_text("experiments/mlir/pipeline.txt").unwrap().trim()
+    val pipeline = read_text(repo("experiments/mlir/pipeline.txt")).unwrap().trim()
     val lowered = s"$work/$proof.llvm.mlir"
 
-    tool(s"$bin/mlir-opt", [s"experiments/mlir/$proof.mlir", s"--pass-pipeline=$pipeline", "-o", lowered])
+    tool(s"$bin/mlir-opt", [repo(s"experiments/mlir/$proof.mlir"), s"--pass-pipeline=$pipeline", "-o", lowered])
 
     // `mlir-translate` reads the lowered module on its stdin and writes LLVM IR to its stdout.
     write_text(s"$work/$proof.ll", tool(s"$bin/mlir-translate", ["--mlir-to-llvmir"],
@@ -65,7 +65,7 @@ private check_proof(proof: string, oracle: string)
     val got = tool(lower(bin, work, proof), [])
 
     remove_dir_all(work).unwrap()
-    assert_eq(got, read_text(oracle).unwrap())
+    assert_eq(got, read_text(repo(oracle)).unwrap())
 
 @test("Newton's square root lowers through the pipeline and prints its corpus output")
 proof_newton()
@@ -119,7 +119,7 @@ proof_blas()
     val got = tool(lower(bin, work, "blas", links.view()), [])
 
     remove_dir_all(work).unwrap()
-    assert_eq(got, read_text("experiments/mlir/blas.out").unwrap())
+    assert_eq(got, read_text(repo("experiments/mlir/blas.out")).unwrap())
 
 @test("a trap inside MLIR-generated frames is caught and resumed by the runtime, and aborts uncaught")
 proof_trap_catch()
@@ -128,7 +128,7 @@ proof_trap_catch()
     val out = capture(lower(bin, work, "trap-catch"), [], stderr = true).unwrap()
 
     remove_dir_all(work).unwrap()
-    assert_eq(out.text, read_text("experiments/mlir/trap-catch.out").unwrap())
+    assert_eq(out.text, read_text(repo("experiments/mlir/trap-catch.out")).unwrap())
     assert_eq(out.err.unwrap_or(""), "trap: complex division by zero\n")
     assert(out.status == Status.Signalled(6), s"${out.status}")
 

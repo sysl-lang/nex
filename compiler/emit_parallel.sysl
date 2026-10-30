@@ -33,6 +33,7 @@
 // product), and combined after the region in the tree the sequential reduction uses, so adding
 // `parallel` never changes a result's bits.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.text.str_builder
 import sh.sysl.parsing.Span

@@ -31,6 +31,7 @@
 // the emitter's. The scalar body reaches its operands through a frame of the chain stack, so the
 // scalar emitter runs unchanged inside a region.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.text.{StrBuilder, str_builder}
 import sh.sysl.parsing.Span

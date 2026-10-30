@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // Structs, tuples, enums and `match`, and what a lambda may capture: the typed IR the elaborator

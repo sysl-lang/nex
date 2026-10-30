@@ -1,0 +1,26 @@
+// The `nex` command: a nex program compiled through MLIR to a native one. The front end is the
+// workspace root's library `nex`; this project is what only the compiled engine needs — the emitter
+// (`emit*.sysl`), the driver that runs `mlir-opt`, `mlir-translate` and `clang` and links the runtime
+// (`driver.sysl`), the test runner behind `nex test` (`test_runner.sysl`) and the command itself
+// (`main.sysl`).
+//
+//     sysl build compiler -o nex
+//
+// The executable finds the runtime archive beside itself (`libnex_rt.a`, built from `../runtime`) or
+// at `NEX_RUNTIME`.
+
+package {
+  name    = "nexc"
+  version = "0.0.1"
+  sysl    = "0.7.9"
+}
+
+dependencies {
+  nex { workspace = true }
+}
+
+// **`os`** to read sources and run the toolchain; **`heap`** for the module text the emitter builds.
+requires {
+  os   = true
+  heap = true
+}

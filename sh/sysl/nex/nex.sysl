@@ -1,0 +1,42 @@
+module sh.sysl.nex
+
+// The library's entry: a nex program from its source to the typed program an engine runs, or the
+// diagnostics that refuse it. Everything both engines need is here — the lexer, the parser, the
+// elaborator and its checks, the typed IR (`tir.sysl`) and its printed form (`show_tir.sysl`) — and
+// nothing either engine does with a typed program is: the compiler emits MLIR from one, and the
+// interpreter runs one.
+//
+//     import nex.sh.sysl.nex.{load, LoadOptions}
+//
+//     load("main.nex") match
+//         Ok(l) -> ... l.program ...
+//         Err(report) -> eprint(report)
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.{Diagnostic, Source}
+
+// A program loaded and elaborated: its typed IR, and the project it was read from, against whose files
+// a diagnostic a later pass gives is rendered (`Project.render`).
+struct Loaded
+    project: Project
+    program: TProgram
+
+// The program whose root module is the file `entry`, with every module it imports (`modules.sysl`),
+// elaborated; or every diagnostic, the loader's or the elaborator's, rendered against its file.
+load(entry: string, opts: LoadOptions = LoadOptions(None, false)) -> Result[Loaded, string]
+    val project = load_project(entry, opts)?
+
+    Ok(Loaded(project, elaborate_project(project)?))
+
+// `src` as a program of one file that imports nothing, elaborated; or every diagnostic the parser or
+// the elaborator gives, with its span in `src`.
+load_source(src: Source) -> Result[TProgram, Buf[Diagnostic]]
+    val p = parse_program(src) match
+        Ok(p) -> p
+        Err(d) ->
+            var ds: Buf[Diagnostic] = buf()
+
+            ds.push(d)
+            return Err(ds)
+
+    elaborate(p)

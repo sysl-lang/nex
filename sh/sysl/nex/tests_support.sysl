@@ -1,9 +1,17 @@
+module sh.sysl.nex
+@tests
+
 // What the test files share: each turns a piece of nex text into a string a test can compare, so a
 // test reads as the input beside the thing it must come to.
 
 import sh.sysl.parsing.source_of
 import sysl.buf.{Buf, buf}
+import sysl.path.{join_all, normalize, parent}
 import sysl.text.join
+
+// A path under the repository's root, found from where this file lies, so that a test reads the same
+// file whatever directory the suite was started from.
+repo(rel: string) -> string = normalize(join_all([parent(__FILE__).unwrap(), "../../..", rel]))
 
 // The tokens of `text` on one line (`K(def) ID(x) NL`), or the lexer's refusal with its position.
 lexed(text: string) -> string

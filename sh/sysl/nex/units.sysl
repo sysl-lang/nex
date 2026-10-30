@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Units of measure as the type checker follows them (DESIGN §13): exact rational arithmetic on scale
 // factors and exponents, the algebra of units, and the questions the elaborator asks of a type that
 // may carry one.

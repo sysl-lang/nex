@@ -6,6 +6,7 @@
 // operator's identity, and combine the block partials in the fixed pairwise tree of §9.2.1. The
 // other reductions are exact, so they run once along the elements.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

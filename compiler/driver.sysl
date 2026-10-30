@@ -1,8 +1,8 @@
 // The driver: a nex source file to a native program, through the toolchain PLAN.md's architecture
 // names. The source is parsed, elaborated and emitted as MLIR text; `mlir-opt` lowers it to the LLVM
-// dialect with the pass list in `experiments/mlir/pipeline.txt`, `mlir-translate` writes LLVM IR, and
-// `clang -O2` compiles that and links it against the runtime archive (`runtime/`, built by
-// `sysl build-c`).
+// dialect with the pass list in the repository's `experiments/mlir/pipeline.txt`, `mlir-translate`
+// writes LLVM IR, and `clang -O2` compiles that and links it against the runtime archive
+// (`runtime/`, built by `sysl build-c`).
 //
 // **A program with a `parallel` construct is lowered through OpenMP, with no flag** (DESIGN §9.5):
 // its module holds an `omp.parallel` region, so the pass list gains `convert-openmp-to-llvm` and
@@ -17,13 +17,14 @@
 // LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm`; the runtime at `NEX_RUNTIME`, else
 // `libnex_rt.a` beside the `nex` executable.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.env.get_or
 import sysl.fs.{exists, make_temp_dir, remove_dir_all, write_text}
 import sysl.process.{Stdio, capture}
 import sysl.text.{from_utf8, replace_all, split}
 
-private val PIPELINE = from_utf8(embed("experiments/mlir/pipeline.txt")).unwrap().trim()
+private val PIPELINE = from_utf8(embed("../experiments/mlir/pipeline.txt")).unwrap().trim()
 
 // The pass the OpenMP pipeline adds, and where: before the function conversion, which would leave
 // the region's operands in types `omp.parallel` does not convert itself.
@@ -66,15 +67,14 @@ private dir_of(file: string) -> string
 
     if out == "" then "/" else out
 
-// The MLIR module for the program whose root module is `file` (`modules.sysl`), or its diagnostics,
-// rendered.
+// The MLIR module for the program whose root module is `file` (the library's `load`), or its
+// diagnostics, rendered.
 mlir_of(file: string, fpe_trap: bool, opts: LoadOptions = LoadOptions(None, false)) -> Result[string, string]
-    val project = load_project(file, opts)?
-    val t = elaborate_project(project)?
+    val l = load(file, opts)?
 
-    emit_program(t, fpe_trap) match
+    emit_program(l.program, fpe_trap) match
         Ok(text) -> Ok(text)
-        Err(ds) -> Err(project.render(ds))
+        Err(ds) -> Err(l.project.render(ds))
 
 // The program in `file` compiled to a native program at `out`, its intermediate files in `work`, and
 // linked with the command line's `links` (`-L dir`, `-l lib`).

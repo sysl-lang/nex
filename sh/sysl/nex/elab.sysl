@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The elaborator: the tree the parser builds to the typed IR of `tir.sysl`.
 //
 // **It works on demand.** The top level is first collected, every name once, so a declaration may

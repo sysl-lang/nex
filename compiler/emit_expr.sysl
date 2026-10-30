@@ -3,6 +3,7 @@
 // `ex` answers the SSA value an expression computes, or `""` for one that has none — a `void`
 // statement, or one that never yields (`return`, `exit`, `stop`), after which the block has ended.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.fmt.hex
 import sh.sysl.parsing.Span

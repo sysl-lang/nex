@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The effect summary of every function and lambda (DESIGN §8.3, §9.4): the module-level `var`s it
 // reads and writes, the I/O it does, whether it starts a `parallel` construct, and for a lambda the
 // locals of the functions around it that it reads and writes. **Each summary is transitive**: it

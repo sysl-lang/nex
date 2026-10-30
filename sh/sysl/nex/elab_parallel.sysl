@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Parallelism (DESIGN §9): a `parallel for` with its `reduce` clauses and the contributions in its
 // body, and the `parallel` expressions of §9.3.
 //

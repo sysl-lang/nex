@@ -36,6 +36,7 @@
 // The program's C `main` sets the arguments aside, initializes the module-level bindings in the order
 // their initializers need, and calls `@"n.main"`.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.text.{StrBuilder, str_builder}
 import sh.sysl.parsing.{Diagnostic, Span, error}

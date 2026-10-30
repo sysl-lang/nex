@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The typed IR of parallelism: the nodes a `TParallel` holds (DESIGN §9).
 //
 // **A `parallel for` says what each iteration owns and how it reduces.** Its header is one index

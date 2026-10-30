@@ -13,6 +13,7 @@
 // bound before the usual check, and `end` adds it back; read as a value the view is its source, so
 // nothing about it is allocated or copied (DESIGN §6.4).
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The tree the parser builds: a nex program as it was written, before any name is resolved or any
 // type is known.
 //

@@ -4,6 +4,7 @@
 // one dimension is one multiplication by the ratio of their exact factors, rounded once, here, to the
 // operand's width.
 
+import nex.sh.sysl.nex.*
 import sh.sysl.parsing.Span
 import sysl.buf.{Buf, buf}
 import sysl.math.max

@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Literate nex (spec §2.9): a `.lnex` file is Markdown whose indented blocks are the program. Prose
 // is blanked rather than removed, so every line of the program is on the line of the document it was
 // written on.

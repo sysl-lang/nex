@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The aggregates: structs, enums and tuples, the `match` that takes an enum apart, the destructuring
 // binding that takes a tuple apart, and the rules on what a lambda may capture.
 //

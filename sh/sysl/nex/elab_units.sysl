@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Units of measure in the elaborator (DESIGN §13): `unit` declarations and the prelude's units,
 // a unit spelt in a type or after a value, and the rules each operator, conversion and prelude
 // function follows for a value that carries one.

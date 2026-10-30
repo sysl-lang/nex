@@ -12,6 +12,7 @@
 // **An `inout` form works where its arrays lie**: it goes through a wrapper function, as an `extern`
 // call with `inout` windows does (`emit_extern.sysl`), and answers LAPACK's `info` without trapping.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

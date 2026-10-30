@@ -1,0 +1,66 @@
+module sh.sysl.nex
+@tests
+
+// The linear-algebra prelude in the elaborator (DESIGN §10.5, §13.6): the types and units it gives
+// the linear-algebra functions and what it refuses. The routines the compiler calls are
+// `compiler/tests_blas.sysl`'s.
+
+import sysl.text.split
+
+private val M = "def main() = ()\n"
+
+// The first line of what `text` elaborates to: its first function.
+private first(text: string) -> string = split(elaborated(text + "\n" + M), "\n")[0]
+
+@test("the linear-algebra functions are typed by rule: static extents carry, an integer matrix is real64, two operands meet")
+lapack_types()
+    assert_eq(first("def f(a: [real; 3, 2], b: [real; 3]) = lstsq(a, b)"), "(def f ((a#0 [real64; 3, 2]) (b#1 [real64; 3])) [real64; 2] (lstsq:[real64; 2] a#0 b#1))")
+    assert_eq(first("def f(i: [integer; 2, 2]) = solve(i, [1, 2])"), "(def f ((i#0 [int64; 2, 2])) [real64; 2] (solve:[real64; 2] (promote:[real64; 2, 2] i#0) (promote:[real64] (array:[int64] 1 2))))")
+    assert_eq(first("def f(a: [real; 3, 2]) = (lu(a), qr(a), svd(a))"), "(def f ((a#0 [real64; 3, 2])) (([real64; 3, 2], [real64; 2, 2], [int64; 3]), ([real64; 3, 2], [real64; 2, 2]), ([real64; 3, 2], [real64; 2], [real64; 2, 2])) (tuple:(([real64; 3, 2], [real64; 2, 2], [int64; 3]), ([real64; 3, 2], [real64; 2, 2]), ([real64; 3, 2], [real64; 2], [real64; 2, 2])) (lu:([real64; 3, 2], [real64; 2, 2], [int64; 3]) a#0) (qr:([real64; 3, 2], [real64; 2, 2]) a#0) (svd:([real64; 3, 2], [real64; 2], [real64; 2, 2]) a#0)))")
+    assert_eq(first("def f(c: [complex[real32]; :, :]) = (svdvals(c), eig(c), eigh(c), eigvals(c))"), "(def f ((c#0 [complex[real32]; :, :])) ([real32], ([complex[real32]], [complex[real32]; :, :]), ([real32], [complex[real32]; :, :]), [complex[real32]]) (tuple:([real32], ([complex[real32]], [complex[real32]; :, :]), ([real32], [complex[real32]; :, :]), [complex[real32]]) (svdvals:[real32] c#0) (eig:([complex[real32]], [complex[real32]; :, :]) c#0) (eigh:([real32], [complex[real32]; :, :]) c#0) (eigvals:[complex[real32]] c#0)))")
+    assert_eq(first("def f(a: [real; 2, 2], b: [real32; 2, 2]) = solve(a, b)"), "(def f ((a#0 [real64; 2, 2]) (b#1 [real32; 2, 2])) [real64; 2, 2] (solve:[real64; 2, 2] a#0 (promote:[real64; 2, 2] b#1)))")
+
+@test("units follow DESIGN §13.6: solve divides, inv inverts, det takes the order's power, chol the square root, the values keep it")
+lapack_units()
+    assert_eq(first("def f(k: [real<N/m>; 2, 2], m: [real<N/m>; :, :]) = (det(k), chol(k, upper = true), inv(m), solve(m, [1.0<N>, 2.0<N>]))"),
+        "(def f ((k#0 [real64<N/m>; 2, 2]) (m#1 [real64<N/m>; :, :])) (real64<N^2/m^2>, [real64<N^(1/2)/m^(1/2)>; 2, 2], [real64<m/N>; :, :], [real64<m>]) (tuple:(real64<N^2/m^2>, [real64<N^(1/2)/m^(1/2)>; 2, 2], [real64<m/N>; :, :], [real64<m>]) (det:real64<N^2/m^2> k#0) (chol:[real64<N^(1/2)/m^(1/2)>; 2, 2] k#0 true) (inv:[real64<m/N>; :, :] m#1) (solve:[real64<m>] m#1 (array:[real64<N>] 1.0<N> 2.0<N>))))")
+    assert_eq(first("def f(k: [real<Pa>; :, :]) = (lu(k), qr(k), svd(k), eigh(k), eig(k), lstsq(k, [1.0<N>]))"),
+        "(def f ((k#0 [real64<Pa>; :, :])) (([real64; :, :], [real64<Pa>; :, :], [int64]), ([real64; :, :], [real64<Pa>; :, :]), ([real64; :, :], [real64<Pa>], [real64; :, :]), ([real64<Pa>], [real64; :, :]), ([complex[real64]<Pa>], [complex[real64]; :, :]), [real64<N/Pa>]) (tuple:(([real64; :, :], [real64<Pa>; :, :], [int64]), ([real64; :, :], [real64<Pa>; :, :]), ([real64; :, :], [real64<Pa>], [real64; :, :]), ([real64<Pa>], [real64; :, :]), ([complex[real64]<Pa>], [complex[real64]; :, :]), [real64<N/Pa>]) (lu:([real64; :, :], [real64<Pa>; :, :], [int64]) k#0) (qr:([real64; :, :], [real64<Pa>; :, :]) k#0) (svd:([real64; :, :], [real64<Pa>], [real64; :, :]) k#0) (eigh:([real64<Pa>], [real64; :, :]) k#0) (eig:([complex[real64]<Pa>], [complex[real64]; :, :]) k#0) (lstsq:[real64<N/Pa>] k#0 (array:[real64<N>] 1.0<N>))))")
+    // N/Pa is m²: the unit is one, whatever its spelling.
+    assert_eq(refused("def f(k: [real<Pa>; :, :]): [real<m^2>] = lstsq(k, [1.0<N>])\n" + M), "ok")
+    assert_eq(refused("def f(a: [real<m>; :, :]) = det(a)\n" + M), "error: `det` of a matrix in m is in m to the power of the matrix's order, so the order must be static, and this one's is not; take `det(strip(A))` @1:29")
+    assert_eq(refused("def f(a: [real<mm>; 2, 2]) = chol(a)\n" + M), "error: the scale of this unit has no exact value: it is too large to hold, or the root of a scale that is not a perfect power @1:30")
+    assert_eq(refused("def f(a: [real<m>; 2, 2]) = det(a)\n" + M), "ok")
+
+@test("the inout forms borrow their arrays as they are and answer an integer")
+lapack_inout_types()
+    assert_eq(first("def f(a: inout [real; :, :], p: inout [int32], t: inout [real], b: inout [real; :, :]) = (lu_inplace(a, p), chol_inplace(a[1..2, 1..2], upper = true), qr_inplace(a, t), solve_inplace(a, p, b))"),
+        "(def f ((a#0 inout [real64; :, :]) (p#1 inout [int32]) (t#2 inout [real64]) (b#3 inout [real64; :, :])) (int64, int64, int64, int64) (tuple:(int64, int64, int64, int64) (lu_inplace:int64 (inout a#0) (inout p#1)) (chol_inplace:int64 (inout (index:[real64; :, :] a#0 (1 .. 2) (1 .. 2))) true) (qr_inplace:int64 (inout a#0) (inout t#2)) (solve_inplace:int64 (inout a#0) (inout p#1) (inout b#3))))")
+
+@test("a linear-algebra call is refused where its arguments say nothing LAPACK takes")
+lapack_refusals()
+    assert_eq(refused("def main() = print(solve([1.0, 2.0], [1.0]))\n"), "error: `solve` takes a matrix (rank 2); this has rank 1 @1:26")
+    assert_eq(refused("def f(a: [real; 3, 2], b: [real; 3]) = solve(a, b)\n" + M), "error: `solve` takes a square matrix; this is 3 × 2 @1:46")
+    assert_eq(refused("def f(a: [real; 2, 2], b: [real; 3]) = solve(a, b)\n" + M), "error: `solve` needs a right-hand side with the matrix's 2 rows; it has 3 @1:40")
+    assert_eq(refused("def f(a: [real; :, :], b: [real; :, :, :]) = solve(a, b)\n" + M), "error: `solve`'s right-hand side is a vector or a matrix of right-hand sides; this has rank 3 @1:55")
+    assert_eq(refused("def f(a: [real16; :, :]) = inv(a)\n" + M), "error: `inv` works in real32, real64, complex[real32] and complex[real64], as LAPACK does; this is [real16; :, :] @1:32")
+    assert_eq(refused("def f(a: [bool; :, :], b: [bool]) = solve(a, b)\n" + M), "error: `solve` takes numbers; these are [bool; :, :] and [bool] @1:37")
+    assert_eq(refused("def f(a: [real; :, :], b: [string]) = lstsq(a, b)\n" + M), "error: `lstsq` takes numbers; these are [real; :, :] and [string] @1:39")
+    assert_eq(refused("def f(a: [real; :, :]) = inv(a, upper = true)\n" + M), "error: `inv` takes no named arguments @1:33")
+    assert_eq(refused("def f(a: [real; :, :]) = chol(a, lower = true)\n" + M), "error: `chol` takes one named argument, `upper =` @1:34")
+    assert_eq(refused("def f(a: [real; :, :]) = chol(a, upper = 1)\n" + M), "error: `upper` must be bool, but this is int64 @1:42")
+    assert_eq(refused("def f(a: [real; :, :]) = solve(a)\n" + M), "error: `solve` takes a matrix and a right-hand side @1:26")
+    assert_eq(refused("def f() = inv(3.0)\n" + M), "error: `inv` takes an array; this is real64 @1:15")
+    assert_eq(refused("def f(a: [real; 3, 2]) = eig(a)\n" + M), "error: `eig` takes a square matrix; this is 3 × 2 @1:30")
+    assert_eq(refused("def f(a: [real; 3, 2]) = svd(a)\n" + M), "ok")
+
+@test("an inout form is refused an array it cannot factor where it lies")
+lapack_inout_refusals()
+    assert_eq(refused("def f(a: inout [real; :, :], p: inout [integer]) = lu_inplace(a, p)\n" + M), "error: `lu_inplace` takes `ipiv` as a vector of int32, borrowed as it is; this is [integer] @1:66")
+    assert_eq(refused("def f(a: inout [real<m>; :, :], p: inout [int32]) = lu_inplace(a, p)\n" + M), "error: `lu_inplace` overwrites the matrix with factors that do not share its unit, so it takes an array without one; this is [real<m>; :, :] @1:64")
+    assert_eq(refused("def f(a: [real; :, :], p: inout [int32]) = lu_inplace(a + a, p)\n" + M), "error: an `inout` argument is a variable the callee can write to @1:55")
+    assert_eq(refused("def f(a: inout [real16; :, :]) = chol_inplace(a)\n" + M), "error: `chol_inplace` takes the matrix as a matrix of real32, real64, complex[real32] or complex[real64], borrowed as it is; this is [real16; :, :] @1:47")
+    assert_eq(refused("def f(a: inout [real; 2, 3]) = chol_inplace(a)\n" + M), "error: `chol_inplace` takes a square matrix; this is 2 × 3 @1:45")
+    assert_eq(refused("def f(a: inout [real; :, :], t: inout [real32]) = qr_inplace(a, t)\n" + M), "error: `qr_inplace` takes `tau` as a vector of real64, borrowed as it is; this is [real32] @1:65")
+    assert_eq(refused("def f(a: inout [real; :, :], p: inout [int32]) = solve_inplace(a, p)\n" + M), "error: `solve_inplace` takes a matrix, its pivots `ipiv` and the right-hand sides @1:50")
+    assert_eq(refused("def f(a: inout [real; :, :], p: inout [int32], b: inout [real; :, :, :]) = solve_inplace(a, p, b)\n" + M), "error: `solve_inplace` takes the right-hand side as a vector or a matrix of real64, borrowed as it is; this is [real; :, :, :] @1:96")

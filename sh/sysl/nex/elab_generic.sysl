@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // Generic functions, structs and enums (DESIGN §2.6, §3.4), and their monomorphization.
 //
 // **A generic function's body is checked once, against its constraints**, whether or not it is

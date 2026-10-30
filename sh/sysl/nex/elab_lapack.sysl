@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The prelude's linear algebra (DESIGN §10.5), typed: the value forms `solve`, `lstsq`, `inv`, `det`,
 // `lu`, `chol`, `qr`, `eigvals`, `eig`, `eigh`, `svd` and `svdvals`, and the `inout` forms
 // `solve_inplace`, `lu_inplace`, `chol_inplace` and `qr_inplace`.

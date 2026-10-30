@@ -6,6 +6,7 @@
 // is reported and the next run. A test passes when its process ends with status 0. What a passing
 // test prints is not shown; a failing one is reported by its trap's message.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, remove_dir_all}
 import sysl.process.{Output, Status, capture}
@@ -20,12 +21,12 @@ struct TestRun
 // The tests of the project whose root module is `file` whose names contain `filter`, built and run;
 // or why they could not be built.
 run_tests(file: string, prelude: Option[string], filter: string, tc: Toolchain, fpe_trap: bool) -> Result[TestRun, string]
-    val project = load_project(file, LoadOptions(prelude, true))?
-    val t = elaborate_project(project)?
+    val l = load(file, LoadOptions(prelude, true))?
+    val t = l.program
 
     val mlir = emit_program(t, fpe_trap) match
         Ok(m) -> m
-        Err(ds) -> return Err(project.render(ds))
+        Err(ds) -> return Err(l.project.render(ds))
 
     val work = make_temp_dir("nex-test").map_err((e) -> s"nex: cannot make a temporary directory: $e")?
     val exe = s"$work/tests"

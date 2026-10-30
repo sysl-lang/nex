@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // The typed IR of arrays and the diagnostics the elaborator gives for them (DESIGN §3–§7), each

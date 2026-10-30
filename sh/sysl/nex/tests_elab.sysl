@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // The typed IR the elaborator builds, in the form `nex elaborate` prints, and the diagnostics it

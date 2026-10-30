@@ -1,5 +1,6 @@
 // `permute`, which rearranges an array's axes (DESIGN §4.3), and `assert_approx` (§4.3).
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

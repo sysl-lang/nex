@@ -1,3 +1,4 @@
+module sh.sysl.nex
 @tests
 
 // Every program of the reference corpus lexes and parses. The corpus was written for the reference
@@ -9,7 +10,7 @@ import sysl.buf.{Buf, buf}
 import sysl.fs.read_text
 import sysl.text.{from_utf8, split}
 
-private val INDEX = from_utf8(embed("testdata/corpus/index.tsv")).unwrap()
+private val INDEX = from_utf8(embed("../../../testdata/corpus/index.tsv")).unwrap()
 
 private names() -> Buf[string]
     var out: Buf[string] = buf()
@@ -24,7 +25,7 @@ corpus_lexes()
     var count = 0
 
     for name in names()
-        val src = source_of(name, read_text(s"testdata/corpus/${name}.nex").unwrap())
+        val src = source_of(name, read_text(repo(s"testdata/corpus/${name}.nex")).unwrap())
 
         lex(src) match
             Ok(_) -> count += 1
@@ -55,7 +56,7 @@ corpus_scalar_programs_elaborate()
     var waiting = 0
 
     for name in scalar_names()
-        val src = source_of(name, read_text(s"testdata/corpus/${name}.nex").unwrap())
+        val src = source_of(name, read_text(repo(s"testdata/corpus/${name}.nex")).unwrap())
         val p = parse_program(src).unwrap()
 
         elaborate(p) match
@@ -84,7 +85,7 @@ corpus_array_programs_elaborate()
         for c in ARRAY_CATEGORIES
             if cols[1] != c then continue
 
-            val src = source_of(cols[0], read_text(s"testdata/corpus/${cols[0]}.nex").unwrap())
+            val src = source_of(cols[0], read_text(repo(s"testdata/corpus/${cols[0]}.nex")).unwrap())
 
             elaborate(parse_program(src).unwrap()) match
                 Ok(_) -> clean += 1
@@ -111,7 +112,7 @@ corpus_aggregate_programs_elaborate()
         if !wanted then continue
 
         val name = cols[0]
-        val src = source_of(name, read_text(s"testdata/corpus/${name}.nex").unwrap())
+        val src = source_of(name, read_text(repo(s"testdata/corpus/${name}.nex")).unwrap())
 
         elaborate(parse_program(src).unwrap()) match
             Ok(_) -> clean += 1
@@ -135,7 +136,7 @@ corpus_view_programs_elaborate()
         for c in VIEW_CATEGORIES
             if cols[1] != c then continue
 
-            val src = source_of(cols[0], read_text(s"testdata/corpus/${cols[0]}.nex").unwrap())
+            val src = source_of(cols[0], read_text(repo(s"testdata/corpus/${cols[0]}.nex")).unwrap())
 
             elaborate(parse_program(src).unwrap()) match
                 Ok(_) -> clean += 1
@@ -161,7 +162,7 @@ corpus_generic_programs_elaborate()
 
         if !wanted then continue
 
-        val src = source_of(cols[0], read_text(s"testdata/corpus/${cols[0]}.nex").unwrap())
+        val src = source_of(cols[0], read_text(repo(s"testdata/corpus/${cols[0]}.nex")).unwrap())
 
         elaborate(parse_program(src).unwrap()) match
             Ok(_) -> clean += 1
@@ -181,7 +182,7 @@ corpus_units_programs_elaborate()
 
         if cols[1] != "units of measure" then continue
 
-        val src = source_of(cols[0], read_text(s"testdata/corpus/${cols[0]}.nex").unwrap())
+        val src = source_of(cols[0], read_text(repo(s"testdata/corpus/${cols[0]}.nex")).unwrap())
 
         elaborate(parse_program(src).unwrap()) match
             Ok(_) -> clean += 1
@@ -194,7 +195,7 @@ corpus_parses()
     var count = 0
 
     for name in names()
-        val src = source_of(name, read_text(s"testdata/corpus/${name}.nex").unwrap())
+        val src = source_of(name, read_text(repo(s"testdata/corpus/${name}.nex")).unwrap())
 
         parse_program(src) match
             Ok(_) -> count += 1

@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The typed IR of arrays: the nodes a `TArray` holds (DESIGN §3–§7).
 //
 // **Each node says what it does to every element and nothing is left to the type to imply.** An

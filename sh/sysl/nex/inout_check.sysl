@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The exclusivity check of DESIGN §8.3: for the duration of a call, an `inout` argument is the only
 // access to the place it borrows. It is a pass over the finished typed IR, so a call can be judged
 // by its callee's effect summary (`effects.sysl`).

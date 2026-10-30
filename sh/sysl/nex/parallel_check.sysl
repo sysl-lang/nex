@@ -1,3 +1,5 @@
+module sh.sysl.nex
+
 // The checker of DESIGN §9.4: what a parallel body may do, proved over the typed IR once every
 // function is elaborated, so a call can be judged by the callee's effect summary (`effects.sysl`).
 //

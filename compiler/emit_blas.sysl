@@ -17,6 +17,7 @@
 // A program that calls BLAS or LAPACK says so before its module (`// nex.blas`), and the driver
 // links the platform's BLAS.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

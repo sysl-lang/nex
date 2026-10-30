@@ -1,13 +1,14 @@
 @tests
 
-// Programs compiled and run: the source through the elaborator, the emitter and the toolchain to a
-// native program, which must print its expected output byte for byte (PLAN.md's oracle). The corpus
-// categories of scalar programs and the `testdata/v2/` programs are each one test; the behaviours
-// no corpus program reaches — a trap nothing catches, `stop`, the program's arguments, standard
-// error, `--fpe-trap` — are tests of their own, on standard error and the exit status too.
+// Programs run on every engine (`tests_engines.sysl`), which must print their expected output byte for
+// byte (PLAN.md's oracle). The corpus categories of scalar programs and the `testdata/v2/` programs
+// are each one test; the behaviours no corpus program reaches — a trap nothing catches, `stop`, the
+// program's arguments, standard error, `--fpe-trap` — are tests of their own, on standard error and
+// the exit status too. What the emitter writes and what the `nex` command does are compiled-only.
 //
 // LLVM is found as the driver finds it; without `mlir-opt` every test skips.
 
+import nex.sh.sysl.nex.*
 import sh.sysl.parsing.{Diagnostic, Source, source_of}
 import sysl.buf.{Buf, buf}
 import sysl.env.get_or
@@ -16,8 +17,8 @@ import sysl.process.{Output, Status, Var, capture}
 import sysl.testing.{compiler, skip}
 import sysl.text.{from_utf8, join, split}
 
-private val CORPUS_INDEX = from_utf8(embed("testdata/corpus/index.tsv")).unwrap()
-private val V2_INDEX = from_utf8(embed("testdata/v2/index.tsv")).unwrap()
+private val CORPUS_INDEX = from_utf8(embed("../testdata/corpus/index.tsv")).unwrap()
+private val V2_INDEX = from_utf8(embed("../testdata/v2/index.tsv")).unwrap()
 
 // The categories PLAN.md's M3 counts.
 private val M3_CATEGORIES = ["top-level bindings + print", "scalar arithmetic", "comparison + logical", "chained comparison", "chained comparisons", "control flow", "blocks + scoping", "top-level initialization", "compound assignment", "functions", "string interpolation", "const fn calls", "inout by-ref"]
@@ -34,7 +35,7 @@ bench() -> Bench
 
     val work = make_temp_dir("nex-run").unwrap()
     val archive = s"$work/libnex_rt.a"
-    val built = capture(compiler(), ["build-c", "runtime", "-o", archive], stderr = true).unwrap()
+    val built = capture(compiler(), ["build-c", repo("runtime"), "-o", archive], stderr = true).unwrap()
 
     assert(built.status.ok(), built.err.unwrap_or(""))
     Bench(work, Toolchain(bin, archive))
@@ -43,11 +44,7 @@ bench() -> Bench
 emitted(text: string, fpe_trap: bool = false) -> Result[string, string]
     val src = source_of("t.nex", text)
 
-    val p = parse_program(src) match
-        Ok(p) -> p
-        Err(d) -> return Err(s"error: ${d.message} @${src.locate(d.span.start)}")
-
-    val t = elaborate(p) match
+    val t = load_source(src) match
         Ok(t) -> t
         Err(ds) -> return Err(lines(ds, src))
 
@@ -67,7 +64,7 @@ private lines(ds: Buf[Diagnostic], src: Source) -> string
 // that find it.
 ffi_fixture(b: Bench) -> Buf[string]
     val obj = s"${b.work}/nexffi.o"
-    val cc = capture(s"${b.tc.llvm_bin}/clang", ["-O2", "-c", "testdata/ffi/nexffi.c", "-o", obj], stderr = true).unwrap()
+    val cc = capture(s"${b.tc.llvm_bin}/clang", ["-O2", "-c", repo("testdata/ffi/nexffi.c"), "-o", obj], stderr = true).unwrap()
 
     assert(cc.status.ok(), cc.err.unwrap_or(""))
 
@@ -94,24 +91,10 @@ fortran_fixture(b: Bench) -> bool
     val g = gfortran() match
         Some(g) -> g
         None -> return false
-    val out = capture(g, ["-O2", "-shared", "testdata/ffi/nexfort.f90", "-o", s"${b.work}/libnexfort.dylib"], stderr = true).unwrap()
+    val out = capture(g, ["-O2", "-shared", repo("testdata/ffi/nexfort.f90"), "-o", s"${b.work}/libnexfort.dylib"], stderr = true).unwrap()
 
     assert(out.status.ok(), out.err.unwrap_or(""))
     true
-
-// `text` compiled and run with `args`, linked with `links`: what it wrote and how it ended.
-ran(b: Bench, text: string, args: []const string = [], fpe_trap: bool = false, links: []const string = []) -> Output
-    val m = emitted(text, fpe_trap) match
-        Ok(m) -> m
-        Err(e) -> fail_with(e)
-
-    val exe = s"${b.work}/program"
-
-    lower_module(m, exe, b.work, b.tc, links) match
-        Ok(_) -> ()
-        Err(e) -> fail_with(e)
-
-    capture(exe, args, stderr = true).unwrap()
 
 fail_with(message: string) -> never
     assert(false, message)
@@ -120,52 +103,26 @@ fail_with(message: string) -> never
 finish(b: Bench)
     remove_dir_all(b.work).unwrap()
 
-// Whether every diagnostic says its construct waits on a later part of the compiler.
-private only_later(diagnostics: string) -> bool
-    for line in split(diagnostics, "\n")
-        if !line.contains("is not compiled yet") && !line.contains("is not elaborated yet") then return false
-
-    true
-
 private in_categories(cols: []const string, categories: []const string) -> bool
     for c in categories
         if cols[1] == c then return true
 
     false
 
-// What the corpus programs of `categories` did: how many printed their `.out`, the ones that failed
-// and why, and the ones that wait on a part of the compiler not built yet.
-struct CorpusRun
-    passed: int
-    failed: Buf[string]
-    waiting: Buf[string]
-
-corpus_run(categories: []const string) -> CorpusRun
+// The corpus programs of `categories` run on every engine: how many printed their `.out`, the ones
+// that failed and why, and the ones that wait on a part of the compiler not built yet.
+corpus_run(categories: []const string) -> Checked
     val b = bench()
-    var r = CorpusRun(0, buf(), buf())
+    var names: Buf[string] = buf()
 
     for line in split(CORPUS_INDEX, "\n")
         if line.len == 0 || line.starts_with("file\t") then continue
 
         val cols = split(line, "\t")
 
-        if !in_categories(cols, categories) then continue
+        if in_categories(cols, categories) then names.push(cols[0])
 
-        val name = cols[0]
-        val text = read_text(s"testdata/corpus/$name.nex").unwrap()
-
-        emitted(text) match
-            Err(e) -> if only_later(e) then r.waiting.push(name) else r.failed.push(s"$name: $e")
-            Ok(m) ->
-                val exe = s"${b.work}/program"
-
-                lower_module(m, exe, b.work, b.tc) match
-                    Err(e) -> r.failed.push(s"$name: $e")
-                    Ok(_) ->
-                        val out = capture(exe, [], stderr = true).unwrap()
-
-                        if out.status.ok() && out.text == read_text(s"testdata/corpus/$name.out").unwrap() then r.passed += 1
-                        else r.failed.push(s"$name: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+    val r = check_programs(b, "corpus", names.view())
 
     finish(b)
     r
@@ -184,24 +141,21 @@ run_v2()
     val links = ffi_fixture(b)
     // Without gfortran the programs calling Fortran are left out; `tests_ffi.sysl` says so.
     val fortran = fortran_fixture(b)
-    var passed = 0
-    var failed: Buf[string] = buf()
+    var names: Buf[string] = buf()
 
     for line in split(V2_INDEX, "\n")
         if line.len == 0 || line.starts_with("file\t") then continue
 
         val name = split(line, "\t")[0]
 
-        if !fortran && name.contains("-ffi-fortran-") then continue
+        if fortran || !name.contains("-ffi-fortran-") then names.push(name)
 
-        val out = ran(b, read_text(s"testdata/v2/$name.nex").unwrap(), links = links.view())
-
-        if out.status.ok() && out.text == read_text(s"testdata/v2/$name.out").unwrap() then passed += 1
-        else failed.push(s"$name: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+    val r = check_programs(b, "v2", names.view(), links = links.view())
 
     finish(b)
-    assert(failed.len() == 0, join(failed.view(), "\n"))
-    assert_eq(passed, if fortran then 51 else 47)
+    assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
+    assert_eq(join(r.waiting.view(), "\n"), "")
+    assert_eq(r.passed, if fortran then 51 else 47)
 
 @test("a trap nothing catches writes its message to standard error after what was printed, and aborts")
 run_uncaught_trap()
@@ -354,7 +308,7 @@ run_for_header_once()
 run_command()
     val b = bench()
     val nex = s"${b.work}/nex"
-    val built = capture(compiler(), ["build", ".", "-o", nex], stderr = true).unwrap()
+    val built = capture(compiler(), ["build", repo("compiler"), "-o", nex], stderr = true).unwrap()
 
     assert(built.status.ok(), built.err.unwrap_or(""))
 

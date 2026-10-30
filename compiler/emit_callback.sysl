@@ -20,6 +20,7 @@
 // loads each into the frame, a `logical` as its 4 bytes, and returns a `logical` result as 4 bytes. A
 // C extern named for one is called through its trampoline, since C takes the values themselves.
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 

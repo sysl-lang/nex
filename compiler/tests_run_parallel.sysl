@@ -14,7 +14,7 @@ import sysl.process.{Output, Var, capture}
 import sysl.testing.skip
 import sysl.text.{from_utf8, join, replace_all, split}
 
-private val V2_PARALLEL_INDEX = from_utf8(embed("testdata/v2/index.tsv")).unwrap()
+private val V2_PARALLEL_INDEX = from_utf8(embed("../testdata/v2/index.tsv")).unwrap()
 
 // The thread counts every parallel program runs at: one, a power of two and a prime that divides
 // no block evenly.
@@ -31,7 +31,7 @@ private parallel_programs() -> Buf[string]
 
     out
 
-// `text` compiled into `exe`.
+// `text` compiled into `exe`, for what only its executable is asked.
 private build(b: Bench, text: string, exe: string)
     val m = emitted(text) match
         Ok(m) -> m
@@ -41,39 +41,42 @@ private build(b: Bench, text: string, exe: string)
         Ok(_) -> ()
         Err(e) -> fail_with(e)
 
-// `exe` run with `OMP_NUM_THREADS` set to `threads`.
-private run_with(exe: string, threads: string) -> Output = capture(exe, [], env = [Var("OMP_NUM_THREADS", threads)], stderr = true).unwrap()
+// `text` run on every engine (`tests_engines.sysl`), the compiled one at each of `threads`: what each
+// run wrote and how it ended. The compiled executable is left at `executable(b, case)`.
+private outputs(b: Bench, case: string, text: string, threads: []const string = THREADS[..]) -> Buf[Output]
+    var out: Buf[Output] = buf()
+
+    for r in runs(b, case, text, threads = threads)
+        r.out match
+            Ok(o) -> out.push(o)
+            Err(e) -> fail_with(s"${r.on}: $e")
+
+    out
 
 @test("every parallel program of testdata/v2 prints its .out, bit for bit, on 1, 2 and 7 threads")
 par_run_thread_counts()
     val b = bench()
-    var failed: Buf[string] = buf()
     val names = parallel_programs()
-
-    for name in names
-        val exe = s"${b.work}/$name"
-        val expected = read_text(s"testdata/v2/$name.out").unwrap()
-
-        build(b, read_text(s"testdata/v2/$name.nex").unwrap(), exe)
-
-        for t in THREADS
-            val out = run_with(exe, t)
-
-            if !out.status.ok() || out.text != expected then failed.push(s"$name on $t threads: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+    val r = check_programs(b, "v2", names.view(), threads = THREADS[..])
 
     finish(b)
-    assert(failed.len() == 0, join(failed.view(), "\n"))
+    assert(r.failed.len() == 0 && r.waiting.len() == 0, join(r.failed.view(), "\n"))
+    assert_eq(r.passed, 5)
     assert_eq(names.len(), 5)
 
 @test("each print in a parallel body writes its whole line at once, in any order")
 par_run_atomic_lines()
     val b = bench()
-    val exe = s"${b.work}/lines"
     val tail = "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789"
 
-    build(b, "def main() =\n  parallel for i in 1..400\n    print(s\"line ${i} " + tail + " ${i * 3}\")\n    eprint(s\"err ${i} " + tail + "\")\n  print(\"after\")\n", exe)
+    for out in outputs(b, "lines", "def main() =\n  parallel for i in 1..400\n    print(s\"line ${i} " + tail + " ${i * 3}\")\n    eprint(s\"err ${i} " + tail + "\")\n  print(\"after\")\n", ["7"])
+        atomic_lines(out, tail)
 
-    val out = run_with(exe, "7")
+    finish(b)
+
+// The output of 400 iterations each printing one line and writing one to standard error, then
+// `after`: every line whole and once, in any order.
+private atomic_lines(out: Output, tail: string)
     val lines = split(out.text, "\n")
     var seen: Buf[bool] = buf()
 
@@ -89,7 +92,6 @@ par_run_atomic_lines()
         if parts.len != 4 || parts[0] != "line" || parts[2] != tail || i < 1 || i > 400 || parts[3] != s"${i * 3}" || seen[i] then bad.push(lines[k])
         else seen.set(i, true)
 
-    finish(b)
     assert_eq(join(bad.view(), "\n"), "")
     assert_eq(lines.len, 402)
     assert_eq(lines[400], "after")
@@ -108,14 +110,9 @@ private parse_count(s: string) -> usize
 @test("a trap nothing catches in a parallel body writes its message after what was printed, and aborts")
 par_run_uncaught_trap()
     val b = bench()
-    val exe = s"${b.work}/trap"
 
-    build(b, "def main() =\n  print(\"before\")\n  var y: [integer] = zeros(100000)\n  parallel for i in 1..100000\n    y[i] = 1000 div (i - 54321)\n  print(\"after\")\n", exe)
-
-    for t in THREADS
-        val out = run_with(exe, t)
-
-        assert(!out.status.ok(), s"on $t threads the trap did not end the program")
+    for out in outputs(b, "trap", "def main() =\n  print(\"before\")\n  var y: [integer] = zeros(100000)\n  parallel for i in 1..100000\n    y[i] = 1000 div (i - 54321)\n  print(\"after\")\n")
+        assert(!out.status.ok(), "the trap did not end the program")
         assert_eq(out.text, "before\n")
         assert_eq(out.err.unwrap_or(""), "trap: integer division by zero\n")
 
@@ -147,10 +144,11 @@ par_run_no_leaks_or_races()
 
     val b = bench()
     val name = "parallel-strings-and-closures"
-    val exe = s"${b.work}/shared"
-    val expected = read_text(s"testdata/leaks/$name.out").unwrap()
+    val r = check_programs(b, "leaks", [name], threads = ["7"])
+    val exe = executable(b, name)
+    val expected = read_text(repo(s"testdata/leaks/$name.out")).unwrap()
 
-    build(b, read_text(s"testdata/leaks/$name.nex").unwrap(), exe)
+    assert(r.failed.len() == 0 && r.passed == 1, join(r.failed.view(), "\n"))
 
     val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
     val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
@@ -196,14 +194,9 @@ par_emit_vectorizes()
 @test("a vectorized loop, parallel or not, computes what the scalar one did and still traps out of bounds")
 par_run_vectorized_bits_and_traps()
     val b = bench()
-    val exe = s"${b.work}/axpy"
 
-    build(b, AXPY, exe)
-
-    for t in THREADS
-        val out = run_with(exe, t)
-
-        assert(out.status.ok(), s"on $t threads: ${out.status}\n${out.err.unwrap_or("")}")
+    for out in outputs(b, "axpy", AXPY)
+        assert(out.status.ok(), s"${out.status}\n${out.err.unwrap_or("")}")
         assert_eq(out.text, "2.0\n1.4999000000000002\n15001.499999999998\ntrapped\n")
 
     finish(b)
@@ -214,17 +207,14 @@ par_traps_leak_nothing()
 
     val b = bench()
     val name = "parallel-traps"
-    val exe = s"${b.work}/traps"
-    val expected = read_text(s"testdata/leaks/$name.out").unwrap()
-
-    build(b, read_text(s"testdata/leaks/$name.nex").unwrap(), exe)
-
-    val plain = run_with(exe, "7")
+    val r = check_programs(b, "leaks", [name], threads = ["7"])
+    val exe = executable(b, name)
+    val expected = read_text(repo(s"testdata/leaks/$name.out")).unwrap()
     val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
     val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
 
     finish(b)
-    assert_eq(plain.text, expected)
+    assert(r.failed.len() == 0 && r.passed == 1, join(r.failed.view(), "\n"))
     assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
     assert_eq(guarded.text, expected)
     assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
@@ -246,19 +236,10 @@ private val LAMBDA_IN_PARALLEL = "def main() =\n  var m = fill((3, 400), 0)\n  p
 @test("a lambda in a parallel body reads what its iteration wrote to the array it captures, as the sequential loop does, leaking nothing")
 par_lambda_captures_written_array()
     val b = bench()
-    val exe = s"${b.work}/lambda"
-    val seq = s"${b.work}/lambda-seq"
     val expected = "481200\n21\n376375.0\n750.25\n"
-
-    build(b, LAMBDA_IN_PARALLEL, exe)
-    build(b, replace_all(LAMBDA_IN_PARALLEL, "parallel ", ""), seq)
-
-    var outs: Buf[string] = buf()
-
-    for t in THREADS
-        outs.push(run_with(exe, t).text)
-
-    val sequential = run_with(seq, "1").text
+    val outs = outputs(b, "lambda", LAMBDA_IN_PARALLEL)
+    val exe = executable(b, "lambda")
+    val sequential = outputs(b, "lambda-seq", replace_all(LAMBDA_IN_PARALLEL, "parallel ", ""), ["1"])[0].text
     val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
     val leaks = if exists("/usr/bin/leaks") then capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap().text
                 else ": 0 leaks for 0 total leaked bytes."
@@ -267,7 +248,7 @@ par_lambda_captures_written_array()
     assert_eq(sequential, expected)
 
     for o in outs
-        assert_eq(o, expected)
+        assert_eq(o.text, expected)
 
     assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
     assert_eq(guarded.text, expected)
@@ -287,18 +268,9 @@ private val FUSED = "def axpy(a: real, x: [real], y: inout [real]) =\n  y = para
 @test("fused parallel element-wise expressions and reductions print the sequential program's bits on 1, 2 and 7 threads")
 par_fused_bits()
     val b = bench()
-    val exe = s"${b.work}/fused"
-    val seq = s"${b.work}/fused-seq"
-
-    build(b, FUSED, exe)
-    build(b, replace_all(FUSED, "parallel ", ""), seq)
-
-    val sequential = run_with(seq, "1").text
-    var outs: Buf[string] = buf()
-
-    for t in THREADS
-        outs.push(run_with(exe, t).text)
-
+    val sequential = outputs(b, "fused-seq", replace_all(FUSED, "parallel ", ""), ["1"])[0].text
+    val outs = outputs(b, "fused", FUSED)
+    val exe = executable(b, "fused")
     val leaks = if exists("/usr/bin/leaks") then capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap().text
                 else ": 0 leaks for 0 total leaked bytes."
 
@@ -307,7 +279,7 @@ par_fused_bits()
     assert(sequential.ends_with("28.5+0.0i\n3.0\ntrapped\n"), sequential)
 
     for o in outs
-        assert_eq(o, sequential)
+        assert_eq(o.text, sequential)
 
     assert(leaks.contains(": 0 leaks for 0 total leaked bytes."), leaks)
 
@@ -337,19 +309,13 @@ private val WINDOWS_IN_PARALLEL = "def bump(v: inout [integer], by: integer) =\n
 par_windows_in_place()
     val b = bench()
     val buffers = lowered_until(b, emitted(WINDOWS_IN_PARALLEL).unwrap(), "buffer-deallocation-pipeline")
-    val exe = s"${b.work}/windows"
-
-    build(b, WINDOWS_IN_PARALLEL, exe)
-
-    var outs: Buf[string] = buf()
-
-    for t in THREADS
-        outs.push(run_with(exe, t).text)
+    val outs = outputs(b, "windows", WINDOWS_IN_PARALLEL)
 
     finish(b)
-    assert_eq(outs[0], "[[13, 14, 15, 16], [103, 4, 5, 106], [13, 14, 15, 16]]\n")
-    assert_eq(outs[1], outs[0])
-    assert_eq(outs[2], outs[0])
+
+    for o in outs
+        assert_eq(o.text, "[[13, 14, 15, 16], [103, 4, 5, 106], [13, 14, 15, 16]]\n")
+
     // The one array of `main`, and nothing else.
     assert_eq(occurrences(buffers, "memref.alloc"), 1)
     assert_eq(occurrences(buffers, "memref.copy"), 0)
@@ -363,19 +329,13 @@ private val CAPTURED_IN_PARALLEL = "def bump(v: inout [integer], by: integer) =\
 par_captured_in_place()
     val b = bench()
     val buffers = lowered_until(b, emitted(CAPTURED_IN_PARALLEL).unwrap(), "buffer-deallocation-pipeline")
-    val exe = s"${b.work}/captured"
-
-    build(b, CAPTURED_IN_PARALLEL, exe)
-
-    var outs: Buf[string] = buf()
-
-    for t in THREADS
-        outs.push(run_with(exe, t).text)
+    val outs = outputs(b, "captured", CAPTURED_IN_PARALLEL)
 
     finish(b)
-    assert_eq(outs[0], "[[2, 3, 4, 5], [2, 3, 4, 5], [2, 3, 4, 5]]\n")
-    assert_eq(outs[1], outs[0])
-    assert_eq(outs[2], outs[0])
+
+    for o in outs
+        assert_eq(o.text, "[[2, 3, 4, 5], [2, 3, 4, 5], [2, 3, 4, 5]]\n")
+
     // The fill copied into the cell's object when `m` is bound, and the copy made only where
     // something else still holds that object, which nothing does here; none for the region.
     assert_eq(occurrences(buffers, "memref.copy"), 2)

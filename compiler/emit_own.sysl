@@ -23,6 +23,7 @@
 // A cycle through captured cells is not reclaimed (a lambda stored into a `var` that it captures
 // itself; a local `def` that calls itself does so through its own environment and holds no cycle).
 
+import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
