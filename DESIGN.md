@@ -1213,6 +1213,316 @@ Every operator of §9.2 reduces this way — real and complex `+`, `*`, `min` an
 and reals, `and`, `or`, `minloc`, `maxloc` and a user operator — since the combination is nex's own
 code, not an `omp.declare_reduction`, whose order would follow the thread count.
 
+### 9.6 Distributed memory: MPI (PROPOSED)
+
+`parallel` (§9.1–9.5) uses the cores of one node. A cluster is many nodes with no shared memory,
+and the Fortran answer to it is MPI, with coarrays (§9.7) built on top. nex takes the same road:
+**MPI first, as an `mpi` module shipped with nex; coarrays later, over MPI's one-sided operations.**
+The model is Fortran's and C's: SPMD, every process (a **rank**) runs the same `main`, and data
+moves only where the program moves it.
+
+**MPI is compiled-engine only.** The interpreter never calls C (§16), so a program importing `mpi`
+is refused where it imports it: *"`mpi` is not interpreted: the interpreter never calls C, so a
+program importing `mpi` runs compiled"* — the wording of the refusal of an `extern` (`interp.sysl`)
+with the module named.
+
+#### 9.6.1 What `extern def` reaches today
+
+Every probe below is a test in `compiler/tests_mpi.sysl`, run with Open MPI 5.0.11 under
+`mpirun -np 4` (each skips, saying so, without `mpirun`). They fix what the module has to provide.
+
+- **The C binding's handles are pointers nex cannot spell.** Open MPI's `MPI_Comm` is
+  `struct ompi_communicator_t *`; MPICH's is an `int`. `c_ptr` is only a callback's data (§10.2.1):
+  `extern def MPI_Comm_rank(comm: c_ptr, rank: inout int32): int32` is *"a `c_ptr` is a callback's
+  user data: declare `comm: @data(f) c_ptr`, naming the callback parameter it goes with"*.
+- **The predefined handles are macros, and in Open MPI they are addresses of globals.**
+  `MPI_COMM_WORLD` is `((MPI_Comm) &ompi_mpi_comm_world)`, `MPI_DOUBLE` `&ompi_mpi_double`, `MPI_SUM`
+  `&ompi_mpi_op_sum`; MPICH's are integer constants (`MPI_COMM_WORLD` is `0x44000000`, `MPI_SUM`
+  `0x58000003`). nex has no way to name a C global: `extern val ompi_mpi_comm_world: int64` is
+  *"expected 'def', found 'val'"*. `MPI_IN_PLACE` is `(void *) 1` in Open MPI and `(void *) -1` in
+  MPICH, a pointer no array argument can carry.
+- **`MPI_Init(int *argc, char ***argv)` wants null pointers**, which nex has no spelling for.
+- **The C binding runs only through puns**: declared with each handle as an `int64` obtained from
+  `MPI_Comm_f2c(0)`, `MPI_Type_f2c(17)`, `MPI_Op_f2c(3)`, and `argv` as `inout int64` holding zero,
+  `MPI_Allreduce` sums across four ranks correctly. It relies on a pointer passing as a 64-bit
+  integer, true of LP64 and of nothing the type system knows, and on Open MPI's Fortran handle
+  numbers — a workaround, not a binding.
+- **The Fortran binding crosses as it is.** Its handles are `INTEGER`s and every argument is by
+  reference, which is exactly a `@fortran` extern (§10.6): `mpi_init`, `mpi_comm_rank`,
+  `mpi_allreduce`, `mpi_irecv`, `mpi_wait` with `inout [int32]` for the status all run, linked with
+  `-lmpi_mpifh -lmpi`. But the constants are each implementation's `mpif.h` values (Open MPI:
+  `MPI_COMM_WORLD = 0`, `MPI_DOUBLE_PRECISION = 17`, `MPI_SUM = 3`; MPICH's are its C integers), so a
+  program is written for one MPI; and `MPI_IN_PLACE`, `MPI_BOTTOM` and `MPI_STATUS_IGNORE` are
+  addresses of common blocks (`mpi_fortran_in_place_`), again unnameable.
+- **A nonblocking call outlives the §10.3 copy.** A unit-stride window crosses in place, so
+  `mpi_irecv(dense[2..3], …)` then `mpi_wait` lands the message where the window lies. A strided one
+  is gathered into a temporary that is valid for the call: `mpi_irecv(strided[1..4 by 3], …)` posted
+  before the matching send returns, the temporary is scattered back (zeros) and freed, and the
+  message arrives later into freed memory — the variable prints `[0.0, 0.0, 0.0, 0.0]`.
+- **An MPI error aborts the job.** The default handler, `MPI_ERRORS_ARE_FATAL`, kills every rank from
+  inside the C call; no nex trap is raised and `assert_traps` sees nothing.
+- **There is no standard ABI to declare against yet.** MPI 5.0 fixes one (`mpi_abi.h`, handles and
+  constants identical across implementations, a `libmpi_abi`). Open MPI 5.0.11 ships no `mpi_abi.h`;
+  its `mpi.h` says `MPI_VERSION 3`, `MPI_SUBVERSION 1`. MPICH 4.3 builds it with `--enable-mpi-abi`;
+  Open MPI's support is in its 6.x line. Neither is what a cluster has today.
+
+**So the module is not a header transcription.** Its handles, its constants, its buffers' lifetimes
+and its errors all need something `extern def` does not have, and the design below supplies them in
+one place, the module's shim, rather than in the language.
+
+#### 9.6.2 The module
+
+```nex
+import mpi.*
+
+def main() =
+  val me = rank()                       // in world(), 0 .. size() - 1
+  val p = size()
+  val n = 1000
+  var u: [real] = zeros(n + 2)          // one ghost cell at each end
+  val left = if me > 0 then me - 1 else no_rank
+  val right = if me < p - 1 then me + 1 else no_rank
+  for step in 1..100
+    exchange
+      send(u[2], to = left)
+      send(u[n + 1], to = right)
+      recv(u[1], from = left)
+      recv(u[n + 2], from = right)
+    u[2..n + 1] = 0.5 * (u[1..n] + u[3..n + 2])
+  val total = allreduce(sum(u[2..n + 1]), +)
+  if me == 0 then print(total)
+```
+
+**Initialisation is implicit.** A program that imports `mpi` has `MPI_Init_thread` called before
+its module-level bindings are initialised and `MPI_Finalize` after `main` returns or `stop` runs,
+as a Fortran coarray program has; `init` and `finalize` are not functions the program calls.
+`stop n` with `n ≠ 0` on any rank, and a trap nothing catches, call `MPI_Abort(world, status)` after
+writing the message with the rank in front (`rank 3: trap: index 11 out of bounds 1..10`), so one
+rank's failure ends the job instead of hanging the others in their next collective.
+
+**Communicators** are values of type `Comm`: `world()`, `self()`, `split(comm, color, key = rank())`
+(`MPI_Comm_split`; a color of `no_color` takes the rank out), `dup(comm)`, `split_shared(comm)`
+(the ranks of one node, `MPI_COMM_TYPE_SHARED`), `cart(comm, dims, periodic)` with `shift(c, axis,
+by)` answering `(from, to)` for a halo. A `Comm` is reference counted and freed when its last value
+goes (`MPI_Comm_free`), so there is no `free` to forget. Every function below takes
+`comm: Comm = world()` as its last parameter, so a program that never splits never names one.
+`rank(comm)` and `size(comm)` are `int`s; `no_rank` is `MPI_PROC_NULL`, to which a send or receive
+does nothing.
+
+**Point to point.** `send(x, to, tag = 0)`, `recv(inout x, from = any_rank, tag = any_tag)`
+answering a `Status` (`source`, `tag`, `count`), `sendrecv(x, to, inout y, from)`. `x` is any
+scalar or array of the types of §9.6.3 — a whole array, a window or a strided view — and the count
+is its element count, never written. A `recv` into an array whose shape is not the message's traps:
+*"recv: the message from rank 2 holds 12 values; the array holds 10"*.
+
+**Nonblocking: the `exchange` block.** A nonblocking send or receive must keep its buffer where it
+lies until it completes, which a call cannot promise (§9.6.1). nex makes that a scope: inside an
+`exchange` block, `send` and `recv` are `MPI_Isend` and `MPI_Irecv`, and the block's end is
+`MPI_Waitall` on all of them. A place named by a `recv` in the block is borrowed by it until the
+end, under §8.3's exclusivity rule — reading or writing it inside the block is a compile error —
+and a sent array is held by the request (its buffer reference counted, so a later write copies
+rather than changing what is in flight, value semantics for free). Code in the block that touches
+neither runs while the messages move, which is the overlap of computation and communication a halo
+exchange wants:
+
+```nex
+exchange
+  send(u[:, 2], to = west)
+  recv(u[:, 1], from = west)
+  interior(u)                // error: `u` is borrowed by the `recv` above until the block ends
+```
+
+The overlap is written by computing on another array (or another part, once the checker proves
+windows disjoint as §9.4 does). There is no `Request` value and no `wait`: a request that is never
+waited on is not expressible.
+
+**Collectives** take the value and answer the result, as nex's own reductions do:
+
+| nex | MPI | answers |
+|---|---|---|
+| `barrier()` | `MPI_Barrier` | nothing |
+| `bcast(x, root = 0)` | `MPI_Bcast` | `x` as `root` had it, on every rank |
+| `reduce(x, op, root = 0)` | `MPI_Reduce` | the combination on `root`; `x` elsewhere |
+| `allreduce(x, op)` | `MPI_Allreduce` | the combination, on every rank |
+| `scan(x, op)`, `exscan(x, op)` | `MPI_Scan`, `MPI_Exscan` | the prefix |
+| `gather(x, root = 0)` | `MPI_Gather(v)` | rank-major concatenation on `root`, a rank-(k+1) array of the rank-k pieces when they agree in shape, else rank 1 |
+| `allgather(x)` | `MPI_Allgather(v)` | the same on every rank |
+| `scatter(x, root = 0)` | `MPI_Scatter(v)` | this rank's part of `root`'s `x`, cut along its last axis as evenly as `blocks(n, size())` cuts |
+| `alltoall(x)` | `MPI_Alltoall(v)` | `x`'s last axis cut in `size()` parts, part k sent to rank k |
+| `blocks(n, p = size(), r = rank())` | — | the range of `1..n` rank `r` owns: the block decomposition every program writes |
+
+`op` is any operator of §9.2 — `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc` — or a user
+function `(T, T) -> T`, which becomes an `MPI_Op_create` over a trampoline (§10.2.1), applied
+element by element to an array. `minloc` reduces `(value, index)` pairs, ties going to the lowest
+rank, as `MPI_MINLOC` does. The value forms copy as they must; `x` keeps its value on every rank.
+
+#### 9.6.3 What crosses: types, views and units
+
+| nex element | MPI datatype |
+|---|---|
+| `int8` … `int64`, `uint8` … `uint64` | `MPI_INT8_T` … `MPI_UINT64_T` |
+| `real32`, `real64` | `MPI_FLOAT`, `MPI_DOUBLE` |
+| `real16` | `MPI_UINT16_T` for moving; reductions run nex's own operator through `MPI_Op_create` |
+| `complex[real32]`, `complex[real64]` | `MPI_C_FLOAT_COMPLEX`, `MPI_C_DOUBLE_COMPLEX` |
+| `bool` | `MPI_C_BOOL` |
+| a `@c` struct | `MPI_Type_create_struct` from the layout nex already computes (§10.2) |
+| a tuple of numbers, a `minloc` pair | a struct type of its fields' |
+
+**A view is an MPI datatype, never a copy.** Where §10.3 copies a strided view because C takes a
+bare pointer, MPI takes a pointer *and* a description, so every window crosses where it lies:
+
+- rank 1 with stride `s` (negative included): `MPI_Type_create_hvector(n, 1, s * bytes, elem)`;
+- rank 2, a window of a column-major root with leading dimension `ld`: `MPI_Type_vector(columns,
+  rows, ld, elem)`, and the hvector of a hvector when the first axis is strided too;
+- rank k: one `hvector` per axis, innermost first; a box of a dense root is
+  `MPI_Type_create_subarray` with `MPI_ORDER_FORTRAN`, which is nex's order.
+
+The pointer is the window's first element, as in §10.3. A committed datatype is cached by (element,
+extents, strides), so a halo exchange in a loop commits once. A dense array is the element type and
+a count.
+
+**Units cross as their numbers.** A unit is a static fact of the program and a message carries
+none; each end's types are checked locally, against its own declarations, as in any SPMD program.
+A collective answers its operand's unit: `allreduce(e, +)` of `[real J]` is `[real J]`, `max` keeps
+it, and `*` of a measured value is refused as `product` is (§13.4).
+
+**Shapes.** A rank-k array's shape is known on each rank, and `recv` and the collectives check the
+counts MPI reports against it; the `v` variants (`MPI_Gatherv` and the rest) are chosen automatically
+where pieces may differ, with an `MPI_Allgather` of the counts first.
+
+#### 9.6.4 Errors
+
+Every communicator nex creates has `MPI_ERRORS_RETURN`, and a failed call **traps**, as the value
+forms of LAPACK do (§10.5): the message names the operation in nex's terms and the cause from
+`MPI_Error_string` — *"send: rank 9 does not exist in a communicator of 8"*, *"recv: message
+truncated: 12 values into an array of 10"*. A trap can be caught locally by `assert_traps`, but no
+MPI error leaves the other ranks in a known state, so an uncaught one aborts the job (§9.6.2). MPI
+reports no error a program could handle the way `solve_inplace` reports a singular matrix, so there
+is no `Result` form; fault tolerance (ULFM's `MPI_Comm_shrink`, Fortran's `stat_failed_image`) is §15.
+
+#### 9.6.5 Determinism of reductions
+
+§9.2.1 makes a reduction independent of the thread count. `MPI_Allreduce` gives no such promise:
+the standard leaves the bracketing of a commutative operation to the implementation, which chooses
+by message size, rank count and topology, so the bits can change with `-np`, with the node layout
+and between MPI versions. nex promises:
+
+1. **A distributed reduction is reproducible for a given rank count**, run to run, node layout to
+   node layout, implementation to implementation: `reduce`, `allreduce` and `scan` of a real or
+   complex with a built-in operator, and every user operator, combine the ranks' contributions in
+   §9.2.1's fixed pairwise tree over the rank numbers, the same bits on every rank. They are built
+   from an `MPI_Allgather` of the contributions (a scalar, or a block of an array at a time) and a
+   local combination, or a fixed binomial tree of point-to-point messages for large arrays; never
+   `MPI_Allreduce` with `MPI_SUM`. Integer, `min`, `max`, `and`, `or`, `minloc` and `maxloc`
+   reductions are exact and use MPI's own operators.
+2. **A distributed sum of a distributed array is independent of the rank count**:
+   `global_sum(x_local, offset)`, where `offset` is the global index of `x_local`'s first element,
+   reduces each rank's §9.2.1 blocks *aligned to the global numbering*, gathers the block partials
+   (one number per 4096 elements: 2 MB for a billion), and runs the whole tree on every rank — the
+   bits of `sum` over the undistributed array, for any `-np`, as `OMP_NUM_THREADS` changes nothing.
+   `global_dot`, `global_norm2` the same.
+3. **`fast = true`** on a reduction hands it to `MPI_Allreduce` with MPI's operator, for the code
+   that measures the difference and accepts MPI's bits.
+
+#### 9.6.6 `parallel` inside an MPI program
+
+A rank is one process and its `parallel` constructs use `OMP_NUM_THREADS` threads, the hybrid
+MPI+OpenMP layout of every modern cluster (`srun --ntasks-per-node=4 --cpus-per-task=16`). An `mpi`
+call is not `@pure`, so §9.4 already refuses it in a parallel body: only the thread that runs `main`
+calls MPI, which is **`MPI_THREAD_FUNNELED`**. The program decides the level, as it decides libomp
+(§9.5): one with a `parallel` construct asks for `FUNNELED`, one without for `SINGLE`, and a library
+providing less traps at start-up with the level it gave.
+
+#### 9.6.7 Building, linking and launching
+
+**The link follows the cluster's MPI**, found in this order: `NEX_MPICC`, else `mpicc` on `PATH`
+(what `module load openmpi` or `module load mpich` puts there), asked for its flags —
+`mpicc --showme:compile` / `--showme:link` for Open MPI, `mpicc -compile_info` / `-link_info` for
+MPICH — else `pkg-config` of `ompi-c` or `mpich`. A program importing `mpi` without one is refused at
+the link, naming what was looked for, as a `@fortran` program without gfortran is (§10.6).
+
+**One binary is built for one MPI.** The module's shim — a small C file that includes the found
+`mpi.h`, compiled with its flags when the program links — turns handles into what nex can hold:
+`MPI_Comm_c2f` integers (an `int32` inside `Comm` and the datatype cache) and the predefined
+constants read from the header, so nex declares no implementation's numbers. A binary is for the
+MPI it was linked against, as a Fortran or C MPI program is. **Where `mpi_abi.h` is found** (MPI
+5.0's ABI: MPICH 4.3 built with it, Open MPI 6), the shim is compiled against it and links
+`libmpi_abi`, and the binary runs under any MPI that implements the ABI — chosen at run time by the
+library path, as the ABI intends.
+
+**Launching.** `nex build` writes an ordinary executable, launched as every MPI program is:
+`mpirun -np 64 ./heat` or, in a Slurm batch script, `srun ./heat`. `nex run --np N file.nex` builds
+and runs it under `mpirun -np N` (`NEX_MPIRUN` overrides the launcher; inside a Slurm allocation —
+`SLURM_JOB_ID` set — it is `srun -n N`). `nex test --np N` runs each test as an N-rank job. A program
+importing `mpi` run without a launcher is a single rank (`MPI_Init` gives a world of one), which is
+how it runs in the playground's compiled mode and in `nex test` without `--np`.
+
+#### 9.6.8 Open questions
+
+1. **Rank numbering.** MPI numbers ranks from 0; nex indexes from 1 and Fortran's `this_image()`
+   from 1. *Recommendation: 0-based ranks in `mpi`*, since a rank is an identity, not an index, and
+   every `mpirun` message, Slurm's `SLURM_PROCID` and MPI document are 0-based; coarray images
+   (§9.7) are 1-based, as Fortran's are.
+2. **Implicit `MPI_Init`/`MPI_Finalize`.** *Recommendation: implicit, by importing `mpi`*, as
+   coarrays are; an explicit `init()` is one more thing to forget and to call twice.
+3. **The nonblocking form.** The `exchange` block (scoped, checked, no request values) or a
+   `Request` value with `wait` (MPI's shape, flexible, not checkable without linear types).
+   *Recommendation: the block*, with `Request` left out until a program needs a request that
+   outlives a scope.
+4. **The shim's language.** C compiled by the found `mpicc` (the cluster's own source of headers
+   and flags), or sysl in the runtime built per MPI. *Recommendation: C through `mpicc`*, a few
+   hundred lines that exist only to read `mpi.h`; everything else in the module is nex.
+5. **Default reduction determinism.** Reproducible for a fixed rank count by default with
+   `fast = true` to opt out (above), or MPI's own by default with `reproducible = true` to opt in.
+   *Recommendation: reproducible by default*, the rule `parallel` already follows; the cost is one
+   allgather of partials, small next to the computation of a real code, and `fast = true` is there
+   for the code that measures otherwise.
+6. **`global_sum`'s np-independence across rank counts.** Worth a separate entry point, or folded
+   into `allreduce` of a distributed array once arrays know their distribution (coarrays).
+   *Recommendation: the separate `global_sum`/`global_dot`/`global_norm2` now*, since they are what
+   a Krylov solver needs and the only place rank-count independence is cheap.
+7. **Errors.** Traps only (above), or a `Result` form for the errors a fault-tolerant program
+   handles. *Recommendation: traps only*, with fault tolerance as its own later item.
+
+### 9.7 Coarrays (planned)
+
+Fortran 2008/2018 coarrays are the distributed-memory model in the language rather than in a
+library, and parity with them is the goal after `mpi`. The sketch, each part to be designed when it
+is built:
+
+- **Images.** `this_image()` and `num_images()`, 1-based; every image runs `main` (SPMD). An image
+  is an MPI rank.
+- **Coarrays.** A module-level `var` or a local declared with a codimension — the spelling is
+  open: `var u: [real; 100] on *` reads like Fortran's `u(100)[*]` — exists once per image, the same
+  shape on all. `u{p}[i]` (or another spelling) reads or writes image `p`'s element; without a
+  coindex it is this image's, an ordinary array. A remote window `u{p}[2..9]` is a view (§6) over
+  another image, so it crosses as a datatype.
+- **Synchronisation.** `sync all`, `sync images(list)`, `sync memory`, `critical` blocks, `lock`
+  and `unlock` on a lock variable; segment ordering as Fortran's.
+- **Collectives.** `co_sum`, `co_min`, `co_max`, `co_reduce(x, op)`, `co_broadcast(x, source)`,
+  in place, as Fortran's subroutines are — reproducible as §9.6.5 is.
+- **Teams.** `form team`, `change team … end team`, `team_number`, `get_team`; an image's world
+  inside `change team` is its team.
+- **Events.** `event post(e{p})`, `event wait(e, until_count = n)`, `event_query`.
+
+**Built over MPI one-sided communication**, as OpenCoarrays builds gfortran's `-fcoarray=lib`: a
+coarray is one `MPI_Win_allocate` (collective, symmetric, so its allocation is an implicit
+`sync all`), the windows are opened once with `MPI_Win_lock_all` (passive target); a remote read is
+`MPI_Get` + `MPI_Win_flush`, a write `MPI_Put`, completed at the next image control statement;
+`sync all` is `MPI_Win_flush_all` + `MPI_Barrier`; `sync images` point-to-point messages; events
+and locks `MPI_Fetch_and_op` / `MPI_Compare_and_swap` on a counter window; `form team` is
+`MPI_Comm_split`, and each team's coarrays live in windows of its communicator. The `mpi` module's
+shim, datatype cache and determinism rule are what coarrays reuse; failed images
+(`stat_failed_image`) wait for ULFM.
+
+**Open questions for coarrays.**
+
+8. **Coindex spelling.** Fortran's square brackets are nex's indexing. *Recommendation: braces*,
+   `u{p}[i]` — free in expressions today (only import lists use them), short, and visibly not an
+   index.
+9. **Mixing `mpi` and coarrays in one program.** *Recommendation: allowed*, with `world()` the
+   initial team's communicator, as Fortran compilers built over MPI allow it in practice.
+
 ---
 
 ## 10. C FFI, BLAS and LAPACK

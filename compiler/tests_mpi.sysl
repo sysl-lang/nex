@@ -1,0 +1,99 @@
+@tests
+
+// MPI reached through `extern def` alone (DESIGN §10), before nex ships an `mpi` module (DESIGN §9.6):
+// what the FFI already carries to Open MPI or MPICH, and where it stops. The programs run under
+// `mpirun -np N`, and skip, saying so, where there is no `mpirun` or no MPI library to link.
+
+import nex.sh.sysl.nex.*
+import sh.sysl.parsing.source_of
+import sysl.buf.{Buf, buf}
+import sysl.env.get_or
+import sysl.fs.exists
+import sysl.process.{Output, capture}
+import sysl.testing.skip
+
+// The MPI installation's directory: `NEX_MPI_HOME`, or Homebrew's Open MPI.
+private mpi_home() -> string = get_or("NEX_MPI_HOME", "/opt/homebrew/opt/open-mpi")
+
+// The bench, and the link options for `libs` of the MPI installation; skips without `mpirun`.
+private mpi_bench(libs: []const string) -> (Bench, Buf[string])
+    val home = mpi_home()
+
+    if !exists(s"$home/bin/mpirun") then skip(s"no mpirun in $home/bin (set NEX_MPI_HOME): the MPI probes run under mpirun -np N")
+
+    val b = bench()
+    var links: Buf[string] = buf()
+
+    links.push(s"-L$home/lib")
+
+    for l in libs
+        links.push(s"-l$l")
+
+    (b, links)
+
+// `text` compiled with `links` and run as `np` processes under `mpirun`.
+private mpirun(b: Bench, text: string, np: int, links: Buf[string], case: string = __FUNCTION__) -> Output
+    val exe = s"${b.work}/$case"
+
+    lower_module(emitted(text).unwrap(), exe, b.work, b.tc, links.view()) match
+        Ok(_) -> ()
+        Err(e) -> fail_with(e)
+
+    capture(s"${mpi_home()}/bin/mpirun", ["-np", s"$np", exe], stderr = true).unwrap()
+
+// -- the walls --------------------------------------------------------------------------------------
+
+@test("MPI's C handles are pointers nex cannot spell: a `c_ptr` is only a callback's data, and a C global (MPI_COMM_WORLD's object) cannot be named")
+mpi_c_handles_refused()
+    assert_eq(emitted("extern def MPI_Comm_rank(comm: c_ptr, rank: inout int32): int32\ndef main() = ()\n").err().unwrap_or(""),
+              "error: a `c_ptr` is a callback's user data: declare `comm: @data(f) c_ptr`, naming the callback parameter it goes with @1:32")
+    assert(emitted("extern val ompi_mpi_comm_world: int64\ndef main() = ()\n").err().unwrap_or("").contains("expected 'def', found 'val'"), "")
+
+@test("an MPI program is refused by the interpreter, which never calls C, where it declares its externs")
+mpi_not_interpreted()
+    val text = "@fortran\nextern def mpi_init(ierr: inout int32)\ndef main() =\n  var ierr: int32 = 0\n  mpi_init(ierr)\n"
+    val p = load_source(source_of("t.nex", text)).unwrap()
+    val diags = interpret(p, [], (s, t) -> ()) match
+        Ok(_) -> fail_with("an MPI program was interpreted")
+        Err(ds) -> ds
+
+    assert_eq(diags.len(), 1)
+    assert(diags[0].message.contains("the interpreter never calls C"), diags[0].message)
+
+// -- what crosses today -----------------------------------------------------------------------------
+
+private val RANKS = "  mpi_init(ierr)\n  var rank: int32 = 0\n  var size: int32 = 0\n  mpi_comm_rank(MPI_COMM_WORLD, rank, ierr)\n  mpi_comm_size(MPI_COMM_WORLD, size, ierr)\n"
+
+@test("MPI's Fortran binding crosses as it is: integer handles by reference, the constants Open MPI's mpif.h gives")
+mpi_fortran_binding_runs()
+    val (b, links) = mpi_bench(["mpi_mpifh", "mpi"])
+    val decls = "@fortran\nextern def mpi_init(ierr: inout int32)\n@fortran\nextern def mpi_comm_rank(comm: int32, rank: inout int32, ierr: inout int32)\n@fortran\nextern def mpi_comm_size(comm: int32, size: inout int32, ierr: inout int32)\n@fortran\nextern def mpi_allreduce(s: [real], r: inout [real], n: int32, t: int32, op: int32, comm: int32, ierr: inout int32)\n@fortran\nextern def mpi_finalize(ierr: inout int32)\nval MPI_COMM_WORLD: int32 = 0\nval MPI_DOUBLE_PRECISION: int32 = 17\nval MPI_SUM: int32 = 3\n"
+    val main = "def main() =\n  var ierr: int32 = 0\n" + RANKS + "  var total = [0.0, 0.0]\n  mpi_allreduce([1.0 * rank, 1.0], total, 2, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)\n  if rank == 0 then print(s\"size $size sum $total ierr $ierr\")\n  mpi_finalize(ierr)\n"
+    val out = mpirun(b, decls + main, 4, links)
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "size 4 sum [6.0, 4.0] ierr 0\n")
+
+@test("MPI's C binding runs only through puns: each handle an int64 from an f2c call, argv a pointer to a zero int64")
+mpi_c_binding_by_pun()
+    val (b, links) = mpi_bench(["mpi"])
+    val decls = "extern def MPI_Init(argc: inout int32, argv: inout int64): int32\nextern def MPI_Comm_f2c(f: int32): int64\nextern def MPI_Type_f2c(f: int32): int64\nextern def MPI_Op_f2c(f: int32): int64\nextern def MPI_Comm_rank(comm: int64, rank: inout int32): int32\nextern def MPI_Comm_size(comm: int64, size: inout int32): int32\nextern def MPI_Allreduce(s: [real], r: inout [real], n: int32, t: int64, op: int64, comm: int64): int32\nextern def MPI_Finalize(): int32\n"
+    val main = "def main() =\n  var argc: int32 = 0\n  var argv: int64 = 0\n  MPI_Init(argc, argv)\n  val world = MPI_Comm_f2c(0)\n  var rank: int32 = 0\n  var size: int32 = 0\n  MPI_Comm_rank(world, rank)\n  MPI_Comm_size(world, size)\n  var total = [0.0, 0.0]\n  MPI_Allreduce([1.0 * rank, 1.0], total, 2, MPI_Type_f2c(17), MPI_Op_f2c(3), world)\n  if rank == 0 then print(s\"size $size sum $total\")\n  MPI_Finalize()\n"
+    val out = mpirun(b, decls + main, 4, links)
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "size 4 sum [6.0, 4.0]\n")
+
+@test("a nonblocking receive into a unit-stride window lands where the window lies, the request an inout integer")
+mpi_irecv_into_a_dense_window()
+    val (b, links) = mpi_bench(["mpi_mpifh", "mpi"])
+    val decls = "@fortran\nextern def mpi_init(ierr: inout int32)\n@fortran\nextern def mpi_comm_rank(comm: int32, rank: inout int32, ierr: inout int32)\n@fortran\nextern def mpi_comm_size(comm: int32, size: inout int32, ierr: inout int32)\n@fortran\nextern def mpi_barrier(comm: int32, ierr: inout int32)\n@fortran\nextern def mpi_send(b: [real], n: int32, t: int32, dest: int32, tag: int32, comm: int32, ierr: inout int32)\n@fortran\nextern def mpi_irecv(b: inout [real], n: int32, t: int32, src: int32, tag: int32, comm: int32, req: inout int32, ierr: inout int32)\n@fortran\nextern def mpi_wait(req: inout int32, st: inout [int32], ierr: inout int32)\n@fortran\nextern def mpi_finalize(ierr: inout int32)\nval MPI_COMM_WORLD: int32 = 0\n"
+    // The receive is posted before the send is made (the barrier), so it completes in `mpi_wait`.
+    val main = "def main() =\n  var ierr: int32 = 0\n" + RANKS + "  if rank == 0\n    mpi_barrier(MPI_COMM_WORLD, ierr)\n    mpi_send([1.0, 2.0], 2, 17, 1, 0, MPI_COMM_WORLD, ierr)\n  else\n    var dense: [real] = zeros(4)\n    var req: int32 = 0\n    var st: [int32] = zeros(6)\n    mpi_irecv(dense[2..3], 2, 17, 0, 0, MPI_COMM_WORLD, req, ierr)\n    mpi_barrier(MPI_COMM_WORLD, ierr)\n    mpi_wait(req, st, ierr)\n    print(dense)\n  mpi_finalize(ierr)\n"
+    val out = mpirun(b, decls + main, 2, links)
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[0.0, 1.0, 2.0, 0.0]\n")

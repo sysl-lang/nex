@@ -602,6 +602,50 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     `ENGINES` with I1. *Exit*: every program test passes on both engines with `ENGINES` holding
     both, and a fuzzer run of a fixed seed and size gives the same output on each.
 
+14. **M14 — distributed memory: the `mpi` module** (DESIGN §9.6). Compiled engine only; the
+    interpreter refuses `import mpi`. The probes of what `extern def` reaches without it are
+    `compiler/tests_mpi.sysl`. Stages, each its own item:
+    - **D1 — the shim, the link and the launch**: the C shim compiled by the found `mpicc`
+      (`NEX_MPICC`, `PATH`, `pkg-config ompi-c`/`mpich`), implicit `MPI_Init_thread`/`MPI_Finalize`,
+      `MPI_Abort` on an uncaught trap or `stop n`, `world`/`self`/`rank`/`size`/`barrier`/`no_rank`,
+      `nex run --np N` and `nex test --np N` (`mpirun`, `srun` inside Slurm, `NEX_MPIRUN`), the
+      interpreter's refusal. *Exit*: a hello-ranks program at `-np 1, 2, 4, 7`; a trap on rank 2
+      ends a 4-rank job with `rank 2:` in front of its message and a non-zero status, no hang.
+    - **D2 — point to point and collectives** of every element type of §9.6.3, units and complexes
+      included: `send`/`recv`/`sendrecv`, `bcast`, `reduce`/`allreduce`/`scan` with every §9.2
+      operator and a user one, `gather`/`allgather`/`scatter`/`alltoall` (the `v` forms chosen
+      automatically), `blocks`; the reproducible reductions and `global_sum` of §9.6.5. *Exit*: each
+      collective against a sequential oracle at `-np 1, 2, 3, 4, 7`; `allreduce` of reals gives
+      identical bits run to run and on both MPIs; `global_sum` equals the undistributed `sum`'s
+      bits at every `-np`; a shape mismatch traps with the counts.
+    - **D3 — views as datatypes and the `exchange` block**: every window and strided view of
+      §9.6.3 crossing with no copy (checked: no `nex_c_gather` in the emitted module), the datatype
+      cache, `exchange` with §8.3's borrow of a received place. *Exit*: the strided `mpi_irecv`
+      probe of §9.6.1 written with `exchange` receives `[3.0, 0.0, 0.0, 4.0]`; touching a borrowed
+      place in the block is a compile error.
+    - **D4 — communicators and errors**: `split`, `dup`, `split_shared`, `cart`/`shift`, freed by
+      reference count; `MPI_ERRORS_RETURN` and the traps of §9.6.4; `FUNNELED` for a program with
+      `parallel`. *Exit*: a 2-D Cartesian halo exchange on a split communicator; a hybrid program at
+      `-np 2` × `OMP_NUM_THREADS=4` with the same bits as at `-np 2` × 1.
+    - **D5 — both MPIs and the ABI**: Open MPI 5 and MPICH 4.x in Linux CI containers, and an
+      `mpi_abi.h` build where one is installed. *Exit*: the D1–D4 programs pass on each.
+
+    *Exit for M14*: an MPI corpus (`testdata/mpi/`: 1-D and 2-D Jacobi with halo exchange, a
+    distributed conjugate gradient, a parallel prefix, a ring and a master-worker) prints its `.out`
+    at `-np 1, 2, 4, 7`, the Jacobi results equal to the sequential nex program's; and **a run on a
+    real cluster** — AWS ParallelCluster with Slurm, at least 2 nodes over EFA, an `sbatch` script
+    calling `srun` — of the CG solver pure MPI and hybrid, weak-scaled to 64 ranks within 10% of the
+    equivalent Fortran + MPI program's time per iteration, the outputs reproducible across reruns.
+
+15. **M15 — coarrays** (DESIGN §9.7), over M14's shim and MPI's one-sided operations. Stages:
+    images and coarray declarations with `MPI_Win_allocate`; coindexed reads and writes (`MPI_Get`,
+    `MPI_Put`, a remote window as a datatype); `sync all`, `sync images`, `sync memory`, `critical`,
+    locks; `co_sum`/`co_min`/`co_max`/`co_reduce`/`co_broadcast`, reproducible as M14's; teams;
+    events. *Exit*: the Fortran 2018 coarray examples of the standard's Annex C and the OpenCoarrays
+    test programs translated to nex print the same at 1, 2, 4 and 7 images; the M14 Jacobi and CG
+    written with coarrays instead of `mpi` match their results bit for bit; the cluster run of M14
+    repeated with the coarray CG within 10% of gfortran + OpenCoarrays.
+
 **Later** (DESIGN §15), each its own item once M13 is done, none dropped:
 
 - **Structs by value across the FFI** — `@c` structs passed and returned by value, with clang's
