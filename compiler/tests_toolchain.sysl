@@ -50,7 +50,7 @@ private lower(bin: string, work: string, proof: string, links: []const string = 
                                         stdin = Stdio.FromPath(lowered))).unwrap()
     var args: Buf[string] = buf()
 
-    for a in ["-Wno-override-module", "-O2", s"$work/$proof.ll", runtime_archive(work), "-lm", "-o", s"$work/$proof"]
+    for a in ["-Wno-override-module", "-O2", s"$work/$proof.ll", runtime_archive(work), "-lm", UNUSED_CODE, "-o", s"$work/$proof"]
         args.push(a)
 
     for a in links

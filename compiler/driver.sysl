@@ -133,6 +133,15 @@ blas_links() -> Result[Buf[string], string]
 
     Ok(out)
 
+// The link option every program takes against the runtime archive. The archive is one object, its
+// linear algebra among the rest, so a program that calls none must leave that code — and the BLAS
+// and LAPACK it would need — out of its link.
+#if macos
+val UNUSED_CODE = "-Wl,-dead_strip"
+#else
+val UNUSED_CODE = "-Wl,--gc-sections"
+#endif
+
 // Whether the module's lines before it say it has a `@fortran` extern.
 private calls_fortran(mlir: string) -> bool
     for line in split(mlir, "\n")
@@ -201,13 +210,7 @@ lower_module(mlir: string, out: string, work: string, tc: Toolchain, links: []co
         for a in blas_links()?
             args.push(a)
 
-    // The runtime archive is one object, its linear algebra among the rest; a program that calls
-    // none leaves that code, and the libraries it would need, out of its link.
-#if macos
-    args.push("-Wl,-dead_strip")
-#else
-    args.push("-Wl,--gc-sections")
-#endif
+    args.push(UNUSED_CODE)
 
     if calls_fortran(mlir)
         // The gfortran at `NEX_GFORTRAN`, else Homebrew's.
