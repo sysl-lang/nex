@@ -1,0 +1,26 @@
+// The perf oracle's gemv kernel (PLAN.md): `y = A x` at 4000 × 4000 `real64`, as a column-order
+// loop (the order column-major storage wants), twenty products. Prints nanoseconds per product, then
+// a checksum; `gemv.f90` is its twin.
+
+extern def clock_gettime_nsec_np(clock: int32): uint64
+
+def main() =
+  val n = 4000
+  val reps = 20
+  var a: [real; :, :] = zeros((n, n))
+  var x: [real] = zeros(n)
+  var y: [real] = zeros(n)
+  for j in 1..n
+    x[j] = 1.0 * (j % 5) - 2.0
+    for i in 1..n
+      a[i, j] = 1.0 / (i + j)
+  val start = clock_gettime_nsec_np(4)
+  for r in 1..reps
+    for i in 1..n do y[i] = 0.0
+    for j in 1..n
+      val xj = x[j]
+      for i in 1..n
+        y[i] = y[i] + a[i, j] * xj
+  val done = clock_gettime_nsec_np(4)
+  print((done - start) / reps)
+  print(sum(y))

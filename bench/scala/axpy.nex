@@ -1,0 +1,15 @@
+// axpy.nex for the Scala reference's AOT backend (`~/dev/nex`): its dialect is 0-based with
+// half-open ranges and has no `extern`, so the program is timed from outside and prints only the
+// checksum. The same arrays and the same fifty passes as ../axpy.nex.
+
+def main() =
+  val n = 10000000
+  val a = 1.0e-3
+  var x = fill(n, 0.0)
+  var y = fill(n, 0.0)
+  for k in 0..n
+    x[k] = 1.0 / to_real(k + 1)
+    y[k] = to_real((k + 1) % 7)
+  for r in 0..50
+    y = a * x + y
+  print(sum(y))

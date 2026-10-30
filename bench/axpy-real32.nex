@@ -1,0 +1,21 @@
+// The perf oracle's real32 axpy kernel (PLAN.md): `axpy.nex` over `real32`, which should take half
+// its time — the same time per byte. The checksum is summed in `real64`. `axpy-real32.f90` is its
+// twin.
+
+extern def clock_gettime_nsec_np(clock: int32): uint64
+
+def main() =
+  val n = 10000000
+  val reps = 50
+  val a: real32 = 1.0e-3
+  var x: [real32] = zeros(n)
+  var y: [real32] = zeros(n)
+  for i in 1..n
+    x[i] = real32(1.0 / i)
+    y[i] = real32(1.0 * (i % 7))
+  val start = clock_gettime_nsec_np(4)
+  for r in 1..reps
+    y = a * x + y
+  val done = clock_gettime_nsec_np(4)
+  print((done - start) / reps)
+  print(sum(real(y)))

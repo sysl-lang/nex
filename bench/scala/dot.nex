@@ -1,0 +1,14 @@
+// dot.nex for the Scala reference's AOT backend: the work of ../dot.nex, 0-based, timed from outside.
+
+def main() =
+  val n = 10000000
+  var x = fill(n, 0.0)
+  var y = fill(n, 0.0)
+  for k in 0..n
+    x[k] = 1.0 / to_real(k + 1)
+    y[k] = to_real((k + 1) % 7)
+  var s = 0.0
+  for r in 0..50
+    s = s + sum(x * y)
+    x[0] = 1.0 + s * 1.0e-30
+  print(s)

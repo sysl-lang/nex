@@ -1,0 +1,18 @@
+// point-distance.nex for the Scala reference's AOT backend: the work of ../point-distance.nex,
+// 0-based, timed from outside. The reference's `sqrt` takes a scalar only, so it is mapped.
+
+def main() =
+  val n = 10000000
+  var x1 = fill(n, 0.0)
+  var y1 = fill(n, 0.0)
+  var x2 = fill(n, 0.0)
+  var y2 = fill(n, 0.0)
+  var d = fill(n, 0.0)
+  for k in 0..n
+    x1[k] = to_real((k + 1) % 7)
+    y1[k] = to_real((k + 1) % 11)
+    x2[k] = 1.0 / to_real(k + 1)
+    y2[k] = to_real((k + 1) % 3)
+  for r in 0..50
+    d = map((x2 - x1)^2 + (y2 - y1)^2, v -> sqrt(v))
+  print(sum(d))
