@@ -570,7 +570,9 @@ struct Emitter
 
             out += s", ${if is_arr(t) then self.boundary_ty(span, t) else self.param_ty(span, id)}"
 
-        s"($out) -> ${result_text(if is_arr(ret) then self.memref_ty(span, ret) else self.results_text(span, params, ret))}"
+        // An `inout` array is written in place through the adapter (`adapted`), so only the value
+        // comes back.
+        s"($out) -> ${result_text(if is_arr(ret) then self.memref_ty(span, ret) else self.ty(span, ret))}"
 
     // A function value: `code` and the environment `env`.
     closure(*self, code: string, ty: string, env: string) -> string
@@ -645,13 +647,25 @@ struct Emitter
                 args += s"%a$k"
                 tys += t
 
-            val r = self.ty(span, g.ret)
+            // The value, then each `inout` array as the function hands it back.
+            val r = self.results_text(span, g.params, g.ret)
             var text = s"  func.func private @\"r.$name\"($params)${arrow(r)} {\n"
 
             if r == ""
                 text += s"    func.call @\"n.$name\"($args) : ($tys) -> ()\n    func.return\n  }\n\n"
             else
-                text += s"    %r = func.call @\"n.$name\"($args) : ($tys) -> $r\n    func.return %r : $r\n  }\n\n"
+                var outs: Buf[string] = buf()
+                var names: Buf[string] = buf()
+
+                if self.ty(span, g.ret) != "" then outs.push(self.ty(span, g.ret))
+
+                for id in g.params
+                    if self.inout_array(id) then outs.push(self.ty(span, self.prog.locals[id].ty))
+
+                for k in 0..<outs.len()
+                    names.push(result_name("%r", k, outs.len()))
+
+                text += s"    ${result_def("%r", outs.len())}func.call @\"n.$name\"($args) : ($tys) -> $r\n    func.return ${joined(names)} : ${joined(outs)}\n  }\n\n"
 
             self.funcs.push(text)
 

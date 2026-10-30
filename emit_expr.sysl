@@ -695,7 +695,13 @@ impl Emitter
         if back.len() > 0
             *callee.kind match
                 TFnRef(name) -> return self.call_handing_back(span, s"@\"n.$name\"($vals) : ($tys)", ret, back)
-                _ -> return self.unsupported(span, "an `inout` array passed through a function value")
+                _ ->
+                    val c = self.ex(callee)
+                    val code = self.def(s"llvm.extractvalue $c[0] : $CLOSURE")
+                    val env = self.def(s"llvm.extractvalue $c[1] : $CLOSURE")
+                    val through = self.through_value(span, args, ret)
+
+                    return self.call_handing_back(span, s"@\"$through\"($code, $env, $vals) : (!llvm.ptr, !llvm.ptr, $tys)", ret, back)
 
         *callee.kind match
             TFnRef(name) -> self.own(self.effect(s"func.call @\"n.$name\"($vals) : ($tys) -> ${result_text(r)}", r), ret)

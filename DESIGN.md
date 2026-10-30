@@ -926,8 +926,13 @@ to the caller's variable. Every nex function except `main` is emitted `private`;
 argument's buffer disappears, the function returns nothing and writes the caller's buffer in place
 (`parallel.mlir`, `axpy`). Kept public, the same function returns its argument and the deallocation
 pipeline clones it: a whole-array copy per call. A scalar `inout` is a pointer argument
-*(unverified)*. An `inout` slice argument (§8.2) is the subview of §6.3 written in place
-*(unverified)*.
+*(unverified)*. An `inout` slice argument (§8.2) is the subview of §6.3 written in place: a column,
+a row, a strided or reversed window and a line of a rank-3 array each reach the callee as a
+`memref.subview` of the caller's buffer, with no allocation and no copy, in a `parallel for` body as
+in sequential code. A call through a function value (a local `def`, a lambda, a `val` bound to a
+function, a parameter of function type) passes an `inout` array as its buffer: the code behind the
+value writes it in place and returns only its value, so the same window is written where it lies
+there too.
 
 ---
 
@@ -1139,8 +1144,11 @@ some arrays and writes others as an `inout` argument is written (§8), so a writ
 in place by every thread at the elements it owns — inside an enclosing loop too — and is copied
 first only where the caller still needs its old value or the call also reads it. Inside the code a
 written array is a `restrict writable` tensor over that buffer, written back over it at the end,
-which bufferization turns into nothing. The result of a `parallel` element-wise expression is a
-buffer allocated before the region and freed by the deallocation pipeline.
+which bufferization turns into nothing. An array a lambda captures is held in a cell as a counted
+object; one the body writes crosses as that object's own buffer, written in place, after the cell
+is given a copy of its own if anything else (a `val` sharing it, §8.4) still holds the object. The
+result of a `parallel` element-wise expression is a buffer allocated before the region and freed by
+the deallocation pipeline.
 
 **Counts are atomic in every program.** Strings, cells and closure environments are counted
 objects, and a parallel body may copy and drop one shared from outside — an outer string read, an
