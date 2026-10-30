@@ -27,6 +27,15 @@ itp_par_clauses()
                                    "print(z)", "var m = (0.0, 0)", "parallel for i in 1..5 reduce m: maxloc", "  m = maxloc(m, 1.0 * (i % 2), i)", "print(m)"])),
               "6125.980092905477\n(1, 1)\n(2, 1)\n(1, 2)\n(2, 2)\n5\n(1.0, 1)\nexit 0")
 
+@test("minloc and maxloc clauses pass over nan across blocks: a number beats a nan, two nans tie, and the start is one more candidate")
+itp_par_locations_nan()
+    assert_eq(interpreted(main_of(["val n = 3 * 4096 + 100", "var x: [real] = fill(n, nan)", "for i in 4097..n do x[i] = 1.0", "x[9000] = 0.5",
+                                   "var lo = (nan, 99999)", "var hi = (nan, 99999)", "var kept = (0.0, 0)", "var first = (nan, 99999)", "var start = (nan, 0)",
+                                   "parallel for i in 1..n reduce lo: minloc, hi: maxloc, kept: maxloc, first: minloc, start: minloc",
+                                   "  lo = minloc(lo, x[i], i)", "  hi = maxloc(hi, x[i], i)", "  kept = maxloc(kept, x[i] * nan, i)",
+                                   "  first = minloc(first, x[i] * nan, i)", "  start = minloc(start, x[i] * nan, i)", "print((lo, hi, kept, first, start))"])),
+              "((0.5, 9000), (1.0, 4097), (0.0, 0), (nan, 1), (nan, 0))\nexit 0")
+
 @test("a trap ends the loop where it happens, after the lines printed before it; the reduction variable keeps its start, written elements stay")
 itp_par_traps()
     assert_eq(interpreted(main_of(["print(\"before\")", "var y: [integer] = zeros(10)", "var s = 0", "assert_traps(() ->",

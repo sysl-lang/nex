@@ -61,8 +61,8 @@ par_run_thread_counts()
 
     finish(b)
     assert(r.failed.len() == 0 && r.waiting.len() == 0, join(r.failed.view(), "\n"))
-    assert_eq(r.passed, 5)
-    assert_eq(names.len(), 5)
+    assert_eq(r.passed, 6)
+    assert_eq(names.len(), 6)
 
 @test("each print in a parallel body writes its whole line at once, in any order")
 par_run_atomic_lines()

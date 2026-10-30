@@ -1,0 +1,106 @@
+// DESIGN §7.4 and §9.2: a `nan` is never the extreme of `minloc` / `maxloc` unless every element is
+// one, wherever the `nan`s stand, and then the location is the first. The same rule in every width,
+// at every rank, along a `dim =`, and in a `parallel for` reducing a location across blocks, where
+// the starting value is one more candidate and the result does not depend on the thread count.
+
+def ax(k: integer) = k
+
+def main() =
+  // A leading `nan` gives way to the first number; a later one is passed over.
+  print(minloc([nan, 1.0, 0.5]))
+  print(maxloc([nan, 1.0, 0.5]))
+  print(minloc([nan, nan, 2.0, 1.0]))
+  print(maxloc([1.0, nan, 2.0]))
+  print(minloc([1.0, 0.5, nan]))
+  print(minloc([nan, inf]))
+  print(maxloc([nan, -inf]))
+
+  // Every element `nan`: the first. Empty: 0.
+  print(minloc([nan, nan, nan]))
+  print(maxloc([nan, nan]))
+  val e: [real] = zeros(0)
+  print(s"${minloc(e)} ${maxloc(e)}")
+
+  // Ties go to the first, a `nan` before them or between them; `-0.0` and `0.0` tie.
+  print(minloc([nan, 2.0, 1.0, 1.0]))
+  print(maxloc([nan, 3.0, nan, 3.0]))
+  print(minloc([0.0, -0.0]))
+  print(minloc([-0.0, 0.0]))
+  print(maxloc([nan, -0.0, 0.0]))
+
+  // `real32` and `real16`.
+  val f: [real32] = [nan, 1.0, 0.5]
+  print(s"${minloc(f)} ${maxloc(f)}")
+  val h: [real16] = [nan, nan, -1.0, 4.0]
+  print(s"${minloc(h)} ${maxloc(h)}")
+  val hn: [real16] = [nan, nan]
+  print(s"${minloc(hn)} ${maxloc(hn)}")
+
+  // Rank 2, in storage order (the first index fastest), and along each axis.
+  val m = [[nan, 1.0], [2.0, nan]]
+  print(minloc(m))
+  print(maxloc(m))
+  print(minloc(m, dim = 1))
+  print(minloc(m, dim = 2))
+  print(maxloc(m, dim = ax(1)))
+  print(maxloc(m, dim = ax(2)))
+  print(minloc(fill((2, 2), nan)))
+  print(maxloc(fill((2, 3), nan), dim = 2))
+
+  // Integers have no `nan`; their ties still go to the first.
+  print(minloc([3, 1, 2, 1]))
+  print(maxloc([-5, -5]))
+
+  // `minval` and `maxval` carry a `nan` through, as `min` and `max` do.
+  print(s"${minval([nan, 1.0, 0.5])} ${maxval([1.0, nan])} ${minval(m, dim = 1)}")
+
+  // A `parallel for` over four blocks of 4096: the first block all `nan`.
+  val n = 3 * 4096 + 100
+  var x: [real] = fill(n, nan)
+  for i in 4097..n
+    x[i] = 1.0
+  x[8200] = -0.0
+  x[9000] = 0.5
+
+  var low = (nan, 99999)
+  var high = (nan, 99999)
+  parallel for i in 1..n reduce low: minloc, high: maxloc
+    low = minloc(low, x[i], i)
+    high = maxloc(high, x[i], i)
+  print(s"$low $high")
+
+  // Every contribution `nan`: the starting value if it is a number, else the lowest index.
+  val allnan: [real] = fill(n, nan)
+  var kept = (0.0, 0)
+  var first = (nan, 99999)
+  var start = (nan, 0)
+  parallel for i in 1..n reduce kept: maxloc, first: minloc, start: maxloc
+    kept = maxloc(kept, allnan[i], i)
+    first = minloc(first, allnan[i], i)
+    start = maxloc(start, allnan[i], i)
+  print(s"$kept $first $start")
+
+  // A number only in the last block, beaten by nothing before it; a `-0.0` tying `0.0` across blocks.
+  var y: [real] = fill(n, nan)
+  y[n] = 7.0
+  var z: [real] = fill(n, 0.0)
+  for i in 1..4096
+    z[i] = nan
+  z[5000] = -0.0
+  var late = (nan, 99999)
+  var zero = (nan, 99999)
+  parallel for i in 1..n reduce late: maxloc, zero: minloc
+    late = maxloc(late, y[i], i)
+    zero = minloc(zero, z[i], i)
+  print(s"$late $zero")
+
+  // `real32`, and an empty loop leaving a `nan` start alone.
+  val g: [real32] = fill(n, nan)
+  var w: (real32, integer) = (nan, 99999)
+  parallel for i in 1..n reduce w: minloc
+    w = minloc(w, if i == 6000 then real32(2.5) else g[i], i)
+  var idle = (nan, 3)
+  parallel for i in 1..0 reduce idle: maxloc
+    idle = maxloc(idle, 1.0, i)
+  print(s"$w $idle")
+  print("done")
