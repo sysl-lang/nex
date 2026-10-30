@@ -1089,7 +1089,12 @@ impl Emitter
 
     // `a[…] op= value`: one element or a window of the array place `target`, written in place.
     assign_index(*self, span: Span, op: string, target: TExpr, subs: Buf[TSub], value: TExpr)
-        val v = self.ex(value)
+        // A scalar that fills the window is evaluated once, as the scalar.
+        val v = *value.kind match
+            TArray(a) -> *a match
+                TBroadcast(s) -> self.ex(s)
+                _ -> self.ex(value)
+            _ -> self.ex(value)
         var frames: Buf[Opened] = buf()
         val cur = self.open_place(target, &frames)
         val tt = self.tensor_ty(span, target.ty)

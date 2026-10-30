@@ -334,7 +334,7 @@ struct Emitter
             else
                 self.release_ref(self.def(s"llvm.load ${self.slot[id]} : !llvm.ptr -> !llvm.ptr"))
 
-            val cell = self.new_object(self.words(t) * 8, if self.managed(t) then self.helper_ref("cell", t) else "")
+            val cell = self.new_object((self.words(t) + self.shift_words(id)) * 8, if self.managed(t) then self.helper_ref("cell", t) else "")
 
             self.op(s"llvm.store $cell, ${self.slot[id]} : !llvm.ptr, !llvm.ptr")
         elif self.slot[id] == ""

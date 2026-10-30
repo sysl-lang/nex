@@ -1,0 +1,53 @@
+// Indexing is 1-based and `..` is inclusive (DESIGN §5.1, §5.2): the ends read with `1` and `end`,
+// `0` and `n + 1` trap, inclusive and half-open windows, the two empty windows that are legal, and
+// row and column windows of a matrix agreeing with the loops that read them element by element.
+
+def main() =
+  val a = [10, 20, 30, 40, 50, 60]
+  val n = length(a)
+  print(s"${a[1]} ${a[end]} ${a[end - 1]} ${a[(end + 1) div 2]}")
+  assert_traps(() -> print(a[0]), "out of bounds")
+  assert_traps(() -> print(a[n + 1]), "out of bounds")
+  assert_traps(() -> print(a[-1]), "out of bounds")
+  print("a[0], a[n + 1] and a[-1] trap")
+
+  print(a[2..5])
+  print(length(a[2..5]))
+  print(a[2..<5])
+  print(length(a[2..<5]))
+  print(a[end-2..])
+  print(a[..end-1])
+  print(a[..<end])
+  print(a[1..end])
+  print(length(a[1..0]))
+  print(length(a[n + 1..n]))
+  print(length(a[4..<4]))
+  assert_traps(() -> print(a[0..2]), "out of bounds")
+  assert_traps(() -> print(a[5..n + 1]), "out of bounds")
+  assert_traps(() -> print(a[4..2]), "out of bounds")
+  print("windows past either end, or running backward, trap")
+
+  val m = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+  val rows_23 = m[2..3, :]
+  var same = true
+  for i in 2..3
+    for j in 1..cols(m)
+      if rows_23[i - 1, j] != m[i, j] then same = false
+  print(s"$rows_23 $same")
+
+  val but_last = m[:, ..<end]
+  same = true
+  for i in 1..rows(m)
+    for j in 1..<cols(m)
+      if but_last[i, j] != m[i, j] then same = false
+  print(s"$but_last $same")
+
+  print(m[end, :])
+  print(m[:, end])
+  print(m[2])
+  print(shape(m[2..3, 2..<4]))
+  print(shape(m[1..0, :]))
+  assert_traps(() -> print(m[4, 1]), "out of bounds")
+  assert_traps(() -> print(m[1, 0]), "out of bounds")
+  assert_traps(() -> print(m[:, 2..5]), "out of bounds")
+  print("a matrix's axes are checked one by one")

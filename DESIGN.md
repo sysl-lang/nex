@@ -585,16 +585,20 @@ m[:, end..1 by -1]     // the columns of m in reverse order
 
 - An open start is the last index of the axis (`end`); an open stop is index `1`.
 - Bounds are checked as going forward: the start must be a valid index of a non-empty window, the
-  stop must lie in `1..n` (or be `0` / `n + 1` for an empty window), and a window whose start is
-  below its stop is empty (`a[1..2 by -1]` is empty, as Fortran's `a(1:2:-1)`).
+  stop must lie in `1..n` (or be `0` / `n + 1` for an empty window), and a window whose stop is one
+  past its start is empty (`a[1..2 by -1]` and `a[3..<3 by -1]` are empty, as Fortran's
+  `a(1:2:-1)`). A stop further past the start traps `out of bounds`, as `a[5..2]` does going
+  forward: `a[2..5 by -1]` is an error, not an empty window.
 - A reversed slice is a view like any other (§6): **nothing is copied**. It is valid as an
   assignment target (`a[.. by -1] = b` writes `b` into `a` back to front).
 - The prelude's `reverse(a)` is `a[.. by -1]`, and `reverse(a, k)` reverses axis `k` only.
 
-**Lowering, unverified:** a negative stride in a `memref` strided layout must be probed. If the
-layout refuses it, a reversed axis lowers as an offset at the far end plus index arithmetic in the
-loop, and a reversed view crossing the FFI to BLAS (`incx < 0`) passes the pointer to the
-lowest-addressed element, since BLAS starts a negative-increment vector from that end.
+**Lowering:** a reversed axis is a `tensor.extract_slice` whose offset is the far end and whose
+stride is negative; bufferization makes it a `memref.subview` with that offset and stride, and
+`expand-strided-metadata` keeps both, so it is read and written in place like any other view
+(`experiments/mlir/negative-stride.mlir`). A reversed view crossing the FFI to BLAS (`incx < 0`)
+passes the pointer to the lowest-addressed element, since BLAS starts a negative-increment vector
+from that end.
 
 ## 6. Views
 

@@ -79,6 +79,8 @@ impl Emitter
     shifts_of(*self, e: TExpr) -> Buf[string]
         *e.kind match
             TLocal(id) ->
+                if self.shift_words(id) > 0 && self.boxed[id] then return self.cell_shifts(id)
+
                 var k = self.origins.len()
 
                 while k > 0
@@ -102,16 +104,61 @@ impl Emitter
         self.last_shifts = shifts
         v
 
-    // Local `id` has just been bound to `init`: an `origin` local keeps its shifts.
+    // Local `id` has just been bound to `init`: an `origin` local keeps its shifts. One a lambda
+    // captures keeps them in its cell after the array, where the lambda reads them too.
     note_origin(*self, span: Span, id: usize, init: TExpr)
-        self.prog.locals[id].kind match
-            LOrigin ->
-                if self.boxed[id] then self.later(span, "an `origin` view a lambda captures")
+        if self.shift_words(id) == 0 then return
 
-                self.origins.push(OriginLocal(id, self.shifts_of(init)))
-            _ -> ()
+        val shifts = self.shifts_of(init)
+
+        if !self.boxed[id]
+            self.origins.push(OriginLocal(id, shifts))
+            return
+
+        // An axis given no first index starts at 1: a shift of 0.
+        for k in 0..<self.shift_words(id)
+            val s = if k < shifts.len() then shifts[k] else self.def("arith.constant 0 : i64")
+
+            self.op(s"llvm.store $s, ${self.shift_ptr(id, k)} : i64, !llvm.ptr")
+
+    // The words after the array in local `id`'s cell that hold its shifts: one per axis of an
+    // `origin` local, none for any other.
+    shift_words(*self, id: usize) -> usize = self.prog.locals[id].kind match
+        LOrigin -> rank_of(self.prog.locals[id].ty)
+        _ -> 0
+
+    // The address of the shift of axis `k` (from 0) in captured `origin` local `id`'s cell.
+    shift_ptr(*self, id: usize, k: usize) -> string =
+        self.def(s"llvm.getelementptr ${self.local_ptr(Span(0, 0), id)}[${self.words(self.prog.locals[id].ty) + k}] : (!llvm.ptr) -> !llvm.ptr, i64")
+
+    // A captured `origin` local's shifts, read from its cell.
+    cell_shifts(*self, id: usize) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for k in 0..<self.shift_words(id)
+            out.push(self.def(s"llvm.load ${self.shift_ptr(id, k)} : !llvm.ptr -> i64"))
+
+        out
 
     // -- slices of places -------------------------------------------------------------------------
+
+    // The value `v` a `var` array local `id` starts from. An array literal folds to a constant, and
+    // a constant's storage cannot be written: the first write through a window of one, an `inout`
+    // argument above all, would copy the window and then the whole constant. Copied into a buffer of
+    // the variable's own here, every later write is in place.
+    var_start(*self, span: Span, id: usize, init: TExpr, v: string) -> string
+        self.prog.locals[id].kind match
+            LVar -> ()
+            _ -> return v
+
+        *init.kind match
+            TArray(op) -> *op match
+                TArrayLit(_) -> ()
+                _ -> return v
+            _ -> return v
+
+        // `alloc_tensor`, not `linalg.copy`: canonicalization erases a copy into a fresh tensor.
+        self.def(s"bufferization.alloc_tensor() copy($v) : ${self.tensor_ty(span, init.ty)}")
 
     // The array the place `e` holds now; each slice opened on the way to it pushed onto `frames`.
     open_place(*self, e: TExpr, frames: *Buf[Opened]) -> string
