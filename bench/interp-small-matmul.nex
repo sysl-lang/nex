@@ -1,0 +1,18 @@
+// The interpreter's inline product (PLAN.md M13): `@` below BLAS's size, which sums in order with each
+// product rounded as the compiled inline `linalg` operation does — 20 000 products of 16 × 16 `real64`
+// matrices and as many 16 × 16 by 16 matrix-vector products. Timed from outside, on either engine.
+
+def main() =
+  val n = 16
+  var a: [real; :, :] = zeros((n, n))
+  var v: [real; :] = zeros(n)
+  for i in 1..n
+    v[i] = 1.0 / i
+    for j in 1..n
+      a[i, j] = 1.0 / (i + j)
+  var s = 0.0
+  for k in 1..20000
+    val c = a @ a
+    val y = c @ v
+    s = s + y[1] + c[n, n]
+  print(s)

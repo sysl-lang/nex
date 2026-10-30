@@ -1,0 +1,738 @@
+module sh.sysl.nex
+
+// The element-by-element operations of arrays that are not the arithmetic operators, over machine
+// numbers (`interp_store.sysl`): `^`, the numeric conversions, the prelude's elemental math, the
+// locations, and the reductions of complex and integer elements `interp_kernels.sysl` leaves out.
+//
+// **Each loop computes what the scalar operation computes** (`interp_value.sysl`, `interp_builtin.sysl`):
+// the same function of `sysl.math.Float` at the width the compiled program calls it, the same checks
+// and the same trap, the first element's in storage order. A loop reads an operand of another element
+// type than the result's — an integer exponent, a conversion's source — as one run of `long`s or
+// `real`s first, so each element type is read by one loop and written by another.
+
+import nex_runtime.sh.sysl.nex_runtime.{SHAPE_MISMATCH, int_name, ipow_checked, out_of_range_message, overflow_message}
+import sysl.buf.{Buf, buf}
+import sysl.math.Float
+// The standard complex number, under a name that leaves `Complex` to nex's type.
+import sysl.math.complex.Complex as Cx
+
+private type Real1 = &Fn(real) -> Result[real, Signal]
+private type Real2 = &Fn(real, real) -> Result[real, Signal]
+private type Int1 = &Fn(i128) -> Result[i128, Signal]
+private type Int2 = &Fn(i128, i128) -> Result[i128, Signal]
+// A complex function of a complex number's parts, giving a complex number or a real.
+private type Cx1 = &Fn(real, real) -> Value
+private type CxReal = &Fn(real, real) -> real
+
+// `r`, checked as `--fpe-trap` checks a result made from `a` and `b`.
+private fpe_real(r: real, a: real, b: real, fpe: bool) -> Result[real, Signal]
+    if fpe then _ = fpe_checked(r, a, b, true)?
+
+    Ok(r)
+
+// -- reading a run of another type ----------------------------------------------------------------------
+
+// The elements of an integer array in storage order, each widened to 64 bits by its own signedness as
+// `int_of` reads it.
+private longs_of(a: &Arr) -> Buf[long] = a.store.d match
+    DI8(_) -> widened[i8](a)
+    DI16(_) -> widened[i16](a)
+    DI32(_) -> widened[i32](a)
+    DI64(_) -> widened[long](a)
+    DU8(_) -> widened[u8](a)
+    DU16(_) -> widened[u16](a)
+    DU32(_) -> widened[u32](a)
+    DU64(_) -> widened[u64](a)
+    _ -> buf()
+
+private widened[T: Elem + Integer](a: &Arr) -> Buf[long]
+    val (xs, at) = run_of[T](a)
+    val n = usize(count_of(a))
+    var out: Buf[long] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(long.wrap(xs[at + k]))
+
+    out
+
+// The elements of a real array in storage order, as `real64`s, which hold each exactly.
+private reals_of(a: &Arr) -> Buf[real] = a.store.d match
+    DR16(_) -> as_reals[f16](a)
+    DR32(_) -> as_reals[f32](a)
+    DR64(_) -> as_reals[real](a)
+    _ -> buf()
+
+private as_reals[T: Elem](a: &Arr) -> Buf[real]
+    val (xs, at) = run_of[T](a)
+    val n = usize(count_of(a))
+    var out: Buf[real] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(real(xs[at + k]))
+
+    out
+
+// The elements of a complex array in storage order, their parts as `real64`s.
+private complexes_of(a: &Arr) -> Buf[Cx[real]] = a.store.d match
+    DC32(_) -> as_complexes[f32](a)
+    DC64(_) -> as_complexes[real](a)
+    _ -> buf()
+
+private as_complexes[F: Float](a: &Arr) -> Buf[Cx[real]]
+    val (xs, at) = run_of[Cx[F]](a)
+    val n = usize(count_of(a))
+    var out: Buf[Cx[real]] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(Cx(real(xs[at + k].re), real(xs[at + k].im)))
+
+    out
+
+// An operand as a run, where its first element is, and how far apart they are: a scalar is one
+// element read every time.
+private one[T](x: T) -> (Buf[T], usize, usize)
+    var b: Buf[T] = buf()
+
+    b.push(x)
+    (b, 0, 0)
+
+private run_longs(v: Value, array: bool) -> (Buf[long], usize, usize) = if array then (longs_of(arr_of(v)), 0, 1) else one(int_of(v))
+
+// -- writing a run of the result's type -----------------------------------------------------------------
+
+// Storage of the integer type `t` holding `n` elements, the `k`th computed by `f`.
+private ints_made(t: Ty, n: usize, f: &Fn(usize) -> Result[i128, Signal]) -> Result[Data, Signal] = t match
+    Int(8, true) -> made_ints[i8](n, f)
+    Int(16, true) -> made_ints[i16](n, f)
+    Int(32, true) -> made_ints[i32](n, f)
+    Int(64, true) -> made_ints[long](n, f)
+    Int(8, false) -> made_ints[u8](n, f)
+    Int(16, false) -> made_ints[u16](n, f)
+    Int(32, false) -> made_ints[u32](n, f)
+    _ -> made_ints[u64](n, f)
+
+private made_ints[T: Elem + Integer](n: usize, f: &Fn(usize) -> Result[i128, Signal]) -> Result[Data, Signal]
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(T.wrap(f(k)?))
+
+    Ok(T.holding(out))
+
+private reals_made(t: Ty, n: usize, f: &Fn(usize) -> Result[real, Signal]) -> Result[Data, Signal] = t match
+    Real(16) -> made_reals[f16](n, f)
+    Real(32) -> made_reals[f32](n, f)
+    _ -> made_reals[real](n, f)
+
+private made_reals[T: Elem](n: usize, f: &Fn(usize) -> Result[real, Signal]) -> Result[Data, Signal]
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(T(f(k)?))
+
+    Ok(T.holding(out))
+
+// A complex result's parts, computed by `f` from the element's number.
+private complexes_made(t: Ty, n: usize, f: &Fn(usize) -> Result[Cx[real], Signal]) -> Result[Data, Signal] = t match
+    Complex(32) -> made_complexes[f32](n, f)
+    _ -> made_complexes[real](n, f)
+
+private made_complexes[F: Float](n: usize, f: &Fn(usize) -> Result[Cx[real], Signal]) -> Result[Data, Signal]
+    var out: Buf[Cx[F]] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        val z = f(k)?
+
+        out.push(Cx(F(z.re), F(z.im)))
+
+    Ok(Cx[F].holding(out))
+
+// -- conversions ----------------------------------------------------------------------------------------
+
+// A real of `fb` bits as one of `tb`: a widening, or a rounding that traps an overflow under
+// `--fpe-trap`, as the scalar conversion is.
+private narrow(x: real, fb: int, tb: int, fpe: bool) -> Result[real, Signal]
+    if tb >= fb then return Ok(x)
+
+    fpe_real(rnd(x, tb), x, x, fpe)
+
+// An array of element type `from` converted element by element to `to` (DESIGN §2.4), over machine
+// numbers; `None` where the types are one or no loop converts them.
+private[nex] convert_kernel(from: Ty, to: Ty, traps: bool, fpe: bool) -> Option[Op1]
+    if ty_eq(from, to) then return None
+
+    val f: &Fn(&Arr) -> Result[Data, Signal] = from match
+        Int(fb, fs) -> to match
+            Int(tb, ts) ->
+                val message = out_of_range_message(int_name(fb, fs), int_name(tb, ts))
+
+                (a) ->
+                    val xs = longs_of(a)
+
+                    ints_made(to, xs.len(), (k) ->
+                        val n = wide(xs[k], fs)
+
+                        if traps && !fits(n, tb, ts) then Err(Trapped(message)) else Ok(n)
+                    )
+            Real(tb) -> (a) ->
+                val xs = longs_of(a)
+
+                reals_made(to, xs.len(), (k) -> Ok(int_to_real(xs[k], fs, tb)))
+            Complex(tb) -> (a) ->
+                val xs = longs_of(a)
+
+                complexes_made(to, xs.len(), (k) -> Ok(Cx(int_to_real(xs[k], fs, tb), 0.0)))
+            _ -> return None
+        Real(fb) -> to match
+            Real(tb) -> (a) ->
+                val xs = reals_of(a)
+
+                reals_made(to, xs.len(), (k) -> narrow(xs[k], fb, tb, fpe))
+            Int(tb, ts) ->
+                val message = out_of_range_message(show_ty(from), show_ty(to))
+
+                (a) ->
+                    val xs = reals_of(a)
+
+                    ints_made(to, xs.len(), (k) -> real_truncated(xs[k], tb, ts) match
+                        Some(n) -> Ok(wide(n, ts))
+                        None -> Err(Trapped(message))
+                    )
+            Complex(tb) -> (a) ->
+                val xs = reals_of(a)
+
+                complexes_made(to, xs.len(), (k) -> Ok(Cx(narrow(xs[k], fb, tb, fpe)?, 0.0)))
+            _ -> return None
+        Complex(fb) -> to match
+            Complex(tb) -> (a) ->
+                val xs = complexes_of(a)
+
+                complexes_made(to, xs.len(), (k) ->
+                    val re = narrow(xs[k].re, fb, tb, fpe)?
+
+                    Ok(Cx(re, narrow(xs[k].im, fb, tb, fpe)?))
+                )
+            _ -> return None
+        _ -> return None
+
+    Some((x) ->
+        val a = arr_of(x)
+
+        Ok(dense_data(f(a)?, a.ext))
+    )
+end convert_kernel
+
+// -- `^` --------------------------------------------------------------------------------------------------
+
+// `x ^ y` element by element, the base of element type `bt` and the exponent of its type or an integer
+// type `nt` (DESIGN §2.2), as the scalar power computes each; `None` where no loop computes it.
+private[nex] pow_kernel(bt: Ty, nt: Ty, fpe: bool, xa: bool, ya: bool) -> Option[Op2]
+    val same = ty_eq(bt, nt)
+    var int_exponent = false
+    var n_signed = false
+
+    nt match
+        Int(_, s) ->
+            int_exponent = true
+            n_signed = s
+        _ -> ()
+
+    if !same && !int_exponent then return None
+
+    val f: Op2 = bt match
+        Int(bits, signed) ->
+            if !int_exponent then return None
+
+            bt match
+                Int(8, true) -> (x, y) -> int_pow_zip[i8](bits, signed, n_signed, x, y, xa, ya)
+                Int(16, true) -> (x, y) -> int_pow_zip[i16](bits, signed, n_signed, x, y, xa, ya)
+                Int(32, true) -> (x, y) -> int_pow_zip[i32](bits, signed, n_signed, x, y, xa, ya)
+                Int(64, true) -> (x, y) -> int_pow_zip[long](bits, signed, n_signed, x, y, xa, ya)
+                Int(8, false) -> (x, y) -> int_pow_zip[u8](bits, signed, n_signed, x, y, xa, ya)
+                Int(16, false) -> (x, y) -> int_pow_zip[u16](bits, signed, n_signed, x, y, xa, ya)
+                Int(32, false) -> (x, y) -> int_pow_zip[u32](bits, signed, n_signed, x, y, xa, ya)
+                _ -> (x, y) -> int_pow_zip[u64](bits, signed, n_signed, x, y, xa, ya)
+        Real(16) -> (x, y) -> real_pow_zip[f16](16, fpe, x, y, xa, ya, int_exponent, n_signed)
+        Real(32) -> (x, y) -> real_pow_zip[f32](32, fpe, x, y, xa, ya, int_exponent, n_signed)
+        Real(64) -> (x, y) -> real_pow_zip[real](64, fpe, x, y, xa, ya, int_exponent, n_signed)
+        Complex(32) -> (x, y) -> complex_pow_zip[f32](32, x, y, xa, ya, int_exponent, n_signed)
+        Complex(64) -> (x, y) -> complex_pow_zip[real](64, x, y, xa, ya, int_exponent, n_signed)
+        _ -> return None
+
+    Some(f)
+end pow_kernel
+
+private int_pow_zip[T: Elem + Integer](bits: int, signed: bool, n_signed: bool, x: Value, y: Value, xa: bool, ya: bool) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[T](x, xa)
+    var (ns, j, sj) = run_longs(y, ya)
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        ipow_checked(long.wrap(xs[i]), ns[j], bits, signed, n_signed) match
+            Ok(v) -> out.push(T.wrap(v))
+            Err(m) -> return trapped(m)
+
+        i += si
+        j += sj
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+// A real exponent as the power reads it: an integer one converted to the base's width.
+private real_exponents(y: Value, ya: bool, int_exponent: bool, n_signed: bool, bits: int) -> (Buf[real], usize, usize)
+    if !int_exponent then return if ya then (reals_of(arr_of(y)), 0, 1) else one(real_of(y))
+
+    val (ns, _, step) = run_longs(y, ya)
+    var out: Buf[real] = buf()
+
+    out.reserve(ns.len())
+
+    for n in ns
+        out.push(int_to_real(n, n_signed, bits))
+
+    (out, 0, step)
+
+private real_pow_zip[T: Elem](bits: int, fpe: bool, x: Value, y: Value, xa: bool, ya: bool, int_exponent: bool, n_signed: bool) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[T](x, xa)
+    var (es, j, sj) = real_exponents(y, ya, int_exponent, n_signed, bits)
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        val p = real(xs[i])
+        val q = es[j]
+        val r = real_power(p, q, bits)
+
+        // A `real16` power is unchecked, as the compiled one is.
+        if fpe && bits != 16 then _ = fpe_checked(r, p, q, true)?
+
+        out.push(T(r))
+        i += si
+        j += sj
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+// A complex exponent as the power reads it: an integer one converted to the base's part width.
+private complex_exponents(y: Value, ya: bool, int_exponent: bool, n_signed: bool, bits: int) -> (Buf[Cx[real]], usize, usize)
+    if !int_exponent then return if ya then (complexes_of(arr_of(y)), 0, 1) else one(Cx(re_of(y), im_of(y)))
+
+    val (ns, _, step) = run_longs(y, ya)
+    var out: Buf[Cx[real]] = buf()
+
+    out.reserve(ns.len())
+
+    for n in ns
+        out.push(Cx(int_to_real(n, n_signed, bits), 0.0))
+
+    (out, 0, step)
+
+private complex_pow_zip[F: Float](bits: int, x: Value, y: Value, xa: bool, ya: bool, int_exponent: bool, n_signed: bool) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[Cx[F]](x, xa)
+    var (es, j, sj) = complex_exponents(y, ya, int_exponent, n_signed, bits)
+    var out: Buf[Cx[F]] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        val z = complex_pow(real(xs[i].re), real(xs[i].im), es[j].re, es[j].im, bits)
+
+        out.push(Cx(F(re_of(z)), F(im_of(z))))
+        i += si
+        j += sj
+
+    Ok(dense_data(Cx[F].holding(out), a.ext))
+
+// -- the prelude's elemental math -----------------------------------------------------------------------
+
+// The prelude's elemental function `name` (DESIGN §7.3) of arrays and broadcast scalars, over machine
+// numbers: each argument of element type `ets[k]`, an array where `arrays[k]` says so, and the result's
+// element type `t`. `None` where no loop computes it.
+private[nex] elemental_kernel(name: string, ets: Buf[Ty], t: Ty, arrays: Buf[bool], fpe: bool) -> Option[&Fn(Buf[Value]) -> Answer]
+    val et = ets[0]
+
+    for e in ets
+        if !ty_eq(e, et) then return None
+
+    var any_array = false
+
+    for a in arrays
+        any_array = any_array || a
+
+    if !any_array then return None
+
+    if ets.len() == 1
+        val f: Op1 = et match
+            Real(bits) ->
+                if !ty_eq(et, t) then return None
+
+                val g = real_fn1(name, bits, fpe) match
+                    Some(g) -> g
+                    None -> return None
+
+                if bits == 16 then (x) -> reals1[f16](x, g) elif bits == 32 then (x) -> reals1[f32](x, g) else (x) -> reals1[real](x, g)
+            Int(bits, signed) ->
+                if !ty_eq(et, t) then return None
+
+                val g = int_fn1(name, bits, signed) match
+                    Some(g) -> g
+                    None -> return None
+
+                et match
+                    Int(8, true) -> (x) -> ints1[i8](x, g)
+                    Int(16, true) -> (x) -> ints1[i16](x, g)
+                    Int(32, true) -> (x) -> ints1[i32](x, g)
+                    Int(64, true) -> (x) -> ints1[long](x, g)
+                    Int(8, false) -> (x) -> ints1[u8](x, g)
+                    Int(16, false) -> (x) -> ints1[u16](x, g)
+                    Int(32, false) -> (x) -> ints1[u32](x, g)
+                    _ -> (x) -> ints1[u64](x, g)
+            Complex(bits) ->
+                if ty_eq(et, t)
+                    val g = complex_fn1(name, bits) match
+                        Some(g) -> g
+                        None -> return None
+
+                    if bits == 32 then (x) -> complexes1[f32](x, g) else (x) -> complexes1[real](x, g)
+                else
+                    val g = complex_real_fn(name, bits) match
+                        Some(g) -> g
+                        None -> return None
+
+                    if bits == 32 then (x) -> complex_reals[f32](x, g) else (x) -> complex_reals[real](x, g)
+            _ -> return None
+
+        return Some((vs) -> f(vs[0]))
+
+    if ets.len() != 2 || !ty_eq(et, t) then return None
+
+    val xa = arrays[0]
+    val ya = arrays[1]
+
+    val f: Op2 = et match
+        Real(bits) ->
+            val g = real_fn2(name, bits, fpe) match
+                Some(g) -> g
+                None -> return None
+
+            if bits == 16 then (x, y) -> reals2[f16](x, y, xa, ya, g) elif bits == 32 then (x, y) -> reals2[f32](x, y, xa, ya, g)
+            else (x, y) -> reals2[real](x, y, xa, ya, g)
+        Int(_, _) ->
+            if name != "min" && name != "max" then return None
+
+            val low = name == "min"
+            // The first where it is the lower (for `min`), else the second, as the scalar `min` picks.
+            val g: Int2 = (p, q) -> Ok(if (p < q) == low then p else q)
+
+            et match
+                Int(8, true) -> (x, y) -> ints2[i8](x, y, xa, ya, g)
+                Int(16, true) -> (x, y) -> ints2[i16](x, y, xa, ya, g)
+                Int(32, true) -> (x, y) -> ints2[i32](x, y, xa, ya, g)
+                Int(64, true) -> (x, y) -> ints2[long](x, y, xa, ya, g)
+                Int(8, false) -> (x, y) -> ints2[u8](x, y, xa, ya, g)
+                Int(16, false) -> (x, y) -> ints2[u16](x, y, xa, ya, g)
+                Int(32, false) -> (x, y) -> ints2[u32](x, y, xa, ya, g)
+                _ -> (x, y) -> ints2[u64](x, y, xa, ya, g)
+        _ -> return None
+
+    Some((vs) -> f(vs[0], vs[1]))
+end elemental_kernel
+
+// A real function of one argument at `bits`, as the scalar prelude computes it (`real_math`, `libm1`).
+private real_fn1(name: string, bits: int, fpe: bool) -> Option[Real1]
+    val f: Real1 = if name == "sqrt" then (v) -> fpe_real(rnd(v.sqrt(), bits), v, v, fpe)
+                   elif name == "floor" then (v) -> Ok(v.floor())
+                   elif name == "ceil" then (v) -> Ok(v.ceil())
+                   elif name == "trunc" then (v) -> Ok(v.trunc())
+                   elif name == "round" then (v) -> Ok(v.round())
+                   elif name == "abs" then (v) -> Ok(real_abs(v))
+                   elif name == "sign" then (v) -> Ok(real_sign(v))
+                   else position(name, PRELUDE_LIBM[..]) match
+                       Some(k) -> (v) -> fpe_real(libm1(k, v, bits), v, v, fpe)
+                       None -> return None
+
+    Some(f)
+
+private real_fn2(name: string, bits: int, fpe: bool) -> Option[Real2]
+    val f: Real2 = if name == "min" then (v, w) -> Ok(minimum(v, w))
+                   elif name == "max" then (v, w) -> Ok(maximum(v, w))
+                   elif name == "atan2" || name == "hypot" then
+                       val k = position(name, PRELUDE_LIBM[..]).unwrap()
+
+                       (v, w) -> fpe_real(libm2(k, v, w, bits), v, w, fpe)
+                   else return None
+
+    Some(f)
+
+// `abs` and `sign` of an integer of `bits` bits; the most negative signed one has no `abs` and traps.
+private int_fn1(name: string, bits: int, signed: bool) -> Option[Int1]
+    val f: Int1 = if name == "abs" then
+                      if !signed then (n) -> Ok(n)
+                      else
+                          val lowest = -(i128(1) << (bits - 1))
+
+                          (n) -> if n == lowest then Err(Trapped(overflow_message(bits, true))) elif n < 0 then Ok(-n) else Ok(n)
+                  elif name == "sign" then (n) -> Ok(if n > 0 then 1 elif n < 0 then -1 else 0)
+                  else return None
+
+    Some(f)
+
+private complex_fn1(name: string, bits: int) -> Option[Cx1]
+    val f: Cx1 = if name == "conj" then (re, im) -> VComplex(re, -im)
+                 elif name == "sqrt" then (re, im) -> complex_sqrt(re, im, bits)
+                 elif name == "exp" then (re, im) -> complex_exp(re, im, bits)
+                 elif name == "log" then (re, im) -> complex_log(re, im, bits)
+                 elif name == "sin" then (re, im) -> complex_sin(re, im, bits)
+                 elif name == "cos" then (re, im) -> complex_cos(re, im, bits)
+                 else return None
+
+    Some(f)
+
+private complex_real_fn(name: string, bits: int) -> Option[CxReal]
+    val f: CxReal = if name == "abs" then (re, im) -> complex_abs(re, im, bits)
+                    elif name == "arg" then (re, im) -> complex_arg(re, im, bits)
+                    else return None
+
+    Some(f)
+
+private reals1[T: Elem](x: Value, f: Real1) -> Answer
+    val a = arr_of(x)
+    val n = usize(count_of(a))
+    val (xs, at) = run_of[T](a)
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(T(f(real(xs[at + k]))?))
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+private reals2[T: Elem](x: Value, y: Value, xa: bool, ya: bool, f: Real2) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[T](x, xa)
+    var (ys, j, sj) = operand[T](y, ya)
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        out.push(T(f(real(xs[i]), real(ys[j]))?))
+        i += si
+        j += sj
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+private ints1[T: Elem + Integer](x: Value, f: Int1) -> Answer
+    val a = arr_of(x)
+    val n = usize(count_of(a))
+    val (xs, at) = run_of[T](a)
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(T.wrap(f(i128(xs[at + k]))?))
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+private ints2[T: Elem + Integer](x: Value, y: Value, xa: bool, ya: bool, f: Int2) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[T](x, xa)
+    var (ys, j, sj) = operand[T](y, ya)
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        out.push(T.wrap(f(i128(xs[i]), i128(ys[j]))?))
+        i += si
+        j += sj
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+private complexes1[F: Float](x: Value, f: Cx1) -> Answer
+    val a = arr_of(x)
+    val n = usize(count_of(a))
+    val (xs, at) = run_of[Cx[F]](a)
+    var out: Buf[Cx[F]] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        val z = f(real(xs[at + k].re), real(xs[at + k].im))
+
+        out.push(Cx(F(re_of(z)), F(im_of(z))))
+
+    Ok(dense_data(Cx[F].holding(out), a.ext))
+
+// A real function of complex numbers whose parts are `F`s, giving `F`s.
+private complex_reals[F: Float + Elem](x: Value, f: CxReal) -> Answer
+    val a = arr_of(x)
+    val n = usize(count_of(a))
+    val (xs, at) = run_of[Cx[F]](a)
+    var out: Buf[F] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(F(f(real(xs[at + k].re), real(xs[at + k].im))))
+
+    Ok(dense_data(F.holding(out), a.ext))
+
+// -- locations ------------------------------------------------------------------------------------------
+
+// `minloc` or `maxloc` of an array of element type `et` over machine numbers: the 1-based storage
+// position of the first element strictly lower (higher) than every one before it, the first element
+// taken whatever it is; 0 for an empty array. `None` where no loop computes it.
+private[nex] loc_kernel(name: string, et: Ty) -> Option[&Fn(&Arr) -> long]
+    val low = name == "minloc"
+
+    val f: &Fn(&Arr) -> long = et match
+        Int(8, true) -> (a) -> int_location[i8](a, low)
+        Int(16, true) -> (a) -> int_location[i16](a, low)
+        Int(32, true) -> (a) -> int_location[i32](a, low)
+        Int(64, true) -> (a) -> int_location[long](a, low)
+        Int(8, false) -> (a) -> int_location[u8](a, low)
+        Int(16, false) -> (a) -> int_location[u16](a, low)
+        Int(32, false) -> (a) -> int_location[u32](a, low)
+        Int(64, false) -> (a) -> int_location[u64](a, low)
+        Real(16) -> (a) -> real_location[f16](a, low)
+        Real(32) -> (a) -> real_location[f32](a, low)
+        Real(64) -> (a) -> real_location[real](a, low)
+        _ -> return None
+
+    Some(f)
+
+private int_location[T: Elem](a: &Arr, low: bool) -> long
+    val (xs, at) = run_of[T](a)
+    var best: i128 = 0
+    var loc: long = 0
+
+    for k in 0..<usize(count_of(a))
+        val x = i128(xs[at + k])
+
+        if loc == 0 || (if low then x < best else x > best)
+            best = x
+            loc = long(k) + 1
+
+    loc
+
+private real_location[T: Elem](a: &Arr, low: bool) -> long
+    val (xs, at) = run_of[T](a)
+    var best = 0.0
+    var loc: long = 0
+
+    for k in 0..<usize(count_of(a))
+        val x = real(xs[at + k])
+
+        if loc == 0 || (if low then x < best else x > best)
+            best = x
+            loc = long(k) + 1
+
+    loc
+
+// -- reductions of complex and integer elements -----------------------------------------------------------
+
+// `product` of complex numbers whose parts are `F`s: blocks of 4096 from 1, each step `acc * x` as nex
+// writes the product, the partials multiplied in the pairwise tree.
+private[nex] complex_product[F: Float](a: &Arr, bits: int) -> Answer
+    val (xs, at) = run_of[Cx[F]](a)
+    val n = usize(count_of(a))
+    var partials: Buf[Value] = buf()
+    var lo: usize = 0
+
+    while lo < n
+        val hi = if lo + TREE_BLOCK < n then lo + TREE_BLOCK else n
+        var re = 1.0
+        var im = 0.0
+
+        for k in lo..<hi
+            val z = complex_mul(re, im, real(xs[at + k].re), real(xs[at + k].im), bits)?
+
+            re = re_of(z)
+            im = im_of(z)
+
+        partials.push(VComplex(re, im))
+        lo = hi
+
+    if partials.len() == 0 then return Ok(VComplex(1.0, 0.0))
+
+    while partials.len() > 1
+        var next: Buf[Value] = buf()
+        var k: usize = 0
+
+        while k + 1 < partials.len()
+            val p = partials[k]
+            val q = partials[k + 1]
+
+            next.push(complex_mul(re_of(p), im_of(p), re_of(q), im_of(q), bits)?)
+            k += 2
+
+        if k < partials.len() then next.push(partials[k])
+
+        partials = next
+
+    Ok(partials[0])
+
+// `dot(x, y)` of integers: every product checked against the width, in storage order, then summed as
+// `sum` is.
+private[nex] int_dot[T: Elem](x: &Arr, y: &Arr, bits: int, signed: bool) -> Answer
+    if !same_shape(x, y) then return trapped(SHAPE_MISMATCH)
+
+    val n = usize(count_of(x))
+    val (xs, i) = run_of[T](x)
+    val (ys, j) = run_of[T](y)
+    var ps: Buf[T] = buf()
+
+    ps.reserve(n)
+
+    for k in 0..<n
+        val r = i128(xs[i + k]) * i128(ys[j + k])
+
+        if !fits(r, bits, signed) then return trapped(overflow_message(bits, signed))
+
+        ps.push(T(r))
+
+    int_tree_in(ps, 0, n, bits, signed, false)
+
+// `dot(x, y)` of complex numbers: each `conj(x) * y` as nex writes the product, then summed as `sum` is.
+private[nex] complex_dot[F: Float](x: &Arr, y: &Arr, bits: int) -> Answer
+    if !same_shape(x, y) then return trapped(SHAPE_MISMATCH)
+
+    val n = usize(count_of(x))
+    val (xs, i) = run_of[Cx[F]](x)
+    val (ys, j) = run_of[Cx[F]](y)
+    var ps: Buf[Cx[F]] = buf()
+
+    ps.reserve(n)
+
+    for k in 0..<n
+        val p = xs[i + k]
+        val q = ys[j + k]
+        val z = complex_mul(real(p.re), -real(p.im), real(q.re), real(q.im), bits)?
+
+        ps.push(Cx(F(re_of(z)), F(im_of(z))))
+
+    complex_sum_in(ps, 0, n, bits)

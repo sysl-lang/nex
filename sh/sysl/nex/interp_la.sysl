@@ -29,6 +29,7 @@ import nex_runtime.sh.sysl.nex_runtime.{SHAPE_MISMATCH, la_chol, la_chol_inplace
 import sh.sysl.blas.{MatrixView, Op}
 import sh.sysl.lapack.Scalar
 import sysl.buf.{Buf, buf}
+import sysl.math.Float
 // The standard complex number, under a name that leaves `Complex` to nex's type.
 import sysl.math.complex.Complex as Cx
 import sh.sysl.parsing.Span
@@ -79,66 +80,147 @@ private reaches_blas(x: &Arr, y: &Arr) -> bool
 
     size >= (if n == 3 then GEMM_AT elif n == 2 then GEMV_AT else DOT_AT)
 
-// The multiplication and the addition of the inline product on elements of `t`: an integer's wrap
-// at its width, as `arith.muli` and `arith.addi` do, and a real's or a complex's round once each.
-private inline_ops(t: Ty) -> Option[(Op2, Op2)] = t match
-    Int(bits, signed) ->
-        val mul: Op2 = (a, b) -> Ok(VInt(wrapped(i128(int_of(a) *% int_of(b)), bits, signed)))
-        val add: Op2 = (a, b) -> Ok(VInt(wrapped(i128(int_of(a) +% int_of(b)), bits, signed)))
+// The inline product on an element type: its sum of nothing, and one step `acc + a·b`, the product and the sum each
+// rounded once at the width (a complex product as nex writes it), or an integer's wrapped at its
+// width, as `arith.muli` and `arith.addi` do.
+private trait InlineStep
+    naught() ->Self
+    step(acc: Self, a: Self, b: Self) -> Self
 
-        Some((mul, add))
-    Real(bits) -> Some((real_op("*", bits, false).unwrap(), real_op("+", bits, false).unwrap()))
-    Complex(bits) -> Some((complex_op("*", bits).unwrap(), complex_op("+", bits).unwrap()))
-    _ -> None
+impl InlineStep for i8
+    naught() ->i8 = 0
+    step(acc: i8, a: i8, b: i8) -> i8 = acc +% a *% b
+
+impl InlineStep for i16
+    naught() ->i16 = 0
+    step(acc: i16, a: i16, b: i16) -> i16 = acc +% a *% b
+
+impl InlineStep for i32
+    naught() ->i32 = 0
+    step(acc: i32, a: i32, b: i32) -> i32 = acc +% a *% b
+
+impl InlineStep for long
+    naught() ->long = 0
+    step(acc: long, a: long, b: long) -> long = acc +% a *% b
+
+impl InlineStep for u8
+    naught() ->u8 = 0
+    step(acc: u8, a: u8, b: u8) -> u8 = acc +% a *% b
+
+impl InlineStep for u16
+    naught() ->u16 = 0
+    step(acc: u16, a: u16, b: u16) -> u16 = acc +% a *% b
+
+impl InlineStep for u32
+    naught() ->u32 = 0
+    step(acc: u32, a: u32, b: u32) -> u32 = acc +% a *% b
+
+impl InlineStep for u64
+    naught() ->u64 = 0
+    step(acc: u64, a: u64, b: u64) -> u64 = acc +% a *% b
+
+// A `real16` product and sum are computed in `real64`, where the product is exact, and rounded.
+impl InlineStep for f16
+    naught() ->f16 = 0.0
+    step(acc: f16, a: f16, b: f16) -> f16
+        val p = f16(real(a) * real(b))
+
+        f16(real(acc) + real(p))
+
+impl InlineStep for f32
+    naught() ->f32 = 0.0
+    step(acc: f32, a: f32, b: f32) -> f32
+        val p = a * b
+
+        acc + p
+
+impl InlineStep for real
+    naught() ->real = 0.0
+    step(acc: real, a: real, b: real) -> real
+        val p = a * b
+
+        acc + p
+
+impl[F: Float] InlineStep for Cx[F]
+    naught() ->Cx[F] = Cx(F(0.0), F(0.0))
+
+    step(acc: Cx[F], a: Cx[F], b: Cx[F]) -> Cx[F]
+        val bits = if const sizeof(F) == 4 then 32 else 64
+        val p = complex_mul(real(a.re), real(a.im), real(b.re), real(b.im), bits).unwrap()
+
+        Cx(F(real(acc.re) + re_of(p)), F(real(acc.im) + im_of(p)))
+
+// `x @ y` as the compiled program's inline `linalg` operation computes it, over machine numbers of
+// element type `t`; `None` where `t` is not a number.
+private inline_kernel(t: Ty) -> Option[&Fn(&Arr, &Arr) -> Answer]
+    val f: &Fn(&Arr, &Arr) -> Answer = t match
+        Int(8, true) -> (x, y) -> inline_product[i8](x, y)
+        Int(16, true) -> (x, y) -> inline_product[i16](x, y)
+        Int(32, true) -> (x, y) -> inline_product[i32](x, y)
+        Int(64, true) -> (x, y) -> inline_product[long](x, y)
+        Int(8, false) -> (x, y) -> inline_product[u8](x, y)
+        Int(16, false) -> (x, y) -> inline_product[u16](x, y)
+        Int(32, false) -> (x, y) -> inline_product[u32](x, y)
+        Int(64, false) -> (x, y) -> inline_product[u64](x, y)
+        Real(16) -> (x, y) -> inline_product[f16](x, y)
+        Real(32) -> (x, y) -> inline_product[f32](x, y)
+        Real(64) -> (x, y) -> inline_product[real](x, y)
+        Complex(32) -> (x, y) -> inline_product[Cx[f32]](x, y)
+        Complex(64) -> (x, y) -> inline_product[Cx[real]](x, y)
+        _ -> return None
+
+    Some(f)
 
 // `x @ y` as the compiled program's inline `linalg` operation computes it. Its storage is nex's with
 // the axes reversed, so `linalg.matmul` and `linalg.vecmat`/`matvec` take `y` first: each product is
 // `y`'s element times `x`'s, added to the element so far, from zero, along the inner axis in order.
 // `linalg.dot` of two vectors takes them in order.
-private inline_product(x: &Arr, y: &Arr, mul: Op2, add: Op2, zero: Value, et: Ty) -> Answer
+private inline_product[T: Elem + InlineStep](x: &Arr, y: &Arr) -> Answer
     val ra = x.ext.len()
     val rb = y.ext.len()
     val k = x.ext[ra - 1]
 
     if k != y.ext[0] then return trapped(SHAPE_MISMATCH)
 
-    val xs = x.store.d
-    val ys = y.store.d
+    val xs = T.held(x.store.d)
+    val ys = T.held(y.store.d)
     val xk = x.str[ra - 1]
     val yk = y.str[0]
 
     if ra == 1 && rb == 1
-        var acc = zero
+        var acc = T.naught()
 
         for l in 0..<k
-            val p = mul(data_get(xs, usize(x.offset + l * xk)), data_get(ys, usize(y.offset + l * yk)))?
+            acc = T.step(acc, xs[usize(x.offset + l * xk)], ys[usize(y.offset + l * yk)])
 
-            acc = add(acc, p)?
-
-        return Ok(acc)
+        return Ok(acc.boxed())
 
     val m = if ra == 2 then x.ext[0] else 1
     val n = if rb == 2 then y.ext[1] else 1
     val xi = if ra == 2 then x.str[0] else 0
     val yj = if rb == 2 then y.str[1] else 0
-    val out = data_for(et)
+    var out: Buf[T] = buf()
+
+    out.reserve(usize(m * n))
 
     for j in 0..<n
         for i in 0..<m
-            var acc = zero
+            var acc = T.naught()
+            var p = x.offset + i * xi
+            var q = y.offset + j * yj
 
-            for l in 0..<k
-                val p = mul(data_get(ys, usize(y.offset + l * yk + j * yj)), data_get(xs, usize(x.offset + i * xi + l * xk)))?
+            for _ in 0..<k
+                acc = T.step(acc, ys[usize(q)], xs[usize(p)])
+                p += xk
+                q += yk
 
-                acc = add(acc, p)?
-
-            data_push(out, acc)
+            out.push(acc)
 
     var ext: Buf[long] = buf()
 
     if ra == 2 then ext.push(m)
     if rb == 2 then ext.push(n)
-    Ok(dense_data(out, ext))
+    Ok(dense_data(T.holding(out), ext))
 
 // `op(x) @ op(y)` through BLAS, in the element type of kind `kind`; `vector` where the result is one.
 private blas_product(kind: int, x: &Arr, fx: Op, y: &Arr, fy: Op, vector: bool) -> Answer = kind match
@@ -378,10 +460,9 @@ impl Interp
     // else inline.
     matmul(*self, span: Span, l: TExpr, r: TExpr, t: Ty) -> Code
         val et = elem_or(t)
-        val (mul, add) = inline_ops(et) match
-            Some(p) -> p
+        val inline = inline_kernel(et) match
+            Some(f) -> f
             None -> return self.later(span, s"`@` of ${show_ty(et)}")
-        val zero = one_or_zero(et, false)
         val kind = la_kind(et)
         val vector = rank_of(t) == 1
 
@@ -392,7 +473,9 @@ impl Interp
                 val f = codes[0]
                 val g = codes[1]
 
-                inline_product(arr_of(f(c)?), arr_of(g(c)?), mul, add, zero, et)
+                val a = arr_of(f(c)?)
+
+                inline(a, arr_of(g(c)?))
 
         val (x, fx) = la_operand(l)
         val (y, fy) = la_operand(r)
@@ -405,7 +488,7 @@ impl Interp
             val a = arr_of(f(c)?)
             val b = arr_of(g(c)?)
 
-            if flagged || reaches_blas(a, b) then blas_product(kind, a, fx, b, fy, vector) else inline_product(a, b, mul, add, zero, et)
+            if flagged || reaches_blas(a, b) then blas_product(kind, a, fx, b, fy, vector) else inline(a, b)
 
     // A call of the linear-algebra prelude (DESIGN §10.5).
     linear_algebra(*self, name: string, args: Buf[TExpr]) -> Code

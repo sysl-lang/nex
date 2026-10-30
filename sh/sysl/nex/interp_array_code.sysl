@@ -149,6 +149,26 @@ impl Interp
             TElementwiseUnary(o, v) -> self.elementwise_unary(e.span, o, v, e.ty)
             TMatMul(l, r) -> self.matmul(e.span, l, r, e.ty)
             TElemental(name, args) ->
+                var ets: Buf[Ty] = buf()
+                var arrays: Buf[bool] = buf()
+
+                for x in args
+                    ets.push(elem_or(x.ty))
+                    arrays.push(is_array(x.ty))
+
+                elemental_kernel(name, ets, elem_or(e.ty), arrays, self.m.fpe) match
+                    Some(f) ->
+                        val codes = self.operands(args)
+
+                        return (c) ->
+                            var vals: Buf[Value] = buf()
+
+                            for code in codes
+                                vals.push(code(c)?)
+
+                            f(vals)
+                    None -> ()
+
                 var leaves: Buf[TExpr] = buf()
 
                 for k in 0..<args.len()
@@ -157,6 +177,12 @@ impl Interp
                 self.mapped(e.ty, args, texpr(e.span, elem_of(e.ty), TBuiltin(name, leaves)))
             TElementalConvert(v, traps) ->
                 val a = self.lent(v)
+
+                val typed = if is_array(v.ty) then convert_kernel(elem_or(v.ty), elem_or(e.ty), traps, self.m.fpe) else None
+
+                typed match
+                    Some(f) -> return (c) -> f(a(c)?)
+                    None -> ()
 
                 self.conversion(e.span, elem_or(v.ty), elem_or(e.ty), traps) match
                     Some(f) ->
@@ -517,6 +543,11 @@ impl Interp
         val ra = is_array(rt)
         val et = elem_or(lt)
 
+        if op == "^"
+            pow_kernel(et, elem_or(rt), self.m.fpe, la, ra) match
+                Some(f) -> return Some(f)
+                None -> ()
+
         if ty_eq(et, elem_or(rt))
             zip_kernel(op, et, self.m.fpe, la, ra) match
                 Some(f) -> return Some(f)
@@ -594,16 +625,29 @@ impl Interp
                     None -> shape = Some(a)
 
             val s = shape.unwrap()
-            var lists: Buf[Buf[Value]] = buf()
+            val n = count_of(s)
+            // Each array operand's elements in storage order, taken before the body runs, which may
+            // write the place an operand came from: machine numbers copied as they lie, and an array
+            // of values read as `elements` reads it, which shares the arrays its elements hold.
+            var runs: Buf[Data] = buf()
 
             for k in 0..<vals.len()
-                lists.push(if arrays[k] then elements(arr_of(vals[k])) else buf())
+                if !arrays[k]
+                    runs.push(DValues(buf()))
+                    continue
+
+                val a = arr_of(vals[k])
+
+                runs.push(a.store.d match
+                    DValues(_) -> DValues(elements(a))
+                    _ -> data_gather(a)
+                )
 
             val res = data_for(et)
 
-            for j in 0..<count_of(s)
+            for j in 0..<n
                 for k in 0..<vals.len()
-                    c.v.set(base + k, if arrays[k] then lists[k][usize(j)] else vals[k])
+                    c.v.set(base + k, if arrays[k] then data_get(runs[k], usize(j)) else vals[k])
 
                 data_push(res, body(c)?)
 
@@ -613,6 +657,12 @@ impl Interp
     // An array widened element by element, or seen with other static extents.
     array_converted(*self, span: Span, v: TExpr, to: Ty, traps: bool) -> Code
         val a = self.ex(v)
+
+        val typed = if is_array(v.ty) then convert_kernel(elem_or(v.ty), elem_or(to), traps, self.m.fpe) else None
+
+        typed match
+            Some(f) -> return (c) -> f(a(c)?)
+            None -> ()
 
         self.conversion(span, elem_or(v.ty), elem_or(to), traps) match
             Some(f) ->

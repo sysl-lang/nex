@@ -20,7 +20,7 @@ private among(name: string, names: []const string) -> bool
 
     false
 
-private position(name: string, names: []const string) -> Option[usize]
+private[nex] position(name: string, names: []const string) -> Option[usize]
     for k in 0..<names.len
         if names[k] == name then return Some(k)
 

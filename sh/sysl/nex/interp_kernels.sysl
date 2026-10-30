@@ -8,8 +8,8 @@ module sh.sysl.nex
 // widened to 128 bits and checked against its width, a real computed in `real64` and rounded to its
 // width by storing it, `--fpe-trap`'s checks on the result, a complex number's parts as nex writes
 // the operation. A trap is the first element's, in storage order, as the value-by-value loop gives.
-// An operation with no loop here (`^`, a conversion, an elemental function) runs value by value over
-// the same storage.
+// `^`, the conversions, the elemental prelude and the locations have their loops in
+// `interp_kernels_fn.sysl`; a user's elemental function and `map` run their scalar body per element.
 
 import nex_runtime.sh.sysl.nex_runtime.{COMPLEX_DIVISION_BY_ZERO, INT_DIVISION_BY_ZERO, REAL_DIVISION_BY_ZERO, REMAINDER_BY_ZERO, SHAPE_MISMATCH, overflow_message}
 import sysl.buf.{Buf, buf}
@@ -34,7 +34,7 @@ private val AND = 11
 private val OR = 12
 
 // The elements a block of a tree reduction holds (DESIGN §9.2.1).
-private val TREE_BLOCK: usize = 4096
+private[nex] val TREE_BLOCK: usize = 4096
 
 // The number of `op` on elements of type `t`, or -1 where no loop computes it.
 private op_number(op: string, t: Ty) -> int
@@ -79,7 +79,7 @@ private[nex] zip_kernel(op: string, t: Ty, fpe: bool, xa: bool, ya: bool) -> Opt
 
 // An operand of a loop: the buffer its elements are read from, where the first is, and how far apart
 // they are — a scalar is one element read every time.
-private operand[T: Elem](v: Value, array: bool) -> (Buf[T], usize, usize)
+private[nex] operand[T: Elem](v: Value, array: bool) -> (Buf[T], usize, usize)
     if array
         val (xs, at) = run_of[T](arr_of(v))
 
@@ -91,7 +91,7 @@ private operand[T: Elem](v: Value, array: bool) -> (Buf[T], usize, usize)
     (one, 0, 0)
 
 // The array of the two operands, checked to have the other's shape where both are arrays.
-private shape_of(x: Value, y: Value, xa: bool, ya: bool) -> Result[&Arr, Signal]
+private[nex] shape_of(x: Value, y: Value, xa: bool, ya: bool) -> Result[&Arr, Signal]
     val a = arr_of(if xa then x else y)
 
     if xa && ya && !same_shape(a, arr_of(y)) then return Err(Trapped(SHAPE_MISMATCH))
@@ -390,19 +390,30 @@ private[nex] reduce_kernel(name: string, et: Ty, t: Ty, fpe: bool) -> Option[&Fn
         Real(16) -> (a) -> real_tree_of[f16](a, mul, fpe)
         Real(32) -> (a) -> real_tree_of[f32](a, mul, fpe)
         Real(64) -> (a) -> real_tree_of[real](a, mul, fpe)
-        Complex(32) -> if mul then return None else (a) -> complex_sum[f32](a, 32)
-        Complex(64) -> if mul then return None else (a) -> complex_sum[real](a, 64)
+        Complex(32) -> if mul then (a) -> complex_product[f32](a, 32) else (a) -> complex_sum[f32](a, 32)
+        Complex(64) -> if mul then (a) -> complex_product[real](a, 64) else (a) -> complex_sum[real](a, 64)
         _ -> return None
 
     Some(f)
 
-// `dot(x, y)` of two arrays of one shape and real element type `t`, over machine numbers: each product
-// rounded, then summed as `sum` is. `None` for any other element type.
+// `dot(x, y)` of two arrays of one shape and numeric element type `t`, over machine numbers: each
+// product rounded (an integer's checked, a complex one's `conj(x) * y`), then summed as `sum` is.
+// `None` for any other element type.
 private[nex] dot_kernel(t: Ty, fpe: bool) -> Option[Op2]
     val f: Op2 = base_of(t) match
+        Int(8, true) -> (x, y) -> int_dot[i8](arr_of(x), arr_of(y), 8, true)
+        Int(16, true) -> (x, y) -> int_dot[i16](arr_of(x), arr_of(y), 16, true)
+        Int(32, true) -> (x, y) -> int_dot[i32](arr_of(x), arr_of(y), 32, true)
+        Int(64, true) -> (x, y) -> int_dot[long](arr_of(x), arr_of(y), 64, true)
+        Int(8, false) -> (x, y) -> int_dot[u8](arr_of(x), arr_of(y), 8, false)
+        Int(16, false) -> (x, y) -> int_dot[u16](arr_of(x), arr_of(y), 16, false)
+        Int(32, false) -> (x, y) -> int_dot[u32](arr_of(x), arr_of(y), 32, false)
+        Int(64, false) -> (x, y) -> int_dot[u64](arr_of(x), arr_of(y), 64, false)
         Real(16) -> (x, y) -> real_dot[f16](arr_of(x), arr_of(y), fpe)
         Real(32) -> (x, y) -> real_dot[f32](arr_of(x), arr_of(y), fpe)
         Real(64) -> (x, y) -> real_dot[real](arr_of(x), arr_of(y), fpe)
+        Complex(32) -> (x, y) -> complex_dot[f32](arr_of(x), arr_of(y), 32)
+        Complex(64) -> (x, y) -> complex_dot[real](arr_of(x), arr_of(y), 64)
         _ -> return None
 
     Some(f)
@@ -513,7 +524,11 @@ private real_norm2[T: Elem](a: &Arr, bits: int, fpe: bool) -> Answer
 // `sum` or `product` of integers, each step checked against the width.
 private int_tree[T: Elem](a: &Arr, bits: int, signed: bool, mul: bool) -> Answer
     val (xs, at) = run_of[T](a)
-    val n = usize(count_of(a))
+
+    int_tree_in(xs, at, usize(count_of(a)), bits, signed, mul)
+
+// The `n` integers of `xs` from `at` summed (or multiplied) in blocks, each step checked.
+private[nex] int_tree_in[T: Elem](xs: Buf[T], at: usize, n: usize, bits: int, signed: bool, mul: bool) -> Answer
     val identity: i128 = if mul then 1 else 0
     var partials: Buf[i128] = buf()
     var lo: usize = 0
@@ -555,7 +570,11 @@ private int_tree[T: Elem](a: &Arr, bits: int, signed: bool, mul: bool) -> Answer
 // `sum` of complex numbers, each part rounded at the width.
 private complex_sum[F: Float](a: &Arr, bits: int) -> Answer
     val (xs, at) = run_of[Cx[F]](a)
-    val n = usize(count_of(a))
+
+    complex_sum_in(xs, at, usize(count_of(a)), bits)
+
+// The `n` complex numbers of `xs` from `at` summed in blocks, the partials in the pairwise tree.
+private[nex] complex_sum_in[F: Float](xs: Buf[Cx[F]], at: usize, n: usize, bits: int) -> Answer
     var res: Buf[real] = buf()
     var ims: Buf[real] = buf()
     var lo: usize = 0

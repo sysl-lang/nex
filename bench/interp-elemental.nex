@@ -1,0 +1,24 @@
+// The interpreter's element-by-element paths other than the operators (PLAN.md M13): 200 000 `real64`
+// elements, 20 passes of `^`, a conversion there and back, prelude math, an `@elemental` function,
+// `map` with a lambda and `maxloc`. Timed from outside, on either engine.
+
+@elemental
+def damp(x: real, k: real): real = x * k + 1.0
+
+def main() =
+  val n = 200000
+  var x: [real; :] = zeros(n)
+  for i in 1..n
+    x[i] = 1.0 / i
+  var s = 0.0
+  var loc = 0
+  for k in 1..20
+    val p = x ^ 2.0 + x ^ 3
+    val f = real32(p)
+    val w = real(f) + sqrt(x) + exp(-x) + sin(x) + max(x, 0.5)
+    val d = damp(w, 0.5)
+    val m = map(d, v -> v * 0.25)
+    s = s + sum(m)
+    loc = loc + maxloc(m)
+  print(s)
+  print(loc)

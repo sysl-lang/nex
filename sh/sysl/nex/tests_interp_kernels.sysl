@@ -1,0 +1,203 @@
+module sh.sysl.nex
+@tests
+
+// The interpreter's loops over machine numbers for what is not an arithmetic operator
+// (`interp_kernels_fn.sysl`, the inline product in `interp_la.sysl`): `^`, the conversions, the
+// elemental prelude, a user's elemental function and `map`, the locations, the complex and integer
+// reductions and `@` below BLAS's size — each at every width it has, over strided and reversed views,
+// with the compiled program's answers and its traps.
+
+import sysl.buf.{Buf, buf}
+
+private val INTS = ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"]
+
+@test("integer ^ at every width: an integer exponent of the base's type or another, a scalar base, a negative exponent, and the overflow and zero-base traps")
+itk_int_pow()
+    for t in INTS
+        val text = main_of([s"val a: [$t] = [1, 2, 3]", "val k = 2", "val m = -1", "print(a ^ 3)", "print(a ^ a)", "print(a[3..1 by -1] ^ k)", "print(2 ^ a)",
+                            "print(a ^ m)", s"assert_traps(() -> print(a ^ 41), \"$t overflow\")", "assert_traps(() -> print((a - a) ^ m), \"division by zero\")"])
+
+        assert_eq(interpreted(text), "[1, 8, 27]\n[1, 4, 27]\n[9, 4, 1]\n[2, 4, 8]\n[1, 0, 0]\nexit 0")
+
+@test("real and complex ^ at every width: an exponent of the base's type, an integer one, a scalar base, a strided base, and a shape mismatch")
+itk_real_pow()
+    val widths = ["real16", "real32", "real64", "complex[real32]", "complex[real64]"]
+    val expected = ["[0.25, 2.25, 5.062]\n[0.707, 1.837, 6.2]\n[0.125, 3.375, 11.39]\n[2.0, 0.4443]\n[1.414, 2.828, 4.758]\n",
+                    "[0.25, 2.25, 5.0625]\n[0.70710677, 1.8371173, 6.200271]\n[0.125, 3.375, 11.390625]\n[2.0, 0.44444445]\n[1.4142135, 2.828427, 4.7568283]\n",
+                    "[0.25, 2.25, 5.0625]\n[0.7071067811865476, 1.8371173070873836, 6.20027091141992]\n[0.125, 3.375, 11.390625]\n[2.0, 0.4444444444444444]\n" +
+                    "[1.4142135623730951, 2.8284271247461903, 4.756828460010884]\n",
+                    "[0.25+0.0i, 2.25+0.0i, 5.0625+0.0i]\n[0.70710677+0.0i, 1.8371173+0.0i, 6.200271+0.0i]\n[0.125+0.0i, 3.375+0.0i, 11.390625+0.0i]\n" +
+                    "[2.0+0.0i, 0.44444445+0.0i]\n[1.4142135+0.0i, 2.828427+0.0i, 4.7568283+0.0i]\n",
+                    "[0.25+0.0i, 2.25+0.0i, 5.0625+0.0i]\n[0.7071067811865476+0.0i, 1.8371173070873836+0.0i, 6.20027091141992+0.0i]\n" +
+                    "[0.125+0.0i, 3.375+0.0i, 11.390625+0.0i]\n[2.0+0.0i, 0.4444444444444444+0.0i]\n" +
+                    "[1.4142135623730951+0.0i, 2.8284271247461903+0.0i, 4.756828460010884+0.0i]\n"]
+
+    for k in 0..<widths.len
+        val text = main_of([s"val a: [${widths[k]}] = [0.5, 1.5, 2.25]", "val k = 3", "print(a ^ 2)", "print(a ^ a)", "print(a ^ k)", "print(a[.. by 2] ^ -1)",
+                            "print(2.0 ^ a)", "assert_traps(() -> print(a ^ a[1..2]), \"shape mismatch\")"])
+
+        assert_eq(interpreted(text), expected[k] + "exit 0")
+
+@test("complex ^ of complex exponents follows complex.pow's lowering, and real32 ^ traps an overflow under --fpe-trap where real16's does not")
+itk_complex_pow_fpe()
+    assert_eq(interpreted(main_of(["val z = [1 + 2i, 0.25i - 0.5, 3 - 1i]", "print(z ^ 2)", "print(z ^ z)"])),
+              "[-3.0+4.000000000000002i, 0.18749999999999994-0.2500000000000001i, 8.000000000000002-6.000000000000001i]\n" +
+              "[-0.22251715680177264+0.1007091311360754i, 0.05910942608313866-0.6821959902860281i, -11.89819175985218-19.59292159660941i]\nexit 0")
+    assert_eq(interpreted(main_of(["val f = real32([1.0e30, 2.0])", "val h = real16([300.0])", "print(h ^ 2)", "print(f[2..2] ^ 2)",
+                                   "assert_traps(() -> print(f ^ 2), \"overflow\")"]), fpe = true),
+              "[inf]\n[4.0]\nexit 0")
+
+@test("array conversions between every kind of number: widenings, roundings, truncations, complex parts, and the out-of-range traps")
+itk_conversions()
+    val text = main_of(["val n: [int32] = [-2, 0, 300]", "val r = [0.1, -2.5, 3.0e9]", "val z: [complex[real64]] = [0.1 + 0.2i, 1.0e300 - 1i]", "print(int64(n))",
+                        "print(int16(n[.. by -1]))", "print(real16(n))", "print(real32(n))", "print(real(n))", "print(complex[real32](n))",
+                        "print(uint64(int64(n) + 2))", "assert_traps(() -> print(int8(n)), \"out of range\")", "assert_traps(() -> print(uint16(n)), \"out of range\")",
+                        "print(int64(r))", "print(real32(r))", "print(real16(r[1..2]))", "print(complex[real64](r))", "print(complex[real32](z[1..1]))",
+                        "print(uint64(r[3..3] * 6.0e9))", "assert_traps(() -> print(int32(r)), \"out of range\")", "assert_traps(() -> print(uint8(r)), \"out of range\")",
+                        "print(real(real32(r)))", "print(complex[real64](complex[real32](z[1..1])))"])
+
+    assert_eq(interpreted(text),
+              "[-2, 0, 300]\n[300, 0, -2]\n[-2.0, 0.0, 300.0]\n[-2.0, 0.0, 300.0]\n[-2.0, 0.0, 300.0]\n[-2.0+0.0i, 0.0+0.0i, 300.0+0.0i]\n[0, 2, 302]\n" +
+              "[0, -2, 3000000000]\n[0.1, -2.5, 3000000000.0]\n[0.1, -2.5]\n[0.1+0.0i, -2.5+0.0i, 3000000000.0+0.0i]\n[0.1+0.2i]\n[18000000000000000000]\n" +
+              "[0.10000000149011612, -2.5, 3000000000.0]\n[0.10000000149011612+0.20000000298023224i]\nexit 0")
+
+@test("a narrowing array conversion traps an overflow under --fpe-trap, real to real, real to complex and complex to complex")
+itk_conversion_fpe()
+    assert_eq(interpreted(main_of(["val r = [0.1, 1.0e300]", "val z: [complex[real64]] = [0.1 + 0.2i, 1.0e300 - 1i]", "print(real32(r[1..1]))",
+                                   "assert_traps(() -> print(real32(r)), \"overflow\")", "assert_traps(() -> print(complex[real32](z)), \"overflow\")",
+                                   "assert_traps(() -> print(complex[real32](r)), \"overflow\")"]), fpe = true),
+              "[0.1]\nexit 0")
+
+@test("the elemental prelude on reals of every width: roots, exponentials, logarithms, the trigonometric family, rounding, abs, sign, min, max, atan2 and hypot, broadcast either side")
+itk_real_math()
+    val widths = ["real16", "real32", "real64"]
+    val expected = ["[0.707, 1.118, 1.581]\n[1.648, 0.2866, 12.18]\n[-0.6934, 0.2231, 0.9165]\n[0.5986, -0.949, 0.4795]\n[0.7935, -1.077, 1.357]\n[0.4622, -0.848, 0.987]\n",
+                    "[0.70710677, 1.118034, 1.5811388]\n[1.6487212, 0.2865048, 12.182494]\n[-0.6931472, 0.22314355, 0.91629076]\n[0.5984721, -0.9489846, 0.47942555]\n" +
+                    "[0.7937005, -1.0772173, 1.3572088]\n[0.46211717, -0.84828365, 0.9866143]\n",
+                    "[0.7071067811865476, 1.118033988749895, 1.5811388300841898]\n[1.6487212707001282, 0.2865047968601901, 12.182493960703473]\n" +
+                    "[-0.6931471805599453, 0.22314355131420976, 0.9162907318741551]\n[0.5984721441039564, -0.9489846193555862, 0.479425538604203]\n" +
+                    "[0.7937005259840998, -1.077217345015942, 1.3572088082974534]\n[0.46211715726000974, -0.8482836399575129, 0.9866142981514303]\n"]
+    val two = ["([0.245, -0.5586, 0.896], [0.707, 1.768, 3.535])", "([0.24497867, -0.5585993, 0.8960554], [0.70710677, 1.767767, 3.535534])",
+               "([0.24497866312686414, -0.5585993153435624, 0.8960553845713439], [0.7071067811865476, 1.7677669529663689, 3.5355339059327378])"]
+
+    for k in 0..<widths.len
+        val text = main_of([s"val a: [${widths[k]}] = [0.5, -1.25, 2.5]", "print(sqrt(abs(a)))", "print(exp(a))", "print(log(abs(a)))", "print(sin(a[.. by -1]))",
+                            "print(cbrt(a))", "print(tanh(a))", "print((floor(a), ceil(a), round(a), trunc(a)))", "print((abs(a), sign(a)))",
+                            "print((min(a, 1.0), max(0.0, a), min(a, -a)))", "print((atan2(a, 2.0), hypot(a, a)))",
+                            "assert_traps(() -> print(max(a, a[1..2])), \"shape mismatch\")"])
+
+        assert_eq(interpreted(text),
+                  expected[k] + "([0.0, -2.0, 2.0], [1.0, -1.0, 3.0], [1.0, -1.0, 3.0], [0.0, -1.0, 2.0])\n([0.5, 1.25, 2.5], [1.0, -1.0, 1.0])\n" +
+                  "([0.5, -1.25, 1.0], [0.5, 0.0, 2.5], [-0.5, -1.25, -2.5])\n" + two[k] + "\nexit 0")
+
+@test("the elemental prelude on integers of every width: abs, sign, min and max broadcast and over views, and abs of the most negative traps")
+itk_int_math()
+    for t in INTS
+        assert_eq(interpreted(main_of([s"val a: [$t] = [5, 0, 3]", "print((abs(a), sign(a), min(a, 3), max(a, a[3..1 by -1])))"])),
+                  "([5, 0, 3], [1, 0, 1], [3, 0, 3], [5, 0, 5])\nexit 0")
+
+    assert_eq(interpreted(main_of(["val a: [int8] = [-127, 4]", "print(abs(a))", "print(abs(a - 1))"])), "[127, 4]\ntrap: int8 overflow")
+
+@test("the elemental prelude on complex numbers of both widths: sqrt, exp, log, sin, cos, conj, abs and arg, zero among them")
+itk_complex_math()
+    val expected = ["[1.2720196+0.7861514i, 0.17178038+0.72767335i, 1.7553173-0.28484878i, 0.0+0.0i]\n[-1.1312044+2.4717267i, 0.5876751+0.15005809i, 10.852262-16.901396i, 1.0+0.0i]\n" +
+                    "[0.804719+1.1071488i, -0.5815754+2.6779451i, 1.1512926-0.32175055i]\n[3.1657786+1.9596009i, -0.4944858+0.22168817i, 0.21775953+1.1634403i, 0.0+0.0i]\n" +
+                    "[2.032723-3.0518978i, 0.9051501+0.1211088i, -1.5276382+0.1658444i, 1.0+0.0i]\n[1.0-2.0i, -0.5-0.25i, 3.0+1.0i, 0.0+0.0i]\n" +
+                    "[2.236068, 0.559017, 3.1622777, 0.0]\n[1.1071488, 2.6779451, -0.32175055, 0.0]\n",
+                    "[1.272019649514069+0.7861513777574233i, 0.17178037486125622+0.7276733451126774i, 1.755317301824428-0.28484878459314106i, 0.0+0.0i]\n" +
+                    "[-1.1312043837568135+2.4717266720048188i, 0.5876750903439226+0.15005808662216327i, 10.852261914197959-16.901396535150095i, 1.0+0.0i]\n" +
+                    "[0.8047189562170503+1.1071487177940904i, -0.5815754049028404+2.677945044588987i, 1.151292546497023-0.3217505543966422i]\n" +
+                    "[3.165778513216168+1.9596010414216063i, -0.494485780933195+0.22168816414957476i, 0.21775955162215221+1.1634403637032504i, 0.0+0.0i]\n" +
+                    "[2.0327230070196656-3.0518977991518i, 0.9051501505596068+0.12110879604381163i, -1.5276382501165433+0.1658444019189788i, 1.0+0.0i]\n" +
+                    "[1.0-2.0i, -0.5-0.25i, 3.0+1.0i, 0.0+0.0i]\n[2.23606797749979, 0.5590169943749475, 3.1622776601683795, 0.0]\n" +
+                    "[1.1071487177940904, 2.677945044588987, -0.3217505543966422, 0.0]\n"]
+    val widths = ["complex[real32]", "complex[real64]"]
+
+    for k in 0..<widths.len
+        val text = main_of([s"val z: [${widths[k]}] = [1 + 2i, 0.25i - 0.5, 3 - 1i, 0 + 0i]", "print(sqrt(z))", "print(exp(z))", "print(log(z[1..3]))", "print(sin(z))",
+                            "print(cos(z))", "print(conj(z))", "print(abs(z))", "print(arg(z))"])
+
+        assert_eq(interpreted(text), expected[k] + "exit 0")
+
+@test("the elemental prelude traps under --fpe-trap: the root of a negative number, the logarithm of zero, an exponential that overflows")
+itk_math_fpe()
+    assert_eq(interpreted(main_of(["val a = [4.0, -1.0]", "print(sqrt(a[1..1]))", "assert_traps(() -> print(sqrt(a)), \"invalid\")",
+                                   "assert_traps(() -> print(log(a - a)), \"overflow\")", "assert_traps(() -> print(exp(a * 1000.0)), \"overflow\")"]), fpe = true),
+              "[2.0]\nexit 0")
+
+@test("a user's elemental function and map run over strided, reversed, transposed and broadcast operands of numbers, bools and strings, and trap as the scalar body does")
+itk_user_elemental()
+    val text = "@elemental\ndef blend(x: real32, w: real32, k: integer): real32 = x * w + k\n\n" +
+               main_of(["val a: [real32] = [0.5, 1.5, 2.5, 3.5]", "val m = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3))", "val n: [int16] = [7, -8, 9]",
+                        "val z: [complex[real64]] = [1 + 2i, 3 - 1i]", "print(blend(a, 0.5, 2))", "print(blend(a[.. by -2], a[1..2], 1))", "print(blend(2.0, a, 0))",
+                        "print(map(m, v -> v * v))", "print(map(transpose(m), v -> v - 1.0))", "print(map(n, v -> v * 2))", "print(map(z, v -> v * v))",
+                        "print(map([true, false], v -> not v))", "print(map([\"ab\", \"c\"], s -> s + \"!\"))",
+                        "assert_traps(() -> print(blend(a, a[1..3], 1)), \"shape mismatch\")", "val big: [int16] = [30000]",
+                        "assert_traps(() -> print(map(big, v -> v * 2)), \"int16 overflow\")"])
+
+    assert_eq(interpreted(text),
+              "[2.25, 2.75, 3.25, 3.75]\n[2.75, 3.25]\n[1.0, 3.0, 5.0, 7.0]\n[[1.0, 9.0, 25.0], [4.0, 16.0, 36.0]]\n[[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]\n" +
+              "[14, -16, 18]\n[-3.0+4.0i, 8.0-6.0i]\n[false, true]\n[ab!, c!]\nexit 0")
+
+@test("minloc and maxloc at every integer and real width: ties to the first, reversed and sliced views, rank 2 as a tuple, along an axis, and an empty array")
+itk_locations()
+    for t in ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "real16", "real32", "real64"]
+        val text = main_of([s"val a: [$t] = [4, 1, 9, 1, 9, 2]", "print((minloc(a), maxloc(a), minloc(a[.. by -1]), maxloc(a[2..5])))", "val m = reshape(a, (2, 3))",
+                            "print((minloc(m), maxloc(m)))", "print((minloc(m, dim = 1), maxloc(m, dim = 2)))", "print(minloc(a[1..0]))"])
+
+        assert_eq(interpreted(text), "(2, 3, 3, 2)\n((2, 1), (1, 2))\n([2, 2, 2], [2, 3])\n0\nexit 0")
+
+@test("product and dot of complex numbers at both widths: empty, reversed, along an axis, over more than one block of the tree, and a shape mismatch")
+itk_complex_reductions()
+    val widths = ["complex[real32]", "complex[real64]"]
+    val longs = ["-15803012.0+4774673.5i\n10033.343+0.0i", "-1.580303457415095E7+4774666.963667258i\n10033.338333500004+0.0i"]
+
+    for k in 0..<widths.len
+        val t = widths[k]
+        val text = main_of([s"val z: [$t] = [1 + 2i, 0.25i - 0.5, 3 - 1i]", "print(product(z))", "print(product(z[1..0]))", "print(product(z[.. by -1]))",
+                            "print(dot(z, z[.. by -1]))", "print(dot(z[1..0], z[1..0]))", "val m = reshape(z[1..2], (1, 2))", "print(product(m, dim = 2))",
+                            s"var long: [$t] = zeros(10000)", "for k in 1..10000", s"  long[k] = $t(1 + 0.00001i * k)", "print(product(long))", "print(dot(long, long))",
+                            "assert_traps(() -> print(dot(z, z[1..2])), \"shape mismatch\")"])
+
+        assert_eq(interpreted(text), "-3.75-1.25i\n1.0+0.0i\n-3.75-1.25i\n2.3125+0.0i\n0.0+0.0i\n[-1.0-0.75i]\n" + longs[k] + "\nexit 0")
+
+@test("dot of integers at every width: reversed and empty, a product that overflows the width, and a sum that does")
+itk_int_dot()
+    // Each width with a value whose square overflows it, and one whose square fits but three of which
+    // overflow the sum.
+    for (t, p, s) in [("int8", "16", "11"), ("uint8", "16", "15"), ("int16", "256", "181"), ("uint16", "256", "255"), ("int32", "65536", "46340"),
+                      ("uint32", "65536", "65535"), ("int64", "4294967296", "3037000499"), ("uint64", "4294967296", "4294967295")]
+        val text = main_of([s"val a: [$t] = [1, 2, 3, 4]", "print(dot(a, a))", "print(dot(a[.. by -1], a))", "print(dot(a[1..0], a[1..0]))", s"val p: [$t] = [$p, 1]",
+                            s"val s: [$t] = [$s, $s, $s]", s"assert_traps(() -> print(dot(p, p)), \"$t overflow\")", s"assert_traps(() -> print(dot(s, s)), \"$t overflow\")"])
+
+        assert_eq(interpreted(text), "30\n20\n0\nexit 0")
+
+@test("@ below BLAS's size at every element type: matrix by vector, vector by matrix, vector by vector, transposed and reversed operands, an integer's wrap, and a shape mismatch")
+itk_inline_product()
+    val ints = "[22, 28]\n[4, 10, 16]\n14\n[[35, 44], [44, 56]]\n[[5, 11, 17], [11, 25, 39], [17, 39, 61]]\n[22, 28]\n"
+    val reals = "[22.0, 28.0]\n[4.0, 10.0, 16.0]\n14.0\n[[35.0, 44.0], [44.0, 56.0]]\n[[5.0, 11.0, 17.0], [11.0, 25.0, 39.0], [17.0, 39.0, 61.0]]\n[22.0, 28.0]\n" +
+                "[[20000.0, 20000.0], [20000.0, 20000.0]]\n"
+    val complexes = "[22.0+0.0i, 28.0+0.0i]\n[4.0+0.0i, 10.0+0.0i, 16.0+0.0i]\n14.0+0.0i\n[[35.0+0.0i, 44.0+0.0i], [44.0+0.0i, 56.0+0.0i]]\n" +
+                    "[[5.0+0.0i, 11.0+0.0i, 17.0+0.0i], [11.0+0.0i, 25.0+0.0i, 39.0+0.0i], [17.0+0.0i, 39.0+0.0i, 61.0+0.0i]]\n[22.0+0.0i, 28.0+0.0i]\n" +
+                    "[[20000.0+0.0i, 20000.0+0.0i], [20000.0+0.0i, 20000.0+0.0i]]\n"
+
+    for t in ["int8", "uint16", "int32", "uint64", "real16", "real32", "real64", "complex[real32]", "complex[real64]"]
+        val text = main_of([s"val m = $t(reshape([1, 2, 3, 4, 5, 6], (2, 3)))", s"val v = $t([1, 2, 3])", s"val w = $t([2, 1])", "print(m @ v)", "print(w @ m)", "print(v @ v)",
+                            "print(m @ transpose(m))", "print(transpose(m) @ m)", "print(m[.., 3..1 by -1] @ v[.. by -1])", s"val big = $t(reshape([100, 100, 100, 100], (2, 2)))",
+                            "print(big @ big)", "assert_traps(() -> print(m @ m), \"shape mismatch\")"])
+        // 100 · 100 + 100 · 100 wraps at `int8`'s width.
+        val expected = if t.starts_with("real") then reals elif t.starts_with("complex") then complexes
+                       elif t == "int8" then ints + "[[32, 32], [32, 32]]\n" else ints + "[[20000, 20000], [20000, 20000]]\n"
+
+        assert_eq(interpreted(text), expected + "exit 0")
+
+@test("@ below BLAS's size rounds each product and each sum on its own, never fused, and complex products follow nex's spelling")
+itk_inline_rounding()
+    val text = main_of(["val e = 2.0 ^ -27", "val p = [1.0, 1.0 + e]", "val q = [-1.0, 1.0 + e]", "print(p @ q)", "val pm = reshape([1.0, 3.0, 1.0 + e, 4.0], (2, 2))",
+                        "val qm = reshape([-1.0, 1.0 + e, 0.5, 2.0], (2, 2))", "print(pm @ qm)", "val f = real32([1.0, 1.0 + 2.0 ^ -12])",
+                        "val g = real32([-1.0, 1.0 + 2.0 ^ -12])", "print(f @ g)", "val zm: [complex[real64]; :, :] = reshape([1 + 1i, 2 - 1i, 0.5 + 0i, 1i], (2, 2))",
+                        "print(zm @ zm)", "print(zm @ [1 + 2i, 0.25i - 0.5])"])
+
+    assert_eq(interpreted(text),
+              "1.4901161193847656E-8\n[[1.4901161193847656E-8, 2.500000014901161], [1.0000000298023224, 9.5]]\n4.8828125E-4\n" +
+              "[[1.0+1.5i, 0.5+1.0i], [4.0+3.0i, 0.0-0.5i]]\n[-1.25+3.125i, 3.75+2.5i]\nexit 0")

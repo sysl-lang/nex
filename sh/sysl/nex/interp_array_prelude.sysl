@@ -147,6 +147,15 @@ impl Interp
 
         if loc && dim.is_none()
             val v = self.lent(a)
+
+            loc_kernel(name, elem_or(a.ty)) match
+                Some(f) -> return (c) ->
+                    val x = arr_of(v(c)?)
+                    val k = f(x)
+
+                    Ok(if r == 1 then int_value(k, t) else unflattened(k, x.ext))
+                None -> ()
+
             val (better, start) = self.locator(span, name, et) match
                 Some(p) -> p
                 None -> return self.later(span, s"`$name` of ${show_ty(et)}")
@@ -209,7 +218,14 @@ impl Interp
 
         // A lane is an array of rank 1 or the whole array, read in storage order: through a loop over
         // the machine numbers where one computes the reduction, else value by value.
-        val kernel = if loc || !ty_eq(elem_or(et), elem_or(lane_t)) && name != "norm2" && name != "count" then None
+        val kernel = if loc then
+                         loc_kernel(name, elem_or(et)) match
+                             Some(f) ->
+                                 val located: &Fn(&Arr) -> Answer = (a) -> Ok(int_value(f(a), lane_t))
+
+                                 Some(located)
+                             None -> None
+                     elif !ty_eq(elem_or(et), elem_or(lane_t)) && name != "norm2" && name != "count" then None
                      else reduce_kernel(name, et, lane_t, self.m.fpe)
         val lane: &Fn(&Arr) -> Answer = kernel match
             Some(k) -> k

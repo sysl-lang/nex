@@ -271,9 +271,13 @@ private real_arith(x: real, y: real, k: int, bits: int, fpe: bool) -> Answer
 
 // C's `pow` at the width; a `real16` computes in `real32` and rounds, unchecked as the compiled one is.
 private real_pow(x: real, y: real, bits: int, fpe: bool) -> Answer
-    if bits == 16 then return Ok(VReal(rnd(real(f32(x).pow(f32(y))), 16)))
+    if bits == 16 then return Ok(VReal(real_power(x, y, 16)))
 
-    fpe_checked(if bits == 32 then real(f32(x).pow(f32(y))) else x.pow(y), x, y, fpe)
+    fpe_checked(real_power(x, y, bits), x, y, fpe)
+
+// C's `pow` at the width, unchecked.
+private[nex] real_power(x: real, y: real, bits: int) -> real =
+    if bits == 16 then rnd(real(f32(x).pow(f32(y))), 16) elif bits == 32 then real(f32(x).pow(f32(y))) else x.pow(y)
 
 // -- complex numbers --------------------------------------------------------------------------------
 
@@ -366,7 +370,7 @@ private[nex] complex_log(re: real, im: real, bits: int) -> Value = VComplex(libm
 // 1 and a base of +inf on the real axis — chosen after, in its order.
 private[nex] complex_pow(ar: real, ai: real, br: real, bi: real, bits: int) -> Value
     val r = complex_abs(ar, ai, bits)
-    val power = if bits == 16 then rnd(real(f32(r).pow(f32(br))), 16) elif bits == 32 then real(f32(r).pow(f32(br))) else r.pow(br)
+    val power = real_power(r, br, bits)
     val theta = complex_arg(ar, ai, bits)
     val scale = rnd(power * libm1(LIBM_EXP, rnd(-bi * theta, bits), bits), bits)
     val angle = rnd(rnd(br * theta, bits) + rnd(bi * libm1(LIBM_LOG, r, bits), bits), bits)
@@ -502,17 +506,23 @@ private[nex] int_to_real(v: long, signed: bool, bits: int) -> real
     if bits == 64 then real(u) elif bits == 32 then real(f32(u)) else real(f16(u))
 
 // A real to an integer, truncated toward zero; NaN, an infinity and a value out of range trap.
-private[nex] real_to_int(x: real, tb: int, ts: bool, from: string, to: string) -> Answer
+private[nex] real_to_int(x: real, tb: int, ts: bool, from: string, to: string) -> Answer = real_truncated(x, tb, ts) match
+    Some(n) -> Ok(VInt(n))
+    None -> trapped(out_of_range_message(from, to))
+
+// `x` truncated toward zero to an integer of `tb` bits, held as that type holds it; `None` where it is
+// NaN, an infinity or out of range.
+private[nex] real_truncated(x: real, tb: int, ts: bool) -> Option[long]
     // The open interval of reals that truncate into range, its ends exact in `real64`.
     val lo = if !ts then -1.0 elif tb == 64 then -9223372036854775808.0 else -real(i128(1) << (tb - 1)) - 1.0
     val hi = if ts then real(i128(1) << (tb - 1)) else real(i128(1) << tb)
     val above = if ts && tb == 64 then x >= lo else x > lo
 
-    if !(above && x < hi) then return trapped(out_of_range_message(from, to))
+    if !(above && x < hi) then return None
 
     val t = x.trunc()
 
-    Ok(VInt(if !ts && t >= 9223372036854775808.0 then long.wrap(ulong(t)) else long(t)))
+    Some(if !ts && t >= 9223372036854775808.0 then long.wrap(ulong(t)) else long(t))
 
 // -- text -------------------------------------------------------------------------------------------
 
