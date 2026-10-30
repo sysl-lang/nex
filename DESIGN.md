@@ -1283,8 +1283,8 @@ one place, the module's shim, rather than in the language.
 import mpi.*
 
 def main() =
-  val me = rank()                       // in world(), 0 .. size() - 1
-  val p = size()
+  val me = this_rank()                  // in world(), 0 .. num_ranks() - 1
+  val p = num_ranks()
   val n = 1000
   var u: [real] = zeros(n + 2)          // one ghost cell at each end
   val left = if me > 0 then me - 1 else no_rank
@@ -1310,14 +1310,18 @@ collective. The status is `n` for `stop n` and 134 for a trap, a process ended b
 ends only its own rank's part, through `MPI_Finalize`, which waits for the other ranks to reach
 theirs.
 
-**Communicators** are values of type `Comm`: `world()`, `self()`, `split(comm, color, key = rank())`
+**Communicators** are values of type `Comm`: `world()`, `self()`, `split(comm, color, key = this_rank())`
 (`MPI_Comm_split`; a color of `no_color` takes the rank out), `dup(comm)`, `split_shared(comm)`
 (the ranks of one node, `MPI_COMM_TYPE_SHARED`), `cart(comm, dims, periodic)` with `shift(c, axis,
 by)` answering `(from, to)` for a halo. A `Comm` is reference counted and freed when its last value
 goes (`MPI_Comm_free`), so there is no `free` to forget. Every function below takes
 `comm: Comm = world()` as its last parameter, so a program that never splits never names one.
-`rank(comm)` and `size(comm)` are `int`s; `no_rank` is `MPI_PROC_NULL`, to which a send or receive
-does nothing.
+`this_rank(comm)` and `num_ranks(comm)` are `int`s; `no_rank` is `MPI_PROC_NULL`, to which a send or
+receive does nothing.
+
+**No name in the module is a prelude function's**, so `import mpi.*` hides nothing: `rank(a)` and
+`size(a)` of an array keep their meaning beside `this_rank()` and `num_ranks()` (Fortran's
+`this_image()` and `num_images()`), and `reduce(a, init, f)` beside `reduce_to(x, op, root)`.
 
 **Point to point.** `send(x, to, tag = 0)`, `recv(inout x, from = any_rank, tag = any_tag)`
 answering a `Status` (`source`, `tag`, `count`), `sendrecv(x, to, inout y, from)`. `x` is any
@@ -1352,14 +1356,14 @@ waited on is not expressible.
 |---|---|---|
 | `barrier()` | `MPI_Barrier` | nothing |
 | `bcast(x, root = 0)` | `MPI_Bcast` | `x` as `root` had it, on every rank |
-| `reduce(x, op, root = 0)` | `MPI_Reduce` | the combination on `root`; `x` elsewhere |
+| `reduce_to(x, op, root = 0)` | `MPI_Reduce` | the combination on `root`; `x` elsewhere |
 | `allreduce(x, op)` | `MPI_Allreduce` | the combination, on every rank |
 | `scan(x, op)`, `exscan(x, op)` | `MPI_Scan`, `MPI_Exscan` | the prefix |
 | `gather(x, root = 0)` | `MPI_Gather(v)` | rank-major concatenation on `root`, a rank-(k+1) array of the rank-k pieces when they agree in shape, else rank 1 |
 | `allgather(x)` | `MPI_Allgather(v)` | the same on every rank |
-| `scatter(x, root = 0)` | `MPI_Scatter(v)` | this rank's part of `root`'s `x`, cut along its last axis as evenly as `blocks(n, size())` cuts |
-| `alltoall(x)` | `MPI_Alltoall(v)` | `x`'s last axis cut in `size()` parts, part k sent to rank k |
-| `blocks(n, p = size(), r = rank())` | — | the range of `1..n` rank `r` owns: the block decomposition every program writes |
+| `scatter(x, root = 0)` | `MPI_Scatter(v)` | this rank's part of `root`'s `x`, cut along its last axis as evenly as `blocks(n, num_ranks())` cuts |
+| `alltoall(x)` | `MPI_Alltoall(v)` | `x`'s last axis cut in `num_ranks()` parts, part k sent to rank k |
+| `blocks(n, p = num_ranks(), r = this_rank())` | — | the range of `1..n` rank `r` owns: the block decomposition every program writes |
 
 `op` is any operator of §9.2 — `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc` — or a user
 function `(T, T) -> T`, which becomes an `MPI_Op_create` over a trampoline (§10.2.1), applied
@@ -1418,7 +1422,7 @@ by message size, rank count and topology, so the bits can change with `-np`, wit
 and between MPI versions. nex promises:
 
 1. **A distributed reduction is reproducible for a given rank count**, run to run, node layout to
-   node layout, implementation to implementation: `reduce`, `allreduce` and `scan` of a real or
+   node layout, implementation to implementation: `reduce_to`, `allreduce` and `scan` of a real or
    complex with a built-in operator, and every user operator, combine the ranks' contributions in
    §9.2.1's fixed pairwise tree over the rank numbers, the same bits on every rank. They are built
    from an `MPI_Allgather` of the contributions (a scalar, or a block of an array at a time) and a

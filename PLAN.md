@@ -607,12 +607,12 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     `compiler/tests_mpi.sysl`. Stages, each its own item:
     - **D1 — the shim, the link and the launch**: the C shim compiled by the found `mpicc`
       (`NEX_MPICC`, `PATH`, `pkg-config ompi-c`/`mpich`), implicit `MPI_Init_thread`/`MPI_Finalize`,
-      `MPI_Abort` on an uncaught trap or `stop n`, `world`/`self`/`rank`/`size`/`barrier`/`no_rank`,
+      `MPI_Abort` on an uncaught trap or `stop n`, `world`/`self`/`this_rank`/`num_ranks`/`barrier`/`no_rank`,
       `nex run --np N` and `nex test --np N` (`mpirun`, `srun` inside Slurm, `NEX_MPIRUN`), the
       interpreter's refusal. *Exit*: a hello-ranks program at `-np 1, 2, 4, 7`; a trap on rank 2
       ends a 4-rank job with `rank 2:` in front of its message and a non-zero status, no hang.
     - **D2 — point to point and collectives** of every element type of §9.6.3, units and complexes
-      included: `send`/`recv`/`sendrecv`, `bcast`, `reduce`/`allreduce`/`scan` with every §9.2
+      included: `send`/`recv`/`sendrecv`, `bcast`, `reduce_to`/`allreduce`/`scan` with every §9.2
       operator and a user one, `gather`/`allgather`/`scatter`/`alltoall` (the `v` forms chosen
       automatically), `blocks`; the reproducible reductions and `global_sum` of §9.6.5. *Exit*: each
       collective against a sequential oracle at `-np 1, 2, 3, 4, 7`; `allreduce` of reals gives
