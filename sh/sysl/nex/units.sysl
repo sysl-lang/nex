@@ -203,7 +203,7 @@ show_ratio(r: Ratio) -> string = if r.den == 1 then s"${r.num}" else s"${r.num}/
 
 // -- the algebra of units ---------------------------------------------------------------------------
 
-unit_one() -> Unit = Unit(buf(), ONE_RATIO, buf())
+unit_one() -> Unit = Unit(buf(), ONE_RATIO, buf(), 0)
 
 private single(name: string, param: bool) -> Buf[Power]
     var out: Buf[Power] = buf()
@@ -212,15 +212,16 @@ private single(name: string, param: bool) -> Buf[Power]
     out
 
 // A base unit, `unit m`: a dimension of its own, spelt as its name.
-base_unit(name: string) -> Unit = Unit(single(name, false), ONE_RATIO, single(name, false))
+base_unit(name: string) -> Unit = Unit(single(name, false), ONE_RATIO, single(name, false), 0)
 
 // A unit parameter `U` of a function generic over units.
-param_unit(name: string) -> Unit = Unit(single(name, true), ONE_RATIO, single(name, true))
+param_unit(name: string) -> Unit = Unit(single(name, true), ONE_RATIO, single(name, true), 0)
 
 // `u` given a name of its own: what `unit N = kg m / s^2` makes of its right-hand side.
-named(u: Unit, name: string) -> Unit = Unit(u.dims, u.factor, single(name, false))
+named(u: Unit, name: string) -> Unit = Unit(u.dims, u.factor, single(name, false), u.pi)
 
-scaled(u: Unit, f: Ratio) -> Unit = Unit(u.dims, rmul(u.factor, f), u.spelling)
+// `u` scaled by `f` times π to the power `pi`.
+scaled(u: Unit, f: Ratio, pi: int) -> Unit = Unit(u.dims, rmul(u.factor, f), u.spelling, u.pi + pi)
 
 // Whether `a` sorts before `b` in a reduction: base units by name, then unit parameters by name.
 private before(a: Power, b: Power) -> bool = if a.param != b.param then b.param else a.name < b.name
@@ -277,12 +278,17 @@ private scale(xs: Buf[Power], k: Ratio) -> Buf[Power]
     out
 
 unit_mul(a: Unit, b: Unit) -> Unit =
-    Unit(merge(a.dims, b.dims, ONE_RATIO, true), rmul(a.factor, b.factor), merge(a.spelling, b.spelling, ONE_RATIO, false))
+    Unit(merge(a.dims, b.dims, ONE_RATIO, true), rmul(a.factor, b.factor), merge(a.spelling, b.spelling, ONE_RATIO, false), a.pi + b.pi)
 
 unit_div(a: Unit, b: Unit) -> Unit =
-    Unit(merge(a.dims, b.dims, MINUS_ONE, true), rdiv(a.factor, b.factor), merge(a.spelling, b.spelling, MINUS_ONE, false))
+    Unit(merge(a.dims, b.dims, MINUS_ONE, true), rdiv(a.factor, b.factor), merge(a.spelling, b.spelling, MINUS_ONE, false), a.pi - b.pi)
 
-unit_pow(a: Unit, k: Ratio) -> Unit = Unit(scale(a.dims, k), rpow(a.factor, k), scale(a.spelling, k))
+// A power of π that is not a whole power has no exact value, so its factor is `INEXACT`.
+unit_pow(a: Unit, k: Ratio) -> Unit
+    val p = i256(a.pi) * k.num
+    val f = if p % k.den == 0 then rpow(a.factor, k) else INEXACT
+
+    Unit(scale(a.dims, k), f, scale(a.spelling, k), if is_exact(f) then int(p / k.den) else 0)
 
 private powers_eq(xs: Buf[Power], ys: Buf[Power]) -> bool
     if xs.len() != ys.len() then return false
@@ -292,15 +298,23 @@ private powers_eq(xs: Buf[Power], ys: Buf[Power]) -> bool
 
     true
 
-// Whether two units have the same dimension: the same base units and parameters to the same powers.
-same_dims(a: Unit, b: Unit) -> bool = powers_eq(a.dims, b.dims)
+// Whether two units meet, in `+`, a comparison, a conversion and every position that expects a
+// type: the same base units and parameters to the same powers, or, where both have a dimension
+// other than angle, the same dimension once their angles are taken out (DESIGN §13.3), so `rad/s`
+// meets `1/s`. A pure angle never meets a plain number.
+same_dims(a: Unit, b: Unit) -> bool
+    if powers_eq(a.dims, b.dims) then return true
 
-unit_eq(a: Unit, b: Unit) -> bool = same_dims(a, b) && ratio_eq(a.factor, b.factor)
+    val x = angle_free_dims(a)
+
+    x.len() > 0 && powers_eq(x, angle_free_dims(b))
+
+unit_eq(a: Unit, b: Unit) -> bool = powers_eq(a.dims, b.dims) && ratio_eq(a.factor, b.factor) && a.pi == b.pi
 
 is_dimensionless(u: Unit) -> bool = u.dims.len() == 0
 
 // The unit of a plain number: no dimension and no scale.
-is_one(u: Unit) -> bool = is_dimensionless(u) && ratio_eq(u.factor, ONE_RATIO)
+is_one(u: Unit) -> bool = is_dimensionless(u) && ratio_eq(u.factor, ONE_RATIO) && u.pi == 0
 
 // Whether `u` mentions a unit parameter.
 has_param(u: Unit) -> bool
@@ -311,7 +325,7 @@ has_param(u: Unit) -> bool
 
 // `u` with each unit parameter bound in `names`/`units` replaced by its unit.
 subst_unit(u: Unit, names: Buf[string], units: Buf[Unit]) -> Unit
-    var out = Unit(buf(), u.factor, buf())
+    var out = Unit(buf(), u.factor, buf(), u.pi)
 
     for p in u.dims
         if !p.param then add_power(&out.dims, p, true)
@@ -335,6 +349,67 @@ subst_unit(u: Unit, names: Buf[string], units: Buf[Unit]) -> Unit
 
     out
 end subst_unit
+
+// -- angles -----------------------------------------------------------------------------------------
+
+// The base unit of angle (DESIGN §13.3): the units whose dimension holds it are the angle units.
+val ANGLE = "rad"
+
+private is_angle_power(p: Power) -> bool = !p.param && p.name == ANGLE
+
+// Whether `u`'s dimension holds the angle.
+has_angle(u: Unit) -> bool
+    for p in u.dims
+        if is_angle_power(p) then return true
+
+    false
+
+// Whether `u` is an angle and nothing else: `rad`, `deg`, `sr`; not `rad/s`, not a plain number.
+is_angle(u: Unit) -> bool = has_angle(u) && angle_free_dims(u).len() == 0
+
+// `u`'s dimension with the angle taken out.
+angle_free_dims(u: Unit) -> Buf[Power]
+    var out: Buf[Power] = buf()
+
+    for p in u.dims
+        if !is_angle_power(p) then out.push(p)
+
+    out
+
+// Whether a value in `from` stands in `to` once its angle is taken out, in radians: `from` holds the
+// angle and `to` is the same dimension without it. Where an angle meets another dimension in a product
+// it drops out this way (DESIGN §13.3).
+drops_angle(from: Unit, to: Unit) -> bool = has_angle(from) && !has_angle(to) && powers_eq(angle_free_dims(from), to.dims)
+
+// `u` reduced to its base units with the angle taken out, and spelt with them: `m/s` for `rad m/s`.
+angle_free_base(u: Unit) -> Unit = Unit(angle_free_dims(u), ONE_RATIO, angle_free_dims(u), 0)
+
+// π to 40 decimal places, the value a scale involving π is taken to before emission rounds it once.
+private val PI_NUM: i1024 = 31415926535897932384626433832795028841972
+private val PI_DEN: i1024 = 10000000000000000000000000000000000000000
+private val PI_LIMIT: i1024 = 10000000000000000000000000000000000000000000000000000000000000000000000
+
+// `r` times π to the power `k`, as a ratio that holds its value to more than 50 significant digits;
+// `INEXACT` where it is too large or too small to hold.
+pi_times(r: Ratio, k: int) -> Ratio
+    if !is_exact(r) then return INEXACT
+    if k == 0 then return r
+
+    var n = i1024(r.num)
+    var d = i1024(r.den)
+
+    val up = if k > 0 then PI_NUM else PI_DEN
+    val down = if k > 0 then PI_DEN else PI_NUM
+
+    for _ in 0..<(if k < 0 then -k else k)
+        n *= up
+        d *= down
+
+        while n > PI_LIMIT || d > PI_LIMIT
+            n = (n + 5) / 10
+            d = (d + 5) / 10
+
+    if n == 0 || d == 0 then INEXACT else ratio(i256(n), i256(d))
 
 // -- spelling ---------------------------------------------------------------------------------------
 
@@ -364,12 +439,14 @@ end spell_powers
 // cancelled them) shows its base units, behind its factor where that is not 1.
 spell(u: Unit) -> string
     if u.spelling.len() > 0 then return spell_powers(u.spelling)
-    if ratio_eq(u.factor, ONE_RATIO) then return spell_powers(u.dims)
+    if ratio_eq(u.factor, ONE_RATIO) && u.pi == 0 then return spell_powers(u.dims)
 
-    s"(${show_ratio(u.factor)}) ${spell_powers(u.dims)}"
+    val pi = if u.pi == 0 then "" elif u.pi == 1 then " pi" else s" pi^${u.pi}"
+
+    s"(${show_ratio(u.factor)}${pi}) ${spell_powers(u.dims)}"
 
 // The base units of a dimension, in canonical order, with the name of each one people say aloud.
-private val DIMENSIONS = [("m", "length"), ("kg", "mass"), ("s", "time"), ("A", "current"), ("K", "temperature"), ("mol", "amount of substance"), ("cd", "luminous intensity"), ("m^2", "area"), ("m^3", "volume"), ("m/s", "velocity"), ("m/s^2", "acceleration"), ("1/s", "frequency"), ("kg m/s", "momentum"), ("kg m/s^2", "force"), ("kg m^2/s^2", "energy"), ("kg m^2/s^3", "power"), ("kg/(m s^2)", "pressure"), ("kg/m^3", "density"), ("A s", "charge"), ("kg m^2/(A s^3)", "voltage"), ("kg m^2/(A^2 s^3)", "resistance")]
+private val DIMENSIONS = [("m", "length"), ("kg", "mass"), ("s", "time"), ("A", "current"), ("K", "temperature"), ("mol", "amount of substance"), ("cd", "luminous intensity"), ("m^2", "area"), ("m^3", "volume"), ("m/s", "velocity"), ("m/s^2", "acceleration"), ("1/s", "frequency"), ("kg m/s", "momentum"), ("kg m/s^2", "force"), ("kg m^2/s^2", "energy"), ("kg m^2/s^3", "power"), ("kg/(m s^2)", "pressure"), ("kg/m^3", "density"), ("A s", "charge"), ("kg m^2/(A s^3)", "voltage"), ("kg m^2/(A^2 s^3)", "resistance"), ("rad", "angle"), ("rad^2", "solid angle")]
 
 // What a dimension is called: `length`, `force`, `dimensionless`, or its base units where it has
 // no common name (`m s`).
@@ -450,11 +527,13 @@ private erase_all(ts: Buf[Ty]) -> Buf[Ty]
 
     out
 
-// `v` converted to unit `to` of its own dimension: a `TRescale` by the ratio of the two scales, or,
+// `v` converted to unit `to` of its own dimension, or of that dimension with its angle taken out in
+// radians (`drops_angle`): a `TRescale` by the ratio of the two scales, or,
 // where the scales agree, a `TUnitAs` that only renames the unit. On an array both apply to every
 // element.
 rescaled(v: TExpr, to: Unit) -> TExpr
-    val f = rdiv(elem_unit(v.ty).factor, to.factor)
+    val from = elem_unit(v.ty)
+    val f = pi_times(rdiv(from.factor, to.factor), from.pi - to.pi)
     val ty = with_unit(v.ty, to)
 
     if ratio_eq(f, ONE_RATIO) then texpr(v.span, ty, TUnitAs(v)) else texpr(v.span, ty, TRescale(v, f))

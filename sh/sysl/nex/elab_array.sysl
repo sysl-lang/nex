@@ -647,7 +647,9 @@ impl Elab
             Some(t) -> t
             None -> return self.invalid(span)
 
-        val u = self.exact(span, unit_mul(unit_of(ea), unit_of(eb))) match
+        val (ua, ub) = self.product_units(unit_of(ea), unit_of(eb), false)
+
+        val u = self.exact(span, unit_mul(ua, ub)) match
             Some(u) -> u
             None -> return self.invalid(span)
 
@@ -667,7 +669,7 @@ impl Elab
         val c = measured(n, u)
         val ty = if out.len() == 0 then c else Ty.Array(c, out)
 
-        texpr(span, ty, TArray(TMatMul(promote(a, with_elem(a.ty, measured(n, unit_of(ea)))), promote(b, with_elem(b.ty, measured(n, unit_of(eb)))))))
+        texpr(span, ty, TArray(TMatMul(promote(a, with_elem(a.ty, measured(n, ua))), promote(b, with_elem(b.ty, measured(n, ub))))))
     end matmul
 
     // -- elemental calls --------------------------------------------------------------------------

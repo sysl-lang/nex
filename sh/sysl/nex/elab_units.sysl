@@ -17,7 +17,15 @@ import sysl.buf.{Buf, buf}
 import sysl.text.join
 import sh.sysl.parsing.{Span, nearest_name, source_of}
 
-private val PRELUDE_UNITS = "unit m\nunit kg\nunit s\nunit A\nunit K\nunit mol\nunit cd\nunit N = kg m / s^2\nunit J = N m\nunit W = J / s\nunit Pa = N / m^2\nunit Hz = 1 / s\nunit C = A s\nunit V = W / A\nunit ohm = V / A\nunit rad = 1\nunit mm = 0.001 m\nunit cm = 0.01 m\nunit km = 1000 m\nunit g = 0.001 kg\nunit ms = 0.001 s\nunit us = 0.000001 s\nunit ns = 0.000000001 s\nunit kPa = 1000 Pa\nunit MPa = 1000000 Pa\nunit GPa = 1000000000 Pa\nunit kN = 1000 N\nunit kJ = 1000 J\nunit kW = 1000 W\nunit in = 0.0254 m\nunit ft = 12 in\nunit yd = 3 ft\nunit mi = 5280 ft\nunit lb = 0.45359237 kg\nunit oz = 0.0625 lb\nunit lbf = 4.4482216152605 N\nunit slug = lbf s^2 / ft\nunit psi = lbf / in^2\nunit ksi = 1000 psi\nunit BTU = 1055.05585262 J\nunit hp = 550 ft lbf / s\nunit usgal = 231 in^3\nunit ukgal = 0.00454609 m^3\n"
+private val PRELUDE_UNITS = "unit m\nunit kg\nunit s\nunit A\nunit K\nunit mol\nunit cd\nunit N = kg m / s^2\nunit J = N m\nunit W = J / s\nunit Pa = N / m^2\nunit Hz = 1 / s\nunit C = A s\nunit V = W / A\nunit ohm = V / A\nunit rad\nunit sr = rad^2\nunit deg = rad\nunit turn = rad\nunit arcmin = deg\nunit arcsec = arcmin\nunit mm = 0.001 m\nunit cm = 0.01 m\nunit km = 1000 m\nunit g = 0.001 kg\nunit ms = 0.001 s\nunit us = 0.000001 s\nunit ns = 0.000000001 s\nunit kPa = 1000 Pa\nunit MPa = 1000000 Pa\nunit GPa = 1000000000 Pa\nunit kN = 1000 N\nunit kJ = 1000 J\nunit kW = 1000 W\nunit in = 0.0254 m\nunit ft = 12 in\nunit yd = 3 ft\nunit mi = 5280 ft\nunit lb = 0.45359237 kg\nunit oz = 0.0625 lb\nunit lbf = 4.4482216152605 N\nunit slug = lbf s^2 / ft\nunit psi = lbf / in^2\nunit ksi = 1000 psi\nunit BTU = 1055.05585262 J\nunit hp = 550 ft lbf / s\nunit usgal = 231 in^3\nunit ukgal = 0.00454609 m^3\n"
+
+// The prelude's angle units whose scale a decimal literal cannot spell, as an exact ratio and a power
+// of π: `deg` is π/180 rad, `turn` 2π rad, `arcmin` 1/60 deg and `arcsec` 1/60 arcmin.
+private val ANGLE_SCALES = [("deg", 1, 180, 1), ("turn", 2, 1, 1), ("arcmin", 1, 60, 0), ("arcsec", 1, 60, 0)]
+
+// The functions of an angle: they take one in any angle unit, in radians, or a plain number, which
+// is radians.
+private val TRIG = ["sin", "cos", "tan"]
 
 private val COMPARISON_OPS = ["==", "!=", "<", "<=", ">", ">="]
 
@@ -33,6 +41,8 @@ struct UnitSrc
     factor: Option[string]
     body: Option[UnitExpr]
     prelude: bool
+    // The scale of a prelude angle unit, which overrides `factor`: a ratio and a power of π.
+    scale: Option[(Ratio, int)]
 
 struct Units
     srcs: Buf[UnitSrc]
@@ -45,6 +55,12 @@ struct Units
     path: Buf[usize]
 
 empty_units() -> Units = Units(buf(), buf(), buf(), buf(), buf())
+
+private angle_scale(name: string) -> Option[(Ratio, int)]
+    for (n, num, den, pi) in ANGLE_SCALES
+        if n == name then return Some((ratio(i256(num), i256(den)), pi))
+
+    None
 
 private member(names: []const string, name: string) -> bool
     for n in names
@@ -99,9 +115,18 @@ units_differ(lead: string, a: TExpr, b: TExpr) -> string = clash(lead, a, b)
 private plain_word(v: TExpr) -> string = if bare_literal(v).is_some() then "a bare number" else "a plain number"
 
 // How a plain number beside a value in unit `u` is given that unit.
-private plain_advice(v: TExpr, u: Unit) -> string = bare_literal(v) match
-    Some(t) -> s"a bare literal is dimensionless; write it with its unit, `${t}<${spell(u)}>`"
-    None -> s"a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<${spell(u)}>`"
+private plain_advice(v: TExpr, u: Unit) -> string
+    val angle = is_angle(u) && ratio_eq(u.dims[0].exp, ONE_RATIO)
+
+    bare_literal(v) match
+        Some(t) ->
+            if angle then return s"a bare number is not an angle; write `${t}<rad>` for radians or `${t}<deg>` for degrees"
+
+            s"a bare literal is dimensionless; write it with its unit, `${t}<${spell(u)}>`"
+        None ->
+            if angle then return s"a plain number is not an angle; give it a unit by multiplying, `y * 1.0<rad>` for radians or `y * 1.0<deg>` for degrees"
+
+            s"a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<${spell(u)}>`"
 
 // `in and lbf: length and force are different dimensions`.
 unit_clash(ua: Unit, ub: Unit) -> string =
@@ -165,7 +190,7 @@ impl Elab
             Ok(p) ->
                 for d in p.decls
                     *d.kind match
-                        UnitDecl(name, factor, body) -> self.add_unit(UnitSrc(d.span, name, factor, body, true))
+                        UnitDecl(name, factor, body) -> self.add_unit(UnitSrc(d.span, name, factor, body, true, angle_scale(name)))
                         _ -> ()
             Err(d) -> self.fail(d.span, "the prelude's units do not parse: " + d.message)
 
@@ -181,7 +206,7 @@ impl Elab
                 self.fail(span, s"redeclaration of the unit `${name}`")
                 return
 
-        self.add_unit(UnitSrc(span, name, factor, body, false))
+        self.add_unit(UnitSrc(span, name, factor, body, false, None))
 
     // Every unit the module declares, used or not, so a mistake in one is reported.
     resolve_units(*self)
@@ -228,15 +253,17 @@ impl Elab
             None -> Some(base_unit(src.name))
             Some(b) -> self.unit_expr_value(b, src.prelude) match
                 Some(x) ->
-                    val f = src.factor match
-                        Some(t) -> decimal_ratio(t)
-                        None -> ONE_RATIO
+                    val (f, pi) = src.scale match
+                        Some(sc) -> sc
+                        None -> src.factor match
+                            Some(t) -> (decimal_ratio(t), 0)
+                            None -> (ONE_RATIO, 0)
 
                     if !is_exact(f) || f.num <= 0
                         self.fail(src.span, s"the scale of `${src.name}` is a positive decimal number: `unit in = 0.0254 m`")
                         None
                     else
-                        self.exact(src.span, named(scaled(x, f), src.name))
+                        self.exact(src.span, named(scaled(x, f, pi), src.name))
                 None -> None
 
         self.units.params = saved
@@ -413,6 +440,44 @@ impl Elab
 
     // -- operators --------------------------------------------------------------------------------
 
+    // The units the two operands of a product (or, where `divide`, a quotient) are taken in. An angle
+    // that meets another dimension drops out, in radians: `r * theta` is a length and `theta / t` a
+    // frequency. Where the result is an angle and nothing else (`theta * 2.0`, `omega * t`), or a
+    // plain number (`theta / phi`), each operand keeps its unit (DESIGN §13.3).
+    product_units(*self, ua: Unit, ub: Unit, divide: bool) -> (Unit, Unit)
+        val u = if divide then unit_div(ua, ub) else unit_mul(ua, ub)
+
+        if !has_angle(ua) && !has_angle(ub) || angle_free_dims(u).len() == 0 then return (ua, ub)
+
+        (self.angle_free(ua), self.angle_free(ub))
+
+    // `u` with its angle taken out, in radians: a pure angle becomes a plain number, and a unit spelt
+    // with an angle unit loses that name (`deg/s` becomes `1/s`). One spelt with a name that mixes an
+    // angle with another dimension (`rpm`) is reduced to its base units.
+    private angle_free(*self, u: Unit) -> Unit
+        if !has_angle(u) then return u
+
+        var out = unit_one()
+
+        for p in u.spelling
+            if p.param
+                out = unit_mul(out, unit_pow(param_unit(p.name), p.exp))
+                continue
+
+            val x = self.find_unit(p.name, false) match
+                Some(k) -> self.unit_decl_value(k)
+                None -> None
+
+            if x.is_none() then return angle_free_base(u)
+
+            val y = x.unwrap()
+
+            if !is_angle(y) then out = unit_mul(out, unit_pow(y, p.exp))
+
+        if has_angle(out) || !same_dims(out, angle_free_base(u)) then return angle_free_base(u)
+
+        out
+
     // An arithmetic or comparison operator where an operand carries a unit (DESIGN §13.3).
     measured_apply(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
         val ua = unit_of(a.ty)
@@ -439,11 +504,12 @@ impl Elab
 
         if op == "*" || op == "/"
             val c = self.common_of(span, op, base_of(a.ty), base_of(b.ty)).unwrap_or(Error)
-            val u = if op == "*" then unit_mul(ua, ub) else unit_div(ua, ub)
+            val (xa, xb) = self.product_units(ua, ub, op == "/")
+            val u = if op == "*" then unit_mul(xa, xb) else unit_div(xa, xb)
 
             if self.exact(span, u).is_none() then return texpr(span, Error, TBinary(op, a, b))
 
-            return texpr(span, measured(c, u), TBinary(op, promote(a, measured(c, ua)), promote(b, measured(c, ub))))
+            return texpr(span, measured(c, u), TBinary(op, promote(a, measured(c, xa)), promote(b, measured(c, xb))))
 
         self.fail(span, s"`${op}` needs two integers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
         texpr(span, Error, TBinary(op, a, b))
@@ -494,10 +560,20 @@ impl Elab
             out.push(v)
 
             if !is_exact(ru.factor)
-                self.fail(span, s"`${name}` of ${spell(u)} has no exact scale; convert it to base units first: `${name}(to<${spell(Unit(u.dims, ONE_RATIO, buf()))}>(x))`")
+                self.fail(span, s"`${name}` of ${spell(u)} has no exact scale; convert it to base units first: `${name}(to<${spell(Unit(u.dims, ONE_RATIO, buf(), 0))}>(x))`")
                 return texpr(span, Error, TBuiltin(name, out))
 
             return texpr(span, measured(self.scalar_result(span, name, b), ru), TBuiltin(name, out))
+
+        // An angle in any angle unit is taken in radians.
+        if member(TRIG, name) && is_angle(u) && ratio_eq(u.dims[0].exp, ONE_RATIO)
+            out.push(rescaled(v, unit_one()))
+            return texpr(span, self.scalar_result(span, name, b), TBuiltin(name, out))
+
+        if member(TRIG, name) && !is_dimensionless(u)
+            self.fail(span, s"`${name}` takes an angle or a plain number, which is radians, and this is ${show_ty(v.ty)} (${dimension_name(u)}); strip the unit to pass the number: `${name}(strip(x))`")
+            out.push(v)
+            return texpr(span, Error, TBuiltin(name, out))
 
         if !is_dimensionless(u)
             self.fail(span, s"`${name}` takes a dimensionless argument, and this is ${show_ty(v.ty)} (${dimension_name(u)}); strip the unit to pass the number: `${name}(strip(x))`")

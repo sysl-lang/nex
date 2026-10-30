@@ -1878,7 +1878,9 @@ unit psi = lbf / in^2
   (`in = 0.0254 m`) is a positive numeric literal times a unit expression. The factor is **exact**:
   a decimal literal is read as the rational it spells, and factors compose exactly, so `ft` is
   exactly 0.3048 m and `psi` exactly 6894.757293168361… Pa as a rational. A definition may not
-  refer to itself, directly or through another unit.
+  refer to itself, directly or through another unit. The prelude's angle units are scaled by a
+  power of π as well, held exactly beside the rational (`deg` is π/180 `rad`, §13.9); a module's
+  own declaration writes a decimal factor, so it scales from one of them (`unit grad = 0.9 deg`).
 - **Two units are the same unit** when they reduce to the same exponents of the same base units and
   the same factor. `N` and `kg m / s^2` are one unit, `Hz` and `1/s` are one, and so are `J` and
   `N m` (as in SI, torque and energy are not told apart). `mm` and `m` have the same **dimension**
@@ -1965,7 +1967,7 @@ unit psi = lbf / in^2
   length and force are different dimensions"*.
 - **`*` and `/` combine units**: `3.0<m> / 2.0<s>` is a `real<m/s>`, and `2.0 * x` keeps `x`'s
   unit. A product keeps the names it was made from (`1.0<mm> * 1.0<in>` is `real<mm in>`, an area
-  whose factor is 0.001 × 0.0254).
+  whose factor is 0.001 × 0.0254), except that an angle can drop out of it (below).
 - **`^` takes a constant exponent** when its base carries a unit: `x^2` is `real<m^2>` for
   `x: real<m>`, and a rational exponent is allowed (`<m^(1/2)>`). The exponent is written as an
   integer literal, optionally negative (`x^-1`), or a fraction of two (`x^(1/2)`, `x^(-1/2)`); a
@@ -1979,6 +1981,31 @@ unit psi = lbf / in^2
   assignment of the same dimension and another scale is converted to the target's unit, as `+`
   converts its right operand. `val d: real<mm> = 1.0<in>` holds `25.4<mm>`. A different dimension
   is a compile error.
+- **An angle is a kind of unit**: the angle units are those whose dimension holds the base unit
+  `rad` — the prelude's `rad`, `deg`, `turn`, `arcmin`, `arcsec` and `sr` (= `rad^2`), and any
+  unit declared from them. They are checked where an angle meets a plain number and drop out of
+  products, so `rotate(part, 30)` meant in degrees does not compile, and `r * theta` is a length.
+  - **Angle units convert like any others**: `90.0<deg> + 0.5<rad>` is a `real<deg>` (the right
+    operand converted to the left one's unit), and `to<rad>(180.0<deg>)` is π rad.
+  - **A plain number is not an angle.** With `theta: real<rad>`, `theta + 0.5`, `theta > 0.0`, an
+    `if` with an angle in one branch and a plain number in another, `theta = 2.0`, and passing a
+    plain number to a parameter typed `real<rad>` or `real<deg>` are compile errors whose hint names
+    both forms: *"a bare number is not an angle; write `30<rad>` for radians or `30<deg>` for
+    degrees"*. The literal `0` is no exception, as it is none for any other unit (`theta = 0.0<rad>`).
+    An angle where a plain number is expected is refused the same way, and `strip(theta)` takes its
+    number.
+  - **An angle drops out where it meets another dimension in `*` or `/`**: the operand is taken in
+    radians and its angle removed, so `2.0<m> * 30.0<deg>` is a `real<m>` holding π/3, and
+    `theta / t` a `real<1/s>`. A result that is an angle and nothing else keeps it: `2.0 * theta`
+    and `omega * t` are angles, `theta * phi` is `rad^2`, and `theta / phi` is a plain number. The
+    angle drops at the operator where it meets the other dimension, so `theta * r / r` is a plain
+    number while `theta * (r / r)` is an angle. A unit parameter counts as a dimension other than
+    angle: `r * theta` with `r: real<U>` is a `real<U>`. `@` and `dot` follow the same rule.
+  - **A unit that mixes an angle with another dimension meets that dimension without it** in every
+    place two units must meet: `rad/s` and `1/s` (and so `Hz`) are one dimension, as in SI, so
+    `val omega: real<rad/s> = theta / t` holds, `omega * t` is an angle and `omega * r` a
+    `real<m/s>`. A declared unit that mixes the two (`unit rpm = turn / min`) is taken in base units
+    where its angle drops out: `2.0<rpm> * 1.0<m>` is a `real<m/s>`.
 - **`to<u>(x)`** converts explicitly, on a scalar and element-wise on an array: `to<mm>(1.0<in>)` is
   `25.4<mm>`. A target of another dimension is a compile error.
 - **`strip(x)`** removes the unit and gives the number in `x`'s own unit, dimensionless:
@@ -1998,11 +2025,15 @@ unit psi = lbf / in^2
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
   `sign(x)` and `arg(z)` return a plain number: the sign is −1, 0 or 1 whatever `x` measures, and
-  an angle is dimensionless.
-  `atan2(y, x)` takes two values of one dimension and returns a dimensionless angle.
-- `exp`, `log`, `sin`, `cos`, `tan` and the other elementary functions need a dimensionless argument
-  and return a dimensionless result. **`rad` is dimensionless** (`unit rad = 1`), so
-  `sin(0.5<rad>)` is accepted.
+  `arg(z)` is in radians.
+  `atan2(y, x)` takes two values of one dimension and returns a plain number, in radians.
+- **`sin`, `cos` and `tan` take an angle**, in any angle unit, converted to radians
+  (`sin(30.0<deg>)`), **or a plain number, which is radians**, as in Fortran; another unit, `sr`
+  among them, is a compile error. They return a plain number.
+- `exp`, `log`, `asin`, `acos`, `atan` and the other elementary functions need a dimensionless
+  argument — an angle is not one — and return a dimensionless result. **The inverse functions and
+  `atan2` return a plain number, in radians**, as in Fortran; `asin(x) * 1.0<rad>` makes it an
+  angle.
 - `product(a)` has unit `U^n`; for an `a` that carries a unit, `n` must be a static extent
   (**PROPOSED**), and otherwise it is a compile error that suggests `strip`.
 - `print` and string interpolation show the unit after the value, separated by a space: with
@@ -2041,8 +2072,8 @@ is held stripped.
 - **The element-wise operators, and the prelude functions applied element by element, follow the
   scalar rules of §13.3 and §13.4 for one element**: `a + b` needs one dimension and converts `b`'s
   elements to `a`'s unit, `a * b` and `a / b` combine units, a measured scalar broadcasts with its
-  unit, `a^2` takes a constant exponent, `sqrt(a)` halves the exponents and `sin(a)` needs a
-  dimensionless `a`.
+  unit, `a^2` takes a constant exponent, `sqrt(a)` halves the exponents, an array of angles drops
+  out of a product in radians, and `sin(a)` needs an array of angles or of plain numbers.
 - **`product(a, dim = k)`** multiplies the extent of axis `k`, so its unit is `U` to that extent:
   the axis is written as an integer literal and its extent is static, or, for an `a` that carries a
   unit, it is a compile error that suggests `strip` (**PROPOSED**).
@@ -2075,7 +2106,7 @@ unit-free parameters and result for the same reason.
 Units exist only in the type checker and are erased before MLIR is emitted, so a program with units
 compiles to the same code as the same program without them. **Mixing scales costs one
 multiplication by a constant**: the ratio of two exact factors, rounded once to the operand's width
-at compile time — the same single rounding a hand conversion makes. Where no scales are mixed, no
+at compile time — the same single rounding a hand conversion makes; a ratio that involves π is first taken to more than 50 significant digits. Where no scales are mixed, no
 conversion is emitted. The multiplication is an ordinary one: a conversion past the width's range is
 an infinity, or the overflow trap under `--fpe-trap` (§2.5).
 
@@ -2084,7 +2115,8 @@ an infinity, or the overflow trap under `--fpe-trap` (§2.5).
 | Units | Definitions |
 |---|---|
 | SI base | `m` `kg` `s` `A` `K` `mol` `cd` |
-| SI derived | `N = kg m / s^2`, `J = N m`, `W = J / s`, `Pa = N / m^2`, `Hz = 1 / s`, `C = A s`, `V = W / A`, `ohm = V / A`, `rad = 1` |
+| SI derived | `N = kg m / s^2`, `J = N m`, `W = J / s`, `Pa = N / m^2`, `Hz = 1 / s`, `C = A s`, `V = W / A`, `ohm = V / A` |
+| Angle | `rad` (a base unit), `sr = rad^2`, `deg = π/180 rad`, `turn = 2π rad`, `arcmin = deg / 60`, `arcsec = arcmin / 60` |
 | SI scaled | `mm = 0.001 m`, `cm = 0.01 m`, `km = 1000 m`, `g = 0.001 kg`, `ms = 0.001 s`, `us = 0.000001 s`, `ns = 0.000000001 s`, `kPa = 1000 Pa`, `MPa = 1000000 Pa`, `GPa = 1000000000 Pa`, `kN = 1000 N`, `kJ = 1000 J`, `kW = 1000 W` |
 | Imperial and US customary | `in = 0.0254 m`, `ft = 12 in`, `yd = 3 ft`, `mi = 5280 ft`, `lb = 0.45359237 kg`, `oz = 0.0625 lb`, `lbf = 4.4482216152605 N`, `slug = lbf s^2 / ft`, `psi = lbf / in^2`, `ksi = 1000 psi`, `BTU = 1055.05585262 J`, `hp = 550 ft lbf / s`, `usgal = 231 in^3`, `ukgal = 0.00454609 m^3` |
 
