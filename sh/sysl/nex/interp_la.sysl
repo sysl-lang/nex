@@ -17,16 +17,16 @@ module sh.sysl.nex
 // `info`.
 //
 // **An array crosses as compiled code hands it over** (DESIGN §10.3): the interpreter's storage holds
-// values rather than machine numbers, so each array is copied into storage of the element type, laid
-// out as the compiled program's lies — the stretch of its storage from its first element to its last,
-// its columns as far apart as they lie, where its first axis is at unit stride and its columns do not
-// overlap, and dense otherwise. Two operands lying in one storage are copied as one stretch, so the
-// library sees one buffer where the compiled program passes one: Accelerate answers `transpose(A) @ A`
-// differently in the last bits when both operands are the same address.
+// the machine numbers (`interp_store.sysl`), so where an array's first axis is at unit stride and its
+// columns do not overlap, the runtime is handed a view of that storage itself, its columns as far
+// apart as they lie, and an `inout` form writes its factors there; any other array is copied dense
+// and, for an `inout` form, written back. Two operands lying in one storage are two views of one
+// buffer, so the library sees one buffer where the compiled program passes one: Accelerate answers
+// `transpose(A) @ A` differently in the last bits when both operands are the same address.
 
 import nex_runtime.sh.sysl.nex_runtime.{SHAPE_MISMATCH, la_chol, la_chol_inplace, la_det, la_dot, la_eig, la_eigh, la_eigvals, la_inv, la_lstsq, la_lu, la_lu_inplace,
                                         la_product, la_qr, la_qr_inplace, la_solve, la_solve_inplace, la_svd, la_svdvals}
-import sh.sysl.blas.{MatrixView, Op, Width}
+import sh.sysl.blas.{MatrixView, Op}
 import sh.sysl.lapack.Scalar
 import sysl.buf.{Buf, buf}
 // The standard complex number, under a name that leaves `Complex` to nex's type.
@@ -95,15 +95,15 @@ private inline_ops(t: Ty) -> Option[(Op2, Op2)] = t match
 // the axes reversed, so `linalg.matmul` and `linalg.vecmat`/`matvec` take `y` first: each product is
 // `y`'s element times `x`'s, added to the element so far, from zero, along the inner axis in order.
 // `linalg.dot` of two vectors takes them in order.
-private inline_product(x: &Arr, y: &Arr, mul: Op2, add: Op2, zero: Value) -> Answer
+private inline_product(x: &Arr, y: &Arr, mul: Op2, add: Op2, zero: Value, et: Ty) -> Answer
     val ra = x.ext.len()
     val rb = y.ext.len()
     val k = x.ext[ra - 1]
 
     if k != y.ext[0] then return trapped(SHAPE_MISMATCH)
 
-    val xs = x.store.v
-    val ys = y.store.v
+    val xs = x.store.d
+    val ys = y.store.d
     val xk = x.str[ra - 1]
     val yk = y.str[0]
 
@@ -111,7 +111,7 @@ private inline_product(x: &Arr, y: &Arr, mul: Op2, add: Op2, zero: Value) -> Ans
         var acc = zero
 
         for l in 0..<k
-            val p = mul(xs[usize(x.offset + l * xk)], ys[usize(y.offset + l * yk)])?
+            val p = mul(data_get(xs, usize(x.offset + l * xk)), data_get(ys, usize(y.offset + l * yk)))?
 
             acc = add(acc, p)?
 
@@ -121,24 +121,24 @@ private inline_product(x: &Arr, y: &Arr, mul: Op2, add: Op2, zero: Value) -> Ans
     val n = if rb == 2 then y.ext[1] else 1
     val xi = if ra == 2 then x.str[0] else 0
     val yj = if rb == 2 then y.str[1] else 0
-    var out: Buf[Value] = buf()
+    val out = data_for(et)
 
     for j in 0..<n
         for i in 0..<m
             var acc = zero
 
             for l in 0..<k
-                val p = mul(ys[usize(y.offset + l * yk + j * yj)], xs[usize(x.offset + i * xi + l * xk)])?
+                val p = mul(data_get(ys, usize(y.offset + l * yk + j * yj)), data_get(xs, usize(x.offset + i * xi + l * xk)))?
 
                 acc = add(acc, p)?
 
-            out.push(acc)
+            data_push(out, acc)
 
     var ext: Buf[long] = buf()
 
     if ra == 2 then ext.push(m)
     if rb == 2 then ext.push(n)
-    Ok(dense(out, ext))
+    Ok(dense_data(out, ext))
 
 // `op(x) @ op(y)` through BLAS, in the element type of kind `kind`; `vector` where the result is one.
 private blas_product(kind: int, x: &Arr, fx: Op, y: &Arr, fy: Op, vector: bool) -> Answer = kind match
@@ -147,11 +147,11 @@ private blas_product(kind: int, x: &Arr, fx: Op, y: &Arr, fy: Op, vector: bool) 
     2 -> product_in[Cx[f32]](x, fx, y, fy, vector)
     _ -> product_in[Cx[real]](x, fx, y, fy, vector)
 
-private product_in[T: Scalar](x: &Arr, fx: Op, y: &Arr, fy: Op, vector: bool) -> Answer
+private product_in[T: Scalar + Elem](x: &Arr, fx: Op, y: &Arr, fy: Op, vector: bool) -> Answer
     val xv = x.ext.len() == 1
     val yv = y.ext.len() == 1
-
-    val (a, b) = crossings[T](x, y)
+    val a = crossing[T](x)
+    val b = crossing[T](y)
 
     if xv && yv
         return la_dot(a.col(0), b.col(0)) match
@@ -169,38 +169,13 @@ private lies_in_place(a: &Arr) -> bool
 
     a.ext.len() == 1 || a.str[1] >= a.ext[0]
 
-// The storage position of `a`'s last element.
-private last_of(a: &Arr) -> long = a.offset + (a.ext[0] - 1) * a.str[0] + (if a.ext.len() == 2 then (a.ext[1] - 1) * a.str[1] else 0)
-
-// `a`, of rank 1 or 2, in storage of `T` as compiled code hands it to the runtime: where it lies, a
-// copy of the storage from its first element to its last, read with its own leading dimension;
-// otherwise a dense copy.
-private crossing[T: Scalar](a: &Arr) -> MatrixView[T]
+// `a`, of rank 1 or 2, as compiled code hands it to the runtime: a view of its own storage where it
+// lies, read with its own leading dimension; otherwise a dense copy. Two arrays lying in one storage
+// are two views of one buffer, the same place where they are the same array.
+private crossing[T: Scalar + Elem](a: &Arr) -> MatrixView[T]
     if !lies_in_place(a) then return gathered(a)
 
-    val xs = region[T](a.store, a.offset, last_of(a))
-
-    viewed(xs, a, 0)
-
-// `x` and `y` as `crossing` hands each over, except that two arrays lying in one storage are copied
-// together, so that the runtime reads them as compiled code hands them over: two places in one
-// buffer, the same place where they are the same array.
-private crossings[T: Scalar](x: &Arr, y: &Arr) -> (MatrixView[T], MatrixView[T])
-    if !lies_in_place(x) || !lies_in_place(y) || !(x.store === y.store) then return (crossing[T](x), crossing[T](y))
-
-    val lo = if x.offset < y.offset then x.offset else y.offset
-    val hi = if last_of(x) > last_of(y) then last_of(x) else last_of(y)
-    val xs = region[T](x.store, lo, hi)
-
-    (viewed(xs, x, x.offset - lo), viewed(xs, y, y.offset - lo))
-
-// The storage of `s` from position `lo` to `hi`, as `T`s.
-private region[T: Scalar](s: &Store, lo: long, hi: long) -> []T
-    var xs: []T = [T.zero(); usize(hi - lo + 1)]
-
-    for p in lo..hi do xs[usize(p - lo)] = scalar_in(s.v[usize(p)])
-
-    xs
+    viewed(T.held(a.store.d).view(), a, a.offset)
 
 // The array `a`, lying in `xs` from position `at` with its own column stride.
 private viewed[T](xs: []T, a: &Arr, at: long) -> MatrixView[T]
@@ -211,82 +186,96 @@ private viewed[T](xs: []T, a: &Arr, at: long) -> MatrixView[T]
     MatrixView.strided(xs[usize(at)..<xs.len], rows, cols, ld).unwrap()
 
 // `a` copied dense, column after column, its leading dimension its row count.
-private gathered[T: Scalar](a: &Arr) -> MatrixView[T]
+private gathered[T: Scalar + Elem](a: &Arr) -> MatrixView[T]
     val rows = a.ext[0]
     val cols = if a.ext.len() == 2 then a.ext[1] else 1
     val step = if a.ext.len() == 2 then a.str[1] else 0
+    val src = T.held(a.store.d)
     var xs: []T = [T.zero(); usize(rows * cols)]
 
     for j in 0..<cols
-        for i in 0..<rows do xs[usize(i + j * rows)] = scalar_in(a.store.v[usize(a.offset + i * a.str[0] + j * step)])
+        for i in 0..<rows do xs[usize(i + j * rows)] = src[usize(a.offset + i * a.str[0] + j * step)]
 
     MatrixView.of(xs, usize(rows), usize(cols)).unwrap()
 
-// The elements of the vector `a` as `T`s, in order.
-private slice_in[T: Scalar](a: &Arr) -> []T
-    var xs: []T = [T.zero(); usize(a.ext[0])]
+// Whether the vector `a` lies in its storage one element after another, where it is handed over.
+private runs_in_place(a: &Arr) -> bool = a.ext[0] > 0 && a.str[0] == 1
 
-    for i in 0..<a.ext[0] do xs[usize(i)] = scalar_in(a.store.v[usize(a.offset + i * a.str[0])])
+// The elements of the vector `a`, in order: its own storage where it runs in place, else a copy.
+private slice_in[T: Elem](a: &Arr, zero: T) -> []T
+    val src = T.held(a.store.d)
+
+    if runs_in_place(a) then return src.view()[usize(a.offset)..<usize(a.offset + a.ext[0])]
+
+    var xs: []T = [zero; usize(a.ext[0])]
+
+    for i in 0..<a.ext[0] do xs[usize(i)] = src[usize(a.offset + i * a.str[0])]
 
     xs
-
-// The elements of the `int32` vector `a`.
-private pivots_in(a: &Arr) -> []i32
-    var xs: []i32 = [0; usize(a.ext[0])]
-
-    for i in 0..<a.ext[0] do xs[usize(i)] = i32.wrap(int_of(a.store.v[usize(a.offset + i * a.str[0])]))
-
-    xs
-
-private scalar_in[T: Scalar](v: Value) -> T = v match
-    VComplex(re, im) -> T.from_parts(re, im)
-    VReal(x) -> T.from_parts(x, 0.0)
-    _ -> T.zero()
 
 private value_of[T: Scalar](x: T) -> Value =
     if T.is_complex() then VComplex(T.real_part(x).to_real(), T.imag_part(x).to_real()) else VReal(T.real_part(x).to_real())
 
-private cx_value[R: Width](z: Cx[R]) -> Value = VComplex(z.re.to_real(), z.im.to_real())
-
-private real_value[R: Width](x: R) -> Value = VReal(x.to_real())
-
 // The matrix `m` as an array, column after column: of rank 1 where `vector` holds, its one column.
-private matrix_value[T](m: MatrixView[T], vector: bool, each: &Fn(T) -> Value) -> Value
-    var out: Buf[Value] = buf()
+private matrix_value[T: Elem](m: MatrixView[T], vector: bool) -> Value
+    var out: Buf[T] = buf()
+
+    out.reserve(m.rows * m.cols)
 
     for j in 0..<m.cols
-        for i in 0..<m.rows do out.push(each(m.at(i, j)))
+        for i in 0..<m.rows do out.push(m.at(i, j))
 
     var ext: Buf[long] = buf()
 
     ext.push(long(m.rows))
     if !vector then ext.push(long(m.cols))
-    dense(out, ext)
+    dense_data(T.holding(out), ext)
 
-private list_value[T](xs: []T, each: &Fn(T) -> Value) -> Value
-    var out: Buf[Value] = buf()
+private list_value[T: Elem](xs: []T) -> Value
+    var out: Buf[T] = buf()
 
-    for x in xs do out.push(each(x))
+    out.extend(xs)
+    vector_data(T.holding(out))
 
-    vector(out)
+// Reals of an element type's real width — `real32` or `real64` — as an array.
+private reals_value[R](xs: []R) -> Value
+    if const sizeof(R) == 4
+        var out: Buf[f32] = buf()
 
-private matrix_answer[T: Scalar](r: Result[MatrixView[T], string], vector: bool) -> Answer = r match
-    Ok(m) -> Ok(matrix_value(m, vector, (x) -> value_of(x)))
+        for x in xs do out.push(f32(x))
+
+        vector_data(DR32(out))
+    else
+        var out: Buf[real] = buf()
+
+        for x in xs do out.push(real(x))
+
+        vector_data(DR64(out))
+
+private matrix_answer[T: Scalar + Elem](r: Result[MatrixView[T], string], vector: bool) -> Answer = r match
+    Ok(m) -> Ok(matrix_value(m, vector))
     Err(e) -> trapped(e)
 
-// `m` written over the elements of `a`, of rank 1 or 2, where they lie.
-private put_matrix[T: Scalar](a: &Arr, m: MatrixView[T])
+// `m`, the copy `crossing` made of `a`, written back over `a`'s elements where they lie; nothing
+// where `a` was handed over in place, which the runtime wrote itself.
+private put_matrix[T: Scalar + Elem](a: &Arr, m: MatrixView[T])
+    if lies_in_place(a) then return
+
+    val dst = T.held(a.store.d)
     val cols = if a.ext.len() == 2 then a.ext[1] else 1
     val step = if a.ext.len() == 2 then a.str[1] else 0
 
     for j in 0..<cols
-        for i in 0..<a.ext[0] do a.store.v.set(usize(a.offset + i * a.str[0] + j * step), value_of(m.at(usize(i), usize(j))))
+        for i in 0..<a.ext[0] do dst.set(usize(a.offset + i * a.str[0] + j * step), m.at(usize(i), usize(j)))
 
-private put_slice[T: Scalar](a: &Arr, xs: []T)
-    for i in 0..<a.ext[0] do a.store.v.set(usize(a.offset + i * a.str[0]), value_of(xs[usize(i)]))
+// `xs`, the copy `slice_in` made of the vector `a`, written back over it; nothing where it ran in
+// place.
+private put_slice[T: Elem](a: &Arr, xs: []T)
+    if runs_in_place(a) then return
 
-private put_pivots(a: &Arr, xs: []i32)
-    for i in 0..<a.ext[0] do a.store.v.set(usize(a.offset + i * a.str[0]), VInt(long(xs[usize(i)])))
+    val dst = T.held(a.store.d)
+
+    for i in 0..<a.ext[0] do dst.set(usize(a.offset + i * a.str[0]), xs[usize(i)])
 
 private tuple(xs: []const Value) -> Value
     var out: Buf[Value] = buf()
@@ -305,48 +294,45 @@ private la_value(kind: int, name: string, a: &Arr, b: &Arr, upper: bool) -> Answ
     2 -> value_in[Cx[f32]](name, a, b, upper)
     _ -> value_in[Cx[real]](name, a, b, upper)
 
-private value_in[T: Scalar](name: string, a: &Arr, b: &Arr, upper: bool) -> Answer
-    val (m, r) = crossings[T](a, b)
+private value_in[T: Scalar + Elem](name: string, a: &Arr, b: &Arr, upper: bool) -> Answer
+    val m = crossing[T](a)
+    val r = if name == "solve" || name == "lstsq" then crossing[T](b) else m
 
     if name == "solve" then return matrix_answer(la_solve(m, r), b.ext.len() == 1)
     if name == "lstsq" then return matrix_answer(la_lstsq(m, r), b.ext.len() == 1)
     if name == "inv" then return matrix_answer(la_inv(m), false)
     if name == "chol" then return matrix_answer(la_chol(m, upper), false)
 
-    val each: &Fn(T) -> Value = (x) -> value_of(x)
-    val cx: &Fn(Cx[T::Real]) -> Value = (z) -> cx_value(z)
-    val re: &Fn(T::Real) -> Value = (x) -> real_value(x)
-
     if name == "det" then return la_det(m) match
         Ok(d) -> Ok(value_of(d))
         Err(e) -> trapped(e)
 
     if name == "lu" then return la_lu(m) match
-        Ok((l, u, p)) -> Ok(tuple([matrix_value(l, false, each), matrix_value(u, false, each), list_value(p, (n) -> VInt(n))]))
+        Ok((l, u, p)) -> Ok(tuple([matrix_value(l, false), matrix_value(u, false), list_value(p)]))
         Err(e) -> trapped(e)
 
     if name == "qr" then return la_qr(m) match
-        Ok((q, r)) -> Ok(tuple([matrix_value(q, false, each), matrix_value(r, false, each)]))
+        Ok((q, r)) -> Ok(tuple([matrix_value(q, false), matrix_value(r, false)]))
         Err(e) -> trapped(e)
 
     if name == "eigvals" then return la_eigvals(m) match
-        Ok(w) -> Ok(list_value(w, cx))
+        Ok(w) -> Ok(list_value(w))
         Err(e) -> trapped(e)
 
     if name == "eig" then return la_eig(m) match
-        Ok((w, v)) -> Ok(tuple([list_value(w, cx), matrix_value(v, false, cx)]))
+        Ok((w, v)) -> Ok(tuple([list_value(w), matrix_value(v, false)]))
         Err(e) -> trapped(e)
 
     if name == "eigh" then return la_eigh(m) match
-        Ok((w, v)) -> Ok(tuple([list_value(w, re), matrix_value(v, false, each)]))
+        Ok((w, v)) -> Ok(tuple([reals_value(w), matrix_value(v, false)]))
         Err(e) -> trapped(e)
 
     if name == "svd" then return la_svd(m) match
-        Ok((u, s, v)) -> Ok(tuple([matrix_value(u, false, each), list_value(s, re), matrix_value(v, false, each)]))
+        Ok((u, s, v)) -> Ok(tuple([matrix_value(u, false), reals_value(s), matrix_value(v, false)]))
         Err(e) -> trapped(e)
 
     la_svdvals(m) match
-        Ok(s) -> Ok(list_value(s, re))
+        Ok(s) -> Ok(reals_value(s))
         Err(e) -> trapped(e)
 
 // The `inout` form `name` on the arrays `xs` where they lie — the matrix, then `ipiv` or `tau`, then
@@ -357,19 +343,19 @@ private la_in_place(kind: int, name: string, xs: Buf[&Arr], upper: bool) -> Answ
     2 -> in_place_in[Cx[f32]](name, xs, upper)
     _ -> in_place_in[Cx[real]](name, xs, upper)
 
-private in_place_in[T: Scalar](name: string, xs: Buf[&Arr], upper: bool) -> Answer
+private in_place_in[T: Scalar + Elem](name: string, xs: Buf[&Arr], upper: bool) -> Answer
     val m = crossing[T](xs[0])
     var info: Result[i32, string] = Ok(0)
 
     if name == "chol_inplace"
         info = la_chol_inplace(m, upper)
     elif name == "qr_inplace"
-        val tau = slice_in[T](xs[1])
+        val tau = slice_in(xs[1], T.zero())
 
         info = la_qr_inplace(m, tau)
         put_slice(xs[1], tau)
     else
-        val ipiv = pivots_in(xs[1])
+        val ipiv = slice_in(xs[1], i32(0))
 
         if name == "lu_inplace"
             info = la_lu_inplace(m, ipiv)
@@ -379,7 +365,7 @@ private in_place_in[T: Scalar](name: string, xs: Buf[&Arr], upper: bool) -> Answ
             info = la_solve_inplace(m, ipiv, b)
             put_matrix(xs[2], b)
 
-        put_pivots(xs[1], ipiv)
+        put_slice(xs[1], ipiv)
 
     put_matrix(xs[0], m)
 
@@ -406,7 +392,7 @@ impl Interp
                 val f = codes[0]
                 val g = codes[1]
 
-                inline_product(arr_of(f(c)?), arr_of(g(c)?), mul, add, zero)
+                inline_product(arr_of(f(c)?), arr_of(g(c)?), mul, add, zero, et)
 
         val (x, fx) = la_operand(l)
         val (y, fy) = la_operand(r)
@@ -419,7 +405,7 @@ impl Interp
             val a = arr_of(f(c)?)
             val b = arr_of(g(c)?)
 
-            if flagged || reaches_blas(a, b) then blas_product(kind, a, fx, b, fy, vector) else inline_product(a, b, mul, add, zero)
+            if flagged || reaches_blas(a, b) then blas_product(kind, a, fx, b, fy, vector) else inline_product(a, b, mul, add, zero, et)
 
     // A call of the linear-algebra prelude (DESIGN §10.5).
     linear_algebra(*self, name: string, args: Buf[TExpr]) -> Code

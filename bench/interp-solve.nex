@@ -1,0 +1,12 @@
+// The interpreter's `solve` kernel (PLAN.md M13): fifty solves of a 500 × 500 `real64` system with
+// 50 right-hand sides, the operands built by prelude functions so that the solves dominate. Timed
+// from outside.
+
+def main() =
+  val n = 500
+  val a: [real; :, :] = reshape(linspace(0.0, 1.0, n * n), (n, n)) + 10.0 * identity(n)
+  val b: [real; :, :] = reshape(linspace(-1.0, 1.0, n * 50), (n, 50))
+  var x: [real; :, :] = solve(a, b)
+  for k in 1..49
+    x = solve(a, b)
+  print(sum(x))

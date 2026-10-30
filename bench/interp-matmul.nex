@@ -1,0 +1,11 @@
+// The interpreter's `@` kernel (PLAN.md M13): fifty products of two 500 × 500 `real64` matrices, the
+// operands built by prelude functions so that the products dominate. Timed from outside.
+
+def main() =
+  val n = 500
+  val a: [real; :, :] = reshape(linspace(0.0, 1.0, n * n), (n, n)) + identity(n)
+  val b: [real; :, :] = transpose(a) - 0.5
+  var c: [real; :, :] = a @ b
+  for k in 1..49
+    c = a @ b
+  print(sum(c))

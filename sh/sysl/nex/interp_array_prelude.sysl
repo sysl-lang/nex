@@ -134,15 +134,6 @@ private[nex] one_or_zero(t: Ty, one: bool) -> Value = base_of(t) match
     Bool -> VBool(one)
     _ -> VVoid
 
-// `n` copies of `x`.
-private repeated(x: Value, n: long) -> Buf[Value]
-    var out: Buf[Value] = buf()
-
-    for _ in 0..<n
-        out.push(x)
-
-    out
-
 impl Interp
     // -- reductions --------------------------------------------------------------------------------
 
@@ -177,6 +168,17 @@ impl Interp
                 None -> return self.later(span, s"`dot` of ${show_ty(pt)}")
             val conj = is_complex(base_of(pt))
 
+            val typed = if ty_eq(elem_or(args[0].ty), elem_or(pt)) && ty_eq(elem_or(args[1].ty), elem_or(pt)) then dot_kernel(pt, self.m.fpe) else None
+
+            typed match
+                Some(k) -> return (c) ->
+                    val f = codes[0]
+                    val x = f(c)?
+                    val g = codes[1]
+
+                    k(x, g(c)?)
+                None -> ()
+
             return (c) ->
                 val f = codes[0]
                 val g = codes[1]
@@ -205,15 +207,21 @@ impl Interp
 
         if red_o.is_none() && locate.is_none() then return self.later(span, s"`$name` of ${show_ty(et)}")
 
-        val lane: &Fn(Buf[Value]) -> Answer = locate match
-            Some((better, start)) -> (xs) -> Ok(int_value(location(better, start, xs)?, lane_t))
-            None ->
-                val red = red_o.unwrap()
+        // A lane is an array of rank 1 or the whole array, read in storage order: through a loop over
+        // the machine numbers where one computes the reduction, else value by value.
+        val kernel = if loc || !ty_eq(elem_or(et), elem_or(lane_t)) && name != "norm2" && name != "count" then None
+                     else reduce_kernel(name, et, lane_t, self.m.fpe)
+        val lane: &Fn(&Arr) -> Answer = kernel match
+            Some(k) -> k
+            None -> locate match
+                Some((better, start)) -> (a) -> Ok(int_value(location(better, start, elements(a))?, lane_t))
+                None ->
+                    val red = red_o.unwrap()
 
-                (xs) -> reduce_all(red, xs)
+                    (a) -> reduce_all(red, elements(a))
 
         dim match
-            None -> (c) -> lane(elements(arr_of(v(c)?)))
+            None -> (c) -> lane(arr_of(v(c)?))
             Some(d) ->
                 // An axis written as a literal is known to be one; a computed one is checked.
                 val fixed: Option[long] = *d.kind match
@@ -232,9 +240,9 @@ impl Interp
                     val axis = k(c)?
 
                     if ulong.wrap(axis - 1) >= ulong(r) then return trapped(NOT_AN_AXIS)
-                    if r == 1 then return lane(elements(x))
+                    if r == 1 then return lane(x)
 
-                    lanes(x, usize(axis - 1), lane)
+                    lanes(x, usize(axis - 1), lane, elem_of(t))
     end reduction
 
     // How an element of type `et` beats the best so far for `minloc` or `maxloc`, and the best to
@@ -342,7 +350,7 @@ impl Interp
                 for n in a.ext
                     xs.push(VInt(n))
 
-                Ok(if tuple then VAgg(0, xs) else vector(xs))
+                Ok(if tuple then VAgg(0, xs) else vector(elem_of(t), xs))
 
         if name == "extent"
             val v = self.lent(args[0])
@@ -358,68 +366,71 @@ impl Interp
 
         if name == "zeros" || name == "ones"
             val dims = self.shape_args(span, args, 0, args.len())
-            val x = one_or_zero(elem_of(t), name == "ones")
+            val et = elem_of(t)
+            val x = one_or_zero(et, name == "ones")
 
             return (c) ->
                 val ext = extents_of(dims, c)?
 
-                Ok(dense(repeated(x, product_of(ext)), ext))
+                Ok(dense_data(data_repeated(et, x, product_of(ext)), ext))
 
         if name == "fill"
             val dims = self.shape_args(span, args, 0, args.len() - 1)
             val x = self.ex(args[args.len() - 1])
+            val et = elem_of(t)
 
             return (c) ->
                 val ext = extents_of(dims, c)?
 
-                Ok(dense(repeated(x(c)?, product_of(ext)), ext))
+                Ok(dense_data(data_repeated(et, x(c)?, product_of(ext)), ext))
 
         if name == "identity"
             val n = self.extent_arg(args[0])
-            val one = one_or_zero(elem_of(t), true)
-            val zero = one_or_zero(elem_of(t), false)
+            val et = elem_of(t)
+            val one = one_or_zero(et, true)
+            val zero = one_or_zero(et, false)
 
             return (c) ->
                 val m = n(c)?
-                var out: Buf[Value] = buf()
+                val out = data_repeated(et, zero, m * m)
 
-                for j in 0..<m
-                    for i in 0..<m
-                        out.push(if i == j then one else zero)
+                for i in 0..<m
+                    data_set(out, usize(i * (m + 1)), one)
 
-                Ok(dense(out, pair(m, m)))
+                Ok(dense_data(out, pair(m, m)))
 
         if name == "diag"
             val v = self.lent(args[0])
-            val zero = one_or_zero(elem_of(t), false)
+            val et = elem_of(t)
+            val zero = one_or_zero(et, false)
             val square = rank_of(args[0].ty) == 1
 
             return (c) ->
                 val a = arr_of(v(c)?)
-                var out: Buf[Value] = buf()
 
                 if square
                     val m = a.ext[0]
+                    val out = data_repeated(et, zero, m * m)
 
-                    for j in 0..<m
-                        for i in 0..<m
-                            out.push(if i == j then a.store.v[usize(a.offset + i * a.str[0])] else zero)
+                    for i in 0..<m
+                        data_set(out, usize(i * (m + 1)), stored(a, a.offset + i * a.str[0]))
 
-                    return Ok(dense(out, pair(m, m)))
+                    return Ok(dense_data(out, pair(m, m)))
 
                 val m = if a.ext[0] < a.ext[1] then a.ext[0] else a.ext[1]
+                var ext: Buf[long] = buf()
+                var str: Buf[long] = buf()
 
-                for i in 0..<m
-                    out.push(a.store.v[usize(a.offset + i * (a.str[0] + a.str[1]))])
-
-                Ok(vector(out))
+                ext.push(m)
+                str.push(a.str[0] + a.str[1])
+                Ok(vector_data(gathered_of(Arr(a.store, a.offset, ext, str, buf()))))
 
         if name == "linspace" then return self.linspace(args, t)
 
         if name == "flatten"
             val v = self.lent(args[0])
 
-            return (c) -> Ok(vector(elements(arr_of(v(c)?))))
+            return (c) -> Ok(vector_data(gathered_of(arr_of(v(c)?))))
 
         if name == "reshape"
             val v = self.lent(args[0])
@@ -431,7 +442,7 @@ impl Interp
 
                 if product_of(ext) != count_of(a) then return trapped(RESHAPE_SIZE)
 
-                Ok(dense(elements(a), ext))
+                Ok(dense_data(gathered_of(a), ext))
 
         if name == "transpose"
             val v = self.lent(args[0])
@@ -504,7 +515,9 @@ impl Interp
                     Some(f) -> f
                     None -> return self.later(span, s"`$name` of ${show_ty(args[0].ty)}")
 
-            return (c) -> map1(f, v(c)?)
+            val et = elem_or(t)
+
+            return (c) -> map1(f, v(c)?, et)
 
         if name == "map"
             var leaves: Buf[TExpr] = buf()
@@ -519,6 +532,7 @@ impl Interp
         if name == "enumerate" || name == "zip"
             val codes = self.operands(args)
             val numbered = name == "enumerate"
+            val et = elem_of(t)
 
             return (c) ->
                 val f = codes[0]
@@ -529,7 +543,7 @@ impl Interp
                     for k in 0..<xs.len()
                         out.push(VAgg(0, pair_of(VInt(long(k) + 1), xs[k])))
 
-                    return Ok(vector(out))
+                    return Ok(vector(et, out))
 
                 val g = codes[1]
                 val ys = elements(arr_of(g(c)?))
@@ -538,7 +552,7 @@ impl Interp
                 for k in 0..<n
                     out.push(VAgg(0, pair_of(xs[k], ys[k])))
 
-                Ok(vector(out))
+                Ok(vector(et, out))
 
         if is_lapack(name) then return self.linear_algebra(name, args)
 
@@ -589,7 +603,8 @@ impl Interp
         val lo = self.ex(args[0])
         val hi = self.ex(args[1])
         val n = self.extent_arg(args[2])
-        val b = bits_of(base_of(elem_of(t)))
+        val et = elem_of(t)
+        val b = bits_of(base_of(et))
 
         (c) ->
             val a = real_of(lo(c)?)
@@ -597,17 +612,17 @@ impl Interp
             val m = n(c)?
             val width = rnd(z - a, b)
             val last = rnd(real(m - 1), b)
-            var out: Buf[Value] = buf()
+            val out = data_for(et)
 
             for k in 0..<m
                 if m == 1
-                    out.push(VReal(a))
+                    data_push(out, VReal(a))
                 else
                     val scaled = rnd(width * rnd(real(k), b), b)
 
-                    out.push(VReal(rnd(a + rnd(scaled / last, b), b)))
+                    data_push(out, VReal(rnd(a + rnd(scaled / last, b), b)))
 
-            Ok(vector(out))
+            Ok(vector_data(out))
 
     // `reduce(a, init, f)`: `f(…f(f(init, a₁), a₂)…)`, in storage order.
     folded(*self, span: Span, args: Buf[TExpr], t: Ty) -> Code
@@ -646,7 +661,8 @@ impl Interp
     // in order.
     filtered(*self, span: Span, args: Buf[TExpr]) -> Code
         val codes = self.operands(args)
-        val (base, apply) = self.applying(span, args[1], elem_of(args[0].ty), Bool)
+        val et = elem_of(args[0].ty)
+        val (base, apply) = self.applying(span, args[1], et, Bool)
 
         (c) ->
             val f = codes[0]
@@ -665,7 +681,7 @@ impl Interp
             for k in 0..<xs.len()
                 if keep[k] then out.push(xs[k])
 
-            Ok(vector(out))
+            Ok(vector(et, out))
 
     // `flatMap(a, f)`: the arrays `f` gives for each element, in storage order, end to end.
     flat_mapped(*self, span: Span, args: Buf[TExpr]) -> Code
@@ -689,7 +705,7 @@ impl Interp
                 for y in elements(arr_of(apply(c)?))
                     out.push(y)
 
-            Ok(vector(out))
+            Ok(vector(elem_of(ret), out))
 
     // The call of the function value `f` on one element of type `et`, answering a `ret`: compiled
     // over two slots of the frame, the function then the element, the first of which is answered.
@@ -767,9 +783,9 @@ private[nex] extreme_identity(high: bool, t: Ty) -> Value = base_of(t) match
     Real(_) -> VReal(if high then -1.0 / 0.0 else 1.0 / 0.0)
     _ -> one_or_zero(t, false)
 
-// Each lane along axis `k` (from 0) of `a`, of rank 2 or more, reduced by `lane`: the result has
-// every other axis.
-private lanes(a: &Arr, k: usize, lane: &Fn(Buf[Value]) -> Answer) -> Answer
+// Each lane along axis `k` (from 0) of `a`, of rank 2 or more, reduced by `lane` to an element of
+// type `t`: the result has every other axis.
+private lanes(a: &Arr, k: usize, lane: &Fn(&Arr) -> Answer, t: Ty) -> Answer
     var ext: Buf[long] = buf()
     var str: Buf[long] = buf()
 
@@ -779,17 +795,17 @@ private lanes(a: &Arr, k: usize, lane: &Fn(Buf[Value]) -> Answer) -> Answer
             str.push(a.str[j])
 
     val starts = positions(Arr(a.store, a.offset, ext, str, buf()))
-    var out: Buf[Value] = buf()
+    val out = data_for(t)
+    var lane_ext: Buf[long] = buf()
+    var lane_str: Buf[long] = buf()
+
+    lane_ext.push(a.ext[k])
+    lane_str.push(a.str[k])
 
     for p in starts
-        var xs: Buf[Value] = buf()
+        data_push(out, lane(Arr(a.store, p, lane_ext, lane_str, buf()))?)
 
-        for i in 0..<a.ext[k]
-            xs.push(a.store.v[usize(p + i * a.str[k])])
-
-        out.push(lane(xs)?)
-
-    Ok(dense(out, ext))
+    Ok(dense_data(out, ext))
 
 private extents_of(dims: Buf[Extent64], c: &Cells) -> Result[Buf[long], Signal]
     var out: Buf[long] = buf()

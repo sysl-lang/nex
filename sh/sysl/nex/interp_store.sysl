@@ -1,0 +1,417 @@
+module sh.sysl.nex
+
+// The storage of the interpreter's arrays (DESIGN §3.2): machine numbers for a numeric or `bool`
+// element type, values for any other.
+//
+// **An array of numbers holds them as the compiled program's does.** Each integer width, each real
+// width and each complex width has its own buffer of that machine type, so an element-wise operation
+// or a reduction loops over the numbers themselves (`interp_kernels.sysl`), and the linear algebra
+// hands the runtime the storage where it lies (`interp_la.sysl`). An array of strings, closures,
+// aggregates or arrays holds the interpreter's values. An array's element type is known when the
+// node making it is compiled, so the buffer is chosen from the type then (`data_for`), and storage of
+// one element type is only ever written with values of that type.
+
+import sysl.buf.{Buf, buf}
+import sysl.math.Float
+// The standard complex number, under a name that leaves `Complex` to nex's type.
+import sysl.math.complex.Complex as Cx
+
+private[nex] enum Data
+    DI8(v: Buf[i8])
+    DI16(v: Buf[i16])
+    DI32(v: Buf[i32])
+    DI64(v: Buf[long])
+    DU8(v: Buf[u8])
+    DU16(v: Buf[u16])
+    DU32(v: Buf[u32])
+    DU64(v: Buf[u64])
+    DR16(v: Buf[f16])
+    DR32(v: Buf[f32])
+    DR64(v: Buf[real])
+    DC32(v: Buf[Cx[f32]])
+    DC64(v: Buf[Cx[real]])
+    DBool(v: Buf[bool])
+    DValues(v: Buf[Value])
+
+// A type storage may hold: how an element crosses to and from the interpreter's values, and the
+// buffer of `Data` that holds it.
+private[nex] trait Elem
+    boxed(self) -> Value
+    unboxed(v: Value) -> Self
+    // The buffer `d` holds, which is one of this type wherever it is asked.
+    held(d: Data) -> Buf[Self]
+    holding(v: Buf[Self]) -> Data
+
+impl Elem for i8
+    boxed(self) -> Value = VInt(long(self))
+    unboxed(v: Value) -> i8 = i8.wrap(int_of(v))
+    held(d: Data) -> Buf[i8] = d match
+        DI8(v) -> v
+        _ -> buf()
+    holding(v: Buf[i8]) -> Data = DI8(v)
+
+impl Elem for i16
+    boxed(self) -> Value = VInt(long(self))
+    unboxed(v: Value) -> i16 = i16.wrap(int_of(v))
+    held(d: Data) -> Buf[i16] = d match
+        DI16(v) -> v
+        _ -> buf()
+    holding(v: Buf[i16]) -> Data = DI16(v)
+
+impl Elem for i32
+    boxed(self) -> Value = VInt(long(self))
+    unboxed(v: Value) -> i32 = i32.wrap(int_of(v))
+    held(d: Data) -> Buf[i32] = d match
+        DI32(v) -> v
+        _ -> buf()
+    holding(v: Buf[i32]) -> Data = DI32(v)
+
+impl Elem for long
+    boxed(self) -> Value = VInt(self)
+    unboxed(v: Value) -> long = int_of(v)
+    held(d: Data) -> Buf[long] = d match
+        DI64(v) -> v
+        _ -> buf()
+    holding(v: Buf[long]) -> Data = DI64(v)
+
+impl Elem for u8
+    boxed(self) -> Value = VInt(long(self))
+    unboxed(v: Value) -> u8 = u8.wrap(int_of(v))
+    held(d: Data) -> Buf[u8] = d match
+        DU8(v) -> v
+        _ -> buf()
+    holding(v: Buf[u8]) -> Data = DU8(v)
+
+impl Elem for u16
+    boxed(self) -> Value = VInt(long(self))
+    unboxed(v: Value) -> u16 = u16.wrap(int_of(v))
+    held(d: Data) -> Buf[u16] = d match
+        DU16(v) -> v
+        _ -> buf()
+    holding(v: Buf[u16]) -> Data = DU16(v)
+
+impl Elem for u32
+    boxed(self) -> Value = VInt(long(self))
+    unboxed(v: Value) -> u32 = u32.wrap(int_of(v))
+    held(d: Data) -> Buf[u32] = d match
+        DU32(v) -> v
+        _ -> buf()
+    holding(v: Buf[u32]) -> Data = DU32(v)
+
+// A `uint64` above `int64`'s range is carried as its bit pattern.
+impl Elem for u64
+    boxed(self) -> Value = VInt(long.wrap(self))
+    unboxed(v: Value) -> u64 = u64.wrap(int_of(v))
+    held(d: Data) -> Buf[u64] = d match
+        DU64(v) -> v
+        _ -> buf()
+    holding(v: Buf[u64]) -> Data = DU64(v)
+
+// A narrower real is carried as the `real64` it widens to exactly, and was rounded to its width by the
+// operation that made it, so storing it back is exact.
+impl Elem for f16
+    boxed(self) -> Value = VReal(real(self))
+    unboxed(v: Value) -> f16 = f16(real_of(v))
+    held(d: Data) -> Buf[f16] = d match
+        DR16(v) -> v
+        _ -> buf()
+    holding(v: Buf[f16]) -> Data = DR16(v)
+
+impl Elem for f32
+    boxed(self) -> Value = VReal(real(self))
+    unboxed(v: Value) -> f32 = f32(real_of(v))
+    held(d: Data) -> Buf[f32] = d match
+        DR32(v) -> v
+        _ -> buf()
+    holding(v: Buf[f32]) -> Data = DR32(v)
+
+impl Elem for real
+    boxed(self) -> Value = VReal(self)
+    unboxed(v: Value) -> real = real_of(v)
+    held(d: Data) -> Buf[real] = d match
+        DR64(v) -> v
+        _ -> buf()
+    holding(v: Buf[real]) -> Data = DR64(v)
+
+impl[F: Float] Elem for Cx[F]
+    boxed(self) -> Value = VComplex(real(self.re), real(self.im))
+    unboxed(v: Value) -> Cx[F] = Cx(F(re_of(v)), F(im_of(v)))
+
+    held(d: Data) -> Buf[Cx[F]]
+        if const sizeof(F) == 4
+            d match
+                DC32(v) -> v
+                _ -> buf()
+        else
+            d match
+                DC64(v) -> v
+                _ -> buf()
+
+    holding(v: Buf[Cx[F]]) -> Data
+        if const sizeof(F) == 4 then DC32(v) else DC64(v)
+
+impl Elem for bool
+    boxed(self) -> Value = VBool(self)
+    unboxed(v: Value) -> bool = bool_of(v)
+    held(d: Data) -> Buf[bool] = d match
+        DBool(v) -> v
+        _ -> buf()
+    holding(v: Buf[bool]) -> Data = DBool(v)
+
+impl Elem for Value
+    boxed(self) -> Value = self
+    unboxed(v: Value) -> Value = v
+    held(d: Data) -> Buf[Value] = d match
+        DValues(v) -> v
+        _ -> buf()
+    holding(v: Buf[Value]) -> Data = DValues(v)
+
+// -- choosing and reading storage ------------------------------------------------------------------------
+
+// Empty storage for elements of type `t`.
+private[nex] data_for(t: Ty) -> Data = base_of(t) match
+    Int(8, true) -> DI8(buf())
+    Int(16, true) -> DI16(buf())
+    Int(32, true) -> DI32(buf())
+    Int(64, true) -> DI64(buf())
+    Int(8, false) -> DU8(buf())
+    Int(16, false) -> DU16(buf())
+    Int(32, false) -> DU32(buf())
+    Int(64, false) -> DU64(buf())
+    Real(16) -> DR16(buf())
+    Real(32) -> DR32(buf())
+    Real(64) -> DR64(buf())
+    Complex(32) -> DC32(buf())
+    Complex(64) -> DC64(buf())
+    Bool -> DBool(buf())
+    _ -> DValues(buf())
+
+// Empty storage of the element type `d` holds.
+private[nex] data_like(d: Data) -> Data = d match
+    DI8(_) -> DI8(buf())
+    DI16(_) -> DI16(buf())
+    DI32(_) -> DI32(buf())
+    DI64(_) -> DI64(buf())
+    DU8(_) -> DU8(buf())
+    DU16(_) -> DU16(buf())
+    DU32(_) -> DU32(buf())
+    DU64(_) -> DU64(buf())
+    DR16(_) -> DR16(buf())
+    DR32(_) -> DR32(buf())
+    DR64(_) -> DR64(buf())
+    DC32(_) -> DC32(buf())
+    DC64(_) -> DC64(buf())
+    DBool(_) -> DBool(buf())
+    DValues(_) -> DValues(buf())
+
+private[nex] data_len(d: Data) -> usize = d match
+    DI8(v) -> v.len()
+    DI16(v) -> v.len()
+    DI32(v) -> v.len()
+    DI64(v) -> v.len()
+    DU8(v) -> v.len()
+    DU16(v) -> v.len()
+    DU32(v) -> v.len()
+    DU64(v) -> v.len()
+    DR16(v) -> v.len()
+    DR32(v) -> v.len()
+    DR64(v) -> v.len()
+    DC32(v) -> v.len()
+    DC64(v) -> v.len()
+    DBool(v) -> v.len()
+    DValues(v) -> v.len()
+
+// The element at storage position `p`, as a value.
+private[nex] data_get(d: Data, p: usize) -> Value = d match
+    DI8(v) -> v[p].boxed()
+    DI16(v) -> v[p].boxed()
+    DI32(v) -> v[p].boxed()
+    DI64(v) -> v[p].boxed()
+    DU8(v) -> v[p].boxed()
+    DU16(v) -> v[p].boxed()
+    DU32(v) -> v[p].boxed()
+    DU64(v) -> v[p].boxed()
+    DR16(v) -> v[p].boxed()
+    DR32(v) -> v[p].boxed()
+    DR64(v) -> v[p].boxed()
+    DC32(v) -> v[p].boxed()
+    DC64(v) -> v[p].boxed()
+    DBool(v) -> v[p].boxed()
+    DValues(v) -> v[p]
+
+// `x` written at storage position `p`.
+private[nex] data_set(d: Data, p: usize, x: Value)
+    d match
+        DI8(v) -> v.set(p, i8.unboxed(x))
+        DI16(v) -> v.set(p, i16.unboxed(x))
+        DI32(v) -> v.set(p, i32.unboxed(x))
+        DI64(v) -> v.set(p, long.unboxed(x))
+        DU8(v) -> v.set(p, u8.unboxed(x))
+        DU16(v) -> v.set(p, u16.unboxed(x))
+        DU32(v) -> v.set(p, u32.unboxed(x))
+        DU64(v) -> v.set(p, u64.unboxed(x))
+        DR16(v) -> v.set(p, f16.unboxed(x))
+        DR32(v) -> v.set(p, f32.unboxed(x))
+        DR64(v) -> v.set(p, real.unboxed(x))
+        DC32(v) -> v.set(p, Cx[f32].unboxed(x))
+        DC64(v) -> v.set(p, Cx[real].unboxed(x))
+        DBool(v) -> v.set(p, bool.unboxed(x))
+        DValues(v) -> v.set(p, x)
+
+// `x` added at the end.
+private[nex] data_push(d: Data, x: Value)
+    d match
+        DI8(v) -> v.push(i8.unboxed(x))
+        DI16(v) -> v.push(i16.unboxed(x))
+        DI32(v) -> v.push(i32.unboxed(x))
+        DI64(v) -> v.push(long.unboxed(x))
+        DU8(v) -> v.push(u8.unboxed(x))
+        DU16(v) -> v.push(u16.unboxed(x))
+        DU32(v) -> v.push(u32.unboxed(x))
+        DU64(v) -> v.push(u64.unboxed(x))
+        DR16(v) -> v.push(f16.unboxed(x))
+        DR32(v) -> v.push(f32.unboxed(x))
+        DR64(v) -> v.push(real.unboxed(x))
+        DC32(v) -> v.push(Cx[f32].unboxed(x))
+        DC64(v) -> v.push(Cx[real].unboxed(x))
+        DBool(v) -> v.push(bool.unboxed(x))
+        DValues(v) -> v.push(x)
+
+// `xs` as storage for elements of type `t`.
+private[nex] packed(t: Ty, xs: Buf[Value]) -> Data
+    val d = data_for(t)
+
+    d match
+        DValues(_) -> return DValues(xs)
+        _ -> ()
+
+    for x in xs
+        data_push(d, x)
+
+    d
+
+// -- copying ------------------------------------------------------------------------------------------
+
+// A copy of all of `d`, laid out as it is.
+private[nex] data_copy(d: Data) -> Data = d match
+    DI8(v) -> DI8(v.copy())
+    DI16(v) -> DI16(v.copy())
+    DI32(v) -> DI32(v.copy())
+    DI64(v) -> DI64(v.copy())
+    DU8(v) -> DU8(v.copy())
+    DU16(v) -> DU16(v.copy())
+    DU32(v) -> DU32(v.copy())
+    DU64(v) -> DU64(v.copy())
+    DR16(v) -> DR16(v.copy())
+    DR32(v) -> DR32(v.copy())
+    DR64(v) -> DR64(v.copy())
+    DC32(v) -> DC32(v.copy())
+    DC64(v) -> DC64(v.copy())
+    DBool(v) -> DBool(v.copy())
+    DValues(v) -> DValues(v.copy())
+
+// `a`'s elements in storage order, as new storage of their type.
+private[nex] data_gather(a: &Arr) -> Data = a.store.d match
+    DI8(v) -> DI8(gather(v, a))
+    DI16(v) -> DI16(gather(v, a))
+    DI32(v) -> DI32(gather(v, a))
+    DI64(v) -> DI64(gather(v, a))
+    DU8(v) -> DU8(gather(v, a))
+    DU16(v) -> DU16(gather(v, a))
+    DU32(v) -> DU32(gather(v, a))
+    DU64(v) -> DU64(gather(v, a))
+    DR16(v) -> DR16(gather(v, a))
+    DR32(v) -> DR32(gather(v, a))
+    DR64(v) -> DR64(gather(v, a))
+    DC32(v) -> DC32(gather(v, a))
+    DC64(v) -> DC64(gather(v, a))
+    DBool(v) -> DBool(gather(v, a))
+    DValues(v) -> DValues(gather(v, a))
+
+// The elements of `a`, which lies in `v`, in storage order.
+private[nex] gather[T](v: Buf[T], a: &Arr) -> Buf[T]
+    val n = usize(count_of(a))
+    var out: Buf[T] = buf()
+
+    if n == 0 then return out
+
+    out.reserve(n)
+
+    if contiguous(a)
+        val at = usize(a.offset)
+
+        out.extend(v.view()[at..<at + n])
+        return out
+
+    for p in positions(a)
+        out.push(v[usize(p)])
+
+    out
+
+// The elements of `a` in storage order, as `T`s, and where in the buffer the first one is: `a`'s own
+// storage where its elements lie there one after another, a gathered copy otherwise.
+private[nex] run_of[T: Elem](a: &Arr) -> (Buf[T], usize)
+    val v = T.held(a.store.d)
+
+    if contiguous(a) then (v, usize(a.offset)) else (gather(v, a), 0)
+
+// The elements of `src`, in storage order, written over the window `w` of `d`. Both hold one element
+// type.
+private[nex] data_scatter(d: Data, w: &Arr, src: Data) = d match
+    DI8(v) -> scatter(v, w, i8.held(src))
+    DI16(v) -> scatter(v, w, i16.held(src))
+    DI32(v) -> scatter(v, w, i32.held(src))
+    DI64(v) -> scatter(v, w, long.held(src))
+    DU8(v) -> scatter(v, w, u8.held(src))
+    DU16(v) -> scatter(v, w, u16.held(src))
+    DU32(v) -> scatter(v, w, u32.held(src))
+    DU64(v) -> scatter(v, w, u64.held(src))
+    DR16(v) -> scatter(v, w, f16.held(src))
+    DR32(v) -> scatter(v, w, f32.held(src))
+    DR64(v) -> scatter(v, w, real.held(src))
+    DC32(v) -> scatter(v, w, Cx[f32].held(src))
+    DC64(v) -> scatter(v, w, Cx[real].held(src))
+    DBool(v) -> scatter(v, w, bool.held(src))
+    DValues(v) -> scatter(v, w, Value.held(src))
+
+private scatter[T](v: Buf[T], w: &Arr, xs: Buf[T])
+    if contiguous(w)
+        val at = usize(w.offset)
+
+        for j in 0..<xs.len()
+            v.set(at + j, xs[j])
+
+        return
+
+    val ps = positions(w)
+
+    for j in 0..<ps.len()
+        v.set(usize(ps[j]), xs[j])
+
+// `n` copies of `x`, as storage for elements of type `t`.
+private[nex] data_repeated(t: Ty, x: Value, n: long) -> Data = data_for(t) match
+    DI8(_) -> DI8(repeat(i8.unboxed(x), n))
+    DI16(_) -> DI16(repeat(i16.unboxed(x), n))
+    DI32(_) -> DI32(repeat(i32.unboxed(x), n))
+    DI64(_) -> DI64(repeat(long.unboxed(x), n))
+    DU8(_) -> DU8(repeat(u8.unboxed(x), n))
+    DU16(_) -> DU16(repeat(u16.unboxed(x), n))
+    DU32(_) -> DU32(repeat(u32.unboxed(x), n))
+    DU64(_) -> DU64(repeat(u64.unboxed(x), n))
+    DR16(_) -> DR16(repeat(f16.unboxed(x), n))
+    DR32(_) -> DR32(repeat(f32.unboxed(x), n))
+    DR64(_) -> DR64(repeat(real.unboxed(x), n))
+    DC32(_) -> DC32(repeat(Cx[f32].unboxed(x), n))
+    DC64(_) -> DC64(repeat(Cx[real].unboxed(x), n))
+    DBool(_) -> DBool(repeat(bool.unboxed(x), n))
+    DValues(_) -> DValues(repeat(x, n))
+
+private repeat[T](x: T, n: long) -> Buf[T]
+    var out: Buf[T] = buf()
+
+    out.reserve(usize(n))
+
+    for _ in 0..<n
+        out.push(x)
+
+    out

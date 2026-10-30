@@ -1,0 +1,639 @@
+module sh.sysl.nex
+
+// The element-wise operations and the reductions the interpreter runs over machine numbers: a loop
+// over an array's storage (`interp_store.sysl`) for each operation and element type, as the compiled
+// program's `linalg.generic` and reduction loops are, with no value made per element.
+//
+// **Each loop computes what the operation on two values computes** (`interp_value.sysl`): an integer
+// widened to 128 bits and checked against its width, a real computed in `real64` and rounded to its
+// width by storing it, `--fpe-trap`'s checks on the result, a complex number's parts as nex writes
+// the operation. A trap is the first element's, in storage order, as the value-by-value loop gives.
+// An operation with no loop here (`^`, a conversion, an elemental function) runs value by value over
+// the same storage.
+
+import nex_runtime.sh.sysl.nex_runtime.{COMPLEX_DIVISION_BY_ZERO, INT_DIVISION_BY_ZERO, REAL_DIVISION_BY_ZERO, REMAINDER_BY_ZERO, SHAPE_MISMATCH, overflow_message}
+import sysl.buf.{Buf, buf}
+import sysl.math.Float
+// The standard complex number, under a name that leaves `Complex` to nex's type.
+import sysl.math.complex.Complex as Cx
+
+// The operations, by number.
+private val ADD = 0
+private val SUB = 1
+private val MUL = 2
+// `/` of reals and complex numbers, `div` of integers.
+private val DIV = 3
+private val REM = 4
+private val EQ = 5
+private val NE = 6
+private val LT = 7
+private val LE = 8
+private val GT = 9
+private val GE = 10
+private val AND = 11
+private val OR = 12
+
+// The elements a block of a tree reduction holds (DESIGN §9.2.1).
+private val TREE_BLOCK: usize = 4096
+
+// The number of `op` on elements of type `t`, or -1 where no loop computes it.
+private op_number(op: string, t: Ty) -> int
+    val k = if op == "+" then ADD elif op == "-" then SUB elif op == "*" then MUL elif op == "/" || op == "div" then DIV
+            elif op == "%" then REM elif op == "==" then EQ elif op == "!=" then NE elif op == "<" then LT elif op == "<=" then LE
+            elif op == ">" then GT elif op == ">=" then GE elif op == "and" then AND elif op == "or" then OR else -1
+
+    if k < 0 then return -1
+
+    base_of(t) match
+        Int(_, _) -> if op == "/" || k >= AND then -1 else k
+        Real(_) -> if op == "div" || k == REM || k >= AND then -1 else k
+        Complex(_) -> if op == "div" || k == REM || k >= LT then -1 else k
+        Bool -> if k == AND || k == OR || k == EQ || k == NE then k else -1
+        _ -> -1
+
+// `op` between two arrays of one shape, or an array and a scalar, each of element type `t`, over
+// machine numbers: `xa` and `ya` say which operand is an array. `None` where no loop computes it.
+private[nex] zip_kernel(op: string, t: Ty, fpe: bool, xa: bool, ya: bool) -> Option[Op2]
+    val k = op_number(op, t)
+
+    if k < 0 then return None
+
+    val f: Op2 = base_of(t) match
+        Int(8, true) -> (x, y) -> int_zip[i8](k, 8, true, x, y, xa, ya)
+        Int(16, true) -> (x, y) -> int_zip[i16](k, 16, true, x, y, xa, ya)
+        Int(32, true) -> (x, y) -> int_zip[i32](k, 32, true, x, y, xa, ya)
+        Int(64, true) -> (x, y) -> int_zip[long](k, 64, true, x, y, xa, ya)
+        Int(8, false) -> (x, y) -> int_zip[u8](k, 8, false, x, y, xa, ya)
+        Int(16, false) -> (x, y) -> int_zip[u16](k, 16, false, x, y, xa, ya)
+        Int(32, false) -> (x, y) -> int_zip[u32](k, 32, false, x, y, xa, ya)
+        Int(64, false) -> (x, y) -> int_zip[u64](k, 64, false, x, y, xa, ya)
+        Real(16) -> (x, y) -> real_zip[f16](k, fpe, x, y, xa, ya)
+        Real(32) -> (x, y) -> real_zip[f32](k, fpe, x, y, xa, ya)
+        Real(64) -> (x, y) -> real_zip[real](k, fpe, x, y, xa, ya)
+        Complex(32) -> (x, y) -> complex_zip[f32](k, 32, x, y, xa, ya)
+        Complex(64) -> (x, y) -> complex_zip[real](k, 64, x, y, xa, ya)
+        Bool -> (x, y) -> bool_zip(k, x, y, xa, ya)
+        _ -> return None
+
+    Some(f)
+
+// An operand of a loop: the buffer its elements are read from, where the first is, and how far apart
+// they are — a scalar is one element read every time.
+private operand[T: Elem](v: Value, array: bool) -> (Buf[T], usize, usize)
+    if array
+        val (xs, at) = run_of[T](arr_of(v))
+
+        return (xs, at, 1)
+
+    var one: Buf[T] = buf()
+
+    one.push(T.unboxed(v))
+    (one, 0, 0)
+
+// The array of the two operands, checked to have the other's shape where both are arrays.
+private shape_of(x: Value, y: Value, xa: bool, ya: bool) -> Result[&Arr, Signal]
+    val a = arr_of(if xa then x else y)
+
+    if xa && ya && !same_shape(a, arr_of(y)) then return Err(Trapped(SHAPE_MISMATCH))
+
+    Ok(a)
+
+private int_zip[T: Elem](k: int, bits: int, signed: bool, x: Value, y: Value, xa: bool, ya: bool) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[T](x, xa)
+    var (ys, j, sj) = operand[T](y, ya)
+
+    if k >= EQ
+        var out: Buf[bool] = buf()
+
+        out.reserve(n)
+
+        for _ in 0..<n
+            out.push(compared(k, i128(xs[i]), i128(ys[j])))
+            i += si
+            j += sj
+
+        return Ok(dense_data(DBool(out), a.ext))
+
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        val p = i128(xs[i])
+        val q = i128(ys[j])
+
+        if (k == DIV || k == REM) && q == 0 then return trapped(if k == DIV then INT_DIVISION_BY_ZERO else REMAINDER_BY_ZERO)
+
+        val r = if k == ADD then p + q elif k == SUB then p - q elif k == MUL then p * q elif k == DIV then p / q else p % q
+
+        if !fits(r, bits, signed) then return trapped(overflow_message(bits, signed))
+
+        out.push(T(r))
+        i += si
+        j += sj
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+private real_zip[T: Elem](k: int, fpe: bool, x: Value, y: Value, xa: bool, ya: bool) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[T](x, xa)
+    var (ys, j, sj) = operand[T](y, ya)
+
+    if k >= EQ
+        var out: Buf[bool] = buf()
+
+        out.reserve(n)
+
+        for _ in 0..<n
+            val p = real(xs[i])
+            val q = real(ys[j])
+
+            out.push(if k == EQ then p == q elif k == NE then p != q elif k == LT then p < q elif k == LE then p <= q elif k == GT then p > q else p >= q)
+            i += si
+            j += sj
+
+        return Ok(dense_data(DBool(out), a.ext))
+
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        val p = real(xs[i])
+        val q = real(ys[j])
+
+        if fpe && k == DIV && q == 0.0 then return trapped(REAL_DIVISION_BY_ZERO)
+
+        // Stored at the width, which rounds it as `rnd` does.
+        val s = T(if k == ADD then p + q elif k == SUB then p - q elif k == MUL then p * q else p / q)
+
+        if fpe then _ = fpe_checked(real(s), p, q, true)?
+
+        out.push(s)
+        i += si
+        j += sj
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+private complex_zip[F: Float](k: int, bits: int, x: Value, y: Value, xa: bool, ya: bool) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[Cx[F]](x, xa)
+    var (ys, j, sj) = operand[Cx[F]](y, ya)
+
+    if k >= EQ
+        var out: Buf[bool] = buf()
+
+        out.reserve(n)
+
+        for _ in 0..<n
+            val p = xs[i]
+            val q = ys[j]
+            val same = real(p.re) == real(q.re) && real(p.im) == real(q.im)
+
+            out.push(if k == EQ then same else !same)
+            i += si
+            j += sj
+
+        return Ok(dense_data(DBool(out), a.ext))
+
+    var out: Buf[Cx[F]] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        val ar = real(xs[i].re)
+        val ai = real(xs[i].im)
+        val br = real(ys[j].re)
+        val bi = real(ys[j].im)
+
+        if k == ADD then out.push(Cx(F(ar + br), F(ai + bi)))
+        elif k == SUB then out.push(Cx(F(ar - br), F(ai - bi)))
+        else
+            val z = if k == MUL then complex_mul(ar, ai, br, bi, bits)? else complex_div(ar, ai, br, bi, bits)?
+
+            out.push(Cx(F(re_of(z)), F(im_of(z))))
+
+        i += si
+        j += sj
+
+    Ok(dense_data(Cx[F].holding(out), a.ext))
+
+private bool_zip(k: int, x: Value, y: Value, xa: bool, ya: bool) -> Answer
+    val a = shape_of(x, y, xa, ya)?
+    val n = usize(count_of(a))
+    var (xs, i, si) = operand[bool](x, xa)
+    var (ys, j, sj) = operand[bool](y, ya)
+    var out: Buf[bool] = buf()
+
+    out.reserve(n)
+
+    for _ in 0..<n
+        val p = xs[i]
+        val q = ys[j]
+
+        out.push(if k == AND then p && q elif k == OR then p || q elif k == EQ then p == q else p != q)
+        i += si
+        j += sj
+
+    Ok(dense_data(DBool(out), a.ext))
+
+private compared(k: int, p: i128, q: i128) -> bool =
+    if k == EQ then p == q elif k == NE then p != q elif k == LT then p < q elif k == LE then p <= q elif k == GT then p > q else p >= q
+
+// -- one operand ----------------------------------------------------------------------------------------
+
+// `-a` or `not a` over machine numbers, `a` of element type `t`; `None` where no loop computes it.
+private[nex] unary_kernel(op: string, t: Ty) -> Option[Op1]
+    val f: Op1 = base_of(t) match
+        Int(8, true) -> (x) -> int_negated[i8](x, 8, true)
+        Int(16, true) -> (x) -> int_negated[i16](x, 16, true)
+        Int(32, true) -> (x) -> int_negated[i32](x, 32, true)
+        Int(64, true) -> (x) -> int_negated[long](x, 64, true)
+        Int(8, false) -> (x) -> int_negated[u8](x, 8, false)
+        Int(16, false) -> (x) -> int_negated[u16](x, 16, false)
+        Int(32, false) -> (x) -> int_negated[u32](x, 32, false)
+        Int(64, false) -> (x) -> int_negated[u64](x, 64, false)
+        Real(16) -> (x) -> real_negated[f16](x)
+        Real(32) -> (x) -> real_negated[f32](x)
+        Real(64) -> (x) -> real_negated[real](x)
+        Complex(32) -> (x) -> complex_negated[f32](x)
+        Complex(64) -> (x) -> complex_negated[real](x)
+        Bool -> (x) -> negated_bools(x)
+        _ -> return None
+
+    if (op == "not") != is_bool(base_of(t)) then return None
+
+    Some(f)
+
+private is_bool(t: Ty) -> bool = t match
+    Bool -> true
+    _ -> false
+
+private int_negated[T: Elem](x: Value, bits: int, signed: bool) -> Answer
+    val a = arr_of(x)
+    val n = usize(count_of(a))
+    val (xs, at) = run_of[T](a)
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        val r = -i128(xs[at + k])
+
+        if !fits(r, bits, signed) then return trapped(overflow_message(bits, signed))
+
+        out.push(T(r))
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+private real_negated[T: Elem](x: Value) -> Answer
+    val a = arr_of(x)
+    val n = usize(count_of(a))
+    val (xs, at) = run_of[T](a)
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(T(-real(xs[at + k])))
+
+    Ok(dense_data(T.holding(out), a.ext))
+
+private complex_negated[F: Float](x: Value) -> Answer
+    val a = arr_of(x)
+    val n = usize(count_of(a))
+    val (xs, at) = run_of[Cx[F]](a)
+    var out: Buf[Cx[F]] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(Cx(F(-real(xs[at + k].re)), F(-real(xs[at + k].im))))
+
+    Ok(dense_data(Cx[F].holding(out), a.ext))
+
+private negated_bools(x: Value) -> Answer
+    val a = arr_of(x)
+    val n = usize(count_of(a))
+    val (xs, at) = run_of[bool](a)
+    var out: Buf[bool] = buf()
+
+    out.reserve(n)
+
+    for k in 0..<n
+        out.push(!xs[at + k])
+
+    Ok(dense_data(DBool(out), a.ext))
+
+// -- reductions -------------------------------------------------------------------------------------
+
+// The reduction `name` of the elements of an array of element type `et`, giving a `t`, over machine
+// numbers in storage order; `None` where no loop computes it. Each combines as `reduce_all` does:
+// `sum`, `product` and `norm2` in blocks of 4096 from the identity, the partials in the pairwise tree,
+// and the others from the identity through every element in order.
+private[nex] reduce_kernel(name: string, et: Ty, t: Ty, fpe: bool) -> Option[&Fn(&Arr) -> Answer]
+    val e = base_of(et)
+
+    if name == "count" || name == "any" || name == "all"
+        if !is_bool(e) then return None
+
+        val f: &Fn(&Arr) -> Answer = (a) -> bools_reduced(name, a)
+
+        return Some(f)
+
+    if name == "minval" || name == "maxval"
+        val high = name == "maxval"
+        val start = extreme_identity(high, t)
+
+        val f: &Fn(&Arr) -> Answer = e match
+            Int(8, true) -> (a) -> int_extreme[i8](a, high, true, start)
+            Int(16, true) -> (a) -> int_extreme[i16](a, high, true, start)
+            Int(32, true) -> (a) -> int_extreme[i32](a, high, true, start)
+            Int(64, true) -> (a) -> int_extreme[long](a, high, true, start)
+            Int(8, false) -> (a) -> int_extreme[u8](a, high, false, start)
+            Int(16, false) -> (a) -> int_extreme[u16](a, high, false, start)
+            Int(32, false) -> (a) -> int_extreme[u32](a, high, false, start)
+            Int(64, false) -> (a) -> int_extreme[u64](a, high, false, start)
+            Real(16) -> (a) -> real_extreme[f16](a, high)
+            Real(32) -> (a) -> real_extreme[f32](a, high)
+            Real(64) -> (a) -> real_extreme[real](a, high)
+            _ -> return None
+
+        return Some(f)
+
+    if name == "norm2"
+        val f: &Fn(&Arr) -> Answer = e match
+            Real(16) -> (a) -> real_norm2[f16](a, 16, fpe)
+            Real(32) -> (a) -> real_norm2[f32](a, 32, fpe)
+            Real(64) -> (a) -> real_norm2[real](a, 64, fpe)
+            _ -> return None
+
+        return Some(f)
+
+    if name != "sum" && name != "product" then return None
+
+    val mul = name == "product"
+
+    val f: &Fn(&Arr) -> Answer = e match
+        Int(8, true) -> (a) -> int_tree[i8](a, 8, true, mul)
+        Int(16, true) -> (a) -> int_tree[i16](a, 16, true, mul)
+        Int(32, true) -> (a) -> int_tree[i32](a, 32, true, mul)
+        Int(64, true) -> (a) -> int_tree[long](a, 64, true, mul)
+        Int(8, false) -> (a) -> int_tree[u8](a, 8, false, mul)
+        Int(16, false) -> (a) -> int_tree[u16](a, 16, false, mul)
+        Int(32, false) -> (a) -> int_tree[u32](a, 32, false, mul)
+        Int(64, false) -> (a) -> int_tree[u64](a, 64, false, mul)
+        Real(16) -> (a) -> real_tree_of[f16](a, mul, fpe)
+        Real(32) -> (a) -> real_tree_of[f32](a, mul, fpe)
+        Real(64) -> (a) -> real_tree_of[real](a, mul, fpe)
+        Complex(32) -> if mul then return None else (a) -> complex_sum[f32](a, 32)
+        Complex(64) -> if mul then return None else (a) -> complex_sum[real](a, 64)
+        _ -> return None
+
+    Some(f)
+
+// `dot(x, y)` of two arrays of one shape and real element type `t`, over machine numbers: each product
+// rounded, then summed as `sum` is. `None` for any other element type.
+private[nex] dot_kernel(t: Ty, fpe: bool) -> Option[Op2]
+    val f: Op2 = base_of(t) match
+        Real(16) -> (x, y) -> real_dot[f16](arr_of(x), arr_of(y), fpe)
+        Real(32) -> (x, y) -> real_dot[f32](arr_of(x), arr_of(y), fpe)
+        Real(64) -> (x, y) -> real_dot[real](arr_of(x), arr_of(y), fpe)
+        _ -> return None
+
+    Some(f)
+
+// `acc op x` at the width `T` stores, with `--fpe-trap`'s checks.
+private real_step[T](acc: real, x: real, mul: bool, fpe: bool) -> Result[real, Signal]
+    val r = real(T(if mul then acc * x else acc + x))
+
+    if fpe then _ = fpe_checked(r, acc, x, true)?
+
+    Ok(r)
+
+// The `n` numbers of `xs` from `at` summed (or multiplied) in blocks, the partials in the pairwise
+// tree.
+private real_tree[T: Elem](xs: Buf[T], at: usize, n: usize, mul: bool, fpe: bool) -> Answer
+    val identity = if mul then 1.0 else 0.0
+    var partials: Buf[real] = buf()
+    var lo: usize = 0
+
+    while lo < n
+        val hi = if lo + TREE_BLOCK < n then lo + TREE_BLOCK else n
+        var acc = identity
+
+        if !fpe && !mul && sizeof(T) == 8
+            // `real64` addition with nothing to check: the sum itself.
+            for k in lo..<hi
+                acc = acc + real(xs[at + k])
+        else
+            for k in lo..<hi
+                acc = real_step[T](acc, real(xs[at + k]), mul, fpe)?
+
+        partials.push(acc)
+        lo = hi
+
+    if partials.len() == 0 then return Ok(VReal(identity))
+
+    while partials.len() > 1
+        var next: Buf[real] = buf()
+        var k: usize = 0
+
+        while k + 1 < partials.len()
+            next.push(real_step[T](partials[k], partials[k + 1], mul, fpe)?)
+            k += 2
+
+        if k < partials.len() then next.push(partials[k])
+
+        partials = next
+
+    Ok(VReal(partials[0]))
+
+private real_tree_of[T: Elem](a: &Arr, mul: bool, fpe: bool) -> Answer
+    val (xs, at) = run_of[T](a)
+
+    real_tree(xs, at, usize(count_of(a)), mul, fpe)
+
+private real_dot[T: Elem](x: &Arr, y: &Arr, fpe: bool) -> Answer
+    if !same_shape(x, y) then return trapped(SHAPE_MISMATCH)
+
+    val n = usize(count_of(x))
+    val (xs, i) = run_of[T](x)
+    val (ys, j) = run_of[T](y)
+    var ps: Buf[T] = buf()
+
+    ps.reserve(n)
+
+    for k in 0..<n
+        ps.push(T(real_step[T](real(xs[i + k]), real(ys[j + k]), true, fpe)?))
+
+    real_tree(ps, 0, n, false, fpe)
+
+// `norm2`: each element squared at the width and added unchecked, the partials added as `sum` adds
+// them, the root of the total.
+private real_norm2[T: Elem](a: &Arr, bits: int, fpe: bool) -> Answer
+    val (xs, at) = run_of[T](a)
+    val n = usize(count_of(a))
+    var partials: Buf[real] = buf()
+    var lo: usize = 0
+
+    while lo < n
+        val hi = if lo + TREE_BLOCK < n then lo + TREE_BLOCK else n
+        var acc = 0.0
+
+        for k in lo..<hi
+            val x = real(xs[at + k])
+            val sq = real(T(x * x))
+
+            acc = real(T(acc + sq))
+
+        partials.push(acc)
+        lo = hi
+
+    if partials.len() == 0 then return Ok(VReal(real_math("sqrt", 0.0, bits)))
+
+    while partials.len() > 1
+        var next: Buf[real] = buf()
+        var k: usize = 0
+
+        while k + 1 < partials.len()
+            next.push(real_step[T](partials[k], partials[k + 1], false, fpe)?)
+            k += 2
+
+        if k < partials.len() then next.push(partials[k])
+
+        partials = next
+
+    Ok(VReal(real_math("sqrt", partials[0], bits)))
+
+// `sum` or `product` of integers, each step checked against the width.
+private int_tree[T: Elem](a: &Arr, bits: int, signed: bool, mul: bool) -> Answer
+    val (xs, at) = run_of[T](a)
+    val n = usize(count_of(a))
+    val identity: i128 = if mul then 1 else 0
+    var partials: Buf[i128] = buf()
+    var lo: usize = 0
+
+    while lo < n
+        val hi = if lo + TREE_BLOCK < n then lo + TREE_BLOCK else n
+        var acc = identity
+
+        for k in lo..<hi
+            val x = i128(xs[at + k])
+
+            acc = if mul then acc * x else acc + x
+
+            if !fits(acc, bits, signed) then return trapped(overflow_message(bits, signed))
+
+        partials.push(acc)
+        lo = hi
+
+    if partials.len() == 0 then return Ok(VInt(long.wrap(identity)))
+
+    while partials.len() > 1
+        var next: Buf[i128] = buf()
+        var k: usize = 0
+
+        while k + 1 < partials.len()
+            val r = if mul then partials[k] * partials[k + 1] else partials[k] + partials[k + 1]
+
+            if !fits(r, bits, signed) then return trapped(overflow_message(bits, signed))
+
+            next.push(r)
+            k += 2
+
+        if k < partials.len() then next.push(partials[k])
+
+        partials = next
+
+    Ok(VInt(long.wrap(partials[0])))
+
+// `sum` of complex numbers, each part rounded at the width.
+private complex_sum[F: Float](a: &Arr, bits: int) -> Answer
+    val (xs, at) = run_of[Cx[F]](a)
+    val n = usize(count_of(a))
+    var res: Buf[real] = buf()
+    var ims: Buf[real] = buf()
+    var lo: usize = 0
+
+    while lo < n
+        val hi = if lo + TREE_BLOCK < n then lo + TREE_BLOCK else n
+        var re = 0.0
+        var im = 0.0
+
+        for k in lo..<hi
+            re = rnd(re + real(xs[at + k].re), bits)
+            im = rnd(im + real(xs[at + k].im), bits)
+
+        res.push(re)
+        ims.push(im)
+        lo = hi
+
+    if res.len() == 0 then return Ok(VComplex(0.0, 0.0))
+
+    while res.len() > 1
+        var next_re: Buf[real] = buf()
+        var next_im: Buf[real] = buf()
+        var k: usize = 0
+
+        while k + 1 < res.len()
+            next_re.push(rnd(res[k] + res[k + 1], bits))
+            next_im.push(rnd(ims[k] + ims[k + 1], bits))
+            k += 2
+
+        if k < res.len()
+            next_re.push(res[k])
+            next_im.push(ims[k])
+
+        res = next_re
+        ims = next_im
+
+    Ok(VComplex(res[0], ims[0]))
+
+// `minval` or `maxval` of integers, from the identity `start`, the first of equal ones kept.
+private int_extreme[T: Elem](a: &Arr, high: bool, signed: bool, start: Value) -> Answer
+    val (xs, at) = run_of[T](a)
+    var best = wide(int_of(start), signed)
+
+    for k in 0..<usize(count_of(a))
+        val x = i128(xs[at + k])
+
+        if (best > x) != high then best = x
+
+    Ok(VInt(long.wrap(best)))
+
+// `minval` or `maxval` of reals, from the infinity on the other side.
+private real_extreme[T: Elem](a: &Arr, high: bool) -> Answer
+    val (xs, at) = run_of[T](a)
+    var best = if high then -1.0 / 0.0 else 1.0 / 0.0
+
+    for k in 0..<usize(count_of(a))
+        val x = real(xs[at + k])
+
+        best = if high then maximum(best, x) else minimum(best, x)
+
+    Ok(VReal(best))
+
+// `count`, `any` or `all`.
+private bools_reduced(name: string, a: &Arr) -> Answer
+    val (xs, at) = run_of[bool](a)
+    val n = usize(count_of(a))
+
+    if name == "count"
+        var c: long = 0
+
+        for k in 0..<n
+            if xs[at + k] then c += 1
+
+        return Ok(VInt(c))
+
+    val all = name == "all"
+
+    for k in 0..<n
+        if xs[at + k] != all then return Ok(VBool(!all))
+
+    Ok(VBool(all))
