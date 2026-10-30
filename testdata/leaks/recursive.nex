@@ -1,0 +1,53 @@
+struct Node
+  label: string
+  kids: [Node]
+
+struct Dir
+  name: string
+  files: [File]
+
+struct File
+  name: string
+  inside: [Dir]
+
+enum Expr =
+  Num(v: integer)
+  Add(terms: [Expr])
+  Named(name: string, of: [Expr])
+
+def tree(depth: integer): Node =
+  if depth == 0
+    val none: [Node] = []
+    return Node(s"leaf", none)
+  Node(s"n$depth", [tree(depth - 1), tree(depth - 1)])
+
+def expr(depth: integer): Expr =
+  if depth == 0 then Num(depth)
+  else Named(s"e$depth", [Add([expr(depth - 1), Num(depth)])])
+
+def count(n: Node): integer =
+  var total = 1
+  for k in n.kids
+    total += count(k)
+  total
+
+def main() =
+  var total = 0
+  var same = 0
+  for n in 1..5
+    val t = tree(n)
+    var c = t
+    c.kids[1].label = s"changed$n"
+    c.kids[2] = tree(0)
+    total += count(t) + count(c)
+    if c != t then same += 1
+    if t == tree(n) then same += 1
+    val e = expr(n)
+    if e == expr(n) then same += 1
+    val nodirs: [Dir] = []
+    val d = Dir(s"d$n", [File("f", [Dir("g", [File(s"h$n", nodirs)])])])
+    var d2 = d
+    d2.files[1].inside[1].name = "x"
+    if d2 != d then same += 1
+  print((total, same))
+  print(s"${tree(1)} ${expr(2)}")

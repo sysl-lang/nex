@@ -9,6 +9,10 @@
 // wide enough for the largest variant's fields. A variant's fields are an LLVM struct written into
 // the payload's storage and read back out of it, through an entry-block slot that LLVM's SROA dissolves.
 // `match` is an `scf.index_switch` on the tag.
+//
+// **A struct or an enum is printed and compared by a function of its own**, one per type, which the
+// code printing or comparing one calls: a type may hold itself through an array (`kids: [Node]`), so
+// its function calls itself where its elements are printed or compared rather than repeating its body.
 
 import nex.sh.sysl.nex.*
 import nex_runtime.sh.sysl.nex_runtime.{FIELD_SEPARATOR, STRUCT_CLOSE, TUPLE_CLOSE, TUPLE_OPEN, field_label, struct_open}
@@ -24,6 +28,12 @@ struct Case
     text: string
     arr: Buf[string]
     value: string
+
+// A struct or enum type whose print or `==` function the module needs, and where it was first asked
+// for, which its diagnostics name.
+struct Wanted
+    t: Ty
+    span: Span
 
 impl Emitter
     struct_of(*self, name: string) -> Option[TStruct]
@@ -375,7 +385,9 @@ impl Emitter
 
     // `a == b` or `a != b` on two structs, tuples or enums of type `t`, field by field.
     aggregate_compare(*self, span: Span, op: string, a: string, b: string, t: Ty) -> string
-        val eq = self.aggregate_equal(span, a, b, t)
+        val eq = t match
+            Nominal(_, _) -> self.def(s"func.call @\"equal.${wanted(&self.compared, span, t)}\"($a, $b) : (${self.ty(span, t)}, ${self.ty(span, t)}) -> i1")
+            _ -> self.aggregate_equal(span, a, b, t)
 
         if op == "==" then eq else self.not(eq)
 
@@ -578,7 +590,55 @@ impl Emitter
 
         self.later(span, s"printing ${show_ty(t)}")
     end put_aggregate
+
+    // A struct or enum printed by calling the function that prints its type; a tuple in place.
+    put_aggregate_value(*self, span: Span, sink: string, v: string, t: Ty)
+        t match
+            Nominal(_, _) -> self.op(s"func.call @\"show.${wanted(&self.shown, span, t)}\"($sink, $v) : (i64, ${self.ty(span, t)}) -> ()")
+            _ -> self.put_aggregate(span, sink, v, t)
+
+    // The print and `==` functions the module asked for; one may ask for more, of either kind.
+    aggregate_bodies(*self)
+        val none = texpr(Span(0, 0), Void, TLiteral(VoidVal, false))
+        var s = 0
+        var c = 0
+
+        while s < self.shown.len() || c < self.compared.len()
+            if s < self.shown.len()
+                val w = self.shown[s]
+
+                self.begin(Void, none)
+                self.put_aggregate(w.span, "%sink", "%v", w.t)
+                self.release_all()
+                self.frame_record()
+                self.op("func.return")
+                self.end(s"  func.func private @\"show.$s\"(%sink: i64, %v: ${self.ty(w.span, w.t)})")
+                s += 1
+            else
+                val w = self.compared[c]
+                val m = self.ty(w.span, w.t)
+
+                self.begin(Bool, none)
+
+                val eq = self.aggregate_equal(w.span, "%a", "%b", w.t)
+
+                self.release_all()
+                self.frame_record()
+                self.op(s"func.return $eq : i1")
+                self.end(s"  func.func private @\"equal.$c\"(%a: $m, %b: $m) -> i1")
+                c += 1
+    end aggregate_bodies
 end Emitter
+
+// The number of `t` among the wanted types, added at `span` if it is not there yet.
+private wanted(ws: *Buf[Wanted], span: Span, t: Ty) -> usize
+    val name = show_ty(t)
+
+    for k in 0..<ws.len()
+        if show_ty(ws[k].t) == name then return k
+
+    ws.push(Wanted(t, span))
+    ws.len() - 1
 
 private field_types(fields: Buf[FieldInfo]) -> Buf[Ty]
     var out: Buf[Ty] = buf()

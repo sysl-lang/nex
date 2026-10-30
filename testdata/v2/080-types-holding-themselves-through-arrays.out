@@ -1,0 +1,15 @@
+Node { label=root, kids=[Node { label=a, kids=[] }, Node { label=b, kids=[Node { label=c, kids=[] }, Node { label=d2, kids=[] }] }] }
+tree: Node { label=root, kids=[Node { label=a, kids=[] }, Node { label=b, kids=[Node { label=c, kids=[] }, Node { label=d2, kids=[] }] }] }
+[     Node { label=a, kids=[] }]
+(Node { label=b, kids=[Node { label=c, kids=[] }, Node { label=d2, kids=[] }] }, 5)
+[Node { label=b, kids=[Node { label=c, kids=[] }, Node { label=d2, kids=[] }] }, Node { label=e, kids=[] }]
+(true, false, false, true, false)
+Node { label=root, kids=[Node { label=z, kids=[] }, Node { label=b, kids=[Node { label=changed, kids=[] }, Node { label=d2, kids=[] }] }] }
+Node { label=root, kids=[Node { label=a, kids=[] }, Node { label=b, kids=[Node { label=c, kids=[] }, Node { label=d2, kids=[] }] }] }
+(false, false, true)
+Dir { name=top, files=[File { name=a.txt, size=3, inside=[] }, File { name=sub, size=0, inside=[Dir { name=inner, files=[File { name=b.txt, size=5, inside=[] }] }] }] }
+(true, false)
+(false, 6, 5)
+Add([Num(1), Neg([Add([Num(2), Num(3)])]), Num(10)])
+Add([Num(1), Neg([Add([Num(2), Num(3)])]), Num(10)]) = 6
+(true, false, true)

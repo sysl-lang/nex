@@ -17,7 +17,7 @@ import sysl.text.{join, split}
 private val M4_M5_CATEGORIES = ["structs", "tuple destructuring", "paren-less tuple construction", "sum types (enums)", "closure escape (§4.11)",
     "user generics", "user generic enums", "user generic structs"]
 
-private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates", "views", "arrays", "equality", "items-sliced", "items-rearranged", "traps", "linear-algebra"]
+private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates", "views", "arrays", "equality", "items-sliced", "items-rearranged", "traps", "linear-algebra", "recursive"]
 
 @test("every program of PLAN.md's M4 and M5 corpus categories prints its .out")
 run_m4_m5_corpus()
@@ -49,8 +49,8 @@ run_leak_programs()
         reports.push(s"$name: ${leaks_line(leaks.text)}")
 
     finish(b)
-    assert_eq(r.passed, 9)
-    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.\nviews: 0 leaks for 0 total leaked bytes.\narrays: 0 leaks for 0 total leaked bytes.\nequality: 0 leaks for 0 total leaked bytes.\nitems-sliced: 0 leaks for 0 total leaked bytes.\nitems-rearranged: 0 leaks for 0 total leaked bytes.\ntraps: 0 leaks for 0 total leaked bytes.\nlinear-algebra: 0 leaks for 0 total leaked bytes.")
+    assert_eq(r.passed, 10)
+    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.\nviews: 0 leaks for 0 total leaked bytes.\narrays: 0 leaks for 0 total leaked bytes.\nequality: 0 leaks for 0 total leaked bytes.\nitems-sliced: 0 leaks for 0 total leaked bytes.\nitems-rearranged: 0 leaks for 0 total leaked bytes.\ntraps: 0 leaks for 0 total leaked bytes.\nlinear-algebra: 0 leaks for 0 total leaked bytes.\nrecursive: 0 leaks for 0 total leaked bytes.")
 
 @test("only a function holding counted values registers a frame record for a trap's catch, and it is taken off before the return")
 frame_records_only_where_counts_are_held()
@@ -93,6 +93,19 @@ run_rank_n_items_equality()
 
     finish(b)
     assert_eq(out.text, "(true, false, false)\n(true, false, false)\n(true, false, false)\n")
+
+@test("a struct or enum is printed and compared by one function per type, which a type holding itself through an array calls from its own")
+emit_one_printer_and_equality_per_type()
+    val text = emitted("struct Node\n  label: string\n  kids: [Node]\nenum E =\n  Leaf\n  Many(es: [E])\n" +
+        "def main() =\n  val none: [Node] = []\n  val n = Node(\"a\", [Node(\"b\", none)])\n  print(n)\n  print(s\"$n ${(n, 1)}\")\n" +
+        "  print((n == n, Many([Leaf]) == Leaf))\n  print(Many([Leaf, Many([])]))\n").unwrap_or("")
+    val show_node = split(split(text, "func.func private @\"show.0\"")[1], "func.return")[0]
+    val equal_node = split(split(text, "func.func private @\"equal.0\"")[1], "func.return")[0]
+
+    assert_eq(split(text, "func.func private @\"show.").len(), 3)
+    assert_eq(split(text, "func.func private @\"equal.").len(), 3)
+    assert(show_node.contains("func.call @\"show.0\""), show_node)
+    assert(equal_node.contains("func.call @\"equal.0\""), equal_node)
 
 // The line of a `leaks` report that counts what leaked.
 private leaks_line(report: string) -> string

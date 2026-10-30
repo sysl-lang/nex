@@ -158,7 +158,7 @@ run_v2()
     finish(b)
     assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
     assert_eq(join(r.waiting.view(), "\n"), "")
-    assert_eq(r.passed, if fortran then 54 else 50)
+    assert_eq(r.passed, if fortran then 55 else 51)
 
 @test("a trap nothing catches writes its message to standard error after what was printed, and aborts")
 run_uncaught_trap()

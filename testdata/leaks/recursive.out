@@ -1,0 +1,2 @@
+(186, 20)
+Node { label=n1, kids=[Node { label=leaf, kids=[] }, Node { label=leaf, kids=[] }] } Named(e2, [Add([Named(e1, [Add([Num(0), Num(1)])]), Num(2)])])

@@ -1,0 +1,67 @@
+// A struct holding itself through an array, two structs holding each other, and an enum holding
+// itself: built, printed every way a value prints, compared, copied and then written, and dropped.
+
+struct Node
+  label: string
+  kids: [Node]
+
+struct Dir
+  name: string
+  files: [File]
+
+struct File
+  name: string
+  size: integer
+  inside: [Dir]
+
+enum Expr =
+  Num(v: integer)
+  Add(terms: [Expr])
+  Neg(of: [Expr])
+
+def leaf(s: string): Node =
+  val none: [Node] = []
+  Node(s, none)
+
+def count(n: Node): integer =
+  var total = 1
+  for k in n.kids
+    total += count(k)
+  total
+
+def eval(e: Expr): integer = e match
+  Num(v) -> v
+  Add(terms) ->
+    var s = 0
+    for t in terms
+      s += eval(t)
+    s
+  Neg(of) -> -eval(of[1])
+
+def main() =
+  val t = Node("root", [leaf("a"), Node("b", [leaf("c"), leaf(s"d${1 + 1}")])])
+  print(t)
+  print(s"tree: $t")
+  print(f"[${t.kids[1]}%30s]")
+  print((t.kids[2], count(t)))
+  print([t.kids[2], leaf("e")])
+  val u = Node("root", [leaf("a"), Node("b", [leaf("c"), leaf("d2")])])
+  print((t == u, t != u, t == t.kids[2], t.kids[2] == u.kids[2], leaf("x") == leaf("y")))
+  var c = t
+  c.kids[2].kids[1].label = "changed"
+  c.kids[1] = leaf("z")
+  print(c)
+  print(t)
+  print((c == t, c.kids[2] == t.kids[2], c.kids[2].kids[2] == t.kids[2].kids[2]))
+  val none: [File] = []
+  val nodirs: [Dir] = []
+  val d = Dir("top", [File("a.txt", 3, nodirs), File("sub", 0, [Dir("inner", [File("b.txt", 5, nodirs)])])])
+  print(d)
+  print((d == d, d == Dir("top", none)))
+  var d2 = d
+  d2.files[2].inside[1].files[1].size = 6
+  print((d2 == d, d2.files[2].inside[1].files[1].size, d.files[2].inside[1].files[1].size))
+  val e = Add([Num(1), Neg([Add([Num(2), Num(3)])]), Num(10)])
+  print(e)
+  print(s"$e = ${eval(e)}")
+  print((e == Add([Num(1), Neg([Add([Num(2), Num(3)])]), Num(10)]), e == Add([Num(1)]), Neg([Num(1)]) != Neg([Num(2)])))
