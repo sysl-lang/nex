@@ -70,6 +70,20 @@ impl Interp
 
         if name == "min" || name == "max" then return self.extreme(span, name, codes, t)
 
+        if name == "fma"
+            val fa = codes[0]
+            val fb = codes[1]
+            val fc = codes[2]
+            val width = bits_of(base_of(t))
+            val trap = m.fpe
+
+            return (c) ->
+                val p = real_of(fa(c)?)
+                val q = real_of(fb(c)?)
+                val r = real_of(fc(c)?)
+
+                fpe_checked3(fused_multiply_add(p, q, r, width), p, q, r, trap)
+
         val x = codes[0]
         val at = base_of(args[0].ty)
 

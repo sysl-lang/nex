@@ -205,6 +205,11 @@ be an array, the other then an array of the same shape or a scalar that broadcas
 - Real arithmetic is IEEE at its own width: `real32` operations are `f32` operations, never computed
   in `f64` and rounded (`precision.mlir`: `0.1 * 3` in `real32`, widened to `real64` to print, is
   `0.30000001192092896`).
+- **nex never contracts `a * b + c` into a fused multiply-add.** Each real operation rounds at its
+  own width, so the two engines agree bit for bit and a result does not depend on whether the
+  machine has a fused instruction. The compiled engine emits plain `fmul` and `fadd`, with no
+  `contract` flag and no `llvm.fmuladd`. A fused operation happens only where the source asks for it:
+  `fma(a, b, c)` (§7.3).
 - **Real arithmetic does not trap by default.** `1.0 / 0.0` is `inf`, `0.0 / 0.0` is `nan`, and an
   overflow is `±inf`, as IEEE specifies. `nex build --fpe-trap` (and `nex run --fpe-trap`) traps on
   real division by zero, invalid operations and overflow instead, like gfortran's
@@ -796,10 +801,21 @@ threshold it is a BLAS call (§10.4).
 
 **Every prelude scalar math function is elemental** — `sqrt`, `exp`, `log`, `sin`, `cos`, `tan` and
 the rest of the elementary functions, `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `sign`,
-`hypot`, `atan2`, `min`, `max`: applied to an array of any rank it applies element by element and
+`hypot`, `atan2`, `fma`, `min`, `max`: applied to an array of any rank it applies element by element and
 returns an array of the same shape, and it fuses into the surrounding expression's loop nest like an
 operator (§7.1). `sqrt(a) + 1.0` is one loop. Arguments of a several-argument elemental function broadcast
 as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps every element.
+
+**`fma(a, b, c)` is `a * b + c` rounded once**, as Fortran 2023's `ieee_fma` and C's `fma` are, and
+is elemental like the rest, its three arguments broadcasting as an operator's do. It takes reals of
+one width (the widest of its arguments; a literal adopts it). **`real16` is fused in `real64`**, where
+the product of two halves is exact, and the sum rounded once to a half. **Units follow `+` and `*`**:
+`a` and `b` combine as in `a * b`, `c` must have that product's dimension and is converted to its
+unit as `+` converts a right operand, and the result has it. **An integer argument is refused**
+(there is nothing to round) **and so is a complex one**, since a complex product and sum have no
+single rounding; write the two operations. Under `--fpe-trap` it traps an overflow (an infinite
+result from three finite operands) and an invalid operation (a NaN from three non-NaN operands).
+`fma` is the only fused operation: `a * b + c` is never contracted (§2.5).
 
 **A user function opts in with `@elemental`**: `@elemental def f(x: real) = …`. Its body obeys the
 parallel-body rules of §9.4 — no `inout` parameters, no writes to module variables, no I/O except
@@ -2689,6 +2705,8 @@ unit psi = lbf / in^2
 
 ### 13.4 Prelude functions
 
+- `fma(a, b, c)` types `a * b` as `*` does and takes `c` as `+` takes a right operand: `c` must have the
+  product's dimension, is converted to its unit, and the result has that unit (§7.3).
 - `sqrt` halves every exponent: `sqrt(a)` for `a: real<m^2>` is `real<m>`.
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.

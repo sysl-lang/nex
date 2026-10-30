@@ -367,6 +367,28 @@ impl Emitter
         self.trap_if(self.def(s"arith.andi $r_inf, $fin : i1"), REAL_OVERFLOW)
         r
 
+    // The same for a result of three operands: invalid where it is NaN and none of them is, an
+    // overflow where it is infinite and all of them are finite.
+    fpe_check3(*self, r: string, a: string, b: string, c: string, bits: int) -> string
+        if !self.fpe_trap then return r
+
+        val t = s"f$bits"
+        val inf = self.real_const(1.0 / 0.0, bits)
+        val r_nan = self.def(s"arith.cmpf uno, $r, $r : $t")
+        val ab_ordered = self.def(s"arith.cmpf ord, $a, $b : $t")
+        val ordered = self.def(s"arith.andi $ab_ordered, ${self.def(s"arith.cmpf ord, $c, $c : $t")} : i1")
+
+        self.trap_if(self.def(s"arith.andi $r_nan, $ordered : i1"), REAL_INVALID)
+
+        val r_inf = self.def(s"arith.cmpf oeq, ${self.def(s"math.absf $r : $t")}, $inf : $t")
+        val a_fin = self.def(s"arith.cmpf olt, ${self.def(s"math.absf $a : $t")}, $inf : $t")
+        val b_fin = self.def(s"arith.cmpf olt, ${self.def(s"math.absf $b : $t")}, $inf : $t")
+        val c_fin = self.def(s"arith.cmpf olt, ${self.def(s"math.absf $c : $t")}, $inf : $t")
+        val fin = self.def(s"arith.andi ${self.def(s"arith.andi $a_fin, $b_fin : i1")}, $c_fin : i1")
+
+        self.trap_if(self.def(s"arith.andi $r_inf, $fin : i1"), REAL_OVERFLOW)
+        r
+
     complex_binary(*self, op: string, a: string, b: string, bits: int) -> string
         val c = s"complex<f$bits>"
         val f = s"f$bits"
