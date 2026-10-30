@@ -99,6 +99,7 @@ private mentions_param(t: Type, tps: Buf[TypeParam]) -> bool = *t.kind match
     TypeKind.Tuple(elems) -> any_mentions(elems, tps)
     Func(params, _, ret) -> mentions_param(ret, tps) || any_mentions(params, tps)
     Measured(base, _) -> mentions_param(base, tps)
+    TypeKind.Assumed -> false
 
 private any_mentions(ts: Buf[Type], tps: Buf[TypeParam]) -> bool
     for t in ts

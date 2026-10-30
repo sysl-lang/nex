@@ -150,6 +150,9 @@ impl Elab
 
         val p = self.place(arg)
 
+        // A `[*; ..]` parameter takes the place as it is, which its caller checks.
+        if is_assumed(ty) then return texpr(arg.span, p.ty, TBorrow(p))
+
         if !ty_eq(p.ty, ty) && !is_wild(p.ty) && !is_error(ty)
             self.fail(arg.span, s"an `inout` argument must be exactly ${if named.len > 0 then named else show_ty(ty)}, since it is borrowed and not converted; this is ${self.shown(p)}")
 

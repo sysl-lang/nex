@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "../../include/nex_desc.h"
+
 // BLAS's `ddot`: `x` and `y` read every `incx`-th and `incy`-th element.
 double nf_ddot(int32_t n, const double *x, int32_t incx, const double *y, int32_t incy) {
     double s = 0.0;
@@ -261,3 +263,104 @@ static double (*kept)(double);
 void nf_keep(double (*f)(double)) { kept = f; }
 
 double nf_call_kept(double x) { return kept(x); }
+
+// -- `[*; ..]` descriptors (nex DESIGN §10.7) ---------------------------------------------------------
+
+// The value of part `part` (0 the real part, 1 the imaginary) of the element at `p` of type `type`.
+static double desc_part(int32_t type, const char *p, int part) {
+    switch (type) {
+    case NEX_INT8: return *(const int8_t *)p;
+    case NEX_INT16: return *(const int16_t *)p;
+    case NEX_INT32: return *(const int32_t *)p;
+    case NEX_INT64: return (double)*(const int64_t *)p;
+    case NEX_UINT8: return *(const uint8_t *)p;
+    case NEX_UINT16: return *(const uint16_t *)p;
+    case NEX_UINT32: return *(const uint32_t *)p;
+    case NEX_UINT64: return (double)*(const uint64_t *)p;
+    case NEX_REAL16: return (double)*(const _Float16 *)p;
+    case NEX_REAL32: return *(const float *)p;
+    case NEX_REAL64: return *(const double *)p;
+    case NEX_COMPLEX_REAL16: return (double)((const _Float16 *)p)[part];
+    case NEX_COMPLEX_REAL32: return ((const float *)p)[part];
+    case NEX_COMPLEX_REAL64: return ((const double *)p)[part];
+    case NEX_BOOL: return *(const uint8_t *)p;
+    default: return -1.0;
+    }
+}
+
+// The element at `p` of type `type` set to `v`, an imaginary part of `-v` where it is complex, and
+// a `bool` true where `v` is odd.
+static void desc_store(int32_t type, char *p, int64_t v) {
+    switch (type) {
+    case NEX_INT8: *(int8_t *)p = (int8_t)v; break;
+    case NEX_INT16: *(int16_t *)p = (int16_t)v; break;
+    case NEX_INT32: *(int32_t *)p = (int32_t)v; break;
+    case NEX_INT64: *(int64_t *)p = v; break;
+    case NEX_UINT8: *(uint8_t *)p = (uint8_t)v; break;
+    case NEX_UINT16: *(uint16_t *)p = (uint16_t)v; break;
+    case NEX_UINT32: *(uint32_t *)p = (uint32_t)v; break;
+    case NEX_UINT64: *(uint64_t *)p = (uint64_t)v; break;
+    case NEX_REAL16: *(_Float16 *)p = (_Float16)v; break;
+    case NEX_REAL32: *(float *)p = (float)v; break;
+    case NEX_REAL64: *(double *)p = (double)v; break;
+    case NEX_COMPLEX_REAL16: ((_Float16 *)p)[0] = (_Float16)v; ((_Float16 *)p)[1] = (_Float16)-v; break;
+    case NEX_COMPLEX_REAL32: ((float *)p)[0] = (float)v; ((float *)p)[1] = (float)-v; break;
+    case NEX_COMPLEX_REAL64: ((double *)p)[0] = (double)v; ((double *)p)[1] = (double)-v; break;
+    case NEX_BOOL: *(uint8_t *)p = (uint8_t)(v & 1); break;
+    }
+}
+
+// The next index of `d` in column-major order, nex's first axis fastest.
+static void desc_next(const nex_desc *d, int64_t *idx) {
+    for (int32_t k = 0; k < d->rank; k++) {
+        if (++idx[k] < d->dim[k].extent) return;
+        idx[k] = 0;
+    }
+}
+
+// What `d` says, written to `out` for nex to print: its type code, element size, rank, contiguity
+// and writability, each axis's extent and byte stride, then every element in column-major order,
+// a complex as its two parts. The count written.
+int32_t nf_desc_read(const nex_desc *d, double *out) {
+    int32_t n = 0;
+    out[n++] = d->type;
+    out[n++] = (double)d->elem_size;
+    out[n++] = d->rank;
+    out[n++] = d->contiguous;
+    out[n++] = d->writable;
+    for (int32_t k = 0; k < d->rank; k++) {
+        out[n++] = (double)d->dim[k].extent;
+        out[n++] = (double)d->dim[k].stride;
+    }
+    int64_t idx[16] = {0};
+    int parts = d->type >= NEX_COMPLEX_REAL16 && d->type <= NEX_COMPLEX_REAL64 ? 2 : 1;
+    for (int64_t e = 0; e < nex_desc_count(d); e++) {
+        const char *p = nex_desc_at(d, idx);
+        out[n++] = desc_part(d->type, p, 0);
+        if (parts == 2) out[n++] = desc_part(d->type, p, 1);
+        desc_next(d, idx);
+    }
+    return n;
+}
+
+// The number of elements `d` describes.
+int64_t nf_desc_count(const nex_desc *d) { return nex_desc_count(d); }
+
+// Every element of a writable `d` set to its position in column-major order, from 1.
+void nf_desc_fill(const nex_desc *d) {
+    if (!d->writable) return;
+    int64_t idx[16] = {0};
+    for (int64_t e = 0; e < nex_desc_count(d); e++) {
+        desc_store(d->type, nex_desc_at(d, idx), e + 1);
+        desc_next(d, idx);
+    }
+}
+
+// Two descriptors in one call: the elements of `b` added into `a`, both real64 of one shape.
+void nf_desc_add(const nex_desc *a, const nex_desc *b) {
+    int64_t idx[16] = {0};
+    for (int64_t e = 0; e < nex_desc_count(a); e++) {
+        *(double *)nex_desc_at(a, idx) += *(const double *)nex_desc_at(b, idx);
+        desc_next(a, idx);
+    }
+}

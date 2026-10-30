@@ -48,9 +48,13 @@ impl Elab
             if contains(names, p.name) then self.fail(x.decl.span, s"redeclaration of `${p.name}`")
             if p.default.is_some() then self.fail(p.typ.span, "an `extern` parameter has no default: an `extern` declares the C function as it is, and a default belongs to a `def` that wraps it")
 
-            val ty = self.resolve_type(p.typ)
+            val ty = *p.typ.kind match
+                Assumed -> Ty.Assumed
+                _ -> self.resolve_type(p.typ)
 
-            if carries_unit(ty) then self.fail(p.typ.span, s"an `extern` parameter never carries a unit: C takes the number, so declare it ${show_ty(stripped(ty))} and pass `strip(x)`")
+            if is_assumed(ty)
+                if fortran then self.fail(p.typ.span, s"a plain Fortran procedure takes no descriptor, so `${p.name}` cannot be `[*; ..]`; a `type(*), dimension(..)` dummy is a `bind(c)` procedure's, reached through a C wrapper declared as a C `extern`")
+            elif carries_unit(ty) then self.fail(p.typ.span, s"an `extern` parameter never carries a unit: C takes the number, so declare it ${show_ty(stripped(ty))} and pass `strip(x)`")
             elif fortran then self.check_fortran_crossing(p, ty)
             else self.check_crossing(p, ty)
 
@@ -229,6 +233,7 @@ impl Elab
         for a in p.attrs
             if a.name == "strided"
                 if a.args.len() > 0 then self.fail(p.typ.span, "`@strided` takes no arguments")
+                elif is_assumed(ty) then self.fail(p.typ.span, s"`${p.name}` is `[*; ..]`, whose descriptor carries every stride, so every view crosses as it lies and `@strided` says nothing")
                 elif !is_array(ty) && !is_error(ty) then self.fail(p.typ.span, s"`@strided` passes an array's view as it lies, and `${p.name}` is not an array")
 
                 marked = true
@@ -342,6 +347,10 @@ impl Elab
                 out.push(self.coerce(self.elab(a, Some(ty)), ty, s"argument ${i + 1}"))
                 continue
 
+            if is_assumed(ty)
+                out.push(self.described_arg(a, x.modes[j] == Inout, i))
+                continue
+
             if x.modes[j] == Inout
                 out.push(self.borrow(a, ty, ""))
                 continue
@@ -368,6 +377,25 @@ impl Elab
 
         texpr(span, x.ret, TCall(texpr(at, fn_type(params, modes, x.ret), TFnRef(x.name)), out))
     end call_extern
+
+    // The argument `a`, the `i`th, for a `[*; ..]` parameter, borrowed where C `writes` it: an array of
+    // numbers or `bool` of any rank, or one such value, whatever its unit, typed as it is. A generic
+    // body's `[T; R]` or `T` passes where `T`'s constraint admits only numbers and `bool`.
+    private described_arg(*self, a: Expr, writes: bool, i: usize) -> TExpr
+        val v = if writes then self.borrow(a, Ty.Assumed, "") else self.elab(a, None)
+
+        if is_wild(v.ty) then return v
+
+        val e = base_of(elem_of(v.ty))
+
+        if described(e) then return v
+
+        val why = e match
+            Param(name, c, _) -> s", whose `${name}: ${c}` admits more than numbers and `bool`: constrain it `${name}: Numeric`"
+            _ -> ""
+
+        self.fail(a.span, s"a `[*; ..]` parameter takes an array of numbers or `bool`, or one such value, which C reads through a descriptor, and argument ${i + 1} is ${show_ty(v.ty)}$why")
+        self.invalid(a.span)
 
     // The argument `a`, the `i`th, for a callback parameter of type `ty`, borrowed for the call. With
     // a `@data` partner it is any function of the type without its `c_ptr`, its environment crossing
@@ -434,6 +462,29 @@ c_scalar(ty: Ty) -> bool = ty match
     Complex(b) -> b == 32 || b == 64
     Bool -> true
     _ -> false
+
+// Whether a value of `t`, or an array of them, crosses in a `[*; ..]` descriptor: an integer of 8 to
+// 64 bits, a real or a complex of 16 to 64-bit parts, a `bool`, or a type parameter that may be only
+// those (DESIGN §10.7).
+described(t: Ty) -> bool = t match
+    Int(b, _) -> b == 8 || b == 16 || b == 32 || b == 64
+    Real(b) -> b == 16 || b == 32 || b == 64
+    Complex(b) -> b == 16 || b == 32 || b == 64
+    Bool -> true
+    Param(_, _, _) ->
+        val k = kinds_of(t)
+        val ok = KINDS_NUMERIC | KIND_BOOL
+
+        k != 0 && (k | ok) == ok
+    _ -> false
+
+// Whether `t` is `[*; ..]`.
+is_assumed(t: Ty) -> bool = t match
+    Assumed -> true
+    _ -> false
+
+// What `[*; ..]` written anywhere but a C `extern`'s parameter is told.
+private[nex] val ASSUMED_ELSEWHERE = "`[*; ..]` is an array of any element type at any rank, which only a C `extern`'s parameter takes; a `def` over any array is generic, `def f[T: Numeric, R: Rank](x: [T; R])`"
 
 private is_callback(ty: Ty) -> bool = base_of(ty) match
     Fn(_) -> true

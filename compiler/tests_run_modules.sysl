@@ -43,6 +43,20 @@ mod_run_extern()
     finish(b)
     assert_eq(out, "3.0\n")
 
+@test("a module shaped like `mpi` hands C any array or scalar through one generic def over a private [*; ..] extern")
+mod_run_extern_described()
+    val b = bench()
+    val links = ffi_fixture(b)
+    val comm = "module comm\n@link(\"nexffi\")\nprivate extern def nf_desc_count(x: [*; ..]): int64\n@link(\"nexffi\")\nprivate extern def nf_desc_fill(x: inout [*; ..])\ndef elements[T: Numeric, R: Rank](x: [T; R], to: integer = 0): integer = nf_desc_count(x) + to\ndef element[T: Numeric](x: T): integer = nf_desc_count(x)\ndef receive[T: Numeric, R: Rank](x: inout [T; R]) = nf_desc_fill(x)\n"
+    val main = "import comm.*\ndef main() =\n  print(elements([1.0, 2.0, 3.0]))\n  print(elements(reshape([1, 2, 3, 4, 5, 6], 2, 3)[:, 2..3], to = 10))\n  print(element(2.5))\n  var a: [int16] = zeros(4)\n  receive(a[2..3])\n  print(a)\n"
+    val dir = project([("main.nex", main), ("comm/comm.nex", comm)])
+    val out = agreed(runs(b, __FUNCTION__, main + comm, entry = s"${dir}/main.nex", links = links.view()))
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "3\n14\n1\n[0, 1, 2, 0]\n")
+
 @test("a program of several modules runs: imports, aliases, chains, structs, module-level state")
 mod_run()
     val b = bench()

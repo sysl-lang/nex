@@ -67,12 +67,13 @@ enum WrapJob
     CallC(symbol: string)
     Lapack(name: string, et: Ty)
 
-// An `inout` array argument: its root, by number, each slice opened from the root to the window, and
-// whether its parameter is `@strided`.
+// An `inout` array argument: its root, by number, each slice opened from the root to the window,
+// whether its parameter is `@strided`, and whether it is `[*; ..]`, crossing as a descriptor.
 struct CWindow
     root: usize
     frames: Buf[Opened]
     strided: bool
+    described: bool
 
 impl Emitter
     find_extern(*self, name: string) -> Option[TExtern]
@@ -143,6 +144,27 @@ impl Emitter
             val a = args[next]
 
             next += 1
+
+            if is_assumed(x.params[j])
+                *a.kind match
+                    TBorrow(place) ->
+                        if is_arr(place.ty)
+                            windows.push(self.open_window(place, true, &roots, true))
+                            vals.push("")
+                        else
+                            vals.push(self.scalar_desc(a.span, self.place_ptr(place), place.ty, true))
+                    _ ->
+                        val v = self.ex(a)
+
+                        if is_arr(a.ty)
+                            vals.push(self.array_desc(a.span, self.def(s"bufferization.to_buffer $v read_only : ${self.tensor_ty(a.span, a.ty)} to ${self.boundary_ty(a.span, a.ty)}"), a.ty, false))
+                        else
+                            val mt = self.mem_ty(a.span, a.ty)
+                            val slot = self.alloca(mt)
+
+                            self.op(s"llvm.store ${self.to_mem(v, a.ty)}, $slot : $mt, !llvm.ptr")
+                            vals.push(self.scalar_desc(a.span, slot, a.ty, false))
+                continue
 
             if is_callback_ty(x.params[j])
                 val cb = self.c_callback(a, x.params[j], has_data(x.partner, j), x.fortran)
@@ -272,16 +294,16 @@ impl Emitter
 
     // The `inout` array place `place` opened: its root, numbered in `roots`, which gains it unless an
     // earlier argument of the call holds the same one, and the slices opened from it to the window.
-    open_window(*self, place: TExpr, strided: bool, roots: *Buf[CRoot]) -> CWindow
+    open_window(*self, place: TExpr, strided: bool, roots: *Buf[CRoot], described: bool = false) -> CWindow
         var frames: Buf[Opened] = buf()
         val v = self.open_place(place, &frames)
         val root = if frames.len() > 0 then frames[0].src else place
 
         for k in 0..<roots.len()
-            if same_root(roots[k].place, root) then return CWindow(k, frames, strided)
+            if same_root(roots[k].place, root) then return CWindow(k, frames, strided, described)
 
         roots.push(CRoot(root, if frames.len() > 0 then frames[0].cur else v, root.ty))
-        CWindow(roots.len() - 1, frames, strided)
+        CWindow(roots.len() - 1, frames, strided, described)
 
     // The function through which `job` writes its `inout` arrays, and the operands and their types of
     // a call of it: the C arguments `vals` of types `tys` made by the caller (`""` for each `inout`
@@ -364,6 +386,11 @@ impl Emitter
 
                 for j in 0..<inner.len()
                     if inner[j] != "" then continue
+
+                    if windows[next].described
+                        inner.set(j, self.array_desc(span, wms[next], wts[next], true))
+                        next += 1
+                        continue
 
                     val c = self.c_pointer(span, wms[next], wts[next], windows[next].strided, true)
 
@@ -488,6 +515,63 @@ impl Emitter
 
         CArray(m, t, p, ok, desc, writes)
 
+    // The address of a `nex_desc` (`include/nex_desc.h`, DESIGN §10.7) describing the array buffer `m`
+    // of type `t` as it lies: its first element, and per axis, nex's first axis first, its extent and
+    // its stride in bytes, negative where the view runs backwards. Nothing is copied; the descriptor
+    // says whether the buffer is a dense column-major block, and whether C may write it.
+    array_desc(*self, span: Span, m: string, t: Ty, writable: bool) -> string
+        val r = rank_of(t)
+        val e = base_of(elem_of(t))
+        val dt = described_ty(r)
+        val md = self.metadata(m, t)
+        val bytes = self.def(s"arith.constant ${self.elem_bytes(e)} : i64")
+        var d = self.desc_head(dt, self.first_element(span, m, t), e, r, writable)
+        var want = bytes
+        var dense = self.def("arith.constant true")
+
+        for k in 0..<r
+            // The buffer's dimensions are nex's axes last first.
+            val n = self.def(s"arith.index_cast $md#${2 + r - 1 - k} : index to i64")
+            val s = self.def(s"arith.muli ${self.def(s"arith.index_cast $md#${2 + r + r - 1 - k} : index to i64")}, $bytes : i64")
+
+            d = self.def(s"llvm.insertvalue $n, $d[6, $k, 0] : $dt")
+            d = self.def(s"llvm.insertvalue $s, $d[6, $k, 1] : $dt")
+
+            // An axis is dense where its stride is the bytes of the axes before it, or where it holds
+            // at most one element, whose stride is never used.
+            val at_most_one = self.def(s"arith.cmpi sle, $n, ${self.def("arith.constant 1 : i64")} : i64")
+            val ok = self.def(s"arith.ori ${self.def(s"arith.cmpi eq, $s, $want : i64")}, $at_most_one : i1")
+
+            dense = self.def(s"arith.andi $dense, $ok : i1")
+            want = self.def(s"arith.muli $want, $n : i64")
+
+        self.desc_slot(dt, self.def(s"llvm.insertvalue ${self.def(s"arith.extui $dense : i1 to i32")}, $d[4] : $dt"))
+
+    // The address of a `nex_desc` of rank 0 describing the scalar of type `t` stored at `ptr`.
+    scalar_desc(*self, span: Span, ptr: string, t: Ty, writable: bool) -> string
+        val dt = described_ty(0)
+        val d = self.desc_head(dt, ptr, base_of(t), 0, writable)
+
+        self.desc_slot(dt, self.def(s"llvm.insertvalue ${self.def("arith.constant 1 : i32")}, $d[4] : $dt"))
+
+    // A descriptor of LLVM type `dt` with its base address, element size and code, rank and
+    // writability filled in.
+    private desc_head(*self, dt: string, base: string, e: Ty, r: usize, writable: bool) -> string
+        var d = self.def(s"llvm.mlir.undef : $dt")
+
+        d = self.def(s"llvm.insertvalue $base, $d[0] : $dt")
+        d = self.def(s"llvm.insertvalue ${self.def(s"arith.constant ${self.elem_bytes(e)} : i64")}, $d[1] : $dt")
+        d = self.def(s"llvm.insertvalue ${self.def(s"arith.constant ${desc_code(e)} : i32")}, $d[2] : $dt")
+        d = self.def(s"llvm.insertvalue ${self.def(s"arith.constant $r : i32")}, $d[3] : $dt")
+        self.def(s"llvm.insertvalue ${self.def(s"arith.constant ${if writable then 1 else 0} : i32")}, $d[5] : $dt")
+
+    // The descriptor `d` of LLVM type `dt` stored in a slot of the function's frame; its address.
+    private desc_slot(*self, dt: string, d: string) -> string
+        val slot = self.alloca(dt)
+
+        self.op(s"llvm.store $d, $slot : $dt, !llvm.ptr")
+        slot
+
     // A call of the runtime's `name` that runs whether or not an `exit`, `cycle` or `return` has run
     // in the statement: a copy is made and given back either way.
     always(*self, name: string, args: string, params: string, result: string) -> string
@@ -557,6 +641,7 @@ impl Emitter
             Str -> "!llvm.ptr"
             Fn(_) -> "!llvm.ptr"
             CPtr -> "!llvm.ptr"
+            Assumed -> "!llvm.ptr"
             _ -> self.ty(span, t)
 
     // The MLIR type of a result of type `t` as C gives it, `""` for none.
@@ -614,6 +699,21 @@ c_ext(t: Ty, mode: Mode) -> string
 
 // The extension of a result of type `t`: none for a Fortran `logical`, which is 32 bits.
 result_ext(t: Ty, fortran: bool) -> string = if fortran && is_logical_ty(t) then "" else c_ext(t, Mode.Read)
+
+// The LLVM type of a `nex_desc` of rank `r`: `base`, `elem_size`, `type`, `rank`, `contiguous`,
+// `writable`, then `r` pairs of extent and byte stride (`include/nex_desc.h`).
+described_ty(r: usize) -> string = s"!llvm.struct<(ptr, i64, i32, i32, i32, i32, array<$r x struct<(i64, i64)>>)>"
+
+// The `nex_type` code of a described element `e` (`include/nex_desc.h`).
+desc_code(e: Ty) -> int = e match
+    Int(b, signed) ->
+        val k = if b == 8 then 1 elif b == 16 then 2 elif b == 32 then 3 else 4
+
+        if signed then k else k + 4
+    Real(b) -> if b == 16 then 9 elif b == 32 then 10 else 11
+    Complex(b) -> if b == 16 then 12 elif b == 32 then 13 else 14
+    Bool -> 15
+    _ -> 0
 
 is_string(t: Ty) -> bool = base_of(t) match
     Str -> true

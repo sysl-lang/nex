@@ -860,6 +860,13 @@ struct Parser
         val m = self.toks.mark()
 
         if self.accept("[")
+            // `[*; ..]`: any element type at any rank, assumed-type and assumed-rank as one.
+            if self.accept("*")
+                if !self.accept(";") || !self.accept("..") || !self.accept("]")
+                    return Err(error(self.toks.span_from(m), "an array of any element type is of any rank too: `[*; ..]`"))
+
+                return Ok(Type(self.toks.span_from(m), TypeKind.Assumed))
+
             val elem = self.type_expr()?
 
             *elem.kind match
@@ -922,6 +929,8 @@ struct Parser
         val want = "an axis (`:`, an integer literal or a const name)"
 
         if self.accept(":") then return Ok(AnyExtent)
+
+        if self.at("..") then return Err(error(self.toks.here(), "`..` is an assumed rank, which an array of any element type has: `[*; ..]`; an array of one element type has its axes, `[real; :, :]`, or a rank parameter, `[T; R]`"))
 
         self.tok(0) match
             Num(text) ->

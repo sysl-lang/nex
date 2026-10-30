@@ -698,6 +698,7 @@ struct Elab
             Tuple(elems) -> self.any_names_type_param(elems)
             Func(params, _, ret) -> self.any_names_type_param(params) || self.names_type_param(ret)
             Measured(base, _) -> self.names_type_param(base)
+            Assumed -> false
     end names_type_param
 
     private any_names_type_param(self, ts: Buf[Type]) -> bool
@@ -855,6 +856,11 @@ struct Elab
 
                 fn_type(ps, modes, self.resolve_type(ret))
             Measured(base, unit) -> self.measured_type(t.span, base, unit)
+            // An extern's parameter is resolved where it is declared (`elab_extern.sysl`); here it is
+            // anywhere else.
+            Assumed ->
+                self.fail(t.span, ASSUMED_ELSEWHERE)
+                Error
     end resolve_type
 
     // -- the result -------------------------------------------------------------------------------

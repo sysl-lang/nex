@@ -657,6 +657,7 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
 - **Banded and tridiagonal LAPACK solvers**, generalized eigenproblems, `rcond` / `cond`.
 - **Affine temperature units** `degC` / `degF`, with a point type and a difference type.
 - **Unit-polymorphic externs** — units in an `extern` declaration's parameters.
+- **Arrays of `@c` structs in a `[*; ..]` descriptor** — a struct type code and its layout named to C.
 - **nex as a 3D modeller's scripting language.** Requirements: fast edit-and-rerun — compile a
   script to a shared library and `dlopen` it, or run it through MLIR's ORC JIT, with a module cache,
   against a stated latency target; small static-shape arrays (`[real; 3]`, `[real; 4, 4]`) held in

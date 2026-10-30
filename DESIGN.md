@@ -1391,7 +1391,9 @@ bare pointer, MPI takes a pointer *and* a description, so every window crosses w
 - rank k: one `hvector` per axis, innermost first; a box of a dense root is
   `MPI_Type_create_subarray` with `MPI_ORDER_FORTRAN`, which is nex's order.
 
-The pointer is the window's first element, as in §10.3. A committed datatype is cached by (element,
+The module's externs take every buffer as `[*; ..]` (§10.7), so one `send` written in nex covers
+every element type and rank, and the shim reads the element type, the extents and the byte strides
+from the descriptor. The pointer is the window's first element, as in §10.3. A committed datatype is cached by (element,
 extents, strides), so a halo exchange in a loop commits once. A dense array is the element type and
 a count.
 
@@ -1601,6 +1603,7 @@ believes without proof.
 | a `@c` struct, read mode or `inout` | `const S *` / `S *` to the struct, laid out as C lays it out |
 | a function type `(A, B) -> R` | a C function pointer (§10.2.1) |
 | `c_ptr` | `void *`, opaque, only as a callback's `@data` partner (§10.2.1) |
+| `[*; ..]`, read mode or `inout` | `const nex_desc *`: any array of numbers or `bool` at any rank, or a scalar, described (§10.7) |
 | return: a scalar, a complex or `void` | the value, or C `void` |
 
 **Complex scalars cross by value.** nex mirrors clang's ABI for `_Complex` on each target, so
@@ -1892,6 +1895,134 @@ own: a Fortran shared library names its runtime itself. The Fortran library come
 `@link("name")` or `-l name`, found on the default search path or a `-L dir` given on the command
 line; a procedure no linked library defines is the linker's undefined-symbol error naming the
 mangled symbol (`_fdot_`).
+
+### 10.7 Any type, any rank: `[*; ..]` and its descriptor
+
+Fortran 2018 lets a `bind(c)` procedure take an argument of **any type at any rank** —
+`type(*), dimension(..)` — which C receives as a `CFI_cdesc_t *` from `ISO_Fortran_binding.h`: the
+base address, the element type and size, the rank, and an extent and byte stride per axis. It is how
+MPI's Fortran 2008 bindings (`mpi_f08`) give one `MPI_Send` for every buffer, and how a library such
+as HDF5, NetCDF or PETSc offers one entry point over every element type. nex has the same thing, for
+the same reason: **one `extern` takes any array of numbers or `bool`, at any rank, or a scalar, and C
+gets a pointer, the shape, the strides and the element type.**
+
+```nex
+extern def nex_send(x: [*; ..], to: int32, tag: int32)
+extern def nex_recv(x: inout [*; ..], from: int32, tag: int32): int32
+
+def send[T: Numeric, R: Rank](x: [T; R], to: integer, tag: integer = 0) =
+  nex_send(x, int32(to), int32(tag))
+```
+
+```c
+#include "nex_desc.h"
+void nex_send(const nex_desc *x, int32_t to, int32_t tag);
+int32_t nex_recv(const nex_desc *x, int32_t from, int32_t tag);
+```
+
+Without it a library over every element type could not be written in nex: a generic body cannot
+hand its `[T; R]` to an `extern`, whose parameter has one element type and one rank; an `extern`
+is not generic; and nex has no overloading by type to give one `extern` per element type.
+
+**The spelling `[*; ..]` (PROPOSED)** is nex's array type `[T; axes]` with Fortran's two wildcards in
+their places: `*` for the element type, as `type(*)`, and `..` for the axes, as `dimension(..)`. It
+reads as what it is, an array type, and needs no new keyword. The two go together: `[*]` and
+`[real; ..]` are refused (*"an array of any element type is of any rank too: `[*; ..]`"*, and *"`..`
+is an assumed rank, which an array of any element type has: …"*), since a parameter of one element
+type at any rank is what a generic `def` over `[T; R]` already writes.
+
+**What may be passed:**
+
+- **an array of any element type C has a code for** — `int8` … `int64`, `uint8` … `uint64`,
+  `real16`, `real32`, `real64`, `complex[real16]`, `complex[real32]`, `complex[real64]`, `bool` — at
+  any rank, whole, a window, a strided view or a reversed one;
+- **a scalar of those types, as rank 0**: `nex_send(2.5, …)`, `nex_recv(count, …)`;
+- **a measured value or array, as its numbers**: the unit is a static fact and the descriptor
+  carries none (§13.7), so neither `strip` nor a unit-free declaration is needed;
+- **a generic body's `[T; R]` or `T`**, where `T`'s constraint admits only numbers and `bool`
+  (`Numeric`, `Float`, `Integral`, `Real`, `Complex`): the body is checked once against the
+  constraint (§2.6), and each instance hands C the descriptor of its own element type and rank.
+  `T: Eq` admits `string`, so it is refused: *"…, and argument 1 is [T], whose `T: Eq` admits more
+  than numbers and `bool`: constrain it `T: Numeric`"*.
+
+**`inout` makes it writable**, as for any `extern` parameter: the argument is a place (§8), borrowed
+for the call under §8.3's exclusivity rule, and C writes where the view lies — through a strided or
+reversed view, into the elements the view names. A read-mode argument is a promise that C does not
+write, as in §10.2. The descriptor says which it is.
+
+**The descriptor** is the C struct `nex_desc` of `include/nex_desc.h`, which nex ships:
+
+```c
+typedef enum nex_type {
+    NEX_INT8 = 1, NEX_INT16, NEX_INT32, NEX_INT64,          /* 1-4 */
+    NEX_UINT8, NEX_UINT16, NEX_UINT32, NEX_UINT64,          /* 5-8 */
+    NEX_REAL16, NEX_REAL32, NEX_REAL64,                     /* 9-11 */
+    NEX_COMPLEX_REAL16, NEX_COMPLEX_REAL32, NEX_COMPLEX_REAL64, /* 12-14 */
+    NEX_BOOL                                                /* 15 */
+} nex_type;
+
+typedef struct nex_dim { int64_t extent; int64_t stride; } nex_dim;
+
+typedef struct nex_desc {
+    void *base;          /* the first element: index 1 along every axis */
+    int64_t elem_size;   /* bytes of one element */
+    int32_t type;        /* a nex_type */
+    int32_t rank;        /* 0 for a scalar */
+    int32_t contiguous;  /* 1 where the elements are one dense column-major block */
+    int32_t writable;    /* 1 for an inout parameter */
+    nex_dim dim[];       /* rank axes, nex's first axis first */
+} nex_desc;
+```
+
+C receives `const nex_desc *` for every `[*; ..]` parameter, read mode or `inout`. Element
+(i₀, i₁, …), each counted from 0, is at `(char *)base + i₀·dim[0].stride + i₁·dim[1].stride + …`; the
+header's `nex_desc_at` computes it and `nex_desc_count` the element count. It follows `CFI_cdesc_t`
+where the two agree, so a C routine written against one reads the other: `base` is `base_addr`,
+`elem_size` is `elem_len`, `dim[k].extent` and `dim[k].stride` are `extent` and `sm` — **strides in
+bytes**, which is what lets one descriptor describe a column of a matrix and a view into an array of
+complexes alike — and `dim[0]` is the first axis, Fortran's order. It leaves out `lower_bound`, since
+C counts from 0 whatever the nex array's origin (§6.4), and the `version` and `attribute` fields,
+whose job `writable` and `contiguous` do. A `bool` element is one byte, 0 or 1, C's `bool`; a
+`complex[real16]` is two `_Float16`, the real part first.
+
+**Views cross with no copy.** Where §10.3 copies a strided view because C gets a bare pointer, a
+descriptor carries the strides, so every view crosses where it lies: `m[2..3, 2..3]` of a 3×4 matrix
+is `base` at `m[2, 2]` with strides 8 and 24; `x[4..1 by -1]` is `base` at `x[4]` with stride −8;
+`m[1..3 by 2, 4..1 by -3]` has strides 16 and −72. `contiguous` is 1 exactly where the elements form
+one dense column-major block from `base` (an axis of extent 0 or 1 is dense whatever its stride), so
+a C routine that wants a flat buffer tests it and copies only where it must. `@strided` says nothing
+of a `[*; ..]` parameter and is refused on one. This is the ground of §9.6.3's views as MPI
+datatypes: the module's shim builds the datatype from the descriptor's extents and strides.
+
+**Lifetime: the descriptor and what it points at are valid for the call only.** The descriptor lies
+in the caller's frame, and an `inout` window is the caller's buffer only while the call runs (§10.3);
+a C function that keeps either past its return reads freed or reused memory. A nonblocking operation
+that must outlive its call is §9.6.2's `exchange` block, which holds the buffer itself.
+
+**What is refused:**
+
+- an argument that is a `string`, a struct (a `@c` one included), a tuple, an enum or a function, or
+  an array of any of them: *"a `[*; ..]` parameter takes an array of numbers or `bool`, or one such
+  value, which C reads through a descriptor, and argument 1 is [P]"*. A `@c` struct has a C type of
+  its own and is declared as such (§10.2); an array of them in a descriptor is for later (§15);
+- `[*; ..]` anywhere but a C `extern`'s parameter — a `def`'s parameter, a variable, a field, a
+  result, a callback's parameter, a `@host` function's: *"`[*; ..]` is an array of any element type
+  at any rank, which only a C `extern`'s parameter takes; a `def` over any array is generic,
+  `def f[T: Numeric, R: Rank](x: [T; R])`"*;
+- on a `@fortran` extern: a plain Fortran procedure takes no descriptor, and a `type(*),
+  dimension(..)` dummy is a `bind(c)` procedure's, whose `CFI_cdesc_t` is reached through a C wrapper
+  declared as a C `extern`;
+- `@strided` on it, as above; and an extern with one is only called, never a function value (§10.2.1).
+
+**Compiled only**, like every `extern`: the interpreter never calls C (§16).
+
+**Lowering.** The descriptor is an `llvm.struct<(ptr, i64, i32, i32, i32, i32, array<R x
+struct<(i64, i64)>>)>` filled where the call is made, from `memref.extract_strided_metadata` of the
+argument's buffer — the aligned pointer plus the offset for `base`, the buffer's sizes and strides
+(times the element's bytes) for the axes, nex's first axis being the buffer's last dimension (§3.2)
+— and stored in a slot of the caller's frame, whose address is the argument. A scalar is stored in a
+slot of its own and described at rank 0. An `inout` window goes through the wrapper of §10.3, the
+descriptor built inside it over the subview of the root's buffer; nothing is gathered or scattered.
 
 ---
 
@@ -2597,6 +2728,9 @@ each has an item in PLAN.md's later list.
   **difference** converts without the offset — a rise of 20 °C is a rise of 20 K — so an affine unit
   needs two types, a point and a difference, with point − point giving a difference and point + point
   refused. That is a rule of its own, not a factor in the table of §13.9.
+- **Arrays of `@c` structs in a `[*; ..]` descriptor** (§10.7): a type code for "a struct of
+  `elem_size` bytes" and a way to name its layout to C, should a library want one entry point over
+  records as well as numbers.
 - **Unit-polymorphic externs**: an `extern` declaration whose parameters carry units (§13.7), so a C
   routine can be given its units once in its declaration instead of `strip` at every call.
 
