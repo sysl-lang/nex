@@ -110,15 +110,25 @@ private zeros(n: int) -> string
 
     out
 
-// A real of `bits` bits, widened exactly to `v`: its digits are the fewest that read back at its own
-// width, so the `real32` nearest 0.1 is `0.1`, not the `0.10000000149011612` its widening would need.
+// A real of `bits` bits, widened exactly to `v`. A `real32` or `real16` is the shortest decimal that
+// reads back at its own width, spelled as the `real64` nearest that decimal is: the `real32` nearest
+// 0.1 is `0.1`, not the `0.10000000149011612` its widening would need, and the one nearest 1e15 is
+// `1.0E15`, not the whole number `999999986991104.0` it is exactly.
 format_real_nex(v: real, bits: int = 64) -> string
+    val finite = v == v && v != 1.0 / 0.0 && v != -1.0 / 0.0
+
+    if bits != 64 && finite && v != 0.0
+        val (digits, e) = if bits == 32 then digits32(f32(v)) else shortest_digits16(v)
+        val decimal = parse_real(s"0.${digits}e${e + 1}").unwrap()
+
+        return format_real_nex(if v < 0.0 then -decimal else decimal)
+
     if v != v then return "nan"
     if v == 1.0 / 0.0 then return "inf"
     if v == -1.0 / 0.0 then return "-inf"
     if (if v < 0.0 then -v else v) < 1e15 && v == real(long(v)) then return s"${long(v)}.0"
 
-    val (digits, e) = if bits == 64 then shortest_digits(v) elif bits == 32 then digits32(f32(v)) else shortest_digits16(v)
+    val (digits, e) = shortest_digits(v)
     val n = int(digits.len)
     val sign = if v < 0.0 then "-" else ""
 

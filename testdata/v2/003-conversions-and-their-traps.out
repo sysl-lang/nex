@@ -1,0 +1,17 @@
+40000
+int16(40000) traps
+uint32(-1) traps
+200
+int8(uint8 200) traps
+9223372036854775808
+int64(2^63) traps
+-2
+1000000000000000000
+int64(nan) traps
+int32(inf) traps
+int32(3.0e9) traps
+0
+uint8(-1.0) traps
+inf
+0.1
+0.1+0.2i

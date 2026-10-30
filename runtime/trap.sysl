@@ -86,6 +86,29 @@ catch_trap(body: *extern() -> unit) -> bool
     catch_env = saved
     trapped
 
+// The same for a nex function value of no parameters: its code, called with its environment.
+private catch_closure(code: *extern(*u8) -> unit, env: *u8) -> bool
+    val saved = catch_env
+
+    depth += 1
+
+    val trapped = setjmp(&catch_env[0]) != 0
+
+    if !trapped then code(env)
+
+    depth -= 1
+    catch_env = saved
+    trapped
+
+// `assert_traps(f)` and `assert_traps(f, text)`: `f` must trap, with a message containing `text`
+// where one is given (`expected` is null where it is not); otherwise the assertion traps.
+@export("nex_assert_traps")
+assert_traps(code: *extern(*u8) -> unit, env: *u8, expected: *u8)
+    if !catch_closure(code, env) then trap_with("assert_traps: the function did not trap")
+    if !(expected == null || mentions(expected)) then trap_with("assert_traps: expected substring not present in trap")
+
+private mentions(expected: *u8) -> bool = last_message.contains(c_text(expected))
+
 // The message of the last trap a catch caught, written to standard output on a line of its own.
 @export("nex_print_last_trap")
 print_last_trap()

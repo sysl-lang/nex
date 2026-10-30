@@ -58,6 +58,15 @@ impl Emitter
 
             return ""
 
+        if name == "assert_traps"
+            val f = self.ex(args[0])
+            val code = self.def(s"llvm.extractvalue $f[0] : $CLOSURE")
+            val env = self.def(s"llvm.extractvalue $f[1] : $CLOSURE")
+            val expected = if args.len() == 2 then self.ex(args[1]) else self.def("llvm.mlir.zero : !llvm.ptr")
+
+            self.call("nex_assert_traps", s"$code, $env, $expected", "!llvm.ptr, !llvm.ptr, !llvm.ptr", "")
+            return ""
+
         if name == "assert_eq"
             val a = self.ex(args[0])
             val b = self.ex(args[1])

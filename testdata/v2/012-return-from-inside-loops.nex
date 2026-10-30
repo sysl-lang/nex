@@ -1,0 +1,23 @@
+def first_multiple(n: integer, m: integer): integer =
+  for k in 1..n
+    if k % m == 0 then return k
+  -1
+
+def find(): string =
+  var i = 0
+  while i < 100
+    i += 1
+    for j in 1..i
+      if i * j == 42 then return s"$i*$j"
+  "none"
+
+def classify(x: real): string =
+  val sign = if x < 0.0 then return "negative" else "non-negative"
+  s"$sign: $x"
+
+def main() =
+  print(first_multiple(10, 4))
+  print(first_multiple(3, 7))
+  print(find())
+  print(classify(-1.5))
+  print(classify(2.5))

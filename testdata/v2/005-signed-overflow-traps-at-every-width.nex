@@ -1,0 +1,30 @@
+def main() =
+  val a: int8 = 127
+  assert_traps(() -> print(a + 1), "int8 overflow")
+  print("int8 127 + 1 traps")
+  val b: int16 = -32768
+  assert_traps(() -> print(b - 1), "int16 overflow")
+  print("int16 -32768 - 1 traps")
+  val c: int32 = 65536
+  assert_traps(() -> print(c * c), "int32 overflow")
+  print("int32 65536 * 65536 traps")
+  val d: int64 = 9223372036854775807
+  assert_traps(() -> print(d + 1), "int64 overflow")
+  print("int64 max + 1 traps")
+  val m: int8 = -128
+  assert_traps(() -> print(-m), "int8 overflow")
+  print("-(-128) traps")
+  val mo: int8 = -1
+  assert_traps(() -> print(m div mo), "int8 overflow")
+  print("-128 div -1 traps")
+  print(m % mo)
+  assert_traps(() -> print(abs(m)), "int8 overflow")
+  print("abs(-128) traps")
+  val zero = 0
+  assert_traps(() -> print(5 div zero), "integer division by zero")
+  assert_traps(() -> print(5 % zero), "by zero")
+  print("division by zero traps")
+  print(-7 div 2)
+  print(-7 % 2)
+  val x: int8 = 100
+  print(x + 27)

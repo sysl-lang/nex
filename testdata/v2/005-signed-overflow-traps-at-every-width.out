@@ -1,0 +1,12 @@
+int8 127 + 1 traps
+int16 -32768 - 1 traps
+int32 65536 * 65536 traps
+int64 max + 1 traps
+-(-128) traps
+-128 div -1 traps
+0
+abs(-128) traps
+division by zero traps
+-3
+-1
+127

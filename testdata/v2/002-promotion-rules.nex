@@ -1,0 +1,30 @@
+def main() =
+  val a: int8 = 100
+  val b: int32 = 100
+  print(a + b)
+  val u8: uint8 = 200
+  val u16: uint16 = 100
+  print(u8 + u16)
+  val s16: int16 = -1
+  print(u8 + s16)
+  val x32: real32 = 0.1
+  val x64: real64 = 0.0
+  print(x32 + x64)
+  val n: integer = 3
+  print(n * x32)
+  print(n * 0.1)
+  val z32: complex[real32] = 1 + 0.1i
+  val y: real64 = 0.5
+  print(y + z32)
+  print(7 / 2)
+  val k32: int32 = 1
+  val t32: real32 = 3.0
+  print(k32 / t32)
+  val two: int8 = 2
+  print(two ^ 6)
+  assert_traps(() -> print(two ^ 7), "int8 overflow")
+  print("int8 ^ 7 traps")
+  val h: real32 = 1.5
+  print(h ^ 2)
+  val c32: complex[real32] = 1 + 1i
+  print(c32 * c32)

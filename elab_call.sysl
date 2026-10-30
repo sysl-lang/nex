@@ -273,11 +273,11 @@ impl Elab
             self.fail(args[0].span, s"`${name}(...)` converts a number, and this is ${show_ty(from)}")
             return self.invalid(span)
 
-        if is_complex(from)
+        if is_complex(from) && !is_complex(target)
             self.fail(args[0].span, s"a complex number does not convert to ${show_ty(target)}: take `.re` (or `abs`, `arg`) first")
             return self.invalid(span)
 
-        // A narrower integer, a change of signedness, or a real to an integer can be out of range.
+        // A narrower complex rounds each part, as a narrower real does, and never traps. A narrower integer, a change of signedness, or a real to an integer can be out of range.
         texpr(span, target, TConvert(v, is_int(target)))
     end conversion
 

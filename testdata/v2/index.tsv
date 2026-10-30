@@ -1,0 +1,14 @@
+file	category	name
+001-every-type-printed	precision	every type of DESIGN §2.1 printed, with each width's extremes
+002-promotion-rules	precision	each promotion rule of DESIGN §2.2, `/` and `^`
+003-conversions-and-their-traps	precision	each conversion of DESIGN §2.4 and its trap
+004-unsigned-overflow-and-underflow-trap	precision	unsigned overflow and going below zero trap at every width
+005-signed-overflow-traps-at-every-width	precision	signed overflow, `div`, `%` and `abs` traps at every width
+006-literal-adoption	precision	literals and prelude constants adopt their context's type (DESIGN §2.3)
+007-real32-printing	precision	a real32 prints as the shortest decimal at its own width
+008-real-division-is-ieee	precision	real division and overflow are IEEE without --fpe-trap
+009-integer-powers	precision	integer `^` keeps the base's type, traps on overflow, and divides on a negative exponent
+010-exit-cycle-and-named-loops	loop control	`exit`, `cycle` and named loops (DESIGN §11.1)
+011-stepped-for-headers	loop control	stepped `for` headers, at the ends of their type's range
+012-return-from-inside-loops	loop control	`return` from inside loops and from a value position
+013-inout-scalars	inout	`inout` scalars: locals, module-level `var`s, forwarded and captured

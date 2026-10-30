@@ -627,7 +627,7 @@ impl Elab
             self.fail(v.span, s"`${name}(...)` converts numbers, and this is ${show_ty(v.ty)}")
             return self.invalid(span)
 
-        if is_complex(from)
+        if is_complex(from) && !is_complex(target)
             self.fail(v.span, s"a complex number does not convert to ${show_ty(target)}: take `.re` (or `abs`, `arg`) first")
             return self.invalid(span)
 

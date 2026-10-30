@@ -152,6 +152,13 @@ elab_conversions()
         "(def f ((n#0 int64) (x#1 real64) (y#2 real32)) void (block (print (convert-trap:int8 n#0)) (print (convert-trap:uint32 n#0)) (print (convert:real32 x#1)) (print (promote:real64 y#2)) (print (complex:complex[real32] (adopt:real32 1) y#2)) (print (convert-trap:int16 x#1)) (print (convert-trap:int64 x#1))))\n(def main () void ())")
     assert_eq(refused("def main() =\n  val z = 1 + 2i\n  print(int32(z))\n"), "error: a complex number does not convert to int32: take `.re` (or `abs`, `arg`) first @3:15")
     assert_eq(refused("def main() = print(real(true))\n"), "error: `real(...)` converts a number, and this is bool @1:25")
+
+@test("a complex converts to a narrower complex part by part, and to nothing but a complex")
+elab_complex_narrows()
+    assert_eq(elaborated("def f(z: complex, a: [complex]) =\n  print(complex[real32](z))\n  print(complex[real16](a))\n" + MAIN),
+        "(def f ((z#0 complex[real64]) (a#1 [complex[real64]])) void (block (print (convert:complex[real32] z#0)) (print (.convert:[complex[real16]] a#1))))\n(def main () void ())")
+    assert_eq(refused("def f(z: complex) = print(real32(z))\n" + MAIN), "error: a complex number does not convert to real32: take `.re` (or `abs`, `arg`) first @1:34")
+    assert_eq(refused("def f(a: [complex]) = print(int8(a))\n" + MAIN), "error: a complex number does not convert to int8: take `.re` (or `abs`, `arg`) first @1:34")
     assert_eq(refused("def main() = print(int8(300))\n"), "error: 300 does not fit in int8 @1:25")
 
 @test("a complex value has its parts and the complex prelude functions")

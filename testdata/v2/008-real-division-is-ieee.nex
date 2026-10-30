@@ -1,0 +1,14 @@
+def main() =
+  val z = 0.0
+  print(1.0 / z)
+  print(-1.0 / z)
+  print(z / z)
+  val one: real32 = 1.0
+  val z32: real32 = 0.0
+  print(one / z32)
+  val n = 1
+  val m = 0
+  print(n / m)
+  val big = 1.0e308
+  print(big * 10.0)
+  print(sqrt(-1.0))
