@@ -141,7 +141,7 @@ impl Emitter
         out
 
     // The MLIR type of an array's element.
-    elem_ty(*self, span: Span, t: Ty) -> string = t match
+    elem_ty(*self, span: Span, t: Ty) -> string = base_of(t) match
         Int(b, _) -> s"i$b"
         Real(b) -> s"f$b"
         Complex(b) -> s"complex<f$b>"
@@ -151,7 +151,7 @@ impl Emitter
             "i64"
 
     // The bytes an element of `t` takes in storage.
-    elem_bytes(*self, t: Ty) -> int = t match
+    elem_bytes(*self, t: Ty) -> int = base_of(t) match
         Int(b, _) -> if b < 8 then 1 else b / 8
         Real(b) -> b / 8
         Complex(b) -> b / 4

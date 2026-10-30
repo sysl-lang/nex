@@ -1,0 +1,84 @@
+// Emission of units of measure (DESIGN §13.8). A unit is erased: a value that carries one is its
+// number, so every place the emitter dispatches on a type matches on `base_of(t)`, the type under the
+// unit; attaching, renaming or removing a unit emits nothing; and a conversion between two scales of
+// one dimension is one multiplication by the ratio of their exact factors, rounded once, here, to the
+// operand's width.
+
+import sh.sysl.parsing.Span
+import sysl.buf.{Buf, buf}
+import sysl.math.max
+
+impl Emitter
+    // `v` converted to the scale of `e`'s unit: a multiplication by `factor` at the width of `e`'s
+    // type, each part of a complex on its own, and on an array each element.
+    rescale(*self, e: TExpr, v: TExpr, factor: Ratio) -> string
+        val span = e.span
+        val t = e.ty
+
+        if is_arr(t)
+            var operands: Buf[TExpr] = buf()
+
+            operands.push(v)
+            return self.mapped(e, operands, texpr(span, elem_of(t), TRescale(chain_leaf(v, 0), factor)))
+
+        val x = self.ex(v)
+
+        base_of(t) match
+            Real(bits) -> self.real_binary(span, "*", x, self.real_const(factor_at(factor, bits), bits), bits)
+            Complex(bits) ->
+                val c = s"complex<f$bits>"
+                val f = self.real_const(factor_at(factor, bits), bits)
+                val re = self.real_binary(span, "*", self.def(s"complex.re $x : $c"), f, bits)
+                val im = self.real_binary(span, "*", self.def(s"complex.im $x : $c"), f, bits)
+
+                self.complex_const(re, im, bits)
+            _ -> self.unsupported(span, s"a conversion of ${show_ty(t)} to another scale")
+end Emitter
+
+// The exact positive ratio `r` rounded once to the nearest real of `bits` bits, ties to even, and
+// returned as the `real` that holds that value exactly. Past the width's largest finite value it is an
+// infinity; below its smallest subnormal it rounds to zero, as IEEE rounding of the exact value does.
+// Dividing the two parts as reals would round three times and can miss by an ulp.
+factor_at(r: Ratio, bits: int) -> real
+    // Significand bits, and the exponents of the smallest and largest normal numbers.
+    val p = if bits == 64 then 53 elif bits == 32 then 24 else 11
+    val emin = if bits == 64 then -1022 elif bits == 32 then -126 else -14
+    val emax = 1 - emin
+    val num = u2048(r.num)
+    val den = u2048(r.den)
+    // 2^e <= r < 2^(e + 1)
+    var e = bit_length(num) - bit_length(den)
+
+    if !at_least(num, den, e) then e -= 1
+    if e > emax then return 1.0 / 0.0
+    if e < emin - p then return 0.0
+
+    // The value of the last significand bit, and the significand in units of it.
+    val q = max(e, emin) - (p - 1)
+    val n = if q < 0 then num << -q else num
+    val d = if q > 0 then den << q else den
+    var m = n / d
+    val rest = n % d
+
+    if 2 * rest > d || (2 * rest == d && m % 2 == 1) then m += 1
+    if e == emax && m == u2048(1) << p then return 1.0 / 0.0
+
+    var x = real(u64(m))
+
+    for _ in 0..<q.abs()
+        x = if q > 0 then x * 2.0 else x * 0.5
+
+    x
+
+// Whether `num / den` is at least `2^e`.
+private at_least(num: u2048, den: u2048, e: int) -> bool = if e >= 0 then num >= den << e else num << -e >= den
+
+private bit_length(x: u2048) -> int
+    var n = 0
+    var v = x
+
+    while v > 0
+        v >>= 1
+        n += 1
+
+    n
