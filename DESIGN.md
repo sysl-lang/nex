@@ -185,16 +185,37 @@ be an array, the other then an array of the same shape or a scalar that broadcas
   unsigned result below zero is an overflow. The emitted form is
   `llvm.intr.sadd.with.overflow` and its siblings, then a branch to the trap (`precision.mlir` runs
   `127 + 1` and `100 + 27` at `i8`).
+- `div` and `%` truncate toward zero, as Fortran's integer `/` and `MOD` do: `-7 div 2` is `-3` and
+  `-7 % 2` is `-1`. A zero divisor traps, and so does the one quotient out of range, the signed
+  minimum `div -1`; the minimum `% -1` is `0`.
+- **An integer power keeps the base's type and traps on overflow**, at every width. A negative
+  exponent divides, as Fortran's `**` does: `2 ^ -1` is `0`, `1 ^ -n` is `1`, `(-1) ^ -n` is `1` or
+  `-1` by the parity of `n`, and `0 ^ -n` traps as a division by zero.
+- **A trap's message names what failed**: `int8 overflow` (the type whose range was left, `uint8
+  overflow` for going below zero too), `integer division by zero`, `` `%` by zero ``, `complex division by
+  zero`, `int64 value out of range for uint32` and `real64 value out of range for int32` (a
+  conversion, NaN and infinities included), `` a `for` step of 0 ``, `assertion failed` or `assertion
+  failed: <message>`. A trap nothing catches writes `trap: <message>` to standard error after
+  everything printed before it, and the program ends abnormally (a non-zero status).
 - Real arithmetic is IEEE at its own width: `real32` operations are `f32` operations, never computed
-  in `f64` and rounded (`precision.mlir`: `0.1 * 3` in `real32` prints `0.30000001192092896`).
+  in `f64` and rounded (`precision.mlir`: `0.1 * 3` in `real32`, widened to `real64` to print, is
+  `0.30000001192092896`).
 - **Real arithmetic does not trap by default.** `1.0 / 0.0` is `inf`, `0.0 / 0.0` is `nan`, and an
   overflow is `±inf`, as IEEE specifies. `nex build --fpe-trap` (and `nex run --fpe-trap`) traps on
   real division by zero, invalid operations and overflow instead, like gfortran's
   `-ffpe-trap=zero,invalid,overflow`. Integer division by zero and integer overflow trap always.
+  Under the flag a real `/` by zero traps `floating-point division by zero`; a NaN computed from
+  operands that are not NaN traps `floating-point invalid operation` (`sqrt(-1.0)`, `0.0 / 0.0`); and
+  an infinity computed from finite operands traps `floating-point overflow`, a narrowing
+  `real32(1.0e300)` included. These are checks in the generated code, so they behave the same on
+  every machine, whether or not its floating-point unit can trap.
 - Printing (ref §10.6) prints a `real32` or `real16` as the shortest decimal that reads back to the
   same value **at that width**, in the reference's spelling (`0.3` for the `real32` nearest 0.3, not
-  `0.30000001192092896`) (**PROPOSED**; needs runtime entries per width). A complex prints as its two
-  parts do.
+  `0.30000001192092896`) (**PROPOSED**). The spelling is the one the `real64` nearest that decimal
+  gets, so a whole number is shortened too: the `real16` 65504 prints `65500.0` and the `real32`
+  nearest 1e15 prints `1.0E15`. A complex prints as its two parts do.
+- `round` rounds half away from zero, as Fortran's `ANINT` does: `round(2.5)` is `3.0` and
+  `round(-2.5)` is `-3.0`.
 - **The prelude's real functions** (`sqrt`, `exp`, `sin`, `floor`, …, ref §10.2) compute at the
   width of a real argument, and widen an integer argument to `real64` first (`sqrt(n32)` is a
   `real64`). `sqrt`, `exp`, `log`, `sin`, `cos` and `tan` also take a complex and give one. `abs` and
@@ -1336,12 +1357,17 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
 - **`exit`** leaves the innermost loop; **`cycle`** goes to its next iteration (Fortran's names).
 - **A loop may be named**: `outer: for j in 1..n`, and `exit outer` / `cycle outer` act on that
   loop, as Fortran's named `DO` constructs do.
-- **`stop`** ends the program with exit status 0; **`stop n`** with status `n`.
+- **`stop`** ends the program with exit status 0; **`stop n`** with status `n`. What was printed
+  before it is written out first.
 - **A `for` header takes a step**: `for k in n..1 by -1`, `for k in 1..n by 2`, read in the direction
   of travel exactly as a subscript's `by` (§5.4). A stepped range is a value (`val odd = 1..n by 2`).
 - **A `for` over a range counts in integers**, as Fortran's `DO` does: the loop variable has the
   common type of the two bounds (`for k in 1..n` with `n: int32` counts in `int32`), the step must
   promote to it, and a range of reals is a compile error. The loop variable is read-only.
+- **The bounds and the step are evaluated once, before the first pass**, and the number of passes
+  is fixed then, as Fortran's `DO` fixes its iteration count: changing a variable the header read
+  changes nothing, and the loop variable never steps past the last value it takes, so
+  `for k in 120..127` with `k: int8` runs eight times without overflowing. A step of 0 traps.
 - In a `parallel for` body, `cycle` ends that iteration and is allowed; `exit` is a compile error
   (§9.4).
 
@@ -1349,8 +1375,8 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
 
 - **The entry point** is `def main()` or `def main(args: [string])`, returning `void`; any other
   signature of `main` is a compile error, and so is a program without one. `args` holds only the user's arguments, without the program name, 1-based:
-  `args[1]` is the first. The exit status is 0 when `main` returns, `n` after `stop n`, and non-zero
-  after an uncaught trap.
+  `args[1]` is the first, and an index outside `1..length(args)` traps. The exit status is 0 when
+  `main` returns, `n` after `stop n`, and non-zero after an uncaught trap.
 - **The top level of a file holds only declarations** (`import`, `const`, module-level `val` and
   `var`, `def`, `struct`, `enum`, `extern`); there are no top-level statements.
 - **`print`** writes to standard output, **`eprint`** to standard error.

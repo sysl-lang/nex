@@ -1,6 +1,7 @@
 // The `nex` command. `tokens` prints what the lexer reads, `parse` the tree the parser builds,
 // `elaborate` the typed IR, or every diagnostic the elaborator gives; `emit` the MLIR module.
-// `compile` makes a native program, and `run` makes one in a temporary directory, runs it with the
+// `build` (or `compile`) makes a native program, beside the source or at `-o`, and `run` makes one in
+// a temporary directory, runs it with the
 // arguments after `--` and exits with its status. `--fpe-trap`, before the file, makes real division
 // by zero, invalid operations and overflow trap (DESIGN §2.5).
 
@@ -9,7 +10,7 @@ import sysl.fs.{make_temp_dir, read_bytes, remove_dir_all}
 import sysl.process.run
 import sh.sysl.parsing.{Source, full_report, source}
 
-private val usage = "usage: nex <tokens | parse | elaborate | emit | compile | run> [--fpe-trap] <file.nex> [-o out] [-- args]"
+private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run> [--fpe-trap] <file.nex> [-o out] [-- args]"
 
 main(args: []string)
     if args.len < 3
@@ -36,12 +37,14 @@ main(args: []string)
             Err(m) -> fail(m)
         return
 
-    if command == "compile" || command == "run"
+    val build = command == "build" || command == "compile"
+
+    if build || command == "run"
         val tc = find_toolchain(args[0]) match
             Ok(t) -> t
             Err(m) -> fail(m)
 
-        if command == "compile"
+        if build
             val out = if k + 2 < args.len && args[k + 1] == "-o" then args[k + 2] else default_output(file)
 
             compile_file_here(file, out, tc, fpe_trap)
@@ -59,7 +62,7 @@ main(args: []string)
 
         val status = run(exe, program_args.view())
 
-        remove_dir_all(work)
+        _ = remove_dir_all(work)
 
         status match
             Ok(Exited(code)) -> exit(code)
@@ -116,7 +119,7 @@ private compile_file_here(file: string, out: string, tc: Toolchain, fpe_trap: bo
 
     val done = compile_file(file, out, work, tc, fpe_trap)
 
-    remove_dir_all(work)
+    _ = remove_dir_all(work)
 
     done match
         Ok(_) -> ()

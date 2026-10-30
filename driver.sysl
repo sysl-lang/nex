@@ -78,8 +78,11 @@ private rendered(ds: Buf[Diagnostic], src: Source) -> string
     r.render(src)
 
 // The program in `file` compiled to a native program at `out`, its intermediate files in `work`.
-compile_file(file: string, out: string, work: string, tc: Toolchain, fpe_trap: bool) -> Result[unit, string]
-    val mlir = mlir_of(file, fpe_trap)?
+compile_file(file: string, out: string, work: string, tc: Toolchain, fpe_trap: bool) -> Result[unit, string] =
+    lower_module(mlir_of(file, fpe_trap)?, out, work, tc)
+
+// An MLIR module lowered to a native program at `out`, its intermediate files in `work`.
+lower_module(mlir: string, out: string, work: string, tc: Toolchain) -> Result[unit, string]
     val input = s"$work/program.mlir"
     val lowered = s"$work/program.llvm.mlir"
     val ir = s"$work/program.ll"
@@ -106,5 +109,5 @@ compile_temp(file: string, tc: Toolchain, fpe_trap: bool) -> Result[(string, str
     compile_file(file, exe, work, tc, fpe_trap) match
         Ok(_) -> Ok((work, exe))
         Err(m) ->
-            remove_dir_all(work)
+            _ = remove_dir_all(work)
             Err(m)

@@ -67,10 +67,20 @@ struct Emitter
     wrappers: Buf[string]
     // The local `main(args: [string])` binds, which the runtime holds.
     args_local: Option[usize]
+    // Whether the current function has reported something not compiled yet.
+    reported: bool
+    // Whether an `exit`, `cycle` or `return` may already have run in the statement being emitted, so
+    // that what the rest of it does — a call, a store, a trap — runs only where none did.
+    dirty: bool
 
     // -- diagnostics ------------------------------------------------------------------------------
 
+    // A construct the emitter does not compile yet: reported once per function, at the first, since
+    // what surrounds it reports the same gap again.
     later(*self, span: Span, what: string)
+        if self.reported then return
+
+        self.reported = true
         self.diags.push(error(span, s"${what} is not compiled yet"))
 
     // -- text -------------------------------------------------------------------------------------
@@ -109,6 +119,11 @@ struct Emitter
     set_ctl(*self, word: usize)
         self.op(s"llvm.store ${self.def(s"arith.constant $word : i64")}, ${self.ctl} : i64, !llvm.ptr")
 
+    // `exit`, `cycle` or `return` setting the control word, unless one has already run in the
+    // statement.
+    leave(*self, word: usize)
+        self.effect(s"llvm.store ${self.def(s"arith.constant $word : i64")}, ${self.ctl} : i64, !llvm.ptr", "")
+
     // The control word cleared where it holds `word`.
     clear_ctl(*self, word: usize)
         val w = self.def(s"llvm.load ${self.ctl} : !llvm.ptr -> i64")
@@ -131,12 +146,47 @@ struct Emitter
 
     call(*self, name: string, args: string, params: string, result: string) -> string
         self.external(name, params, result)
+        self.effect(s"func.call @$name($args) : ($params) -> ${result_text(result)}", result)
+
+    // An operation that may have an effect, a call, and its value of MLIR type `result` (`""` for
+    // none). Where an `exit`, `cycle` or `return` may already have run in the statement, it runs only
+    // where none did, a zero standing in for its value.
+    effect(*self, text: string, result: string) -> string
+        if !self.dirty
+            if result == ""
+                self.op(text)
+                return ""
+
+            return self.def(text)
+
+        val ok = self.flowing()
 
         if result == ""
-            self.op(s"func.call @$name($args) : ($params) -> ()")
+            self.op(s"scf.if $ok {")
+            self.op(text)
+            self.op("}")
             return ""
 
-        self.def(s"func.call @$name($args) : ($params) -> $result")
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if $ok -> ($result) {")
+        self.op(s"scf.yield ${self.def(text)} : $result")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.zero_text(result)} : $result")
+        self.op("}")
+        r
+
+    // The zero of an MLIR type.
+    zero_text(*self, t: string) -> string =
+        if t == "i1" then self.def("arith.constant false")
+        elif t.starts_with("i") then self.def(s"arith.constant 0 : $t")
+        elif t.starts_with("f") then self.def(s"arith.constant 0.0 : $t")
+        elif t.starts_with("complex<")
+            val part = t[8..<t.len - 1]
+            val z = self.def(s"arith.constant 0.0 : $part")
+
+            self.def(s"complex.create $z, $z : $t")
+        else self.def(s"llvm.mlir.zero : $t")
 
     // The address of a string constant.
     string_ref(*self, text: string) -> string
@@ -158,8 +208,9 @@ struct Emitter
         self.external("nex_trap", "!llvm.ptr", "")
 
         val m = self.string_ref(message)
+        val c = if self.dirty then self.def(s"arith.andi $cond, ${self.flowing()} : i1") else cond
 
-        self.op(s"scf.if $cond {")
+        self.op(s"scf.if $c {")
         self.op(s"  func.call @nex_trap($m) : (!llvm.ptr) -> ()")
         self.op("}")
 
@@ -210,7 +261,7 @@ struct Emitter
                 w = self.def(s"llvm.insertvalue $im, $a[1] : $m")
             _ -> ()
 
-        self.op(s"llvm.store $w, $ptr : $m, !llvm.ptr")
+        self.effect(s"llvm.store $w, $ptr : $m, !llvm.ptr", "")
 
     // -- locals -----------------------------------------------------------------------------------
 
@@ -269,6 +320,8 @@ struct Emitter
         self.chains = buf()
         self.ctl = ""
         self.ret_slot = ""
+        self.reported = false
+        self.dirty = false
 
         for k in 0..<self.slot.len()
             self.slot.set(k, "")
@@ -460,6 +513,8 @@ struct Emitter
         var globals: Buf[TGlobal] = buf()
 
         for d in self.prog.decls
+            self.reported = false
+
             d match
                 FunDecl(f) -> self.fun(f)
                 GlobalDecl(g) -> globals.push(g)
@@ -494,15 +549,6 @@ struct Emitter
     // reads it, the program's `main` called and what it printed written out.
     entry_point(*self, globals: Buf[TGlobal])
         self.begin(Void, texpr(Span(0, 0), Void, TLiteral(VoidVal, false)))
-
-        var main_found = false
-
-        for d in self.prog.decls
-            d match
-                FunDecl(f) -> if f.name == "main" then main_found = true
-                _ -> ()
-
-        if !main_found then self.diags.push(error(Span(0, 0), "the program has no `def main()`"))
 
         self.call("nex_set_args", "%argc, %argv", "i32, !llvm.ptr", "")
 
@@ -545,7 +591,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
             boxed.set(c, true)
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
-                    buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None)
+                    buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false)
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)

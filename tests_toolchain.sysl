@@ -75,6 +75,10 @@ proof_complex()
 proof_real_spelling()
     check_proof("real-spelling", "experiments/mlir/real-spelling.out")
 
+@test("every width nex has lowers: real16, real32, complex[real32], int8 overflow detection, int32 widening")
+proof_precision()
+    check_proof("precision", "experiments/mlir/precision.out")
+
 @test("a trap inside MLIR-generated frames is caught and resumed by the runtime, and aborts uncaught")
 proof_trap_catch()
     val bin = llvm_bin()
@@ -111,6 +115,7 @@ runtime_one_main_one_allocator()
     assert(names(undefined, "malloc"), "the runtime allocates through libc's malloc")
     assert(names(defined, "_mlir_ciface_nex_print_array_real"), symbols)
     assert(names(defined, "nex_catch_trap"), symbols)
+    assert(names(defined, "nex_trap"), symbols)
 
 // A C symbol as `nm` lists it: with the leading underscore Mach-O adds, or without, as ELF has it.
 private names(symbols: Buf[string], name: string) -> bool

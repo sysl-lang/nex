@@ -92,6 +92,7 @@ impl Emitter
 
             if name == "conj" then return self.def(s"complex.conj $x : $c")
             if name == "arg" then return self.def(s"complex.angle $x : $c")
+            if name == "sqrt" then return self.complex_sqrt(x, bits_of(args[0].ty))
 
             return self.def(s"complex.$name $x : $c")
 
@@ -134,6 +135,32 @@ impl Emitter
         val out = if bits == 16 then self.def(s"arith.truncf $r : f32 to f16") else r
 
         self.fpe_check(out, operands[0], operands[operands.len() - 1], bits)
+
+    // The principal square root, written out as Kahan gives it rather than through the dialect's
+    // lowering, which loses the zero real part of `sqrt(-4 + 0i)` to `cos(pi / 2)`:
+    // t = sqrt((|re| + |z|) / 2); for re >= 0 the root is (t, im / 2t), else (|im| / 2t, ±t) with
+    // the sign of im. At z = 0 it is z.
+    complex_sqrt(*self, z: string, bits: int) -> string
+        val c = s"complex<f$bits>"
+        val f = s"f$bits"
+        val re = self.def(s"complex.re $z : $c")
+        val im = self.def(s"complex.im $z : $c")
+        val zero = self.real_const(0.0, bits)
+        val two = self.real_const(2.0, bits)
+        val modulus = self.def(s"complex.abs $z : $c")
+        val half = self.def(s"arith.divf ${self.def(s"arith.addf ${self.def(s"math.absf $re : $f")}, $modulus : $f")}, $two : $f")
+        val t = self.def(s"math.sqrt $half : $f")
+        val other = self.def(s"arith.divf ${self.def(s"math.absf $im : $f")}, ${self.def(s"arith.mulf $two, $t : $f")} : $f")
+        val right = self.def(s"arith.cmpf oge, $re, $zero : $f")
+        val out_re = self.def(s"arith.select $right, $t, $other : $f")
+        val signed_t = self.def(s"math.copysign $t, $im : $f")
+        val right_im = self.def(s"arith.divf $im, ${self.def(s"arith.mulf $two, $t : $f")} : $f")
+        val out_im = self.def(s"arith.select $right, $right_im, $signed_t : $f")
+        val at_zero = self.def(s"arith.cmpf oeq, $modulus, $zero : $f")
+        val final_re = self.def(s"arith.select $at_zero, $re, $out_re : $f")
+        val final_im = self.def(s"arith.select $at_zero, $im, $out_im : $f")
+
+        self.def(s"complex.create $final_re, $final_im : $c")
 
     min_max(*self, name: string, a: string, b: string, t: Ty) -> string = t match
         Int(bits, signed) -> self.def(s"arith.${name}${if signed then "si" else "ui"} $a, $b : i$bits")

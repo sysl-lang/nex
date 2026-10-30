@@ -8,7 +8,14 @@ import sysl.fmt.hex
 import sh.sysl.parsing.Span
 
 impl Emitter
-    ex(*self, e: TExpr) -> string = *e.kind match
+    ex(*self, e: TExpr) -> string
+        val v = self.ex_kind(e)
+
+        // What follows in the statement runs only where nothing has left it.
+        if self.ctl != "" && !self.dirty && may_leave(e) then self.dirty = true
+        v
+
+    ex_kind(*self, e: TExpr) -> string = *e.kind match
         TLiteral(v, _) -> self.literal(e.span, v, e.ty)
         TConstant(name, _) -> self.constant(e.span, name, e.ty)
         TLocal(id) ->
@@ -51,9 +58,11 @@ impl Emitter
         TFor(id, v, lo, hi, inclusive, step, body) -> self.for_loop(e.span, id, v, lo, hi, inclusive, step, body)
         TBlock(items, result) -> self.block_from(items, 0, result, e.ty)
         TLet(id, init) ->
+            // Bound first, so a local `def` that calls itself captures its own cell.
+            self.bind_local(e.span, id)
+
             val v = self.ex(init)
 
-            self.bind_local(e.span, id)
             self.store(e.span, self.local_ptr(e.span, id), v, self.prog.locals[id].ty)
             ""
         TAssign(op, target, value) ->
@@ -79,13 +88,13 @@ impl Emitter
                     if self.ret_slot != "" && r != "" then self.store(x.span, self.ret_slot, r, self.ret)
                 None -> ()
 
-            self.set_ctl(1)
+            self.leave(1)
             ""
         TExit(id) ->
-            self.set_ctl(2 * id + 2)
+            self.leave(2 * id + 2)
             ""
         TCycle(id) ->
-            self.set_ctl(2 * id + 3)
+            self.leave(2 * id + 3)
             ""
         TStop(code) ->
             val c = code match
@@ -107,7 +116,7 @@ impl Emitter
         TDestructure(_, _, _) -> self.unsupported(e.span, "a destructuring binding")
         TAssignTuple(_, _) -> self.unsupported(e.span, "a tuple assignment")
         TInvalid -> self.unsupported(e.span, "an invalid expression")
-    end ex
+    end ex_kind
 
     unsupported(*self, span: Span, what: string) -> string
         self.later(span, what)
@@ -117,18 +126,23 @@ impl Emitter
     // `cycle` or `return` run only where it did not.
     block_from(*self, items: Buf[TExpr], start: usize, result: TExpr, t: Ty) -> string
         var k = start
+        // Each statement starts as the block did: one before it that may have left guards it.
+        val entry = self.dirty
 
         while k < items.len()
             val item = items[k]
 
+            self.dirty = entry
             self.ex(item)
             k += 1
 
             if self.ctl != "" && may_leave(item)
                 // The rest runs only where the control word is 0, its value yielded out, a zero where
-                // it did not run.
+                // it did not run. Inside, nothing has left yet.
                 val ok = self.flowing()
                 val ty = self.ty(result.span, t)
+
+                self.dirty = false
 
                 if ty == ""
                     self.op(s"scf.if $ok {")
@@ -145,6 +159,7 @@ impl Emitter
                 self.op("}")
                 return r
 
+        self.dirty = entry
         self.ex(result)
 
     // A region's value, or a zero where it never yields one.
@@ -230,24 +245,28 @@ impl Emitter
         if op == "div" || op == "%"
             val zero = self.int_const("0", bits)
 
-            self.trap_if(self.def(s"arith.cmpi eq, $b, $zero : $t"), if op == "div" then "integer division by zero" else "`%` by zero")
+            val by_zero = self.def(s"arith.cmpi eq, $b, $zero : $t")
 
-            if !signed then return self.def(s"arith.${if op == "div" then "divui" else "remui"} $a, $b : $t")
+            self.trap_if(by_zero, if op == "div" then "integer division by zero" else "`%` by zero")
+
+            // Where something may have left the statement the trap above is skipped, and the zero
+            // divisor a skipped operand stands in with must not reach the division.
+            val one = self.int_const("1", bits)
+            val d = if self.dirty then self.def(s"arith.select $by_zero, $one, $b : $t") else b
+
+            if !signed then return self.def(s"arith.${if op == "div" then "divui" else "remui"} $a, $d : $t")
 
             val minus_one = self.int_const("-1", bits)
-            val by_minus_one = self.def(s"arith.cmpi eq, $b, $minus_one : $t")
+            val by_minus_one = self.def(s"arith.cmpi eq, $d, $minus_one : $t")
 
-            if op == "%"
-                // `min % -1` is 0, which LLVM's `srem` leaves undefined: divide by 1 instead.
-                val one = self.int_const("1", bits)
-
-                return self.def(s"arith.remsi $a, ${self.def(s"arith.select $by_minus_one, $one, $b : $t")} : $t")
+            // `min % -1` is 0, which LLVM's `srem` leaves undefined, and so is `x % 1`: divide by 1.
+            if op == "%" then return self.def(s"arith.remsi $a, ${self.def(s"arith.select $by_minus_one, $one, $d : $t")} : $t")
 
             val min = self.int_const(s"${-(i128(1) << (bits - 1))}", bits)
-            val at_min = self.def(s"arith.cmpi eq, $a, $min : $t")
+            val overflows = self.def(s"arith.andi ${self.def(s"arith.cmpi eq, $a, $min : $t")}, $by_minus_one : i1")
 
-            self.trap_if(self.def(s"arith.andi $at_min, $by_minus_one : i1"), s"$name overflow")
-            return self.def(s"arith.divsi $a, $b : $t")
+            self.trap_if(overflows, s"$name overflow")
+            return self.def(s"arith.divsi $a, ${if self.dirty then self.def(s"arith.select $overflows, $one, $d : $t") else d} : $t")
 
         if op == "^"
             val r = self.call("nex_ipow", s"${self.widen64(a, bits, signed)}, ${self.widen64(b, bits, signed)}, ${self.def(s"arith.constant $bits : i32")}, ${self.def(s"arith.constant ${signed}")}, ${self.def(s"arith.constant ${signed}")}",
@@ -496,6 +515,8 @@ impl Emitter
     if_expr(*self, e: TExpr, c: TExpr, a: TExpr, b: Option[TExpr]) -> string
         val cond = self.ex(c)
         val t = self.ty(e.span, e.ty)
+        // Each branch starts as the `if` did: a `return` in one does not run in the other.
+        val entry = self.dirty
 
         if t == ""
             self.op(s"scf.if $cond {")
@@ -504,6 +525,7 @@ impl Emitter
             b match
                 Some(x) ->
                     self.op("} else {")
+                    self.dirty = entry
                     self.ex(x)
                 None -> ()
 
@@ -515,6 +537,7 @@ impl Emitter
         self.op(s"$v = scf.if $cond -> ($t) {")
         self.yield_value(self.ex(a), e.ty)
         self.op("} else {")
+        self.dirty = entry
         self.yield_value(b match
             Some(x) -> self.ex(x)
             None -> "", e.ty)
@@ -627,12 +650,9 @@ impl Emitter
             tys += t
 
         val r = self.ty(span, ret)
-        var out = ""
 
         *callee.kind match
-            TFnRef(name) ->
-                if r == "" then self.op(s"func.call @\"n.$name\"($vals) : ($tys) -> ()")
-                else out = self.def(s"func.call @\"n.$name\"($vals) : ($tys) -> $r")
+            TFnRef(name) -> self.effect(s"func.call @\"n.$name\"($vals) : ($tys) -> ${result_text(r)}", r)
             _ ->
                 val c = self.ex(callee)
                 val code = self.def(s"llvm.extractvalue $c[0] : $CLOSURE")
@@ -642,10 +662,7 @@ impl Emitter
                 val f = self.def(s"builtin.unrealized_conversion_cast $code : !llvm.ptr to $fty")
                 val with_env = if vals == "" then env else s"$env, $vals"
 
-                if r == "" then self.op(s"func.call_indirect $f($with_env) : $fty")
-                else out = self.def(s"func.call_indirect $f($with_env) : $fty")
-
-        out
+                self.effect(s"func.call_indirect $f($with_env) : $fty", r)
     end call_value
 end Emitter
 
