@@ -16,7 +16,7 @@ import sysl.text.{join, split}
 private val M4_M5_CATEGORIES = ["structs", "tuple destructuring", "paren-less tuple construction", "sum types (enums)", "closure escape (§4.11)",
     "user generics", "user generic enums", "user generic structs"]
 
-private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates", "views", "arrays", "equality"]
+private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates", "views", "arrays", "equality", "traps"]
 
 @test("every program of PLAN.md's M4 and M5 corpus categories prints its .out")
 run_m4_m5_corpus()
@@ -49,7 +49,17 @@ run_leak_programs()
         reports.push(s"$name: ${leaks_line(leaks.text)}")
 
     finish(b)
-    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.\nviews: 0 leaks for 0 total leaked bytes.\narrays: 0 leaks for 0 total leaked bytes.\nequality: 0 leaks for 0 total leaked bytes.")
+    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.\nviews: 0 leaks for 0 total leaked bytes.\narrays: 0 leaks for 0 total leaked bytes.\nequality: 0 leaks for 0 total leaked bytes.\ntraps: 0 leaks for 0 total leaked bytes.")
+
+@test("only a function holding counted values registers a frame record for a trap's catch, and it is taken off before the return")
+frame_records_only_where_counts_are_held()
+    val numbers = emitted("def f(n: integer): real =\n  var s = 0.0\n  for k in 1..n\n    s += real(k)\n  s\ndef main() = print(f(3))\n").unwrap_or("")
+    val text = emitted("def f(n: integer) =\n  val s = s\"n$n\"\n  print(s + s)\ndef main() = f(3)\n").unwrap_or("")
+    val f = split(text, "@\"n.f\"")[1]
+
+    assert(!numbers.contains("nex_frame_enter"), numbers)
+    assert(f.contains("func.call @nex_frame_enter"), f)
+    assert(split(f, "func.return")[0].contains("func.call @nex_frame_leave"), f)
 
 @test("== and != compare structs, tuples and enums field by field: strings by text, reals as == does, enums by variant first")
 run_aggregate_equality()

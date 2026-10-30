@@ -219,7 +219,7 @@ impl Emitter
 
         if r > 1 then self.put_text(sink, ")")
 
-    // A trap whose message is what `sink` holds.
+    // A trap whose message is what `sink` holds, the string released once the trap has its text.
     trap_from(*self, sink: string)
-        self.call("nex_trap", self.call("nex_sink_finish", sink, "i64", "!llvm.ptr"), "!llvm.ptr", "")
+        self.call("nex_trap_owned", self.call("nex_sink_finish", sink, "i64", "!llvm.ptr"), "!llvm.ptr", "")
 end Emitter

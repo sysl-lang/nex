@@ -63,8 +63,11 @@ array_alloc(bytes: long) -> *u8
 
     calloc(usize(n), 1)
 
-// Storage from `nex_array_alloc` given back: the block partials of a parallel reduction, whose
-// lifetime the compiler knows.
+// `bytes` of zeroed storage for the block partials of a parallel reduction, whose lifetime the
+// compiler knows: given back by `nex_storage_free`, or by the catch a trap in the region reaches.
+@export("nex_storage_alloc")
+storage_alloc(bytes: long) -> *u8 = storage_block(bytes)
+
 @export("nex_storage_free")
 storage_free(p: *u8)
-    free(p)
+    block_free(p)

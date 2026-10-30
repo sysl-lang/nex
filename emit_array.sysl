@@ -444,7 +444,7 @@ impl Emitter
     // that nothing the statement does frees the storage under it.
     stored_view(*self, span: Span, h: string, t: Ty) -> string
         self.pin(h, t, 1)
-        self.temps.push(Temp(h, t))
+        self.hold_temp(h, t)
 
         val m =self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")} : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
 

@@ -160,6 +160,27 @@ par_run_no_leaks_or_races()
     assert_eq(guarded.text, expected)
     assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
 
+@test("traps in parallel bodies, caught many times on seven threads, give back what every abandoned iteration held")
+par_traps_leak_nothing()
+    if !exists("/usr/bin/leaks") then skip("no leaks tool")
+
+    val b = bench()
+    val name = "parallel-traps"
+    val exe = s"${b.work}/traps"
+    val expected = read_text(s"testdata/leaks/$name.out").unwrap()
+
+    build(b, read_text(s"testdata/leaks/$name.nex").unwrap(), exe)
+
+    val plain = run_with(exe, "7")
+    val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
+    val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
+
+    finish(b)
+    assert_eq(plain.text, expected)
+    assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
+    assert_eq(guarded.text, expected)
+    assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
+
 @test("a parallel body writing a module-level array, or reducing a counted value, is refused by the emitter")
 par_emit_refusals()
     assert_eq(emitted("var g: [real] = zeros(4)\ndef main() =\n  parallel for i in 1..4\n    g[i] = 1.0\n").err().unwrap_or(""),
