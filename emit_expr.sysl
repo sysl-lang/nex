@@ -35,8 +35,8 @@ impl Emitter
             val i = self.ex(im)
 
             self.def(s"complex.create $r, $i : ${self.ty(e.span, e.ty)}")
-        TRescale(_, _) -> self.unsupported(e.span, "a value with a unit of measure")
-        TUnitAs(_) -> self.unsupported(e.span, "a value with a unit of measure")
+        TRescale(v, factor) -> self.rescale(e, v, factor)
+        TUnitAs(v) -> self.ex(v)
         TComplexPart(v, imag) -> self.def(s"complex.${if imag then "im" else "re"} ${self.ex(v)} : ${self.ty(e.span, v.ty)}")
         TBinary(op, l, r) ->
             val a = self.ex(l)
@@ -128,9 +128,7 @@ impl Emitter
             self.call("nex_stop", c, "i32", "")
             ""
         TArray(op) -> self.array(e, *op)
-        TParallel(_) ->
-            self.later(e.span, "a parallel construct")
-            ""
+        TParallel(p) -> self.par(e, *p)
         TTuple(elems) -> self.aggregate(e.span, e.ty, elems)
         TTupleField(v, k) -> self.field_of(v, k, e.ty)
         TNew(args) -> self.aggregate(e.span, e.ty, args)
@@ -216,12 +214,12 @@ impl Emitter
     complex_const(*self, re: string, im: string, bits: int) -> string = self.def(s"complex.create $re, $im : complex<f$bits>")
 
     literal(*self, span: Span, v: Lit, t: Ty) -> string = v match
-        IntVal(n) -> t match
+        IntVal(n) -> base_of(t) match
             Int(b, _) -> self.int_const(s"$n", b)
             Real(b) -> self.real_const(real(n), b)
             Complex(b) -> self.complex_const(self.real_const(real(n), b), self.real_const(0.0, b), b)
             _ -> self.unsupported(span, s"an integer literal of type ${show_ty(t)}")
-        RealVal(x) -> t match
+        RealVal(x) -> base_of(t) match
             Real(b) -> self.real_const(x, b)
             Complex(b) -> self.complex_const(self.real_const(x, b), self.real_const(0.0, b), b)
             _ -> self.unsupported(span, s"a real literal of type ${show_ty(t)}")
@@ -229,7 +227,8 @@ impl Emitter
         StrVal(text) -> self.string_ref(text)
         VoidVal -> ""
 
-    constant(*self, span: Span, name: string, t: Ty) -> string
+    constant(*self, span: Span, name: string, unit_t: Ty) -> string
+        val t = base_of(unit_t)
         val bits = bits_of(t)
 
         if name == "i" then return self.complex_const(self.real_const(0.0, bits), self.real_const(1.0, bits), bits)
@@ -242,7 +241,7 @@ impl Emitter
     // -- operators --------------------------------------------------------------------------------
 
     // `a op b` on two operands of type `t`.
-    binary(*self, span: Span, op: string, a: string, b: string, t: Ty) -> string = t match
+    binary(*self, span: Span, op: string, a: string, b: string, t: Ty) -> string = base_of(t) match
         Int(bits, signed) -> self.int_binary(op, a, b, bits, signed)
         Real(bits) -> self.real_binary(span, op, a, b, bits)
         Complex(bits) -> self.complex_binary(op, a, b, bits)
@@ -401,7 +400,7 @@ impl Emitter
     end complex_binary
 
     // `base ^ n` with an integer `n` of its own type, the base keeping its type (DESIGN §2.2).
-    power_int_exponent(*self, span: Span, a: string, at: Ty, n: string, nt: Ty) -> string = at match
+    power_int_exponent(*self, span: Span, a: string, at: Ty, n: string, nt: Ty) -> string = base_of(at) match
         Int(bits, signed) ->
             val nbits = bits_of(nt)
             val nsigned = is_signed(nt)
@@ -416,7 +415,7 @@ impl Emitter
     unary(*self, span: Span, op: string, v: string, t: Ty) -> string
         if op == "not" then return self.not(v)
 
-        t match
+        base_of(t) match
             Int(bits, _) -> self.binary(span, "-", self.int_const("0", bits), v, t)
             Real(bits) -> self.def(s"arith.negf $v : f$bits")
             Complex(bits) -> self.def(s"complex.neg $v : complex<f$bits>")
@@ -481,7 +480,10 @@ impl Emitter
 
     // `v` of type `from` as a `to`: a widening, or a conversion that traps where `traps` says the
     // value can be out of the target's range (DESIGN §2.4).
-    convert(*self, span: Span, v: string, from: Ty, to: Ty, traps: bool) -> string
+    convert(*self, span: Span, v: string, unit_from: Ty, unit_to: Ty, traps: bool) -> string
+        val from = base_of(unit_from)
+        val to = base_of(unit_to)
+
         if ty_eq(from, to) then return v
 
         from match

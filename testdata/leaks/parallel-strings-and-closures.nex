@@ -1,0 +1,19 @@
+// A parallel body reading an outer string and calling an outer closure on every thread, each
+// iteration building and dropping strings: the counts change on several threads at once.
+
+def tag(s: string, k: integer): string = s"$s-$k"
+
+def main() =
+  val name = s"shared${3 * 7}"
+  val f = (k: integer) -> s"$name:$k"
+  val n = 200000
+  var total = 0
+  parallel for i in 1..n reduce total: +
+    val a = tag(name, i)
+    val b = f(i)
+    val c = a + b
+    if c == "" then cycle
+    total += 1
+  print(total)
+  print(name)
+  print(f(1))

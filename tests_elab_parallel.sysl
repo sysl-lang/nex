@@ -97,6 +97,15 @@ par_owned_reads()
     assert_eq(refused("var g: [real] = zeros(3)\ndef total(): real = sum(g)\ndef main() =\n  parallel for i in 1..3\n    g[i] = total()\n"),
         "error: `total` reads `g`, which this body writes element by element @5:12")
 
+@test("a column written through its slice is read through the same slice, and no other")
+par_owned_slice_reads()
+    assert_eq(refused("def main() =\n  var g: [real; :, :] = ones((3, 3))\n  parallel for j in 1..3\n    g[:, j] = g[:, j] / sum(g[:, j])\n"), "ok")
+    assert_eq(refused("def main() =\n  var g: [real; :, :] = ones((3, 3))\n  parallel for j in 1..3\n    g[:, j] = g[:, 1] * 2.0\n"),
+        "error: `g` is written by every iteration at its own element, so the body reads it only there, not at another iteration's @4:15")
+    assert_eq(refused("def main() =\n  var g: [real; :, :] = ones((3, 3))\n  parallel for j in 1..3\n    g[:, j] = g[1..2, j] * 2.0\n"), "ok")
+    assert_eq(refused("def main() =\n  var g: [real; :, :] = ones((3, 3))\n  parallel for j in 1..3\n    g[j, :] = g[:, j]\n"),
+        "error: `g` is written by every iteration at its own element, so the body reads it only there, not at another iteration's @4:15")
+
 // -- rule 3: calls and I/O --------------------------------------------------------------------
 @test("a body does no I/O but print and eprint, and calls only what the checker sees")
 par_io_and_opaque_calls()

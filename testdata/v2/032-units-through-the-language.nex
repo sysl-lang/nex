@@ -1,0 +1,57 @@
+// Values with units through every place a value goes: module-level bindings, compound assignment,
+// loops, `match`, closures and function values, tuples destructured, and prelude constants.
+
+val g = 9.81<m/s^2>
+var total = 0.0<mm>
+
+enum Shape =
+  Circle(r: real<m>)
+  Square(side: real<cm>)
+
+def area(s: Shape): real<m^2> =
+  s match
+    Circle(r) -> pi * r * r
+    Square(side) -> to<m^2>(side * side)
+
+def fall(t: real<s>) = 0.5 * g * t^2
+
+def add(x: real<in>) =
+  total += x
+
+def main() =
+  print(g)
+  print(fall(2.0<s>))
+  add(1.0<in>)
+  add(2.0<in>)
+  print(total)
+
+  var d = 1.0<m>
+  d *= 3.0
+  d -= 50.0<cm>
+  print(d)
+
+  var speed = 0.0<m/s>
+  for k in 1..3
+    speed += g * 1.0<s>
+  print(speed)
+
+  var x = 1.0<km>
+  while x > 1.0<mi>
+    x = x * 0.5
+  print(x)
+
+  print(area(Circle(1.0<m>)))
+  print(area(Square(10.0<cm>)))
+
+  val scale = (v: real<ft>) -> to<m>(v) * 2.0
+  print(scale(1.0<ft>))
+  val f: (real<s>) -> real<m> = fall
+  print(f(1.0<s>))
+
+  val (w, h) = (2.0<m>, 3.0<ft>)
+  print(w * h)
+
+  val turn = 2pi<rad>
+  print(sin(turn / 4.0))
+  print(-sign(-2.0<m>))
+  print(s"${floor(2.7<s>)}, ${round(2.5<s>)}")

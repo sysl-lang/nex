@@ -62,3 +62,9 @@ array_alloc(bytes: long) -> *u8
     val n = if bytes > 0 then bytes else 1
 
     calloc(usize(n), 1)
+
+// Storage from `nex_array_alloc` given back: the block partials of a parallel reduction, whose
+// lifetime the compiler knows.
+@export("nex_storage_free")
+storage_free(p: *u8)
+    free(p)

@@ -25,13 +25,17 @@ private among(name: string, names: []const string) -> bool
 impl Emitter
     builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
         if name == "print" || name == "eprint"
-            val sink = self.def(s"arith.constant ${if name == "print" then 1 else 2} : i64")
+            val dest = self.def(s"arith.constant ${if name == "print" then 1 else 2} : i64")
+            // A program that runs threads gathers the line and writes it at once (DESIGN §9.4).
+            val sink = if self.threaded then self.call("nex_sink_new", "", "", "i64") else dest
 
             *args[0].kind match
                 TInterp(parts, _) -> self.interp_into(sink, parts)
                 _ -> self.put_value(args[0].span, sink, self.ex(args[0]), args[0].ty)
 
-            self.call("nex_put_newline", sink, "i64", "")
+            if self.threaded then self.call("nex_line_end", s"$sink, $dest", "i64, i64", "")
+            else self.call("nex_put_newline", sink, "i64", "")
+
             return ""
 
         if name == "assert_approx" then return self.assert_approx(span, args)
@@ -94,17 +98,19 @@ impl Emitter
         if name == "abs" then return self.abs(span, x, args[0].ty)
         if name == "sign" then return self.sign(span, x, args[0].ty)
 
-        if is_complex(args[0].ty)
-            val c = self.ty(span, args[0].ty)
+        val at = base_of(args[0].ty)
+
+        if is_complex(at)
+            val c = self.ty(span, at)
 
             if name == "conj" then return self.def(s"complex.conj $x : $c")
             if name == "arg" then return self.def(s"complex.angle $x : $c")
-            if name == "sqrt" then return self.complex_sqrt(x, bits_of(args[0].ty))
+            if name == "sqrt" then return self.complex_sqrt(x, bits_of(at))
             if among(name, COMPLEX_OPS) then return self.def(s"complex.$name $x : $c")
 
             return self.unsupported(span, s"`$name` of a complex")
 
-        val bits = bits_of(t)
+        val bits = bits_of(base_of(t))
 
         if name == "sqrt" || name == "floor" || name == "ceil" || name == "trunc" || name == "round"
             val r = self.def(s"math.$name $x : f$bits")
@@ -170,12 +176,12 @@ impl Emitter
 
         self.def(s"complex.create $final_re, $final_im : $c")
 
-    min_max(*self, name: string, a: string, b: string, t: Ty) -> string = t match
+    min_max(*self, name: string, a: string, b: string, t: Ty) -> string = base_of(t) match
         Int(bits, signed) -> self.def(s"arith.${name}${if signed then "si" else "ui"} $a, $b : i$bits")
         Real(bits) -> self.def(s"arith.${if name == "min" then "minimumf" else "maximumf"} $a, $b : f$bits")
         _ -> ""
 
-    abs(*self, span: Span, x: string, t: Ty) -> string = t match
+    abs(*self, span: Span, x: string, t: Ty) -> string = base_of(t) match
         Int(bits, signed) ->
             if !signed then return x
 
@@ -188,7 +194,7 @@ impl Emitter
         _ -> self.unsupported(span, s"`abs` of ${show_ty(t)}")
 
     // -1, 0 or 1 in the argument's type; a real's zero and NaN are their own sign.
-    sign(*self, span: Span, x: string, t: Ty) -> string = t match
+    sign(*self, span: Span, x: string, t: Ty) -> string = base_of(t) match
         Int(bits, signed) ->
             val i = s"i$bits"
             val zero = self.int_const("0", bits)
@@ -243,6 +249,10 @@ impl Emitter
             Bool -> self.call("nex_put_bool", s"$sink, $v", "i64, i1", "")
             Str -> self.call("nex_put_str", s"$sink, $v", "i64, !llvm.ptr", "")
             Array(_, _) -> if is_items(t) then self.put_items(span, sink, v, t) else self.put_array(span, sink, v, t)
+            // A value with a unit inside a tuple or a struct, as `print` shows one (DESIGN §13.4).
+            Measured(b, u) ->
+                self.put_value(span, sink, v, *b)
+                self.put_text(sink, " " + spell(*u))
             _ -> self.put_aggregate(span, sink, v, t)
 
     // A value under an `f"..."` specifier, which the elaborator has checked against its type.
@@ -261,7 +271,7 @@ impl Emitter
             self.call("nex_put_fmt_str", s"$sink, $text, $s", "i64, !llvm.ptr, !llvm.ptr", "")
             return
 
-        t match
+        base_of(t) match
             Int(bits, signed) ->
                 val b = self.def(s"arith.constant $bits : i32")
                 val sg = self.def(s"arith.constant $signed")

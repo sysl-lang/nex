@@ -1,0 +1,61 @@
+@tests
+
+// Programs with units of measure, compiled and run (DESIGN §13): the corpus's units programs, the
+// conversion factor rounded once to each width, a conversion's overflow under `--fpe-trap`, and what
+// units leave for a later part of the compiler.
+
+import sysl.text.join
+
+@test("every units-of-measure corpus program prints its .out")
+run_units_corpus()
+    val r = corpus_run(["units of measure"])
+
+    assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
+    assert_eq(r.waiting.len(), 0)
+    assert_eq(r.passed, 6)
+
+@test("a conversion factor is the exact ratio rounded once to the operand's width, ties to even")
+factor_rounded_once()
+    assert_eq(factor_at(Ratio(254, 10000), 64), 0.0254)
+    assert_eq(factor_at(Ratio(1, 3), 64), 1.0 / 3.0)
+    assert_eq(factor_at(Ratio(8896443230521, 1290320000), 64), 6894.757293168362)
+    // Dividing the two parts as reals misses this one by an ulp.
+    assert_eq(factor_at(Ratio(930492790050107870235, 574733391551082240301), 64).bits(), 0x3FF9E76B80A1E9AC)
+    assert_eq((real(i256(930492790050107870235)) / real(i256(574733391551082240301))).bits(), 0x3FF9E76B80A1E9AB)
+    // 1 + 2^-24 + 2^-60 is just above the real32 midpoint of 1 and 1 + 2^-23: rounding through real64
+    // lands on the midpoint and then on 1.
+    val above = Ratio((i256(1) << 60) + (i256(1) << 36) + 1, i256(1) << 60)
+
+    assert_eq(f32(factor_at(above, 32)).bits(), 0x3F800001)
+    assert_eq(f32(factor_at(Ratio(254, 10), 32)).bits(), f32(25.4).bits())
+    assert_eq(f16(factor_at(Ratio(1, 1000), 16)).bits(), f16(0.001).bits())
+    // An exact tie goes to the even significand.
+    assert_eq(f32(factor_at(Ratio((i256(1) << 24) + 1, i256(1) << 24), 32)).bits(), 0x3F800000)
+    assert_eq(f32(factor_at(Ratio((i256(1) << 24) + 3, i256(1) << 24), 32)).bits(), 0x3F800002)
+
+@test("a conversion factor past a width's range is an infinity, and below its subnormals a zero")
+factor_at_the_ends()
+    assert_eq(factor_at(Ratio(i256(1) << 200, 1), 32), 1.0 / 0.0)
+    assert_eq(factor_at(Ratio(1, i256(1) << 160), 32), 0.0)
+    assert_eq(f32(factor_at(Ratio(1, i256(1) << 149), 32)).bits(), 0x00000001)
+    assert_eq(f32(factor_at(Ratio(3, i256(1) << 150), 32)).bits(), 0x00000002)
+    assert_eq(f16(factor_at(Ratio(65520, 1), 16)).bits(), 0x7C00)
+    assert_eq(f16(factor_at(Ratio(65519, 1), 16)).bits(), 0x7BFF)
+
+@test("a conversion is a multiplication like any other: IEEE without --fpe-trap, an overflow trap with it")
+run_conversion_overflow()
+    val b = bench()
+    val program = "def main() =\n  val d = 1.0e306<km>\n  print(to<mm>(d))\n"
+    val quiet = ran(b, program)
+    val trapped = ran(b, program, fpe_trap = true)
+
+    finish(b)
+    assert_eq(quiet.text, "inf mm\n")
+    assert_eq(trapped.err.unwrap_or(""), "trap: floating-point overflow\n")
+    assert(!trapped.status.ok())
+
+@test("an extern is still refused by the emitter, whatever its units")
+emit_refuses_extern()
+    val e = emitted("extern def cbrt(x: real): real\n\ndef main() =\n  val v = 8.0<m^3>\n  print(cbrt(strip(v)) * 1.0<m>)\n").err().unwrap_or("")
+
+    assert_eq(e, "error: an `extern` declaration is not compiled yet @1:1")

@@ -11,6 +11,8 @@
 
 @include("<setjmp.h>")
 
+import sysl.sync.{Acquire, Atomic, Release, SpinLock}
+
 c const
     JMP_BUF_WORDS: usize = "(sizeof(jmp_buf) + sizeof(long long) - 1) / sizeof(long long)"
 
@@ -25,10 +27,11 @@ extern longjmp(env: *u64, v: int) -> never
 extern abort() -> never
 
 // The innermost catch's saved context, and how deep the catches are nested; at depth zero a trap
-// aborts. Each catch saves the context it replaces and restores it on the way out.
-private var catch_env: [JMP_BUF_WORDS]u64 = [0; JMP_BUF_WORDS]
-private var depth = 0
-private var last_message = ""
+// aborts. Each catch saves the context it replaces and restores it on the way out. Every thread has
+// its own: a `longjmp` never leaves the thread that trapped.
+@thread_local private var catch_env: [JMP_BUF_WORDS]u64 = [0; JMP_BUF_WORDS]
+@thread_local private var depth = 0
+@thread_local private var last_message = ""
 
 trap_with(message: string) -> never
     note_trap(message)
@@ -39,8 +42,8 @@ trap_with(message: string) -> never
 // the `longjmp` of `raise_trap`.
 note_trap(message: string)
     if depth == 0 then
-        flush()
-        eprints(s"trap: $message\n")
+        flush_output()
+        put(2, s"trap: $message\n")
         abort()
 
     last_message = message
@@ -62,13 +65,13 @@ trap_complex_div_zero() -> never
 // `stop n`: what was printed is written out, and the program ends with status `n`.
 @export("nex_stop")
 stop(code: int) -> never
-    flush()
+    flush_output()
     exit(code)
 
 // The end of `main`: what was printed is written out.
 @export("nex_finish")
 finish()
-    flush()
+    flush_output()
 
 // Run `body`, answering true if it trapped and false if it returned. What it printed before the trap
 // stays printed; the trap's message is not written, and `nex_last_trap_message` answers it.
@@ -112,4 +115,59 @@ private mentions(expected: *u8) -> bool = last_message.contains(c_text(expected)
 // The message of the last trap a catch caught, written to standard output on a line of its own.
 @export("nex_print_last_trap")
 print_last_trap()
-    print(s"trap: $last_message")
+    put(1, s"trap: $last_message\n")
+
+// -- parallel regions -------------------------------------------------------------------------------
+//
+// A `parallel` construct runs as one OpenMP region whose every thread calls `nex_par_run` with the
+// region's code (DESIGN §9.5). A trap inside the region must not `longjmp` out of an OpenMP thread,
+// so each thread runs the code under a catch of its own: a trap returns to that catch, the first
+// trap's message is kept, and `nex_par_stopped` tells the other threads to start no new iteration.
+// After the region the thread that started it calls `nex_par_end`, which raises the kept trap there,
+// where a catch around the loop (`assert_traps`) or the program's end sees it like any other.
+
+// Whether a trap has ended the region running now, and its message.
+private var stopped = Atomic[i32](0)
+private var region_message = ""
+private var region_lock = SpinLock(0)
+
+@export("nex_par_begin")
+par_begin()
+    stopped.store(0, Release)
+
+// One thread's share of a region: `code(env, worker, workers)` under a catch.
+@export("nex_par_run")
+par_run(code: *extern(*u8, long, long) -> unit, env: *u8, worker: long, workers: long)
+    val saved = catch_env
+
+    depth += 1
+
+    val trapped = setjmp(&catch_env[0]) != 0
+
+    if !trapped then code(env, worker, workers)
+
+    depth -= 1
+    catch_env = saved
+
+    if trapped
+        region_lock.lock()
+
+        if stopped.load(Acquire) == 0
+            region_message = last_message
+            stopped.store(1, Release)
+
+        region_lock.unlock()
+
+// The word that turns nonzero once a trap has ended the region, which generated code reads with an
+// atomic load before each iteration: an iteration not yet started does not start.
+@export("nex_par_stop_word")
+par_stop_word() -> *i32 = &stopped.v
+
+// The region is over: its trap, if one ended it, is raised in the thread that started it.
+@export("nex_par_end")
+par_end()
+    if stopped.load(Acquire) == 0 then return
+
+    stopped.store(0, Release)
+    note_trap(region_message)
+    raise_trap()

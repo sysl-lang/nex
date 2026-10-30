@@ -142,7 +142,7 @@ impl Emitter
         self.trap_if(self.def(s"arith.cmpi slt, $w, ${self.def("arith.constant 0 : i64")} : i64"), "a negative extent")
         self.def(s"arith.index_cast $w : i64 to index")
 
-    one_or_zero(*self, span: Span, t: Ty, one: bool) -> string = t match
+    one_or_zero(*self, span: Span, t: Ty, one: bool) -> string = base_of(t) match
         Int(b, _) -> self.int_const(if one then "1" else "0", b)
         Real(b) -> self.real_const(if one then 1.0 else 0.0, b)
         Complex(b) -> self.complex_const(self.real_const(if one then 1.0 else 0.0, b), self.real_const(0.0, b), b)
@@ -462,7 +462,7 @@ impl Emitter
 
             var x = chain_leaf(args[0], 0)
 
-            if is_complex(elem_of(a.ty)) then x = texpr(e.span, elem_of(a.ty), TBuiltin("conj", single(x)))
+            if is_complex(base_of(elem_of(a.ty))) then x = texpr(e.span, elem_of(a.ty), TBuiltin("conj", single(x)))
 
             vt = Ty.Array(elem_of(e.ty), dynamic_axes(1))
             v = self.mapped_values(e.span, vt, operands, vals, texpr(e.span, elem_of(e.ty), TBinary("*", x, chain_leaf(args[1], 1))))
@@ -481,6 +481,7 @@ impl Emitter
 
         val rt = self.ty(span, t)
 
+        if self.par_kernel then return self.reduce_kernel(span, name, f, ft, t)
         if !tree_reduction(name) then return self.reduce_range(span, name, f, ft, t, self.index_const(0), n)
 
         // The block partials, then rounds of the pairwise tree: each pairs neighbours, an odd last
@@ -635,10 +636,10 @@ impl Emitter
         if name == "count" then return self.def(s"arith.addi $acc, ${self.def(s"arith.extui $x : i1 to i64")} : i64")
 
         if name == "norm2"
-            val b = bits_of(t)
+            val b = bits_of(base_of(t))
             var sq = ""
 
-            et match
+            base_of(et) match
                 Complex(_) ->
                     val re = self.def(s"complex.re $x : complex<f$b>")
                     val im = self.def(s"complex.im $x : complex<f$b>")
@@ -674,7 +675,7 @@ impl Emitter
         if name == "minval" || name == "maxval"
             val low = name == "maxval"
 
-            return t match
+            return base_of(t) match
                 Int(b, signed) ->
                     if signed then self.def(s"arith.constant ${if low then int_min_text(b) else int_max_text(b)} : i$b")
                     else self.def(s"arith.constant ${if low then "0" else "-1"} : i$b")
