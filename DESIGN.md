@@ -1008,7 +1008,9 @@ function `reduce` keeps its name.
 
 #### 9.2.1 Reproducible reductions
 
-**A reduction's result does not depend on the thread count.** The index range is cut into
+**A reduction's result does not depend on the thread count.** The iterations are numbered in a
+fixed order — for a header of several clauses, the first clause's index varying fastest, as
+Fortran's array element order runs — and that range is cut into
 fixed-size blocks (4096 iterations; the size is a compile-time constant, not a tuning knob), each
 block is reduced sequentially from the operator's identity (`0` for `+`, `1` for `*`, `+inf` for
 a real `min` and the type's largest value for an integer `min`, `-inf` / the type's smallest value
@@ -1083,7 +1085,9 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
    function or lambda passed as a value (to `map`, say) counts as called by whatever receives it.
    **I/O:** `print` and writing to stderr are allowed, and each call is **atomic** — its whole line
    is written under a lock, so lines never interleave mid-line — but the **order of lines across
-   iterations is unspecified**. This is the one deliberately non-reproducible thing in a parallel
+   iterations is unspecified**. A program with a `parallel` construct gathers each line and writes
+   it whole when it ends, so a trap in the middle of computing a line's value (`print(s"a ${f()}")`)
+   leaves none of that line written; a program without one writes the pieces as they come. This is the one deliberately non-reproducible thing in a parallel
    loop. Every other I/O (`read_bytes`, `write_bytes`, opening or writing a file, reading input) is a
    compile error in a parallel body.
 4. **The reductions are well formed** (§9.2).
@@ -1104,41 +1108,62 @@ The body of an `@elemental` function (§7.3) obeys rules 1–3 and 5 as if it we
 
 **A trap inside a parallel body** ends the loop: every iteration already running finishes, no new
 one starts, and the trap is raised in the thread that started the loop, as if by its first
-statement after the loop (**PROPOSED**). Which iteration's trap is reported when several trap is
-unspecified. (The runtime's `longjmp` must not cross an OpenMP thread, so a worker records the trap
-and the region's end raises it *(unverified)*.)
+statement after the loop: an `assert_traps` around the loop catches it, and with nothing catching
+it the program writes it and aborts as any trap does. Which iteration's trap is reported when
+several trap is unspecified. A thread looks for a trap between blocks of 4096 iterations, so "no
+new one starts" holds per block: the iterations of a block already begun run to its end. (Each
+thread runs its share under a catch of its own, so the runtime's `longjmp` never crosses an OpenMP
+thread; the first trap's message is kept and raised by the thread that started the loop.)
 
 ### 9.5 Lowering
 
-| nex | MLIR at the tensor level | after bufferization |
-|---|---|---|
-| `parallel for` writing owned elements | `scf.forall` with `shared_outs`, one `tensor.parallel_insert_slice` per written array | `scf.forall` → `scf.parallel` (`scf-forall-to-parallel`) |
-| a reduction (`reduce` clause, `parallel sum`) | `scf.parallel` with an `scf.reduce` region over the operand's `bufferization.to_buffer` | itself |
-| `parallel map`, `parallel` element-wise | `linalg.generic`, all iterators `parallel` | `convert-linalg-to-parallel-loops` |
+**Every `parallel` construct is one OpenMP region whose code nex outlines itself.** The function
+that meets the construct gathers what the region reads into an environment in its frame and opens an
+`omp.parallel`; every thread of the team calls the runtime with the region's code, a function of
+its own taking the environment, the thread's number and the team's size. Being a function, the code
+gives each thread its own copy of every local the body binds, its loop counter and the control word
+`cycle` sets. The runtime runs the code under a per-thread catch (§9.4 traps).
 
-then `convert-scf-to-openmp` (an `omp.parallel` / `omp.wsloop`, and an `omp.declare_reduction` per
-reduction) and `convert-openmp-to-llvm`, linking `libomp`. `parallel.mlir` runs all three shapes
-through both the sequential pipeline (where `convert-scf-to-cf` makes every parallel op a plain
-loop) and the OpenMP one, with the same sum both ways, and records the highest OpenMP thread id that
-ran an iteration: 0 sequentially, 3 under `OMP_NUM_THREADS=4`. An element write in the body is a
-`linalg.fill` of a one-element `tensor.extract_slice`; `tensor.from_elements` instead bufferizes to
-an allocation and a `memrefCopy` call per iteration (both run).
+| nex | the region's code |
+|---|---|
+| `parallel for` | the thread's contiguous run of iterations (or, with a `reduce` clause, of blocks), each iteration setting the indices from its number and running the body |
+| a `reduce` clause | per block: an accumulator started from the identity, each contribution combined into it, the block's partial stored; after the region the partials are combined in the tree of §9.2.1 and once with the starting value |
+| `parallel` element-wise or `map` | the thread's run of the result's elements, in storage order, each computed by the scalar operation over the operands' elements |
+| `parallel sum`, `product`, `minval`, `maxval`, `dot` | the thread's run of blocks, each reduced as the sequential reduction reduces it; after the region the same tree |
 
-The OpenMP lowering of a reduction over an operator the conversion does not pattern-match
-(complex `+`, `min`/`max` on integers, `and`/`or`, `minloc`/`maxloc`, a user operator) is
-*(unverified)*; only real `+` was run. The fixed block-and-tree order of §9.2.1 is emitted by nex
-around the per-block loop, not left to `omp.declare_reduction`, whose combination order follows the
-thread count.
+**Arrays cross as buffers.** A local the body reads crosses as its address. An array crosses as a
+memref descriptor, through a *launcher*: a private function that takes every array the region
+reaches as a tensor argument, gives back each one the body writes, fills their fields of the
+environment with their buffers and opens the region. One-shot bufferization sees a call that reads
+some arrays and writes others as an `inout` argument is written (§8), so a written array is written
+in place by every thread at the elements it owns — inside an enclosing loop too — and is copied
+first only where the caller still needs its old value or the call also reads it. Inside the code a
+written array is a `restrict writable` tensor over that buffer, written back over it at the end,
+which bufferization turns into nothing. The result of a `parallel` element-wise expression is a
+buffer allocated before the region and freed by the deallocation pipeline.
+
+**Counts are atomic in every program.** Strings, cells and closure environments are counted
+objects, and a parallel body may copy and drop one shared from outside — an outer string read, an
+outer closure called — on several threads at once. The runtime changes every count with one atomic
+add (`release` with acquire-release ordering, so the thread that frees an object sees every other
+thread's last use of it); uncontended that costs what the plain add did, so there is no second,
+non-atomic kind of count to keep apart. A reduction variable of a type that holds a count (a string
+built by a user operator) is not compiled yet.
 
 **Which pipeline a program gets is decided by the program, not by a flag.** A program that contains
-a `parallel` construct anywhere is lowered through OpenMP and links the OpenMP runtime; a program
-with none is lowered sequentially and links no OpenMP runtime at all. There is no `-fopenmp`
-equivalent to forget.
+a `parallel` construct anywhere holds an `omp.parallel`, so its pass list gains
+`convert-openmp-to-llvm` and its link `libomp`; a program with none links no OpenMP runtime at all.
+There is no `-fopenmp` equivalent to forget. Only the regions nex writes run on several threads:
+every other `linalg` operation still lowers to sequential loops (§9.3, no implicit parallelism).
 
 **The thread count comes from `OMP_NUM_THREADS` only**, the variable every HPC batch script already
 sets; nex adds no variable of its own. `OMP_PROC_BIND` and `OMP_PLACES` are honoured as the OpenMP
 runtime reads them. `OMP_NUM_THREADS=1` runs the program sequentially and, by §9.2.1, produces
 identical bits.
+
+Every operator of §9.2 reduces this way — real and complex `+`, `*`, `min` and `max` on integers
+and reals, `and`, `or`, `minloc`, `maxloc` and a user operator — since the combination is nex's own
+code, not an `omp.declare_reduction`, whose order would follow the thread count.
 
 ---
 

@@ -157,8 +157,8 @@ source ──parse──▶ AST ──elaborate──▶ typed IR ──emit─�
    A struct, tuple or enum is an LLVM struct value, never a heap object (no type contains itself), so
    counting one counts its parts. The tables of handles an array of strings, closures or enums with
    payloads stores (below) are arrays of these addresses as `i64`; a runtime table indexed by number
-   would buy nothing but a load per use. Counts are not atomic yet: a `parallel` body that copies a
-   string needs atomic ones. The leak check (`tests_run_aggregate.sysl`) runs the
+   would buy nothing but a load per use. Counts are atomic (DESIGN §9.5): a `parallel` body may copy
+   and drop an outer string on several threads at once. The leak check (`tests_run_aggregate.sysl`) runs the
    `testdata/leaks/` programs under `leaks --atExit` and under Guard Malloc.
 
 `tests_toolchain.sysl` holds the pipeline to account: hand-written proofs in `experiments/mlir/` go
@@ -207,10 +207,9 @@ Each pass and setting below is new, forced by a program that fails or copies wit
   source, which `finalize-memref-to-llvm` does not lower (`views.mlir`, `parallel.mlir`).
 
 The four existing proofs (145, 313, 316, real spelling) print the same bytes through the revised
-list. **OpenMP** inserts, after `convert-bufferization-to-memref`,
-`func.func(scf-forall-to-parallel), convert-linalg-to-parallel-loops, convert-scf-to-openmp`, and,
-before `convert-func-to-llvm`, `convert-openmp-to-llvm`; the program links `libomp` from
-`$NEX_LLVM_HOME/lib`.
+list. **OpenMP**: a program with a `parallel` construct emits its own `omp.parallel` regions
+(DESIGN §9.5), so the list gains only `convert-openmp-to-llvm`, before `convert-func-to-llvm`, and
+the program links `libomp` from `$NEX_LLVM_HOME/lib` (`driver.sysl`'s `pipeline_for`).
 
 ## What MLIR gives, and what it does not
 
@@ -236,9 +235,10 @@ before `convert-func-to-llvm`, `convert-openmp-to-llvm`; the program links `libo
   copies a view genuinely needs, so no MLIR runtime library is linked.
 - **Parallel loops lower to OpenMP.** `scf.forall` with `shared_outs`, `scf.parallel` with
   `scf.reduce`, and a parallel `linalg.generic` all reach `omp.wsloop` (with an
-  `omp.declare_reduction` for the reduction) and run on several threads (`parallel.mlir`). An element
-  write inside one must be a `linalg.fill` of a one-element slice: `tensor.from_elements` costs an
-  allocation and a `memrefCopy` per iteration.
+  `omp.declare_reduction` for the reduction) and run on several threads (`parallel.mlir`). nex
+  emits none of them: a region's order of combination would follow the thread count, and its body
+  could not hold the emitter's locals in memory. It outlines each region's code itself and opens an
+  `omp.parallel` around a runtime call (DESIGN §9.5).
 - **BLAS takes a view as it is.** A column-major matrix or a view with unit stride along its first axis is a
   pointer (`extract_aligned_pointer_as_index` plus the metadata offset) and a leading dimension (the
   memref's axis-0 stride), handed to `cblas_dgemm` with no copy (`blas.mlir`, Accelerate).
@@ -255,8 +255,8 @@ before `convert-func-to-llvm`, `convert-openmp-to-llvm`; the program links `libo
 - **Traps are catchable.** `assert_traps` (corpus 252–254) runs a lambda and passes when it traps,
   so a trap is a `longjmp` to the innermost `setjmp` the runtime armed, and an uncaught one prints
   its message and exits. Every trap goes through one runtime entry for that reason. A `longjmp` may
-  not leave an OpenMP worker, so inside a parallel region the entry records the trap and the region's
-  end raises it (DESIGN §9.4; not yet run).
+  not leave an OpenMP worker, so every thread of a region runs its share under a catch of its own,
+  and the region's end raises the first trap in the thread that started it (DESIGN §9.4).
 
 ## Milestones
 
