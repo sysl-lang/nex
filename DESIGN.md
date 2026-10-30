@@ -2264,15 +2264,21 @@ kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
   having been made.
 - **`run(args)`** calls `main` with `args` as the program's arguments and answers the status: 0 when
   `main` returns, the code `stop` gives. **`call(name, args)`** calls the top-level function `name`
-  with values, each checked against its parameter's type (§16.3), and answers its result. Every
-  argument is given: a host's call does not fill in defaults, and a function taking an `inout`
-  parameter is refused, since a host passes values, not places. A `stop` inside a call is an error,
-  `ScriptStop`.
+  with values, each checked against its parameter's type (§16.3), and answers its result.
+  **`call_named(name, positional, named)`** names arguments as a nex call does: `positional` fills
+  the leading parameters, `named` (each a `NexField`) any others by name. **A parameter a host's call
+  leaves out takes its default exactly as a nex call's does** (§11.3): evaluated afresh at every call,
+  in parameter order, seeing the module-level names of the function's own module, its unit
+  converted to the parameter's. A trap in a default leaves the function's own frame, at the default,
+  since the host's call has no nex frame of its own. A function taking an `inout` parameter is
+  refused, since a host passes values, not places. A `stop` inside a call is an error, `ScriptStop`.
 - **`get(name)`** reads a module-level binding, one taken apart by a destructuring `val` among them;
   **`set(name, v)`** writes a `var`, the value checked against its type. A `val` is not written.
 - **What a script prints goes to the host's `write`**, standard output and standard error apart.
-- **A request that cannot be made is refused before anything runs**: a name the script does not
-  declare, a wrong count of arguments, a value of the wrong type — `ScriptRefused` with the reason.
+- **A request that cannot be made is refused before anything runs**, no default evaluated: a name
+  the script does not declare, more arguments than parameters, a named argument the function has no
+  parameter for or one given twice, a parameter with no default left out, a value of the wrong type
+  — `ScriptRefused` with the reason, worded as the elaborator's refusal of the same nex call.
 - **Dropping the script lets go of everything it holds**: its compiled code, its bindings and the
   host's objects in them. A host that reloads an edited script after every keystroke holds one
   script at a time, and `examples/embed` reloads its model 50 times on a counted heap with nothing
@@ -2350,6 +2356,12 @@ kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
   `write`, stops the run in progress at its next step. Either ends the run with `ScriptHalt`, which
   `assert_traps` does not catch; the next request starts with the budget whole and uncancelled. Calls
   nest at most 10,000 deep, as everywhere (§11.3).
+- **Another thread stops a run through the script's `CancelToken`.** `cancel_token()` answers a
+  `&sync CancelToken`, one atomic word shared with the script and nothing else of it, so a
+  modeller's UI thread may hold it while a worker thread runs the script; its `cancel()` halts the run
+  in progress at its next step, as `Script.cancel()` does, and the step reads it without a lock. A
+  cancel that arrives between requests is cleared by the next one starting, so a host cancels a run
+  it knows has begun.
 
 ### 16.6 The sandbox
 

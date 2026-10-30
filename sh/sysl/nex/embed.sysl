@@ -28,6 +28,7 @@ module sh.sysl.nex
 // its elements in one typed buffer, column-major, rather than a value per element.
 
 import sysl.buf.{Buf, buf}
+import sysl.sync.{Atomic, Relaxed}
 import sh.sysl.parsing.{Diagnostic, Source, Span, source, source_of}
 
 // -- values ------------------------------------------------------------------------------------------
@@ -235,6 +236,7 @@ private compiled(p: TProgram, texts: Texts, host: Host, opts: ScriptOptions) -> 
 
     var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf(), buf())
     var init = it.program(None)
+    val defaults = it.defaults()
 
     if it.diags.len() > 0
         shut(m)
@@ -243,9 +245,24 @@ private compiled(p: TProgram, texts: Texts, host: Host, opts: ScriptOptions) -> 
     // The last is the call of `main`, which `run` makes itself.
     init.pop()
 
-    val s: &Script = Script(p, texts, m, init, it.fun_names, it.global_names, if opts.budget > 0 then opts.budget else NO_LIMIT, false, None)
+    val s: &Script = Script(p, texts, m, init, defaults, it.fun_names, it.global_names, if opts.budget > 0 then opts.budget else NO_LIMIT, false, None)
 
     Ok(s)
+
+// The argument a host's call leaves out: its default run in a frame of its own when the call
+// evaluates its arguments. A trap there leaves the function's frame, at the default.
+private defaulted(m: &Machine, d: Compiled) -> Code
+    (c) ->
+        val code = d.code
+        val r = code(frame_of(d.slots))
+
+        r match
+            Err(Trapped(_)) ->
+                m.trace.push(TraceFrame(d.name, if m.sited then m.site else d.span))
+                m.sited = false
+            _ -> ()
+
+        r
 
 // The text of every file of a script, by which a span becomes a file, a line and a column.
 private[nex] struct Texts
@@ -330,12 +347,32 @@ impl NexError
         ScriptHalt(message) -> message
         ScriptRefused(message) -> message
 
+// What stops a script's run in progress from any thread: a modeller's UI thread holds it while a
+// worker runs the script, and `cancel` halts the run at its next step, a call's entry or a loop's
+// pass, with `ScriptHalt`. It is one atomic word, so holding it shares nothing else of the script.
+struct CancelToken
+    flag: Atomic[int]
+
+impl CancelToken
+    cancel(*self)
+        self.flag.store(1)
+
+    cancelled(*self) -> bool = self.flag.load(Relaxed) != 0
+
+    private[nex] clear(*self)
+        self.flag.store(0)
+
+private[nex] cancel_token() -> &sync CancelToken = CancelToken(Atomic(0))
+
 // A loaded script, ready to run, call and inspect (DESIGN §16.2).
 struct Script
     private program: TProgram
     private texts: Texts
     private m: &Machine
     private init: Buf[Compiled]
+    // By function, each parameter's default compiled to run in a frame of its own, as a module-level
+    // initializer does: what a host's call leaving the argument out evaluates.
+    private defaults: Buf[Buf[Option[Compiled]]]
     private fun_names: Buf[string]
     private global_names: Buf[string]
     private budget: long
@@ -366,27 +403,60 @@ struct Script
                 _ -> Err(self.failure(s))
 
     // The top-level function `name` called with `args`, each checked against its parameter's type, and
-    // its result.
-    call(*self, name: string, args: Buf[NexValue]) -> Result[NexValue, NexError]
+    // its result. The leading parameters take `args`; each one after them takes its default.
+    call(*self, name: string, args: Buf[NexValue]) -> Result[NexValue, NexError] = self.call_named(name, args, buf())
+
+    // `call` with arguments by name as well: `positional` fills the leading parameters, `named` any
+    // others by their names, and each parameter left out takes its default, evaluated afresh in
+    // parameter order as a nex call evaluates it (DESIGN §11.3).
+    call_named(*self, name: string, positional: Buf[NexValue], named: Buf[NexField]) -> Result[NexValue, NexError]
         val k = self.function(name)?
         val f = self.fun_decl(k)
+        val n = f.params.len()
 
-        if args.len() != f.params.len() then return Err(ScriptRefused(s"`$name` takes ${f.params.len()} argument${if f.params.len() == 1 then "" else "s"}, and ${args.len()} ${if args.len() == 1 then "is" else "are"} given"))
+        if positional.len() > n then return Err(ScriptRefused(s"`$name` takes ${n} argument${if n == 1 then "" else "s"}, and ${positional.len()} ${if positional.len() == 1 then "is" else "are"} given"))
+
+        var given: Buf[Option[NexValue]] = buf()
+
+        for a in positional
+            given.push(Some(a))
+
+        for _ in positional.len()..<n
+            given.push(None)
+
+        for a in named
+            var found = false
+
+            for j in 0..<n
+                if self.param_name(f, j) == a.name
+                    found = true
+
+                    if given[j].is_some() then return Err(ScriptRefused(s"`${a.name}` is given twice"))
+
+                    given.set(j, Some(a.value))
+
+            if !found then return Err(ScriptRefused(s"`$name` has no parameter `${a.name}`"))
 
         var codes: Buf[Code] = buf()
 
-        for j in 0..<args.len()
+        for j in 0..<n
             val l = self.program.locals[f.params[j]]
+            val what = self.param_name(f, j)
 
             l.kind match
-                LParam(mode) -> if mode == Inout then return Err(ScriptRefused(s"`$name` takes `${l.name}` inout, and a host's call passes values"))
+                LParam(mode) -> if mode == Inout then return Err(ScriptRefused(s"`$name` takes `$what` inout, and a host's call passes values"))
                 _ -> ()
 
-            val v = from_host(self.program, args[j], l.ty, s"argument ${j + 1} of `$name`, `${l.name}`,") match
-                Ok(v) -> v
-                Err(message) -> return Err(ScriptRefused(message))
+            given[j] match
+                Some(a) ->
+                    val v = from_host(self.program, a, l.ty, s"argument ${j + 1} of `$name`, `$what`,") match
+                        Ok(v) -> v
+                        Err(message) -> return Err(ScriptRefused(message))
 
-            codes.push((c) -> Ok(v))
+                    codes.push((c) -> Ok(v))
+                None -> self.defaults[k][j] match
+                    Some(d) -> codes.push(defaulted(self.m, d))
+                    None -> return Err(ScriptRefused(s"`$name` needs its argument `$what`"))
 
         self.start()?
         self.fresh()
@@ -419,7 +489,10 @@ struct Script
     // Stops the run in progress at its next step, with `ScriptHalt`: a host function or `write` may
     // call it. The next `run` or `call` starts uncancelled.
     cancel(*self)
-        self.m.cancelled = true
+        self.m.cancel.cancel()
+
+    // What another thread holds to cancel this script's runs: the token `cancel` sets.
+    cancel_token(self) -> &sync CancelToken = self.m.cancel
 
     // The module-level bindings initialized, once, in the order they run.
     private start(*self) -> Result[unit, NexError]
@@ -453,7 +526,7 @@ struct Script
     private fresh(*self)
         self.m.steps = 0
         self.m.limit = self.budget
-        self.m.cancelled = false
+        self.m.cancel.clear()
         self.m.depth = 0
         self.m.trace = buf()
         self.m.sited = false
@@ -476,6 +549,8 @@ struct Script
             if display_name(self.fun_names[k]) == name then return Ok(k)
 
         Err(ScriptRefused(s"the script declares no function `$name`"))
+
+    private param_name(self, f: TFun, j: usize) -> string = self.program.locals[f.params[j]].name
 
     private fun_decl(self, k: usize) -> TFun
         var n: usize = 0

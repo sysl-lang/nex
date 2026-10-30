@@ -9,6 +9,9 @@ module sh.sysl.nex
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_dir_all, make_temp_dir, remove_dir_all, write_text}
 import sysl.text.{StrBuilder, join, str_builder}
+import sysl.threads.spawn
+import sysl.sync.Atomic
+import sysl.time.monotonic
 
 private struct Out
     text: StrBuilder
@@ -189,7 +192,9 @@ emb_run_and_state()
 emb_call_refusals()
     val s = loaded("def f(a: integer, b: real): real = a * b\ndef g(x: inout real) =\n  x = 1.0\ndef h() =\n  stop 7\n")
 
-    assert_eq(called(s, "f", one(int_value(2))), "`f` takes 2 arguments, and 1 is given")
+    assert_eq(called(s, "f", one(int_value(2))), "`f` needs its argument `b`")
+    assert_eq(called(s, "f", none()), "`f` needs its argument `a`")
+    assert_eq(called(s, "h", one(int_value(2))), "`h` takes 0 arguments, and 1 is given")
     assert_eq(called(s, "nope", none()), "the script declares no function `nope`")
     assert_eq(called(s, "g", one(real_value(1))), "`g` takes `x` inout, and a host's call passes values")
     assert_eq(called(s, "h", none()), "stop 7")
@@ -201,6 +206,80 @@ emb_call_refusals()
     assert_eq(called(s, "f", args), "r64:3")
 
     assert_eq(ran(s), "the script declares no function `main`")
+
+private named_args(pairs: []const (string, long)) -> Buf[NexField]
+    var out: Buf[NexField] = buf()
+
+    for (n, v) in pairs
+        out.push(NexField(n, int_value(v)))
+
+    out
+
+private called_named(s: &Script, name: string, positional: Buf[NexValue], named: Buf[NexField]) -> string = s.call_named(name, positional, named) match
+    Ok(v) -> shown(v)
+    Err(e) -> e.text()
+
+private val DEFAULTS = "var made = 0\n\ndef next_id(): integer =\n  made += 1\n  made\n\n" +
+    "def ident(id: integer = next_id()): integer = id\n\n" +
+    "def size(w: real<mm>, h: real<mm> = 0.5<cm>): real<mm> = w + h\n\n" +
+    "def digits(a: integer = 1, b: integer = 2, c: integer = 3): integer = a * 100 + b * 10 + c\n\n" +
+    "def need(a: integer, b: integer = 2): integer = a + b\n\n" +
+    "def zero(): integer = 0\n\ndef risky(n: integer = 7 div zero()): integer = n\n\n" +
+    "def order(a: integer = next_id(), b: integer = next_id()): integer = a * 10 + b\n"
+
+@test("a host's call leaving arguments out fills each with its default, evaluated afresh at every call in the function's module, a unit converted")
+emb_call_defaults()
+    val s = loaded(DEFAULTS)
+
+    assert_eq(called(s, "ident", none()), "i64:1")
+    assert_eq(called(s, "ident", none()), "i64:2")
+    assert_eq(called(s, "ident", one(int_value(40))), "i64:40")
+    assert_eq(shown(s.get("made").unwrap()), "i64:2")
+
+    // `0.5<cm>` is the default, which a `real<mm>` parameter holds as 5.
+    assert_eq(called(s, "size", one(real_value(1.0))), "r64:6")
+
+    // Defaults are evaluated in parameter order: `a` takes 3, then `b` takes 4.
+    assert_eq(called(s, "order", none()), "i64:34")
+    assert_eq(called_named(s, "order", none(), named_args([("a", 9)])), "i64:95")
+
+    // A trap in a default leaves the function's frame, at the default.
+    assert_eq(called(s, "risky", none()), "trap: integer division by zero\n  in risky at t.nex:17:24")
+    assert_eq(called(s, "risky", one(int_value(1))), "i64:1")
+
+@test("a host's call names arguments as a nex call does: positional first, then by name in any order, each left out defaulted")
+emb_call_named()
+    val s = loaded(DEFAULTS)
+
+    assert_eq(called_named(s, "digits", none(), named_args([("c", 9)])), "i64:129")
+    assert_eq(called_named(s, "digits", one(int_value(5)), named_args([("c", 7), ("b", 0)])), "i64:507")
+    assert_eq(called_named(s, "need", none(), named_args([("a", 1)])), "i64:3")
+    assert_eq(called_named(s, "need", none(), named_args([("b", 1), ("a", 4)])), "i64:5")
+
+@test("a host's call is refused for too many arguments, a name the function lacks, one given twice, or a required one left out")
+emb_call_named_refusals()
+    val s = loaded(DEFAULTS)
+    var four: Buf[NexValue] = buf()
+
+    for k in 0..<4
+        four.push(int_value(k))
+
+    assert_eq(called(s, "digits", four), "`digits` takes 3 arguments, and 4 are given")
+    assert_eq(called_named(s, "digits", none(), named_args([("z", 1)])), "`digits` has no parameter `z`")
+    assert_eq(called_named(s, "digits", one(int_value(5)), named_args([("a", 1)])), "`a` is given twice")
+    assert_eq(called_named(s, "digits", none(), named_args([("b", 1), ("b", 2)])), "`b` is given twice")
+    assert_eq(called(s, "need", none()), "`need` needs its argument `a`")
+    assert_eq(called_named(s, "need", none(), named_args([("b", 1)])), "`need` needs its argument `a`")
+
+    // A named argument is checked against its parameter's type, as a positional one is.
+    var bad: Buf[NexField] = buf()
+
+    bad.push(NexField("b", string_value("x")))
+    assert(called_named(s, "need", one(int_value(1)), bad).contains("argument 2 of `need`, `b`"), "named argument checked")
+
+    // Nothing runs for a refused call: `next_id` was not called.
+    assert_eq(called_named(s, "order", none(), named_args([("q", 1)])), "`order` has no parameter `q`")
+    assert_eq(shown(s.get("made").unwrap()), "i64:0")
 
 @test("module-level bindings are read by name and a var is written, its type checked; a val is not written")
 emb_globals()
@@ -508,6 +587,58 @@ emb_cancel()
     assert_eq(ran(s), "cancelled by the host")
     assert_eq(called(s, "once", none()), "i64:1")
     holder.s = None
+
+// What the cancelling thread is handed: the script's token, and nothing else of the script.
+private struct Stopper
+    token: &sync CancelToken
+    running: &sync Beat
+
+// Set by the script's host function once its loop is going, so the cancel lands mid-run.
+private struct Beat
+    on: Atomic[int]
+
+// Waits for the script to be running, then cancels it at once: no sleep, so a thread sanitizer sees
+// the cancel and the script's next step race if the flag between them were not atomic.
+private stop_when_running(st: *Stopper)
+    loop
+        if st.running.on.load() != 0 then break
+
+    st.token.cancel()
+
+@test("another thread cancels a script running an infinite loop through its token, the run halts promptly, and the next call is not cancelled")
+emb_cancel_from_thread()
+    val beat: &sync Beat = Beat(Atomic(0))
+    var h = new_host()
+
+    h.give("beat", (args) ->
+        beat.on.store(1)
+        Ok(NNothing)
+    )
+
+    val s = loaded("@host extern def beat()\n\nvar k = 0\n\ndef spin() =\n  while true\n    beat()\n    k += 1\n\ndef main() =\n  spin()\n\ndef once(): integer = 1\n", h)
+
+    // Twice, through `call` and `run`: each request starts uncancelled, and the token cancels again.
+    for round in 0..<2
+        beat.on.store(0)
+
+        var st = Stopper(s.cancel_token(), beat)
+        val began = monotonic()
+        val th = spawn(&stop_when_running, &st)
+
+        assert(th.is_some(), "spawned")
+
+        val r = if round == 0 then called(s, "spin", none()) else ran(s)
+
+        if th is Some(t) then t.join()
+
+        assert_eq(r, "cancelled by the host")
+        assert((monotonic() - began).us < 5000000, "halted promptly")
+
+    s.get("k") match
+        Ok(NInt(n, _, _)) -> assert(n > 0, "the loop ran")
+        _ -> assert(false, "no k")
+
+    assert_eq(called(s, "once", none()), "i64:1")
 
 @test("a sandboxed script may not stop or call C; the same script loads unsandboxed")
 emb_sandbox()

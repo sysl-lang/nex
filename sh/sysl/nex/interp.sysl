@@ -146,7 +146,8 @@ private[nex] struct Machine
     // Steps are a call's entry and a loop's pass; the run halts when `steps` reaches `limit`.
     steps: long
     limit: long
-    cancelled: bool
+    // Shared with whatever thread the host hands it to, which may cancel the run while it runs.
+    cancel: &sync CancelToken
     // The frames a trap has left so far, innermost first; and where in the frame it is leaving the
     // trap happened, once a statement there has said so.
     trace: Buf[TraceFrame]
@@ -160,7 +161,7 @@ private[nex] struct TraceFrame
     span: Span
 
 private[nex] machine(p: TProgram, args: Buf[string], write: &Fn(Stream, string) -> unit, fpe: bool) -> &Machine =
-    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, false, buf(), Span(0, 0), false)
+    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, cancel_token(), buf(), Span(0, 0), false)
 
 // The step limit of a run the host sets none for.
 private[nex] val NO_LIMIT: long = 9223372036854775807
@@ -170,9 +171,9 @@ private[nex] val NO_LIMIT: long = 9223372036854775807
 private[nex] tick(m: &Machine) -> Option[Signal]
     m.steps += 1
 
-    if m.steps < m.limit && !m.cancelled then return None
+    if m.steps < m.limit && !m.cancel.cancelled() then return None
 
-    Some(Halted(if m.cancelled then "cancelled by the host" else s"stopped after ${m.limit} steps, the host's budget"))
+    Some(Halted(if m.cancel.cancelled() then "cancelled by the host" else s"stopped after ${m.limit} steps, the host's budget"))
 
 // `r`, a call's answer at `span`, the site of the trap it may be.
 private[nex] sited(m: &Machine, r: Answer, span: Span) -> Answer
@@ -442,6 +443,34 @@ impl Interp
             m.globals.v.set(k, init(c)?)
             Ok(VVoid)
         , self.next, "module level", g.span)
+
+    // By function, each parameter's default compiled to run in a frame of its own: a default sees only
+    // module-level names (DESIGN §11.3), so it needs no caller's frame. The frame a trap in it leaves
+    // is the function's, at the default.
+    defaults(*self) -> Buf[Buf[Option[Compiled]]]
+        var out: Buf[Buf[Option[Compiled]]] = buf()
+
+        for d in self.prog.decls
+            d match
+                FunDecl(f) ->
+                    var each: Buf[Option[Compiled]] = buf()
+
+                    for x in f.defaults
+                        each.push(x match
+                            Some(e) ->
+                                self.begin()
+
+                                val code = self.ex(e)
+
+                                Some(Compiled(code, self.next, display_name(f.name), e.span))
+                            None -> None
+                        )
+
+                    out.push(each)
+                _ -> ()
+
+        out
+    end defaults
 
     // The call of the function `name` the program starts at.
     entry(*self, name: string) -> Compiled
