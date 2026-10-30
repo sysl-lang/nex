@@ -37,3 +37,4 @@ file	category	name
 061-parallel-reductions-over-every-operator	parallel	a reduction over `+ * min max and or`, `minloc`/`maxloc` with ties across blocks, a user operator (Kahan), a complex sum, a module-level variable, an empty loop and an overflow trap
 062-parallel-expressions-agree-with-sequential	parallel	`parallel` sums, products, extremes, `dot`, element-wise expressions, `map` and `dim =` reductions equal to the sequential ones bit for bit; the pairwise tree against a naive loop
 063-parallel-traps-strings-and-closures	parallel	a trap in a parallel body, expression or reduction caught by `assert_traps`; a body reading an outer string and calling an outer closure on every thread
+064-inout-windows-in-parallel-and-through-function-values	parallel	column, row, strided, reversed and rank-3 windows passed `inout` in a `parallel for` and to local `def`s, function values and function parameters; a captured array written in parallel, a `val` sharing it unchanged
