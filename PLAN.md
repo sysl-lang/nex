@@ -572,8 +572,8 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       is compiled into closures (`tir_erase.sysl`), but for what printing reads — a printed value's
       type and the struct and enum declarations — so a unit inside a tuple or a struct is printed
       after its number; a `TRescale` multiplies by the compiler's `factor_at`, now in the library.
-      Complex `^` follows MLIR's `complex.pow` lowering step for step. Complex `tan` stays refused:
-      MLIR lowers it through `expm1`, which sysl's `Float` does not have (reported upstream).
+      Complex `^` follows MLIR's `complex.pow` lowering step for step. Complex `tan` follows MLIR's
+      lowering too, through `Float.expm1`.
     - **I5 — the embedding API**: load a program and get its diagnostics as values, call a function
       by name with values, give the program host functions, redirect its output, and turn a trap
       into an `Err` instead of an abort. Built (`embed.sysl`, DESIGN §16): `load_script` /

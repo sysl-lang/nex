@@ -12,7 +12,7 @@ import sh.sysl.parsing.Span
 private[nex] type TextCode = &Fn(&Cells) -> Result[string, Signal]
 
 // The prelude's complex functions the interpreter computes.
-private val COMPLEX_FNS = ["conj", "arg", "sqrt", "exp", "log", "sin", "cos"]
+private val COMPLEX_FNS = ["conj", "arg", "sqrt", "exp", "log", "sin", "cos", "tan"]
 
 private among(name: string, names: []const string) -> bool
     for n in names
@@ -92,6 +92,7 @@ impl Interp
                    elif name == "exp" then complex_exp(re, im, bits)
                    elif name == "log" then complex_log(re, im, bits)
                    elif name == "sin" then complex_sin(re, im, bits)
+                   elif name == "tan" then complex_tan(re, im, bits)
                    else complex_cos(re, im, bits))
 
         val bits = bits_of(base_of(t))

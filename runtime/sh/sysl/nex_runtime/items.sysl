@@ -140,7 +140,7 @@ items_set_extent(p: *u8, k: long, n: long)
 // The address of element `k`, counted from 1, of the array at `p`; outside the array a trap.
 @export("nex_items_at")
 items_at(p: *u8, k: long) -> *u8
-    if k < 1 || k > items_count(p) then trap_with("index out of bounds")
+    if k < 1 || k > items_count(p) then trap_with(INDEX_OUT_OF_BOUNDS)
 
     at(p, k - 1)
 
@@ -308,7 +308,7 @@ items_stack(p: *u8, k: long, part: *u8)
     val a = items(p)
 
     for j in 1..<usize(a.rank)
-        if items_extent(part, long(j)) != extents(p)[j] then trap_with("shape mismatch")
+        if items_extent(part, long(j)) != extents(p)[j] then trap_with(SHAPE_MISMATCH)
 
     val n = extents(p)[0]
     val z = usize(a.size)
@@ -327,10 +327,10 @@ items_stack(p: *u8, k: long, part: *u8)
 @export("nex_items_permute")
 items_permute(p: *u8, rank: long, perm: *long) -> *u8
     for n in 0..<usize(rank)
-        if perm[n] < 1 || perm[n] > rank then trap_with("not a permutation of the axes")
+        if perm[n] < 1 || perm[n] > rank then trap_with(NOT_A_PERMUTATION)
 
         for j in 0..<n
-            if perm[j] == perm[n] then trap_with("not a permutation of the axes")
+            if perm[j] == perm[n] then trap_with(NOT_A_PERMUTATION)
 
     if p == null then return null
 
