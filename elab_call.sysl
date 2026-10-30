@@ -50,12 +50,16 @@ impl Elab
                             None -> return self.call_value(span, self.local_ref(callee.span, id, None), args)
                     None -> ()
 
+                self.find_generic_fun(n) match
+                    Some(g) -> return self.generic_call(span, callee.span, n, g, args)
+                    None -> ()
+
                 self.find_top(n) match
                     Some(TopFun(k)) -> return self.call_fun(span, callee.span, k, args)
                     Some(TopValue(_)) -> return self.call_value(span, self.name(callee.span, n, None), args)
                     None -> ()
 
-                self.construct(span, callee.span, n, args) match
+                self.construct(span, callee.span, n, args, want) match
                     Some(v) -> return v
                     None -> ()
 

@@ -258,7 +258,11 @@ impl Elab
             Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(n))
             None -> ()
 
-        self.type_or_variant(span, n) match
+        self.find_generic_fun(n) match
+            Some(g) -> return self.generic_value(span, g, want)
+            None -> ()
+
+        self.type_or_variant(span, n, want) match
             Some(v) -> return v
             None -> ()
 
@@ -811,10 +815,15 @@ impl Elab
 
             names.push(p.name)
 
+            // A type still holding a generic parameter is not known yet (`elab_generic.sysl`).
+            val known = expected match
+                Some(sig) -> if has_param(sig.params[k]) then None else Some(sig.params[k])
+                None -> None
+
             val ty = p.typ match
                 Some(t) -> self.resolve_type(t)
-                None -> expected match
-                    Some(sig) -> sig.params[k]
+                None -> known match
+                    Some(t) -> t
                     None ->
                         self.fail(span, s"the type of `${p.name}` is not known here; write it: `(${p.name}: real) -> ...`")
                         Error
@@ -825,7 +834,7 @@ impl Elab
                 None -> Read)
 
         expected match
-            Some(sig) -> ret = Some(sig.ret)
+            Some(sig) -> if !has_param(sig.ret) then ret = Some(sig.ret)
             None -> ()
 
         val lid = self.reserve_lambda(span)
@@ -1035,4 +1044,4 @@ copy_fx(fx: Fx) -> Fx
     var reds: Buf[RedVar] = buf()
 
     reds.extend(fx.reds.view())
-    Fx(scope, marks, loops, frames, fx.in_const, reds)
+    Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance)

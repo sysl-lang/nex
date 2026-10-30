@@ -16,8 +16,9 @@
 // accepts, so one unknown name gives one diagnostic and not one at every operator it reaches.
 //
 // The expressions are elaborated in `elab_expr.sysl`, the calls in `elab_call.sysl`, the structs,
-// enums, tuples and `match` in `elab_aggregate.sysl`, the arrays in `elab_array.sysl` and the
-// prelude's array functions in `elab_prelude.sysl`.
+// enums, tuples and `match` in `elab_aggregate.sysl`, the arrays in `elab_array.sysl`, the
+// prelude's array functions in `elab_prelude.sysl`, and the generics and their instances in
+// `elab_generic.sysl`.
 
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.{Diagnostic, Span, error, nearest_name}
@@ -34,7 +35,7 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
     Ok(e.program())
 
 private elab(p: Program) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics())
 
 // How far a declaration has got.
 enum Progress
@@ -99,8 +100,12 @@ struct Fx
     in_const: bool
     // The reduction variables of the `parallel for` bodies around the cursor (`elab_parallel.sysl`).
     reds: Buf[RedVar]
+    // The generic parameters in scope and their arguments, inside an instance of a generic
+    // (`elab_generic.sysl`), and which instance that is.
+    subst: Buf[Binding]
+    instance: Option[usize]
 
-empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf())
+empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None)
 
 // A lambda bound by `val f = x -> ...` whose parameter types are not written: it is elaborated at
 // the first use that fixes them, inside the copy of the scope it was written in.
@@ -149,6 +154,8 @@ struct Elab
     ends: Buf[usize]
     // The locals holding views, and what the lifetime pass needs (`elab_view.sysl`).
     vw: Views
+    // The generic functions, structs and enums and their instances (`elab_generic.sysl`).
+    gen: Generics
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -156,7 +163,7 @@ struct Elab
         self.diags.push(error(span, message))
 
     // A construct whose elaboration belongs to a part of the language the elaborator does not
-    // handle yet: arrays, generics, units, parallelism.
+    // handle yet: units, parallelism.
     later(*self, span: Span, what: string)
         self.fail(span, s"${what} is not elaborated yet")
 
@@ -168,8 +175,12 @@ struct Elab
     run(*self)
         self.collect()
         self.resolve_aggregates()
+        self.resolve_generics()
 
-        for k in 0..<self.funs.len()
+        // Counted first: a default may need a generic instance, whose signature is resolved with it.
+        val count = self.funs.len()
+
+        for k in 0..<count
             self.ensure_sig(k)
 
         for top in self.tops
@@ -211,13 +222,13 @@ struct Elab
                         _ -> self.collect_group(d, kind, pat, typ, init)
                 Fun(name, tparams, params, ret, body) ->
                     if tparams.len() > 0 then
-                        self.later(d.span, "a generic function")
+                        self.collect_generic_fun(d, name, tparams, params, ret, body)
                     elif d.attrs.len() > 0 && !only_elemental(d.attrs) then
                         self.later(d.span, s"the attribute `@${d.attrs[0].name}`")
                     else
                         body match
                             Some(b) ->
-                                if self.declare(d.span, name)
+                                if self.declare_fun(d.span, name)
                                     self.tops.push(Top(name, TopFun(self.funs.len())))
                                     self.funs.push(FunSrc(d, name, params, ret, b))
                                     self.fret.push(Error)
@@ -234,7 +245,7 @@ struct Elab
 
     // Whether `name` is free at the top level; if not, says so.
     declare(*self, span: Span, name: string) -> bool
-        if self.find_top(name).is_some() || self.is_aggregate_name(name)
+        if self.find_top(name).is_some() || self.is_aggregate_name(name) || self.find_generic_fun(name).is_some()
             self.fail(span, s"redeclaration of `${name}`")
             return false
 
@@ -313,7 +324,7 @@ struct Elab
         val f = self.funs[k]
         var sig = Sig(buf(), buf(), buf(), buf(), buf())
         val saved = self.fx
-        self.fx = empty_fx()
+        self.fx = self.fx_for(k)
 
         for p in f.params
             if sig.names.len() > 0 && contains(sig.names, p.name)
@@ -333,9 +344,6 @@ struct Elab
             sig.modes.push(p.mode)
             sig.defaults.push(default)
 
-        self.fx = saved
-        self.fsig.push(sig)
-
         f.ret match
             Some(t) ->
                 self.fret.set(k, self.resolve_type(t))
@@ -344,6 +352,14 @@ struct Elab
                 if f.name == "main"
                     self.fret.set(k, Void)
                     self.fret_known.set(k, true)
+
+        self.fx = saved
+
+        // An instance of a generic created while another signature is resolved comes before it.
+        while self.fsig.len() <= k
+            self.fsig.push(Sig(buf(), buf(), buf(), buf(), buf()))
+
+        self.fsig.set(k, sig)
     end ensure_sig
 
     ensure_body(*self, k: usize)
@@ -357,7 +373,7 @@ struct Elab
         val pending_base = self.pending.len()
         val diags_base = self.diags.len()
 
-        self.fx = empty_fx()
+        self.fx = self.fx_for(k)
         self.fx.frames.push(Frame(None, self.fret[k], self.fret_known[k], 0))
         self.open()
 
@@ -509,6 +525,10 @@ struct Elab
     resolve_type(*self, t: Type) -> Ty
         *t.kind match
             Named(name) ->
+                self.generic_named(t.span, name) match
+                    Some(ty) -> return ty
+                    None -> ()
+
                 scalar_named(name) match
                     Some(ty) -> ty
                     None ->
@@ -531,10 +551,14 @@ struct Elab
                             if !is_error(part) then self.fail(args[0].span, s"a complex type names a real part type, `complex[real32]`; found ${show_ty(part)}")
                             return Error
 
-                self.later(t.span, s"the type `${name}[...]`")
-                Error
+                self.applied_type(t.span, name, args)
             Array(elem, axes) ->
                 val e = self.resolve_type(elem)
+
+                self.rank_shape(t.span, axes) match
+                    Some(shape) -> return Ty.Array(e, shape)
+                    None -> ()
+
                 var out: Buf[Extent] = buf()
 
                 for a in axes
@@ -570,6 +594,8 @@ struct Elab
     program(self) -> TProgram
         var decls = self.type_decls()
 
+        decls.extend(self.instance_type_decls().view())
+
         for top in self.tops
             top.kind match
                 TopValue(k) ->
@@ -582,6 +608,8 @@ struct Elab
                 TopFun(k) ->
                     for f in self.fout
                         if f.name == self.funs[k].name then decls.push(FunDecl(f))
+
+        decls.extend(self.instance_fun_decls().view())
 
         var lambdas: Buf[TLambda] = buf()
 

@@ -223,6 +223,38 @@ The closed constraint set of ref §6.10 widens to the sized types:
 Unifying one type parameter against several numeric actuals widens along §2.2, as ref §6.10 widens
 through the old tower.
 
+Generic functions, structs and enums (ref §3.6, §3.8, §6.10) stand, with these rules (**PROPOSED**).
+
+- **A generic is checked at each instance it is used at**, as a Fortran parameterized module
+  procedure or a C++ template is, not once against its constraints: `def twice[T: Numeric](x: T) =
+  x + x` is checked as `twice[int64]` where `twice(21)` is written, and a mistake in its body is
+  reported at the body, naming the instance, `bad[string]`. A generic that is never used is
+  never elaborated. The constraint is checked at every use: `min2("a", "b")` with `T: Ord` is a
+  compile error.
+- **The type arguments are inferred, never written at a call.** The arguments that are not literals
+  fix them first; a literal fixes a parameter only where nothing else does and otherwise adopts it
+  (`add(x32, 2)` is `add[real32]`); a lambda argument comes last, its parameter types filled in from
+  what is known, and its result fixes the parameters there (`apply1(5, x -> x * 2.5)` is
+  `apply1[int64, real64]`). A parameter nothing fixes is a compile error.
+- **An expected type gives a generic struct's or enum's arguments**, before its fields are looked
+  at, and an argument that disagrees with them is converted or refused against its field:
+  `val n: Opt[integer] = None`, `val r: Result[integer, string] = Ok(7)`. A type names all of a
+  generic's arguments (`Pair[integer, string]`); `Pair` alone or `Pair[integer]` is a compile error.
+- **A type argument holds a value**: `void` and `never` are not type arguments.
+- **A name holds at most one generic `def` and one concrete `def`.** The concrete one is called
+  wherever it takes the arguments, each as it is or widened, a literal adopting its parameter's
+  type; the generic one otherwise. The arguments to such a name are passed by position.
+- **A generic function as a value** takes its instance from the function type its position
+  expects: `call(id)` with `call(f: (integer) -> integer)` passes `id[int64]`. With no function type
+  expected it is a compile error.
+- **A `Rank` parameter is the whole shape of an array**, `[T; R]`, never one axis among others, and
+  only a function takes one; a struct's or an enum's parameters are types.
+- **An instance that needs a larger instance of the same generic is a compile error**: `f[T]`
+  calling `f[Box[T]]`, or `struct Grow[T]` with a field of `[Grow[Box[T]]]`, would never finish.
+- **An instance is named by its generic and its arguments**: `id[int64]`, `Pair[int64, string]`,
+  `total[real64, 2]` (a rank argument is its number). The typed IR holds only instances, each a
+  separate declaration, and two instances of one generic are unrelated types.
+
 ---
 
 ## 3. Array types
@@ -1621,6 +1653,7 @@ is in `K` until the affine units of §15 arrive.
 | Literal typing | §2.4 | §2.3 | literals and `pi`/`e`/`inf`/`nan`/`i` take their context's width |
 | Conversions | §10.7 | §2.4 | a conversion function per type name |
 | Generic constraints | §6.10 | §2.6 | widened to sized types; `Integral`, `Rank` added |
+| Checking a generic | §6.10 (once, against its constraints) | §2.6 | at each instance; one name holds one generic `def` beside at most one concrete one |
 | Array types | §3.3, §3.10, §11.2 | §3 | `[T; axes]`, any rank, static extents; `[T]` is sugar; `[[T]]` is gone |
 | Rank-generic code | §6.10 | §3.4 | `R: Rank` parameters |
 | Literals of rank ≥ 3; jagged literals | §4.13 | §4.1 | nesting to any depth; a visibly jagged literal is a compile error |

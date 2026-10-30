@@ -1,0 +1,1235 @@
+// Generic functions, structs and enums (DESIGN §2.6, §3.4), and their monomorphization.
+//
+// **A generic is elaborated once for each instance it is used at.** A call or a construction infers
+// the generic's arguments, checks each against its constraint, and names the instance it needs:
+// `id[int64]`, `Pair[int64, string]`, `total[real64, 2]`. The first use of an instance creates it, an
+// ordinary `def`, struct or enum whose parameter types, body or fields are elaborated with each
+// generic parameter standing for its argument. The typed IR holds only the instances; a generic
+// declaration leaves nothing in it, and one that is never used is never elaborated.
+//
+// **Inference matches each parameter's declared type against its argument's type.** The arguments
+// that are not literals go first, and a type parameter they give several numeric types takes the
+// common type of §2.2. A literal fixes a parameter only where nothing else does, and otherwise
+// adopts it. A lambda goes last, against its parameter's type with what is known filled in, and its
+// result fixes the parameters that appear there. An expected type — the annotation on a binding —
+// fixes a struct's or an enum's arguments before its fields are looked at, which is what gives a
+// bare variant (`None`) its instance.
+//
+// **A generic's own signature is read once, before any instance**, with each type parameter a
+// `Ty.Param` and each rank parameter left standing as an array's shape, `[T; R]`. That is the
+// pattern the arguments are matched against; an application in it (`Box[T]`) is a `Nominal` whose
+// `args` are the pattern's, while an instance is a `Nominal` named for its arguments, with none.
+//
+// **An instance that needs a larger instance of the same generic would never finish**: `f[T]`
+// calling `f[Box[T]]`, a struct holding a bigger instance of itself. Each instance remembers the one
+// that asked for it, and an instance of a generic already on that chain, with longer arguments, is
+// refused.
+//
+// A generic parameter stands for a type, or for a rank (`R: Rank`): the whole shape of an array,
+// `[T; R]`, every axis dynamic. A unit of measure (`U: Unit`, §13.5) is the third kind; `GKind`
+// names it, and its arguments will be units beside the types and ranks of `TArg`.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.join
+import sh.sysl.parsing.{Span, error}
+
+// What a generic parameter stands for.
+enum GKind
+    KType
+    KRank
+    KUnit
+
+// What a generic parameter is given. While a generic's own signature is read a rank parameter has
+// no rank yet, and an array whose shape it is keeps it as written.
+enum TArg
+    TypeArg(ty: Ty)
+    RankArg(rank: usize)
+    RankFree
+
+// A generic parameter's name and its argument in the declaration being elaborated.
+struct Binding
+    name: string
+    arg: TArg
+
+// A generic function as written, and its parameter and result types read as patterns.
+struct GenFun
+    decl: Decl
+    name: string
+    tparams: Buf[TypeParam]
+    params: Buf[Param]
+    ret: Option[Type]
+    body: Expr
+    formals: Buf[Ty]
+    result: Option[Ty]
+    // False where its generic parameters were refused: its calls are then refused quietly.
+    valid: bool
+
+// A generic struct or enum, with its fields read as patterns: a struct's as its one variant.
+struct GenAgg
+    decl: Decl
+    name: string
+    tparams: Buf[TypeParam]
+    is_enum: bool
+    variants: Buf[VariantInfo]
+    valid: bool
+
+// An instance of a generic function: its arguments, its `def` in `Elab.funs`, and the instance whose
+// body asked for it first.
+struct FunInstance
+    generic: usize
+    args: Buf[TArg]
+    fun: usize
+    parent: Option[usize]
+
+// An instance of a generic struct or enum, a struct or an enum of its own under `name`.
+struct AggInstance
+    generic: usize
+    args: Buf[TArg]
+    name: string
+
+struct Generics
+    funs: Buf[GenFun]
+    aggs: Buf[GenAgg]
+    fun_insts: Buf[FunInstance]
+    agg_insts: Buf[AggInstance]
+    // The struct and enum instances whose fields are being resolved, innermost last.
+    building: Buf[usize]
+
+empty_generics() -> Generics = Generics(buf(), buf(), buf(), buf(), buf())
+
+// The arguments of one generic use while they are inferred: each one's argument where it has one,
+// whether something other than a literal fixed it, whether the expected type gave it (and nothing
+// changes it then), and the disagreements found.
+struct Infer
+    owner: string
+    tparams: Buf[TypeParam]
+    args: Buf[Option[TArg]]
+    firm: Buf[bool]
+    given: Buf[bool]
+    clashes: Buf[string]
+
+private val CONSTRAINTS = ["Any", "Numeric", "Integral", "Real", "Float", "Complex", "Ord", "Eq", "Rank", "Unit"]
+
+kind_of(tp: TypeParam) -> GKind = tp.constraint match
+    Some(c) -> if c == "Rank" then KRank elif c == "Unit" then KUnit else KType
+    None -> KType
+
+private constraint_of(tp: TypeParam) -> string = tp.constraint.unwrap_or("Any")
+
+// Whether a constraint admits a type (DESIGN §2.6).
+admits(c: string, t: Ty) -> bool
+    if c == "Numeric" then return is_numeric(t)
+    if c == "Integral" then return is_int(t)
+    if c == "Real" || c == "Ord" then return is_ordered(t)
+    if c == "Float" then return is_real(t)
+    if c == "Complex" then return is_complex(t)
+
+    if c == "Eq"
+        return t match
+            Bool -> true
+            Str -> true
+            _ -> is_numeric(t)
+
+    true
+
+private admitted_text(c: string) -> string
+    if c == "Numeric" then return "the integer, real and complex types"
+    if c == "Integral" then return "the integer types"
+    if c == "Real" || c == "Ord" then return "the integer and real types"
+    if c == "Float" then return "the real types"
+    if c == "Complex" then return "the complex types"
+    if c == "Eq" then return "the numeric types, `bool` and `string`"
+
+    "every type"
+
+// Whether a type still holds a generic parameter: a `Ty.Param`, or an application of a generic
+// struct or enum to some (`Box[T]`), which only a generic's own signature has.
+has_param(t: Ty) -> bool = t match
+    Ty.Param(_, _) -> true
+    Nominal(_, args) -> args.len() > 0
+    Ty.Array(elem, _) -> has_param(*elem)
+    Ty.Tuple(elems) ->
+        for e in elems
+            if has_param(e) then return true
+
+        false
+    Fn(sig) ->
+        for p in sig.params
+            if has_param(p) then return true
+
+        has_param(sig.ret)
+    _ -> false
+
+private show_targ(a: TArg) -> string = a match
+    TypeArg(t) -> show_ty(t)
+    RankArg(r) -> s"${r}"
+    RankFree -> "?"
+
+// An instance's name: the generic's, with its arguments, `Pair[int64, string]`.
+mangle(name: string, args: Buf[TArg]) -> string
+    var out: Buf[string] = buf()
+
+    for a in args
+        out.push(show_targ(a))
+
+    name + "[" + join(out.view(), ", ") + "]"
+
+private targ_eq(a: TArg, b: TArg) -> bool = a match
+    TypeArg(x) -> b match
+        TypeArg(y) -> ty_eq(x, y)
+        _ -> false
+    RankArg(x) -> b match
+        RankArg(y) -> x == y
+        _ -> false
+    RankFree -> false
+
+private targs_eq(xs: Buf[TArg], ys: Buf[TArg]) -> bool
+    if xs.len() != ys.len() then return false
+
+    for k in 0..<xs.len()
+        if !targ_eq(xs[k], ys[k]) then return false
+
+    true
+
+private count_text(n: usize, what: string) -> string = if n == 1 then s"1 ${what}" else s"${n} ${what}s"
+
+private arg_value(e: Expr) -> Expr = *e.kind match
+    NamedArg(_, v) -> v
+    _ -> e
+
+private is_lambda(e: Expr) -> bool = *e.kind match
+    Lambda(_, _) -> true
+    _ -> false
+
+private dynamic_shape(n: usize) -> Buf[Extent]
+    var out: Buf[Extent] = buf()
+
+    for _ in 0..<n
+        out.push(Dynamic)
+
+    out
+
+impl Elab
+    // -- declarations -----------------------------------------------------------------------------
+
+    collect_generic_fun(*self, d: Decl, name: string, tparams: Buf[TypeParam], params: Buf[Param], ret: Option[Type], body: Option[Expr])
+        if d.attrs.len() > 0
+            self.later(d.span, s"the attribute `@${d.attrs[0].name}` on a generic function")
+            return
+
+        val b = body match
+            Some(b) -> b
+            None ->
+                self.fail(d.span, s"`${name}` has no body")
+                return
+
+        if self.find_generic_fun(name).is_some() || self.find_top(name).is_some() && !self.is_concrete_fun(name) || self.is_aggregate_name(name)
+            self.fail(d.span, s"redeclaration of `${name}`")
+            return
+
+        val valid = self.check_tparams(d.span, tparams, true)
+
+        self.gen.funs.push(GenFun(d, name, tparams, params, ret, b, buf(), None, valid))
+    end collect_generic_fun
+
+    collect_generic_agg(*self, d: Decl, name: string, tparams: Buf[TypeParam], is_enum: bool)
+        val valid = self.check_tparams(d.span, tparams, false)
+
+        self.gen.aggs.push(GenAgg(d, name, tparams, is_enum, buf(), valid))
+
+    // A concrete `def` may share its name with a generic one, and with nothing else.
+    declare_fun(*self, span: Span, name: string) -> bool
+        if self.find_generic_fun(name).is_some() && self.find_top(name).is_none() then return true
+
+        self.declare(span, name)
+
+    private is_concrete_fun(self, name: string) -> bool = self.find_top(name) match
+        Some(TopFun(_)) -> true
+        _ -> false
+
+    find_generic_fun(self, name: string) -> Option[usize]
+        for g in 0..<self.gen.funs.len()
+            if self.gen.funs[g].name == name then return Some(g)
+
+        None
+
+    find_generic_agg(self, name: string) -> Option[usize]
+        for g in 0..<self.gen.aggs.len()
+            if self.gen.aggs[g].name == name then return Some(g)
+
+        None
+
+    // Each generic parameter once, with a constraint of §2.6; a rank only on a function.
+    private check_tparams(*self, span: Span, tparams: Buf[TypeParam], fun: bool) -> bool
+        var ok = true
+
+        for k in 0..<tparams.len()
+            val tp = tparams[k]
+            val c = constraint_of(tp)
+
+            for j in 0..<k
+                if tparams[j].name == tp.name
+                    self.fail(span, s"redeclaration of `${tp.name}`")
+                    ok = false
+
+            var known = false
+
+            for n in CONSTRAINTS
+                if n == c then known = true
+
+            if !known
+                self.fail(span, s"unknown constraint `${c}`; the constraints are Any, Numeric, Integral, Real, Float, Complex, Ord, Eq, Rank and Unit")
+                ok = false
+            elif c == "Unit"
+                self.later(span, "a unit parameter (`U: Unit`)")
+                ok = false
+            elif c == "Rank" && !fun
+                self.fail(span, s"`${tp.name}: Rank` stands for an array's rank, which only a function may take; a struct's or an enum's parameters are types")
+                ok = false
+
+        ok
+    end check_tparams
+
+    // The signatures of the generic functions and the fields of the generic structs and enums, read
+    // as patterns once every name is collected.
+    resolve_generics(*self)
+        for g in 0..<self.gen.funs.len()
+            val f = self.gen.funs[g]
+
+            if !f.valid then continue
+
+            val saved = self.fx.subst
+            self.fx.subst = template_binds(f.tparams)
+
+            var formals: Buf[Ty] = buf()
+
+            for p in f.params
+                formals.push(self.resolve_type(p.typ))
+
+            val result = f.ret match
+                Some(t) -> Some(self.resolve_type(t))
+                None -> None
+
+            self.fx.subst = saved
+            self.gen.funs.set(g, GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, formals, result, true))
+
+        for g in 0..<self.gen.aggs.len()
+            val a = self.gen.aggs[g]
+
+            if !a.valid then continue
+
+            val saved = self.fx.subst
+            self.fx.subst = template_binds(a.tparams)
+
+            var variants: Buf[VariantInfo] = buf()
+
+            if a.is_enum
+                for v in self.agg.enums[self.find_enum(a.name).unwrap()].src
+                    variants.push(VariantInfo(v.name, self.resolve_fields(a.decl.span, v.name, v.fields)))
+            else
+                variants.push(VariantInfo(a.name, self.resolve_fields(a.decl.span, a.name, self.agg.structs[self.find_struct(a.name).unwrap()].src)))
+
+            self.fx.subst = saved
+            self.gen.aggs.set(g, GenAgg(a.decl, a.name, a.tparams, a.is_enum, variants, true))
+    end resolve_generics
+
+    // -- types ------------------------------------------------------------------------------------
+
+    // The type a plain name denotes where it is a generic parameter in scope, or a generic struct
+    // or enum written without its arguments.
+    generic_named(*self, span: Span, name: string) -> Option[Ty]
+        for b in self.fx.subst
+            if b.name != name then continue
+
+            b.arg match
+                TypeArg(t) -> return Some(t)
+                _ ->
+                    self.fail(span, s"`${name}` is a rank, not a type; it is the shape of an array: `[T; ${name}]`")
+                    return Some(Error)
+
+        self.find_generic_agg(name) match
+            Some(g) ->
+                val n = self.gen.aggs[g].tparams.len()
+
+                self.fail(span, s"`${name}` takes ${count_text(n, "type argument")}: `${name}[...]`")
+                Some(Error)
+            None -> None
+    end generic_named
+
+    // The axes of an array whose shape is a rank parameter, `[T; R]`; `None` where it is not one.
+    rank_shape(*self, span: Span, axes: Buf[Axis]) -> Option[Buf[Extent]]
+        for a in axes
+            val n = a match
+                NamedExtent(n) -> n
+                _ -> continue
+
+            for b in self.fx.subst
+                if b.name != n then continue
+
+                if axes.len() != 1
+                    self.fail(span, s"a rank parameter is the whole shape of an array: `[T; ${n}]`")
+                    return Some(dynamic_shape(axes.len()))
+
+                return b.arg match
+                    RankArg(r) -> Some(dynamic_shape(r))
+                    RankFree ->
+                        var out: Buf[Extent] = buf()
+
+                        out.push(Extent.Named(n))
+                        Some(out)
+                    TypeArg(_) ->
+                        self.fail(span, s"`${n}` is a type, not a rank; an array's shape is a rank: `[T; R]` with `R: Rank`")
+                        Some(dynamic_shape(1))
+
+        None
+    end rank_shape
+
+    // `Pair[integer, string]`: the instance of a generic struct or enum it names, or the pattern it
+    // is inside a generic's own signature.
+    applied_type(*self, span: Span, name: string, args: Buf[Type]) -> Ty
+        val g = self.find_generic_agg(name) match
+            Some(g) -> g
+            None ->
+                if self.find_struct(name).is_some() || self.find_enum(name).is_some()
+                    self.fail(span, s"`${name}` takes no type arguments")
+                else
+                    self.fail(span, s"unknown type `${name}`")
+
+                return Error
+
+        val a = self.gen.aggs[g]
+
+        if args.len() != a.tparams.len()
+            self.fail(span, s"`${name}` takes ${count_text(a.tparams.len(), "type argument")}, and ${args.len()} ${if args.len() == 1 then "is" else "are"} given")
+            return Error
+
+        var tys: Buf[Ty] = buf()
+        var pattern = false
+
+        for t in args
+            val ty = self.resolve_type(t)
+
+            if has_error(ty) || !a.valid then return Error
+            if has_param(ty) then pattern = true
+
+            tys.push(ty)
+
+        if pattern then return Nominal(name, tys)
+
+        var inf = new_infer(name, a.tparams)
+
+        for k in 0..<tys.len()
+            inf.args.set(k, Some(TypeArg(tys[k])))
+
+        if !self.constraints_hold(span, &inf) then return Error
+
+        self.agg_type(span, g, &inf)
+    end applied_type
+
+    // The instance type of a struct or an enum whose arguments are inferred.
+    private agg_type(*self, span: Span, g: usize, inf: *Infer) -> Ty = self.instantiate_agg(span, g, settled(inf)) match
+        Some(n) -> Nominal(n, buf())
+        None -> Error
+
+    // -- instances --------------------------------------------------------------------------------
+
+    // The struct or enum instance of `g` at `args`, created on its first use.
+    private instantiate_agg(*self, span: Span, g: usize, args: Buf[TArg]) -> Option[string]
+        for i in self.gen.agg_insts
+            if i.generic == g && targs_eq(i.args, args) then return Some(i.name)
+
+        val a = self.gen.aggs[g]
+
+        if !a.valid then return None
+
+        val name = mangle(a.name, args)
+
+        for b in self.gen.building
+            val outer = self.gen.agg_insts[b]
+
+            if outer.generic == g && name.len > outer.name.len
+                self.fail(span, s"`${a.name}` would hold ever larger instances of itself, ${name} inside ${outer.name}, and has no size")
+                self.gen.aggs.set(g, GenAgg(a.decl, a.name, a.tparams, a.is_enum, a.variants, false))
+                return None
+
+        val index = self.gen.agg_insts.len()
+
+        self.gen.agg_insts.push(AggInstance(g, args, name))
+
+        // Registered before its fields are read, so a field that names the instance finds it.
+        val k = if a.is_enum then self.agg.enums.len() else self.agg.structs.len()
+
+        if a.is_enum
+            val src = self.agg.enums[self.find_enum(a.name).unwrap()].src
+
+            self.agg.enums.push(EnumSrc(a.decl, name, false, src, buf()))
+        else
+            val src = self.agg.structs[self.find_struct(a.name).unwrap()].src
+
+            self.agg.structs.push(StructSrc(a.decl, name, false, src, buf()))
+
+        val saved = self.fx.subst
+        self.fx.subst = binds_of(a.tparams, args)
+        self.gen.building.push(index)
+
+        if a.is_enum
+            val e = self.agg.enums[k]
+            var variants: Buf[VariantInfo] = buf()
+
+            for v in e.src
+                variants.push(VariantInfo(v.name, self.instance_fields(v.fields)))
+
+            self.agg.enums.set(k, EnumSrc(e.decl, name, false, e.src, variants))
+        else
+            val s = self.agg.structs[k]
+
+            self.agg.structs.set(k, StructSrc(s.decl, name, false, s.src, self.instance_fields(s.src)))
+
+        self.gen.building.pop()
+        self.fx.subst = saved
+        self.check_contains_self(a.decl.span, name)
+        Some(name)
+    end instantiate_agg
+
+    private instance_fields(*self, src: Buf[Field]) -> Buf[FieldInfo]
+        var out: Buf[FieldInfo] = buf()
+
+        for f in src
+            out.push(FieldInfo(f.name, self.resolve_type(f.typ)))
+
+        out
+
+    // The `def` instance of `g` at `args`, created on its first use: its signature resolved and its
+    // body elaborated there and then, each diagnostic in it saying which instance it is about.
+    private instantiate_fun(*self, span: Span, g: usize, args: Buf[TArg]) -> Option[usize]
+        for i in self.gen.fun_insts
+            if i.generic == g && targs_eq(i.args, args) then return Some(i.fun)
+
+        val f = self.gen.funs[g]
+
+        if !f.valid then return None
+
+        val name = mangle(f.name, args)
+        var up = self.fx.instance
+
+        loop
+            val i = up match
+                Some(i) -> i
+                None -> break
+
+            val outer = self.funs[self.gen.fun_insts[i].fun].name
+
+            if self.gen.fun_insts[i].generic == g && name.len > outer.len
+                self.fail(span, s"`${f.name}` would need ever larger instances of itself, ${name} inside ${outer}, and they would never end")
+                self.gen.funs.set(g, GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, f.formals, f.result, false))
+                return None
+
+            up = self.gen.fun_insts[i].parent
+
+        val k = self.funs.len()
+
+        self.funs.push(FunSrc(f.decl, name, f.params, f.ret, f.body))
+        self.fret.push(Error)
+        self.fret_known.push(false)
+        self.fstate.push(Waiting)
+        self.gen.fun_insts.push(FunInstance(g, args, k, self.fx.instance))
+
+        val base = self.diags.len()
+
+        self.ensure_sig(k)
+        self.ensure_body(k)
+
+        // Those of an instance it needed name that one already.
+        for j in base..<self.diags.len()
+            val d = self.diags[j]
+
+            if !d.message.contains(" (in `") then self.diags.set(j, error(d.span, d.message + s" (in `${name}`)"))
+
+        Some(k)
+    end instantiate_fun
+
+    // The body state a function starts in: empty, with an instance's generic parameters bound.
+    fx_for(self, k: usize) -> Fx
+        var fx = empty_fx()
+
+        for i in 0..<self.gen.fun_insts.len()
+            val inst = self.gen.fun_insts[i]
+
+            if inst.fun == k
+                fx.subst = binds_of(self.gen.funs[inst.generic].tparams, inst.args)
+                fx.instance = Some(i)
+
+        fx
+
+    // The instances, for the typed IR: the structs and enums, and the functions.
+    instance_type_decls(self) -> Buf[TDecl]
+        var out: Buf[TDecl] = buf()
+
+        for i in self.gen.agg_insts
+            val a = self.gen.aggs[i.generic]
+
+            if a.is_enum
+                val e = self.agg.enums[self.find_enum(i.name).unwrap()]
+
+                out.push(EnumDecl(TEnum(a.decl.span, i.name, e.variants)))
+            else
+                val s = self.agg.structs[self.find_struct(i.name).unwrap()]
+
+                out.push(StructDecl(TStruct(a.decl.span, i.name, s.fields)))
+
+        out
+
+    instance_fun_decls(self) -> Buf[TDecl]
+        var out: Buf[TDecl] = buf()
+
+        for i in self.gen.fun_insts
+            val name = self.funs[i.fun].name
+
+            for f in self.fout
+                if f.name == name then out.push(FunDecl(f))
+
+        out
+
+    // -- inference --------------------------------------------------------------------------------
+
+    // Matches a parameter's declared type against an argument's type, fixing the generic parameters
+    // it holds; false where the two cannot match whatever the parameters are.
+    private unify(*self, formal: Ty, actual: Ty, inf: *Infer, firm: bool) -> bool
+        if is_wild(actual) || has_error(actual) then return true
+
+        formal match
+            Ty.Param(n, _) ->
+                self.bind_param(inf, n, TypeArg(actual), firm)
+                true
+            Ty.Array(fe, fx) ->
+                val ae = actual match
+                    Ty.Array(ae, _) -> *ae
+                    _ -> return false
+
+                if fx.len() == 1
+                    fx[0] match
+                        Extent.Named(n) ->
+                            if param_index(inf, n).is_some() then self.bind_param(inf, n, RankArg(rank_of(actual)), true)
+                        _ -> ()
+
+                self.unify(*fe, ae, inf, firm)
+            Ty.Tuple(fs) -> actual match
+                Ty.Tuple(xs) ->
+                    if fs.len() != xs.len() then return false
+
+                    for k in 0..<fs.len()
+                        if !self.unify(fs[k], xs[k], inf, firm) then return false
+
+                    true
+                _ -> false
+            Fn(fs) -> actual match
+                Fn(xs) ->
+                    if fs.params.len() != xs.params.len() then return false
+
+                    for k in 0..<fs.params.len()
+                        if !self.unify(fs.params[k], xs.params[k], inf, firm) then return false
+
+                    self.unify(fs.ret, xs.ret, inf, firm)
+                _ -> false
+            Nominal(n, fargs) ->
+                if fargs.len() == 0 then return true
+
+                val i = actual match
+                    Nominal(an, _) -> self.agg_instance_named(an)
+                    _ -> None
+
+                val inst = i match
+                    Some(i) -> self.gen.agg_insts[i]
+                    None -> return false
+
+                if self.gen.aggs[inst.generic].name != n then return false
+
+                for k in 0..<fargs.len()
+                    inst.args[k] match
+                        TypeArg(t) -> if !self.unify(fargs[k], t, inf, firm) then return false
+                        _ -> ()
+
+                true
+            _ -> true
+    end unify
+
+    // Gives a generic parameter its argument. A second numeric type widens a type parameter to the
+    // common type of the two; a literal's type fixes one only where nothing firmer has. One the
+    // expected type gave stays, and the argument that disagrees is converted to it or refused.
+    private bind_param(self, inf: *Infer, n: string, arg: TArg, firm: bool)
+        val k = param_index(inf, n) match
+            Some(k) -> k
+            None -> return
+
+        if inf.given[k] then return
+
+        val old = inf.args[k] match
+            Some(a) -> a
+            None ->
+                inf.args.set(k, Some(arg))
+                inf.firm.set(k, firm)
+                return
+
+        if targ_eq(old, arg) then return
+
+        if inf.firm[k] && !firm then return
+
+        if !inf.firm[k] && firm
+            inf.args.set(k, Some(arg))
+            inf.firm.set(k, true)
+            return
+
+        old match
+            TypeArg(a) -> arg match
+                TypeArg(b) ->
+                    if is_numeric(a) && is_numeric(b)
+                        common(a, b) match
+                            Some(c) ->
+                                inf.args.set(k, Some(TypeArg(c)))
+                                return
+                            None -> ()
+                _ -> ()
+            _ -> ()
+
+        inf.clashes.push(s"the arguments of `${inf.owner}` disagree on `${n}`: ${show_arg(old)} and ${show_arg(arg)}")
+    end bind_param
+
+    // A parameter type with the generic parameters known so far put in, the rest left standing: the
+    // type a lambda argument is elaborated against.
+    private partial(*self, span: Span, t: Ty, inf: *Infer) -> Ty
+        t match
+            Ty.Param(n, _) ->
+                param_index(inf, n) match
+                    Some(k) -> inf.args[k] match
+                        Some(TypeArg(a)) -> a
+                        _ -> t
+                    None -> t
+            Ty.Array(e, axes) ->
+                var out = axes
+
+                if axes.len() == 1
+                    axes[0] match
+                        Extent.Named(n) ->
+                            param_index(inf, n) match
+                                Some(k) -> inf.args[k] match
+                                    Some(RankArg(r)) -> out = dynamic_shape(r)
+                                    _ -> ()
+                                None -> ()
+                        _ -> ()
+
+                Ty.Array(self.partial(span, *e, inf), out)
+            Ty.Tuple(elems) ->
+                var out: Buf[Ty] = buf()
+
+                for e in elems
+                    out.push(self.partial(span, e, inf))
+
+                Ty.Tuple(out)
+            Fn(sig) ->
+                var ps: Buf[Ty] = buf()
+
+                for p in sig.params
+                    ps.push(self.partial(span, p, inf))
+
+                fn_type(ps, sig.modes, self.partial(span, sig.ret, inf))
+            Nominal(n, args) ->
+                if args.len() == 0 then return t
+
+                var out: Buf[Ty] = buf()
+
+                for a in args
+                    val p = self.partial(span, a, inf)
+
+                    if has_param(p) then return t
+
+                    out.push(p)
+
+                val g = self.find_generic_agg(n).unwrap()
+                var inner = new_infer(n, self.gen.aggs[g].tparams)
+
+                for k in 0..<out.len()
+                    inner.args.set(k, Some(TypeArg(out[k])))
+
+                if !self.constraints_hold(span, &inner) then return Error
+
+                self.agg_type(span, g, &inner)
+            _ -> t
+    end partial
+
+    // Infers a generic's arguments from the arguments of a call or a construction: those that are
+    // not literals, then the literals, then the lambdas, each against its parameter's pattern. `pre`
+    // holds each argument elaborated so far; the others are elaborated here, a lambda last, each
+    // expecting its parameter's type as far as it is known. False where an argument cannot match its
+    // parameter, which is reported.
+    private infer_from(*self, inf: *Infer, formals: Buf[Ty], what: Buf[string], slots: Buf[Option[usize]], args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> bool
+        var ok = true
+
+        for pass in 0..<3
+            for j in 0..<slots.len()
+                val i = slots[j] match
+                    Some(i) -> i
+                    None -> continue
+
+                val e = arg_value(args[i])
+                val literal = self.literal_class(e) != NOT_LITERAL
+                val lambda = is_lambda(e)
+
+                if pre[i].is_none() && lambda == (pass == 2)
+                    val hint = self.partial(e.span, formals[j], inf)
+
+                    if lambda then self.pass_lambda(e)
+
+                    pre.set(i, Some(self.elab(e, if lambda || !has_param(hint) then Some(hint) else None)))
+
+                if (pass == 0 && (literal || lambda)) || (pass == 1 && !literal) || (pass == 2 && !lambda) then continue
+
+                val v = pre[i].unwrap()
+
+                if !self.unify(formals[j], v.ty, inf, !literal)
+                    self.fail(value_span(v), s"${what[j]} must be ${show_ty(formals[j])}, but this is ${show_ty(v.ty)}")
+                    ok = false
+
+        if inf.clashes.len() > 0
+            self.fail(args[0].span, inf.clashes[0])
+            ok = false
+
+        ok
+    end infer_from
+
+    // Whether every generic parameter has its argument; the first that has none is reported.
+    private inferred(*self, span: Span, inf: *Infer, hint: string) -> bool
+        for k in 0..<inf.tparams.len()
+            if inf.args[k].is_none()
+                self.fail(span, s"cannot infer `${inf.tparams[k].name}` of `${inf.owner}` here: ${hint}")
+                return false
+
+        true
+
+    // Whether each type argument is a type its constraint admits, and holds a value.
+    private constraints_hold(*self, span: Span, inf: *Infer) -> bool
+        for k in 0..<inf.tparams.len()
+            val tp = inf.tparams[k]
+            val c = constraint_of(tp)
+
+            val t = inf.args[k] match
+                Some(TypeArg(t)) -> t
+                _ -> continue
+
+            if has_error(t) then return false
+
+            if is_void(t) || is_never(t)
+                self.fail(span, s"`${tp.name}` of `${inf.owner}` would be ${show_ty(t)}, which holds no value")
+                return false
+
+            if !admits(c, t)
+                self.fail(span, s"`${inf.owner}` needs `${tp.name}: ${c}`, and ${show_ty(t)} is not ${c}: ${c} admits ${admitted_text(c)}")
+                return false
+
+        true
+    end constraints_hold
+
+    // The argument slots of a call or a construction: each parameter's or field's argument, by
+    // position or by name.
+    private arg_slots(*self, span: Span, what: string, names: Buf[string], args: Buf[Expr], fields: bool) -> Buf[Option[usize]]
+        var slots: Buf[Option[usize]] = buf()
+        var named = false
+        var next: usize = 0
+
+        for _ in names
+            slots.push(None)
+
+        for i in 0..<args.len()
+            val a = args[i]
+
+            *a.kind match
+                NamedArg(n, _) ->
+                    named = true
+
+                    var found = false
+
+                    for j in 0..<names.len()
+                        if names[j] == n
+                            found = true
+
+                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots.set(j, Some(i))
+
+                    if !found then self.fail(a.span, if fields then s"`${what}` has no field `${n}`" else s"`${what}` has no parameter `${n}`")
+                _ ->
+                    if named
+                        self.fail(a.span, "a positional argument cannot follow a named one")
+                    elif next >= slots.len()
+                        self.fail(a.span, if fields then s"`${what}` has ${count_text(names.len(), "field")}" else s"`${what}` takes ${count_text(names.len(), "argument")}")
+                    else
+                        slots.set(next, Some(i))
+
+                    next += 1
+
+        slots
+    end arg_slots
+
+    // Every argument elaborated on its own but the lambdas, which wait for their parameter types.
+    private elaborate_args(*self, args: Buf[Expr]) -> Buf[Option[TExpr]]
+        var out: Buf[Option[TExpr]] = buf()
+
+        for a in args
+            val e = arg_value(a)
+
+            out.push(if is_lambda(e) then None else Some(self.infer(e)))
+
+        out
+
+    // An argument elaborated before its parameter's type was known, brought to that type: a literal
+    // elaborated again so it adopts it, a borrow taken, anything else converted.
+    private settle_arg(*self, e: Expr, v: Option[TExpr], ty: Ty, mode: Mode, what: string) -> TExpr
+        if mode == Inout then return self.borrow(e, ty)
+
+        v match
+            None -> self.argument(e, ty, mode, what)
+            Some(x) -> if self.literal_class(e) != NOT_LITERAL then self.check(e, ty, what) else self.coerce(x, ty, what)
+
+    // -- calls ------------------------------------------------------------------------------------
+
+    // A call of a name that has a generic `def`: its concrete `def` where it has one that takes the
+    // arguments, the generic instance the arguments infer otherwise.
+    generic_call(*self, span: Span, at: Span, n: string, g: usize, args: Buf[Expr]) -> TExpr
+        val concrete = self.find_top(n) match
+            Some(TopFun(k)) -> Some(k)
+            _ -> None
+
+        if concrete.is_some()
+            for a in args
+                *a.kind match
+                    NamedArg(_, _) ->
+                        self.fail(a.span, s"`${n}` is declared both as a concrete and as a generic `def`, so its arguments are passed by position")
+                        return self.invalid(span)
+                    _ -> ()
+
+        // Beside a concrete `def`, the arguments are elaborated before either is chosen.
+        var pre = if concrete.is_some() then self.elaborate_args(args) else unelaborated(args.len())
+
+        concrete match
+            Some(k) -> if self.concrete_applies(k, args, &pre) then return self.concrete_call(span, at, k, args, &pre)
+            None -> ()
+
+        val f = self.gen.funs[g]
+
+        if !f.valid then return self.invalid(span)
+
+        var names: Buf[string] = buf()
+        var what: Buf[string] = buf()
+
+        for p in f.params
+            names.push(p.name)
+            what.push(s"argument `${p.name}`")
+
+        val slots = self.arg_slots(span, n, names, args, false)
+        var inf = new_infer(n, f.tparams)
+
+        if !self.infer_from(&inf, f.formals, what, slots, args, &pre) then return self.invalid(span)
+
+        if !self.inferred(span, &inf, "no argument fixes it") || !self.constraints_hold(span, &inf) then return self.invalid(span)
+
+        val k = self.instantiate_fun(span, g, settled(&inf)) match
+            Some(k) -> k
+            None -> return self.invalid(span)
+
+        val sig = self.fsig[k]
+        var out: Buf[TExpr] = buf()
+
+        for j in 0..<slots.len()
+            slots[j] match
+                Some(i) -> out.push(self.settle_arg(arg_value(args[i]), pre[i], sig.tys[j], sig.modes[j], what[j]))
+                None ->
+                    sig.defaults[j] match
+                        Some(d) -> out.push(d)
+                        None ->
+                            self.fail(span, s"`${n}` needs its argument `${names[j]}`")
+                            out.push(self.invalid(span))
+
+        val ty = self.fun_type(k, at)
+        val ret = ty match
+            Fn(s) -> s.ret
+            _ -> Error
+
+        texpr(span, ret, TCall(texpr(at, ty, TFnRef(self.funs[k].name)), out))
+    end generic_call
+
+    // Whether the concrete `def` beside a generic one takes these arguments, each as it is or
+    // widened, a literal adopting its parameter's type.
+    private concrete_applies(*self, k: usize, args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> bool
+        val sig = self.fsig[k]
+
+        if args.len() > sig.tys.len() then return false
+
+        for j in args.len()..<sig.tys.len()
+            if sig.defaults[j].is_none() then return false
+
+        for i in 0..<args.len()
+            val ty = sig.tys[i]
+            val e = args[i]
+
+            val v = pre[i] match
+                Some(v) -> v
+                None ->
+                    val arity = *e.kind match
+                        Lambda(ps, _) -> ps.len()
+                        _ -> 0
+
+                    val fits = ty match
+                        Fn(s) -> s.params.len() == arity
+                        _ -> false
+
+                    if !fits then return false
+
+                    continue
+
+            if is_wild(v.ty) || has_error(v.ty) then continue
+
+            if sig.modes[i] == Inout
+                if !ty_eq(v.ty, ty) then return false
+
+                continue
+
+            val class = self.literal_class(e)
+
+            if class != NOT_LITERAL && adoption(class, ty).is_some() then continue
+            if promotes(v.ty, ty) then continue
+
+            val arrays = v.ty match
+                Ty.Array(ae, ax) -> ty match
+                    Ty.Array(te, tx) -> ax.len() == tx.len() && promotes(*ae, *te)
+                    _ -> false
+                _ -> false
+
+            if !arrays then return false
+
+        true
+    end concrete_applies
+
+    private concrete_call(*self, span: Span, at: Span, k: usize, args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> TExpr
+        val sig = self.fsig[k]
+        val name = self.funs[k].name
+        var out: Buf[TExpr] = buf()
+
+        for j in 0..<sig.tys.len()
+            if j < args.len()
+                out.push(self.settle_arg(args[j], pre[j], sig.tys[j], sig.modes[j], s"argument `${sig.names[j]}`"))
+            else
+                out.push(sig.defaults[j].unwrap())
+
+        val ty = self.fun_type(k, at)
+        val ret = ty match
+            Fn(s) -> s.ret
+            _ -> Error
+
+        if self.is_elemental(k) && any_array(out) then return self.elemental_call(span, texpr(at, ty, TFnRef(name)), out, ret)
+
+        texpr(span, ret, TCall(texpr(at, ty, TFnRef(name)), out))
+    end concrete_call
+
+    // A generic function as a value: the instance the function type its position expects gives.
+    generic_value(*self, span: Span, g: usize, want: Option[Ty]) -> TExpr
+        val f = self.gen.funs[g]
+
+        if !f.valid then return self.invalid(span)
+
+        val sig = want match
+            Some(Fn(s)) -> if s.params.len() == f.formals.len() then Some(*s) else None
+            _ -> None
+
+        val s = sig match
+            Some(s) -> s
+            None ->
+                self.fail(span, s"`${f.name}` is generic: call it, or pass it where its function type is known")
+                return self.invalid(span)
+
+        var inf = new_infer(f.name, f.tparams)
+
+        for k in 0..<f.formals.len()
+            self.unify(f.formals[k], s.params[k], &inf, true)
+
+        if f.result.is_some() then self.unify(f.result.unwrap(), s.ret, &inf, true)
+
+        if inf.clashes.len() > 0
+            self.fail(span, inf.clashes[0])
+            return self.invalid(span)
+
+        if !self.inferred(span, &inf, "the function type expected here does not fix it") || !self.constraints_hold(span, &inf) then return self.invalid(span)
+
+        val k = self.instantiate_fun(span, g, settled(&inf)) match
+            Some(k) -> k
+            None -> return self.invalid(span)
+
+        texpr(span, self.fun_type(k, span), TFnRef(self.funs[k].name))
+    end generic_value
+
+    // -- construction -----------------------------------------------------------------------------
+
+    // `Box(42)`, `Some(x)`, `Ok(7)` of a generic struct or enum: the instance its expected type or
+    // its arguments give, built.
+    generic_construct(*self, span: Span, at: Span, n: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        val v = self.find_variant(n)
+        val template = v match
+            Some(r) -> self.agg.enums[r.owner].name
+            None -> n
+
+        val g = self.find_generic_agg(template).unwrap()
+        val a = self.gen.aggs[g]
+
+        if !a.valid then return self.invalid(span)
+
+        val tag = v match
+            Some(r) -> r.tag
+            None -> 0
+
+        val formal = a.variants[tag]
+
+        if a.is_enum && formal.fields.len() == 0
+            self.fail(at, s"`${n}` carries no fields; write it without parentheses")
+            return self.invalid(span)
+
+        var names: Buf[string] = buf()
+        var what: Buf[string] = buf()
+        var formals: Buf[Ty] = buf()
+
+        for f in formal.fields
+            names.push(f.name)
+            what.push(s"the field `${f.name}`")
+            formals.push(f.ty)
+
+        val slots = self.arg_slots(span, n, names, args, true)
+        var pre = unelaborated(args.len())
+        var inf = new_infer(template, a.tparams)
+
+        self.seed(&inf, g, want)
+
+        if !self.infer_from(&inf, formals, what, slots, args, &pre) then return self.invalid(span)
+
+        val hint = s"write the type where it is bound, `val x: ${template}[...] = ${n}(...)`"
+
+        if !self.inferred(span, &inf, hint) || !self.constraints_hold(span, &inf) then return self.invalid(span)
+
+        val inst = self.instantiate_agg(span, g, settled(&inf)) match
+            Some(i) -> i
+            None -> return self.invalid(span)
+
+        val fields = if a.is_enum then self.agg.enums[self.find_enum(inst).unwrap()].variants[tag].fields else self.agg.structs[self.find_struct(inst).unwrap()].fields
+        var out: Buf[TExpr] = buf()
+
+        for j in 0..<slots.len()
+            slots[j] match
+                Some(i) -> out.push(self.settle_arg(arg_value(args[i]), pre[i], fields[j].ty, Read, what[j]))
+                None ->
+                    self.fail(span, s"`${n}` needs its field `${names[j]}`")
+                    out.push(self.invalid(span))
+
+        if a.is_enum then texpr(span, Nominal(inst, buf()), TVariant(n, tag, out)) else texpr(span, Nominal(inst, buf()), TNew(out))
+    end generic_construct
+
+    // A bare variant of a generic enum, `None`: the instance its expected type names.
+    generic_bare_variant(*self, span: Span, v: VariantRef, want: Option[Ty]) -> TExpr
+        val template = self.agg.enums[v.owner].name
+        val g = self.find_generic_agg(template).unwrap()
+        val a = self.gen.aggs[g]
+
+        if !a.valid then return self.invalid(span)
+
+        val count = a.variants[v.tag].fields.len()
+
+        if count > 0
+            self.fail(span, s"`${v.name}` carries ${count_text(count, "field")}; build it with `${v.name}(...)`")
+            return self.invalid(span)
+
+        var inf = new_infer(template, a.tparams)
+
+        self.seed(&inf, g, want)
+
+        if !self.inferred(span, &inf, s"give it a type, `val x: ${template}[...] = ${v.name}`") then return self.invalid(span)
+
+        texpr(span, self.agg_type(span, g, &inf), TVariant(v.name, v.tag, buf()))
+
+    // The arguments an expected instance of the same generic gives.
+    private seed(self, inf: *Infer, g: usize, want: Option[Ty])
+        val i = want match
+            Some(Nominal(wn, _)) -> self.agg_instance_named(wn)
+            _ -> None
+
+        i match
+            Some(i) ->
+                val inst = self.gen.agg_insts[i]
+
+                if inst.generic != g then return
+
+                for k in 0..<inst.args.len()
+                    inf.args.set(k, Some(inst.args[k]))
+                    inf.firm.set(k, true)
+                    inf.given.set(k, true)
+            None -> ()
+
+    private agg_instance_named(self, name: string) -> Option[usize]
+        for i in 0..<self.gen.agg_insts.len()
+            if self.gen.agg_insts[i].name == name then return Some(i)
+
+        None
+end Elab
+
+private param_index(inf: *Infer, n: string) -> Option[usize]
+    for k in 0..<inf.tparams.len()
+        if inf.tparams[k].name == n then return Some(k)
+
+    None
+
+private show_arg(a: TArg) -> string = a match
+    TypeArg(t) -> show_ty(t)
+    RankArg(r) -> s"rank ${r}"
+    RankFree -> "?"
+
+private new_infer(owner: string, tparams: Buf[TypeParam]) -> Infer
+    var args: Buf[Option[TArg]] = buf()
+    var firm: Buf[bool] = buf()
+    var given: Buf[bool] = buf()
+
+    for _ in tparams
+        args.push(None)
+        firm.push(false)
+        given.push(false)
+
+    Infer(owner, tparams, args, firm, given, buf())
+
+private unelaborated(n: usize) -> Buf[Option[TExpr]]
+    var out: Buf[Option[TExpr]] = buf()
+
+    for _ in 0..<n
+        out.push(None)
+
+    out
+
+// The arguments once every one is known.
+private settled(inf: *Infer) -> Buf[TArg]
+    var out: Buf[TArg] = buf()
+
+    for a in inf.args
+        out.push(a.unwrap())
+
+    out
+
+// A generic's parameters as its own signature reads them: each type parameter a `Ty.Param`, each
+// rank parameter without its rank.
+private template_binds(tparams: Buf[TypeParam]) -> Buf[Binding]
+    var out: Buf[Binding] = buf()
+
+    for tp in tparams
+        kind_of(tp) match
+            KType -> out.push(Binding(tp.name, TypeArg(Ty.Param(tp.name, constraint_of(tp)))))
+            KRank -> out.push(Binding(tp.name, RankFree))
+            KUnit -> ()
+
+    out
+
+private binds_of(tparams: Buf[TypeParam], args: Buf[TArg]) -> Buf[Binding]
+    var out: Buf[Binding] = buf()
+
+    for k in 0..<tparams.len()
+        out.push(Binding(tparams[k].name, args[k]))
+
+    out
