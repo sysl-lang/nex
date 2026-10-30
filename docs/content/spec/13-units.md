@@ -55,9 +55,9 @@ one; `J` and `N m` are one, as in SI, so torque and energy are not told apart. `
 same **dimension**, length, but different factors: they are different units that convert into each
 other (§13.3).
 
-**Unit names have their own namespace.** They appear only inside `<…>` and in `unit` declarations,
-so a variable called `m`, `s` or `g` never clashes with a unit, and `in`, a keyword elsewhere, is an
-ordinary unit name inside the brackets. Spacing matters: `ms` is the millisecond, `m s` the
+**Unit names have their own namespace.** They appear only inside `<…>`, in `unit` declarations and
+directly after a numeric literal (`10mm`, §13.2), so a variable called `m`, `s` or `g` never clashes
+with a unit, and `in`, a keyword elsewhere, is an ordinary unit name there (`2.0<in>`, `2in`). Spacing matters: `ms` is the millisecond, `m s` the
 metre-second.
 
 `unit` is a keyword, so it is no variable's name and no type's: the type whose only value is `()`
@@ -68,6 +68,7 @@ is `void` ([Types](/spec/03-types/)), and `def f(): unit` is an error that sugge
 | Where | Example |
 |---|---|
 | a literal | `9.81<m/s^2>`, `2.0<in>`, `1.0e5<Pa>` |
+| a literal in one unit, shorthand | `10mm`, `2.5in`, `1e5Pa`, `-3mm` |
 | a real type | `real<m>`, `real32<m/s>`, `real16<Pa>` |
 | a complex type | `complex<V>`, `complex[real32]<ohm>` |
 | an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
@@ -101,6 +102,21 @@ left to right with the other postfixes: `x[i]<m>`, `f(x)<m>`, `to<mm>(x)`.
 | `2pi<rad>` | `2 * (pi<rad>)` |
 | `(a + b)<m>`, `strip(y)<m>` | a unit on the parenthesised operand, on the call |
 | `if x<m> then …` | a unit: `then` cannot begin an operand |
+
+**A unit's name written directly against a decimal literal, with no space, is that literal in that
+unit**: `10mm` is `10<mm>`, `2.5in` is `2.5<in>`, and `1e5Pa` — the exponent first, then the unit —
+is `1e5<Pa>`. It is one operand and reads as the bracketed form does: `-10mm` is `-(10mm)`, `10mm^2`
+is `(10mm)^2`, and `0mm < x < 1cm` is a chained comparison.
+
+- **One name is the whole unit.** A compound unit is bracketed, `9.81<m/s^2>`; in `9.81m/s^2` the
+  `s` is a value, divided by. A bracket after the name, `10mm<in>`, is a compile error.
+- **The name is a unit's when the program has one by that name**: the prelude's or one a `unit`
+  declaration makes in any module. Any other name is what the literal multiplies, so `2x`, `2pi` and
+  `2i` are products as before.
+- **The unit wins over a value of the same name**: with a local `m`, `3m` is three metres, and
+  `3 * m` multiplies by the local.
+- **Only a decimal literal takes one**, since a hex literal's digits may be letters (`0x10cd` is one
+  number): write `0x10<mm>`.
 
 An annotation attaches a unit to a **dimensionless** operand. One written on an operand that
 already carries a unit is a compile error, which points to `to<u>(x)`: that is how a value changes
