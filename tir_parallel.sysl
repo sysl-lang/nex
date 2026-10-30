@@ -1,0 +1,42 @@
+// The typed IR of parallelism: the nodes a `TParallel` holds (DESIGN §9).
+//
+// **A `parallel for` says what each iteration owns and how it reduces.** Its header is one index
+// local per clause with that clause's range, and one `TReduce` per `reduce` clause. In the body,
+// every contribution to a reduction variable is a `TContribute` holding only the contributed value,
+// already of the variable's type, so a later phase never has to recognize `total += e` or
+// `peak = max(peak, e)` again. A body that reaches this IR has passed the checker of DESIGN §9.4.
+
+import sysl.buf.Buf
+
+// `i in lo..hi [by step]` in a `parallel for` header: the index's local and its range, the bounds
+// and the step already of the index's type.
+struct TParClause
+    var_id: usize
+    lo: TExpr
+    hi: TExpr
+    inclusive: bool
+    step: Option[TExpr]
+
+// What combines the contributions to a reduction variable.
+enum TRedOp
+    // `+`, `*`, `min`, `max`, `and`, `or`, `minloc` or `maxloc`.
+    RBuiltin(name: string)
+    // A function of type `(T, T) -> T`, a `TFnRef` or a local holding one; the variable's value before
+    // the loop is its identity.
+    RUser(f: TExpr)
+
+// `total: +` in a `reduce` clause: the outer `var` (a `TLocal` or a `TGlobalRef`) and its operator.
+struct TReduce
+    target: TExpr
+    op: TRedOp
+
+enum TPar
+    // `parallel for i in r, j in s reduce v: op body`: `loop_id` is what a `cycle` in the body names.
+    TParFor(loop_id: usize, clauses: Buf[TParClause], reductions: Buf[TReduce], body: TExpr)
+    // One iteration's contribution to the reduction variable `target`: `value` in the variable's
+    // type, or for `minloc` and `maxloc` the candidate, in the type of the variable's first element,
+    // with its `index`.
+    TContribute(target: TExpr, value: TExpr, index: Option[TExpr])
+    // `parallel e`: a `map`, a reduction or a whole-array element-wise expression, computed in
+    // parallel; the node's type is the value's.
+    TParExpr(value: TExpr)

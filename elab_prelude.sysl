@@ -352,6 +352,7 @@ impl Elab
 
             return texpr(span, ty, TArray(TReduction(name, out, None)))
 
+        if (name == "minloc" || name == "maxloc") && pos.len() == 3 then return self.location_outside(span, name)
         if pos.len() != 1 then return self.arity(span, name, "one array, and optionally `dim =` the axis to reduce along")
 
         var a = self.array_arg(name, pos[0])

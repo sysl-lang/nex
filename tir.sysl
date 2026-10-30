@@ -124,6 +124,8 @@ enum TKind
     TDestructure(kind: BindKind, pat: TBind, init: TExpr)
     // An array node: `tir_array.sysl`.
     TArray(op: &TArr)
+    // A parallel node: `tir_parallel.sysl`.
+    TParallel(op: &TPar)
     // What could not be elaborated, after its diagnostic.
     TInvalid
 end TKind

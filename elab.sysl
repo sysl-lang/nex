@@ -97,8 +97,10 @@ struct Fx
     frames: Buf[Frame]
     // Inside a `const` initializer, where a module-level `var` may not be read.
     in_const: bool
+    // The reduction variables of the `parallel for` bodies around the cursor (`elab_parallel.sysl`).
+    reds: Buf[RedVar]
 
-empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false)
+empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf())
 
 // A lambda bound by `val f = x -> ...` whose parameter types are not written: it is elaborated at
 // the first use that fixes them, inside the copy of the scope it was written in.
@@ -175,9 +177,15 @@ struct Elab
                 TopValue(k) -> self.ensure_global(k)
                 TopFun(k) -> self.ensure_body(k)
 
-        for k in 0..<self.funs.len()
-            self.check_elemental(k)
+        // What the elemental and parallel bodies may do is proved over the finished IR, from the
+        // effect summary of every function.
+        val p = self.program()
+        val fx = summarize(p)
 
+        for k in 0..<self.funs.len()
+            self.check_elemental(k, fx)
+
+        self.check_parallel(p, fx)
         self.check_main()
     end run
 

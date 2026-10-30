@@ -150,13 +150,14 @@ array_elemental_user()
         "(def f ((x#0 real64) (k#1 real64)) real64 (*:real64 x#0 k#1))\n(def g ((a#2 [real64; 2])) [real64; 2] (.call:[real64; 2] f a#2 (adopt:real64 2)))\n(def main () void ())")
     assert_eq(refused("@elemental def f(x: real, k: real) = x * k\ndef g(a: [real; 2], b: [real; 3]) = f(a, b)\n" + MAIN), "error: an elemental call combines arrays of one shape; axis 1 is 2 in one and 3 in the other @2:37")
 
-@test("an @elemental function takes scalars, none inout, gives a value and has no effects but print")
+@test("an @elemental function takes scalars, none inout, gives a value and has no effects but print and eprint")
 array_elemental_rules()
     assert_eq(refused("var total = 0.0\n@elemental def bump(x: real) =\n  total = total + x\n  x\n" + MAIN), "error: an `@elemental` function may be run in any order, so it cannot write the module variable `total` @2:1")
     assert_eq(refused("@elemental def twice(x: inout real) = x\n" + MAIN), "error: an `@elemental` function takes no `inout` parameter, and `x` is one @1:1")
     assert_eq(refused("@elemental def p(x: real) = print(x)\n" + MAIN), "error: an `@elemental` function gives a value for each element, and `p` returns nothing @1:1")
     assert_eq(refused("@elemental def q(v: [real]) = 1.0\n" + MAIN), "error: an `@elemental` function takes scalars, and `v` is [real64] @1:1")
-    assert_eq(refused("@elemental def e(x: real) =\n  eprint(x)\n  x\n" + MAIN), "error: an `@elemental` function may be run in any order, so it cannot do I/O with `eprint` @1:1")
+    assert_eq(refused("@elemental def e(x: real) =\n  eprint(x)\n  x\n" + MAIN), "ok")
+    assert_eq(refused("@elemental def e(x: real) =\n  write_bytes(\"f\", to_bytes([1]))\n  x\n" + MAIN), "error: an `@elemental` function may be run in any order, so it cannot do I/O with `write_bytes` @1:1")
 
 // -- the prelude ------------------------------------------------------------------------------------
 

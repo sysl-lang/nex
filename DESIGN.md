@@ -683,7 +683,7 @@ as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps ever
 
 **A user function opts in with `@elemental`**: `@elemental def f(x: real) = …`. Its body obeys the
 parallel-body rules of §9.4 — no `inout` parameters, no writes to module variables, no I/O except
-`print` — so the compiler may evaluate it in any order and fuse it. Its parameters are scalars and
+`print` and `eprint`, no `parallel`, directly or through anything it calls — so the compiler may evaluate it in any order and fuse it. Its parameters are scalars and
 it returns a value. Called with an array for any parameter, it applies element by element, its
 other arguments broadcasting as an operator's do. An unmarked scalar function applied to an array is
 a compile error that suggests `@elemental` or `map`.
@@ -827,8 +827,9 @@ parallel for i in 1..rows(c), j in 1..cols(c)          // a 2-D iteration space
 ```
 
 The header is `parallel for` *index* `in` *range* (`,` *index* `in` *range*)*, over integer ranges
-only (not over an array's elements). The iterations may run in any order and at the same time; the
-loop ends when all of them have.
+only (not over an array's elements), each with an optional `by` step. The iteration space is a box:
+no range may use another clause's index. The iterations may run in any order and at the same time;
+the loop ends when all of them have.
 
 ### 9.2 Reductions
 
@@ -844,8 +845,12 @@ print(total, peak)
 ```
 
 **The operators** are the built-in `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc`, and any
-**user-defined function** of type `(T, T) -> T`. The reduction variable is an outer `var` of a type
-the operator applies to. Each iteration contributes through exactly one of `v op= e`, `v = v op e`,
+**user-defined function** of type `(T, T) -> T`. The reduction variable is an outer `var` (local
+or module-level) of a type the operator applies to: a number for `+` and `*`, an integer or a real
+for `min` and `max`, a `bool` for `and` and `or`, a (value, index) pair for `minloc` and `maxloc`,
+and `T` for a user function. A built-in operator reduces a scalar, not an array; an array is
+reduced element by element by a loop over its indices, or with a user operator. A variable is named
+in one `reduce` clause only. Each iteration contributes through exactly one of `v op= e`, `v = v op e`,
 `v = op(v, e)` (for `min`, `max` and a user function), `v = v and e`, `v = v or e`, or the location
 forms below, where `e` does not mention `v`; `v` is not read anywhere else in the body. The `var`'s
 value before the loop is the starting value, and after the loop it holds the combination of the
@@ -879,7 +884,8 @@ function `reduce` keeps its name.
   val (largest, where) = worst
   ```
 
-  Ties go to the lowest index, as in Fortran, whatever the thread count.
+  Ties go to the lowest index, as in Fortran, whatever the thread count. The three-argument
+  `maxloc(v, x, i)` exists only as this contribution; anywhere else it is a compile error.
 
 #### 9.2.1 Reproducible reductions
 
@@ -933,19 +939,27 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
 
 1. **No write to shared state.** Assignment is allowed only to (a) bindings declared inside the
    body, (b) declared reduction variables, in the forms of §9.2, and (c) elements or slices of an
-   outer `var` array (or `inout` parameter) **owned by the iteration**: in every such write, some
-   axis's subscript is exactly one of the loop's index variables, distinct loop variables on
+   outer `var` array (or `inout` parameter) **owned by the iteration**: in every such write, each
+   of the loop's index variables is exactly the subscript of one axis, distinct variables on
    distinct axes, so two iterations can never write the same element (`y[i]`, `m[:, j]`,
    `c[i, j]`, `t[i, :, k]`). `y[i + 1]`, `y[2 * i]` and `y[idx[i]]` are rejected (**PROPOSED**: the
-   rule recognizes only the plain index variable).
+   rule recognizes only the plain index variable), and so is `c[i, :]` under the header
+   `i in …, j in …`, since iterations with one `i` and different `j` share that row. Every write to
+   one array in a body uses the same subscripts: `c[i, j]` and `c[j, i]` together are rejected.
+   Passing a place `inout` is a write to it.
 2. **No read of what another iteration writes.** An array written under rule 1(c) may be read in the
    body only at the iteration's own subscript (`y[i]` when writing `y[i]`); `y[i - 1]` is rejected.
    Every other outer binding is read-only for the duration of the loop, and reading it is free:
    value semantics means no other code can change it meanwhile.
 3. **No effects through calls.** A function called in the body may receive `inout` only places that
    rule 1 allows the body to write (`normalize(m[:, j])`), and may not itself write a module-level
-   `var` (the transitive summary of §8.3). `extern` functions not marked `@pure` (§10) are rejected
-   in a parallel body.
+   `var` (the transitive summary of §8.3), nor read one the body writes element by element, nor —
+   for a local function — assign a local of the enclosing function or read a reduction variable.
+   `extern` functions not marked `@pure` (§10) are rejected in a parallel body. **The checker must
+   see what is called**: a function by its name, a lambda, or a `val` bound to one. Calling a
+   function value it cannot see into — a parameter of function type, a `var`, a field — is a
+   compile error in a parallel body, and so is calling a function that itself calls one. A
+   function or lambda passed as a value (to `map`, say) counts as called by whatever receives it.
    **I/O:** `print` and writing to stderr are allowed, and each call is **atomic** — its whole line
    is written under a lock, so lines never interleave mid-line — but the **order of lines across
    iterations is unspecified**. This is the one deliberately non-reproducible thing in a parallel
@@ -957,7 +971,9 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
    `parallel for j in 1..n, i in 1..m`.
 6. **`cycle` is allowed, `exit` is not.** `cycle` ends the current iteration; `exit` (and an
    `exit`/`cycle` naming a loop outside the body) is a compile error, since the iterations have no
-   order to leave.
+   order to leave. `return` is a compile error for the same reason, and so is `stop`; a failed
+   `assert` traps instead, and a trap ends the loop as described below. A loop inside the body may
+   be left by `exit` as any loop may.
 
 A body the checker cannot prove is a compile error naming the offending write or read, never a
 silent fallback to a sequential loop. The wording of the checker's messages is the
