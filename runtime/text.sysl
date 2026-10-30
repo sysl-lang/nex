@@ -1,8 +1,9 @@
 // Strings, sinks and formatting: what a compiled program's `print`, `eprint` and interpolations call.
 //
 // **A nex string is a pointer to NUL-terminated UTF-8.** A literal is a constant the compiler wrote;
-// every other string — an interpolation, a concatenation, a command-line argument — is built here, in
-// storage from libc's `malloc`, and lives as long as the program.
+// every other string — an interpolation, a concatenation, a command-line argument — is built here as
+// an object of the counted heap (`heap.sysl`), which the caller owns: each entry that answers a string
+// answers it with a count of 1.
 //
 // **Text goes to a sink.** Sink 1 is standard output and sink 2 standard error; any other is a string
 // being built, which `nex_sink_new` opens and `nex_sink_finish` closes into a string. So `print(s"…")`
@@ -16,15 +17,12 @@ import sysl.text.{StrBuilder, from_utf8_unchecked, str_builder}
 @needs(os)
 extern strlen(s: *u8) -> usize
 
-@needs(os)
-extern malloc(n: usize) -> *u8
-
 // The text of a C string.
 c_text(p: *u8) -> string = from_utf8_unchecked(p[0..<strlen(p)])
 
-// A string as a nex string: its bytes, copied into storage of their own, NUL-terminated.
+// A string as a nex string: its bytes, copied into a new object of the counted heap, NUL-terminated.
 c_string(s: string) -> *u8
-    val p = malloc(s.len + 1)
+    val p = new_object(long(s.len + 1), null)
 
     for k in 0..<s.len
         p[k] = s.bytes[k]
@@ -117,7 +115,7 @@ arg_count() -> long = long(argc_saved - 1)
 arg(k: long) -> *u8
     if k < 1 || k > long(argc_saved - 1) then out_of_bounds(k)
 
-    argv_saved[k]
+    c_string(c_text(argv_saved[k]))
 
 private out_of_bounds(k: long) -> never
     note_trap(s"index $k out of bounds 1..${argc_saved - 1}")

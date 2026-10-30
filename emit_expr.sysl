@@ -47,12 +47,12 @@ impl Emitter
         TCall(callee, args) -> self.call_value(e.span, callee, args, e.ty)
         TBuiltin(name, args) -> self.builtin(e.span, name, args, e.ty)
         TBorrow(place) -> self.place_ptr(place)
-        TLambdaRef(id) -> self.lambda_value(e.span, id)
+        TLambdaRef(id) -> self.own(self.lambda_value(e.span, id), e.ty)
         TInterp(parts, _) ->
             val sink = self.call("nex_sink_new", "", "", "i64")
 
             self.interp_into(sink, parts)
-            self.call("nex_sink_finish", sink, "i64", "!llvm.ptr")
+            self.own(self.call("nex_sink_finish", sink, "i64", "!llvm.ptr"), Ty.Str)
         TIf(c, a, b) -> self.if_expr(e, c, a, b)
         TWhile(id, c, body) -> self.while_loop(id, c, body)
         TFor(id, v, lo, hi, inclusive, step, body) -> self.for_loop(e.span, id, v, lo, hi, inclusive, step, body)
@@ -63,21 +63,21 @@ impl Emitter
 
             val v = self.ex(init)
 
-            self.store(e.span, self.local_ptr(e.span, id), v, self.prog.locals[id].ty)
+            self.keep(e.span, self.local_ptr(e.span, id), v, self.prog.locals[id].ty)
             ""
         TAssign(op, target, value) ->
             val v = self.ex(value)
             val p = self.place_ptr(target)
 
             if op == "="
-                self.store(e.span, p, v, target.ty)
+                self.keep(e.span, p, v, target.ty)
             else
                 val old = self.load(e.span, p, target.ty)
                 val bop = op[0..<op.len - 1]
                 val r = if bop == "^" && !ty_eq(target.ty, value.ty) then self.power_int_exponent(e.span, old, target.ty, v, value.ty)
                         else self.binary(e.span, bop, old, v, target.ty)
 
-                self.store(e.span, p, r, target.ty)
+                self.keep(e.span, p, r, target.ty)
 
             ""
         TReturn(v) ->
@@ -85,7 +85,7 @@ impl Emitter
                 Some(x) ->
                     val r = self.ex(x)
 
-                    if self.ret_slot != "" && r != "" then self.store(x.span, self.ret_slot, r, self.ret)
+                    if self.ret_slot != "" && r != "" then self.keep(x.span, self.ret_slot, r, self.ret)
                 None -> ()
 
             self.leave(1)
@@ -107,20 +107,30 @@ impl Emitter
         TParallel(_) ->
             self.later(e.span, "a parallel construct")
             ""
-        TTuple(_) -> self.unsupported(e.span, "a tuple")
-        TTupleField(_, _) -> self.unsupported(e.span, "a tuple")
-        TNew(_) -> self.unsupported(e.span, "a struct")
-        TField(_, _, _) -> self.unsupported(e.span, "a struct")
-        TVariant(_, _, _) -> self.unsupported(e.span, "an enum")
-        TMatch(_, _) -> self.unsupported(e.span, "`match`")
-        TDestructure(_, _, _) -> self.unsupported(e.span, "a destructuring binding")
-        TAssignTuple(_, _) -> self.unsupported(e.span, "a tuple assignment")
+        TTuple(elems) -> self.aggregate(e.span, e.ty, elems)
+        TTupleField(v, k) -> self.field_of(v, k, e.ty)
+        TNew(args) -> self.aggregate(e.span, e.ty, args)
+        TField(v, _, k) -> self.field_of(v, k, e.ty)
+        TVariant(_, tag, args) -> self.variant(e.span, e.ty, tag, args)
+        TMatch(s, arms) -> self.match_expr(e, s, arms)
+        TDestructure(_, pat, init) ->
+            self.destructure(e.span, pat, self.ex(init), init.ty)
+            ""
+        TAssignTuple(target, value) ->
+            self.assign_tuple(e.span, target, value)
+            ""
         TInvalid -> self.unsupported(e.span, "an invalid expression")
     end ex_kind
 
     unsupported(*self, span: Span, what: string) -> string
         self.later(span, what)
         ""
+
+    // `p.x` or `t.1`: field `k` of the aggregate `v` computes.
+    field_of(*self, v: TExpr, k: usize, t: Ty) -> string
+        val a = self.ex(v)
+
+        if a == "" then "" else self.field(a, self.ty(v.span, v.ty), k, t)
 
     // A body's statements from `k` on, then its result: the statements after one that may `exit`,
     // `cycle` or `return` run only where it did not.
@@ -132,8 +142,9 @@ impl Emitter
         while k < items.len()
             val item = items[k]
 
+            // A statement's temporaries are released where it ends.
             self.dirty = entry
-            self.ex(item)
+            self.region(item)
             k += 1
 
             if self.ctl != "" && may_leave(item)
@@ -144,20 +155,28 @@ impl Emitter
 
                 self.dirty = false
 
+                val m = self.mark()
+
                 if ty == ""
                     self.op(s"scf.if $ok {")
                     self.block_from(items, k, result, t)
+                    self.release_from(m)
                     self.op("}")
                     return ""
 
                 val r = self.fresh()
 
                 self.op(s"$r = scf.if $ok -> ($ty) {")
-                self.yield_value(self.block_from(items, k, result, t), t)
+
+                val v = self.block_from(items, k, result, t)
+
+                if v != "" then self.retain(v, t)
+                self.release_from(m)
+                self.yield_value(v, t)
                 self.op("} else {")
                 self.yield_value("", t)
                 self.op("}")
-                return r
+                return self.own(r, t)
 
         self.dirty = entry
         self.ex(result)
@@ -218,7 +237,7 @@ impl Emitter
             if op == "==" then self.def(s"arith.cmpi eq, $a, $b : i1")
             else self.def(s"arith.cmpi ne, $a, $b : i1")
         Str ->
-            if op == "+" then return self.call("nex_str_concat", s"$a, $b", "!llvm.ptr, !llvm.ptr", "!llvm.ptr")
+            if op == "+" then return self.own(self.call("nex_str_concat", s"$a, $b", "!llvm.ptr, !llvm.ptr", "!llvm.ptr"), Ty.Str)
 
             val eq = self.call("nex_str_eq", s"$a, $b", "!llvm.ptr, !llvm.ptr", "i1")
 
@@ -395,13 +414,13 @@ impl Emitter
 
         self.op(s"$v = scf.if $a -> (i1) {")
 
-        if op == "and" then self.yield_value(self.ex(r), Bool)
+        if op == "and" then self.yield_value(self.region(r), Bool)
         else self.op(s"scf.yield $a : i1")
 
         self.op("} else {")
 
         if op == "and" then self.op(s"scf.yield $a : i1")
-        else self.yield_value(self.ex(r), Bool)
+        else self.yield_value(self.region(r), Bool)
 
         self.op("}")
         v
@@ -432,7 +451,12 @@ impl Emitter
         val v = self.fresh()
 
         self.op(s"$v = scf.if $c -> (i1) {")
-        self.yield_value(self.chain_from(operands, links, k + 1), Bool)
+
+        val m = self.mark()
+        val rest = self.chain_from(operands, links, k + 1)
+
+        self.release_from(m)
+        self.yield_value(rest, Bool)
         self.op("} else {")
         self.op(s"scf.yield $c : i1")
         self.op("}")
@@ -520,13 +544,13 @@ impl Emitter
 
         if t == ""
             self.op(s"scf.if $cond {")
-            self.ex(a)
+            self.region(a)
 
             b match
                 Some(x) ->
                     self.op("} else {")
                     self.dirty = entry
-                    self.ex(x)
+                    self.region(x)
                 None -> ()
 
             self.op("}")
@@ -535,14 +559,14 @@ impl Emitter
         val v = self.fresh()
 
         self.op(s"$v = scf.if $cond -> ($t) {")
-        self.yield_value(self.ex(a), e.ty)
+        self.yield_value(self.region_value(a, e.ty), e.ty)
         self.op("} else {")
         self.dirty = entry
         self.yield_value(b match
-            Some(x) -> self.ex(x)
+            Some(x) -> self.region_value(x, e.ty)
             None -> "", e.ty)
         self.op("}")
-        v
+        self.own(v, e.ty)
 
     // The condition of a loop's next pass: `go`, and no `exit`, `cycle` or `return` under way.
     loop_condition(*self, go: string)
@@ -560,9 +584,9 @@ impl Emitter
 
     while_loop(*self, id: usize, c: TExpr, body: TExpr) -> string
         self.op("scf.while : () -> () {")
-        self.loop_condition(self.ex(c))
+        self.loop_condition(self.region(c))
         self.op("} do {")
-        self.ex(body)
+        self.region(body)
         self.end_pass(id)
         self.op("scf.yield")
         self.op("}")
@@ -613,7 +637,7 @@ impl Emitter
 
         self.bind_local(span, var_id)
         self.store(span, self.local_ptr(span, var_id), k, vt)
-        self.ex(body)
+        self.region(body)
         self.end_pass(id)
 
         // The pass that reached `last` is the final one; the counter never steps past it.
@@ -652,7 +676,7 @@ impl Emitter
         val r = self.ty(span, ret)
 
         *callee.kind match
-            TFnRef(name) -> self.effect(s"func.call @\"n.$name\"($vals) : ($tys) -> ${result_text(r)}", r)
+            TFnRef(name) -> self.own(self.effect(s"func.call @\"n.$name\"($vals) : ($tys) -> ${result_text(r)}", r), ret)
             _ ->
                 val c = self.ex(callee)
                 val code = self.def(s"llvm.extractvalue $c[0] : $CLOSURE")
@@ -662,7 +686,7 @@ impl Emitter
                 val f = self.def(s"builtin.unrealized_conversion_cast $code : !llvm.ptr to $fty")
                 val with_env = if vals == "" then env else s"$env, $vals"
 
-                self.effect(s"func.call_indirect $f($with_env) : $fty", r)
+                self.own(self.effect(s"func.call_indirect $f($with_env) : $fty", r), ret)
     end call_value
 end Emitter
 

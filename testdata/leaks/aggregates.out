@@ -1,0 +1,21 @@
+Particle { name=p3, pos=(3.0, 2.0), z=1.0+2.0i, alive=true }
+p3'
+(13.0, 2.0)
+Particle { name=nudged, pos=(13.0, 3.0), z=1.0+2.0i, alive=true }
+p3'
+p3 at 1
+x->y
+none
+event: Renamed(uv, w)
+20
+times
+right left
+0.0 origin!
+q
+((1, a), (2.5, (true, bc)))
+(1, a) 2.5 true bc
+Pair { fst=Pair { fst=inner, snd=2 }, snd=Quiet }
+hello, ada
+2
+moved/4.0
+55

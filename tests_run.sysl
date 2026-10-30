@@ -22,8 +22,8 @@ private val V2_INDEX = from_utf8(embed("testdata/v2/index.tsv")).unwrap()
 // The categories PLAN.md's M3 counts.
 private val M3_CATEGORIES = ["top-level bindings + print", "scalar arithmetic", "comparison + logical", "chained comparison", "chained comparisons", "control flow", "blocks + scoping", "top-level initialization", "compound assignment", "functions", "string interpolation", "const fn calls", "inout by-ref"]
 
-// The programs of those categories that need an array or a tuple at run time, which the emitter
-// does not compile yet.
+// The programs of those categories that need an array at run time, which the emitter does not
+// compile yet.
 private val WAITING = ["044-for-over-array", "045-for-over-val-bound-array",
     "051-range-at-value-position-produces-an-integer-array", "052-inclusive-range-at-value-position",
     "053-empty-range-at-value-position", "058-for-with-tuple-destructuring-on-enumerate-xs",
@@ -42,15 +42,14 @@ private val WAITING = ["044-for-over-array", "045-for-over-val-bound-array",
     "097-flatmap-where-inner-length-itself-depends-on-the-element-var", "098-length-of-flatmap-result",
     "099-flatmap-on-real-elements-promotes-through-inner-arrays", "100-sum-of-flatmap-result",
     "101-prelude-hof-method-call-sugar-xs-map-x-runs", "103-bound-then-called-lambda-runs-through-prelude-hof",
-    "104-top-level-def-passed-as-a-function-value-argument", "283-evaluate-a-reading-destructured-names",
-    "342-on-an-array-index-target"]
+    "104-top-level-def-passed-as-a-function-value-argument", "342-on-an-array-index-target"]
 
 // A scratch directory and the toolchain, the runtime built into it by the compiler running the tests.
-private struct Bench
+struct Bench
     work: string
     tc: Toolchain
 
-private bench() -> Bench
+bench() -> Bench
     val bin = s"${get_or("NEX_LLVM_HOME", "/opt/homebrew/opt/llvm")}/bin"
 
     if !exists(s"$bin/mlir-opt") then skip(s"no mlir-opt in $bin")
@@ -63,7 +62,7 @@ private bench() -> Bench
     Bench(work, Toolchain(bin, archive))
 
 // What the emitter makes of `text`: the module, or its diagnostics, one to a line.
-private emitted(text: string, fpe_trap: bool = false) -> Result[string, string]
+emitted(text: string, fpe_trap: bool = false) -> Result[string, string]
     val src = source_of("t.nex", text)
 
     val p = parse_program(src) match
@@ -87,7 +86,7 @@ private lines(ds: Buf[Diagnostic], src: Source) -> string
     join(out.view(), "\n")
 
 // `text` compiled and run with `args`: what it wrote and how it ended.
-private ran(b: Bench, text: string, args: []const string = [], fpe_trap: bool = false) -> Output
+ran(b: Bench, text: string, args: []const string = [], fpe_trap: bool = false) -> Output
     val m = emitted(text, fpe_trap) match
         Ok(m) -> m
         Err(e) -> fail_with(e)
@@ -100,11 +99,11 @@ private ran(b: Bench, text: string, args: []const string = [], fpe_trap: bool = 
 
     capture(exe, args, stderr = true).unwrap()
 
-private fail_with(message: string) -> never
+fail_with(message: string) -> never
     assert(false, message)
     panic(message)
 
-private finish(b: Bench)
+finish(b: Bench)
     remove_dir_all(b.work).unwrap()
 
 // Whether every diagnostic says its construct waits on a later part of the compiler.
@@ -120,40 +119,50 @@ private in_categories(cols: []const string, categories: []const string) -> bool
 
     false
 
-@test("every program of PLAN.md's M3 corpus categories prints its .out, but for those waiting on arrays and tuples")
-run_m3_corpus()
+// What the corpus programs of `categories` did: how many printed their `.out`, the ones that failed
+// and why, and the ones that wait on a part of the compiler not built yet.
+struct CorpusRun
+    passed: int
+    failed: Buf[string]
+    waiting: Buf[string]
+
+corpus_run(categories: []const string) -> CorpusRun
     val b = bench()
-    var passed = 0
-    var failed: Buf[string] = buf()
-    var waiting: Buf[string] = buf()
+    var r = CorpusRun(0, buf(), buf())
 
     for line in split(CORPUS_INDEX, "\n")
         if line.len == 0 || line.starts_with("file\t") then continue
 
         val cols = split(line, "\t")
 
-        if !in_categories(cols, M3_CATEGORIES) then continue
+        if !in_categories(cols, categories) then continue
 
         val name = cols[0]
         val text = read_text(s"testdata/corpus/$name.nex").unwrap()
 
         emitted(text) match
-            Err(e) -> if only_later(e) then waiting.push(name) else failed.push(s"$name: $e")
+            Err(e) -> if only_later(e) then r.waiting.push(name) else r.failed.push(s"$name: $e")
             Ok(m) ->
                 val exe = s"${b.work}/program"
 
                 lower_module(m, exe, b.work, b.tc) match
-                    Err(e) -> failed.push(s"$name: $e")
+                    Err(e) -> r.failed.push(s"$name: $e")
                     Ok(_) ->
                         val out = capture(exe, [], stderr = true).unwrap()
 
-                        if out.status.ok() && out.text == read_text(s"testdata/corpus/$name.out").unwrap() then passed += 1
-                        else failed.push(s"$name: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
+                        if out.status.ok() && out.text == read_text(s"testdata/corpus/$name.out").unwrap() then r.passed += 1
+                        else r.failed.push(s"$name: ${out.status}\n${out.text}${out.err.unwrap_or("")}")
 
     finish(b)
-    assert(failed.len() == 0, join(failed.view(), "\n"))
-    assert_eq(join(waiting.view(), "\n"), join(WAITING[..], "\n"))
-    assert_eq(passed, 114)
+    r
+
+@test("every program of PLAN.md's M3 corpus categories prints its .out, but for those waiting on arrays")
+run_m3_corpus()
+    val r = corpus_run(M3_CATEGORIES[..])
+
+    assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
+    assert_eq(join(r.waiting.view(), "\n"), join(WAITING[..], "\n"))
+    assert_eq(r.passed, 115)
 
 @test("every program of testdata/v2 prints its .out")
 run_v2()
@@ -263,8 +272,6 @@ run_fpe_trap()
 @test("a program needing what the emitter does not compile yet is refused with a diagnostic naming it")
 emit_refuses_what_waits()
     assert_eq(emitted("def main() =\n  val xs = [1, 2]\n  print(xs)\n").err().unwrap_or(""), "error: a value of type [int64] is not compiled yet @2:3")
-    assert_eq(emitted("struct P\n  x: real\ndef main() = print(P(1.0).x)\n").err().unwrap_or(""), "error: a struct is not compiled yet @1:1\nerror: a struct is not compiled yet @3:20")
-    assert_eq(emitted("def main() =\n  val t = (1, 2)\n  print(t.1)\n").err().unwrap_or(""), "error: a value of type (int64, int64) is not compiled yet @2:3")
     assert_eq(emitted("def f(x: integer) = x\ndef main() =\n  val g = f\n  print(g(2))\n  print([f(1)])\n").err().unwrap_or(""), "error: an array is not compiled yet @5:9")
 
 @test("the module names every symbol with a prefix no C name has, and makes main the only public function")

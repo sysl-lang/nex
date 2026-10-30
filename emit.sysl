@@ -11,17 +11,22 @@
 // `2L + 3`, `return` to 1 with its value stored aside. A statement after one that may set it runs
 // under `scf.if` on the word being 0, a loop runs while it is 0, and the loop it names clears it.
 //
-// **A local a lambda captures lives in a cell**: storage of its own from `malloc`, whose address the
-// entry-block slot holds. The lambda's environment is the addresses of the cells it captures, so a
-// lambda sees later writes to them and they to it (corpus 079), and it may outlive the frame that
-// made it. An `inout` parameter is held the same way, its slot holding the caller's place.
+// **A local a lambda captures lives in a cell**: an object of the runtime's counted heap, whose
+// address the entry-block slot holds. The lambda's environment is the count of cells it holds and
+// their addresses, so a lambda sees later writes to them and they to it (corpus 079), and it may
+// outlive the frame that made it. An `inout` parameter is held the same way, its slot holding the
+// caller's place, which an environment borrows after its cells. A local `def` that calls itself, and
+// that no other lambda captures, reaches itself through its own code and environment instead of a
+// cell, which would hold the environment that holds it.
 //
 // **A function value is a pair of pointers**, `!llvm.struct<(ptr, ptr)>`: code that takes the
 // environment as its first argument, and the environment. A lambda is emitted as such code; a
 // top-level `def` used as a value gets a wrapper that drops the environment and calls it.
 //
-// **A string is a pointer to NUL-terminated UTF-8**: a literal is a private constant global, and every
-// other string is built by the runtime (`runtime/text.sysl`).
+// **A string is a pointer to NUL-terminated UTF-8**: a literal is a private constant global behind
+// the header of a counted object that is never freed, and every other string is built by the runtime
+// (`runtime/text.sysl`). Who holds a count on what is `emit_own.sysl`'s; structs, tuples and enums
+// are `emit_aggregate.sysl`'s.
 //
 // **Every check that fails calls the runtime's one trap entry**, `nex_trap`, with the message as a
 // constant string, inside an `scf.if` on the failed condition.
@@ -72,6 +77,15 @@ struct Emitter
     // Whether an `exit`, `cycle` or `return` may already have run in the statement being emitted, so
     // that what the rest of it does — a call, a store, a trap — runs only where none did.
     dirty: bool
+
+    // The counted values the statements being emitted own, released where each statement ends, and
+    // the locals the current function owns, released where it returns (`emit_own.sysl`).
+    temps: Buf[Temp]
+    owned: Buf[usize]
+    // By lambda: the local `def` it is bound to where it calls itself and no other lambda captures it.
+    self_local: Buf[Option[usize]]
+    // The types whose retain, release and cell-release functions the module needs, by number.
+    helpers: Buf[Ty]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -188,20 +202,29 @@ struct Emitter
             self.def(s"complex.create $z, $z : $t")
         else self.def(s"llvm.mlir.zero : $t")
 
-    // The address of a string constant.
+    // The address of a string constant: its bytes, after the header of a counted object whose count
+    // marks it as never freed (`runtime/heap.sysl`).
     string_ref(*self, text: string) -> string
         var k = 0
+        val t = s"!llvm.struct<(i64, ptr, array<${text.len + 1} x i8>)>"
 
         loop
             if k == self.strings.len()
                 self.strings.push(text)
-                self.top.push(s"  llvm.mlir.global private constant @\"s.$k\"(\"${mlir_bytes(text)}\\00\") {addr_space = 0 : i32} : !llvm.array<${text.len + 1} x i8>\n")
+                self.top.push(s"  llvm.mlir.global private constant @\"s.$k\"() {addr_space = 0 : i32} : $t {\n")
+                self.top.push(s"    %u = llvm.mlir.undef : $t\n    %c = llvm.mlir.constant(-1 : i64) : i64\n")
+                self.top.push(s"    %h = llvm.insertvalue %c, %u[0] : $t\n    %z = llvm.mlir.zero : !llvm.ptr\n")
+                self.top.push(s"    %d = llvm.insertvalue %z, %h[1] : $t\n")
+                self.top.push(s"    %b = llvm.mlir.constant(\"${mlir_bytes(text)}\\00\") : !llvm.array<${text.len + 1} x i8>\n")
+                self.top.push(s"    %s = llvm.insertvalue %b, %d[2] : $t\n    llvm.return %s : $t\n  }\n")
                 break
 
             if self.strings[k] == text then break
             k += 1
 
-        self.def(s"llvm.mlir.addressof @\"s.$k\" : !llvm.ptr")
+        val g = self.def(s"llvm.mlir.addressof @\"s.$k\" : !llvm.ptr")
+
+        self.def(s"llvm.getelementptr $g[0, 2] : (!llvm.ptr) -> !llvm.ptr, $t")
 
     // A trap with `message` where `cond` holds.
     trap_if(*self, cond: string, message: string)
@@ -224,44 +247,48 @@ struct Emitter
         Bool -> "i1"
         Str -> "!llvm.ptr"
         Fn(_) -> CLOSURE
+        Tuple(_) -> self.agg_ty(span, t)
+        Nominal(_, _) -> self.agg_ty(span, t)
         Void -> ""
         Never -> ""
         _ ->
             self.later(span, s"a value of type ${show_ty(t)}")
             "i64"
 
-    // The type a value of `t` is stored as: a complex as a struct of its parts.
+    // The type a value of `t` is stored as, in memory and inside an aggregate: a complex as a struct
+    // of its parts.
     mem_ty(*self, span: Span, t: Ty) -> string = t match
         Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
         _ -> self.ty(span, t)
 
-    load(*self, span: Span, ptr: string, t: Ty) -> string
-        val m = self.mem_ty(span, t)
-        val v = self.def(s"llvm.load $ptr : !llvm.ptr -> $m")
+    // A value of `t` read in its stored form.
+    from_mem(*self, v: string, t: Ty) -> string = t match
+        Complex(b) ->
+            val m = s"!llvm.struct<(f$b, f$b)>"
+            val re = self.def(s"llvm.extractvalue $v[0] : $m")
+            val im = self.def(s"llvm.extractvalue $v[1] : $m")
 
-        t match
-            Complex(b) ->
-                val re = self.def(s"llvm.extractvalue $v[0] : $m")
-                val im = self.def(s"llvm.extractvalue $v[1] : $m")
+            self.def(s"complex.create $re, $im : complex<f$b>")
+        _ -> v
 
-                self.def(s"complex.create $re, $im : complex<f$b>")
-            _ -> v
+    // A value of `t` in its stored form.
+    to_mem(*self, v: string, t: Ty) -> string = t match
+        Complex(b) ->
+            val m = s"!llvm.struct<(f$b, f$b)>"
+            val re = self.def(s"complex.re $v : complex<f$b>")
+            val im = self.def(s"complex.im $v : complex<f$b>")
+            val u = self.def(s"llvm.mlir.undef : $m")
+
+            self.def(s"llvm.insertvalue $im, ${self.def(s"llvm.insertvalue $re, $u[0] : $m")}[1] : $m")
+        _ -> v
+
+    load(*self, span: Span, ptr: string, t: Ty) -> string =
+        self.from_mem(self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.mem_ty(span, t)}"), t)
 
     store(*self, span: Span, ptr: string, v: string, t: Ty)
-        val m = self.mem_ty(span, t)
-        var w = v
+        val w = self.to_mem(v, t)
 
-        t match
-            Complex(b) ->
-                val re = self.def(s"complex.re $v : complex<f$b>")
-                val im = self.def(s"complex.im $v : complex<f$b>")
-                val u = self.def(s"llvm.mlir.undef : $m")
-                val a = self.def(s"llvm.insertvalue $re, $u[0] : $m")
-
-                w = self.def(s"llvm.insertvalue $im, $a[1] : $m")
-            _ -> ()
-
-        self.effect(s"llvm.store $w, $ptr : $m, !llvm.ptr", "")
+        self.effect(s"llvm.store $w, $ptr : ${self.mem_ty(span, t)}, !llvm.ptr", "")
 
     // -- locals -----------------------------------------------------------------------------------
 
@@ -271,20 +298,28 @@ struct Emitter
         self.entry.push(s"    $v = llvm.alloca %one x $ty : (i64) -> !llvm.ptr\n")
         v
 
-    // Storage for local `id` where it is bound; a captured one gets a fresh cell each time.
-    bind_local(*self, span: Span, id: usize)
+    // Storage for local `id` where it is bound; a captured one gets a fresh cell each time, the one
+    // bound before released. The function owns what the slot holds unless `borrowed` (a parameter's
+    // value, which its caller owns).
+    bind_local(*self, span: Span, id: usize, borrowed: bool = false)
         val t = self.prog.locals[id].ty
 
         if self.boxed[id]
-            if self.slot[id] == "" then self.slot.set(id, self.alloca("!llvm.ptr"))
+            if self.slot[id] == ""
+                self.slot.set(id, self.zeroed_alloca("!llvm.ptr"))
+                self.owned.push(id)
+            else
+                self.release_ref(self.def(s"llvm.load ${self.slot[id]} : !llvm.ptr -> !llvm.ptr"))
 
-            val n = self.def(s"arith.constant ${size_of(t)} : i64")
-            val cell = self.def(s"llvm.call @malloc($n) : (i64) -> !llvm.ptr")
+            val cell = self.new_object(self.words(t) * 8, if self.managed(t) then self.helper_ref("cell", t) else "")
 
-            self.declare("malloc", "llvm.func @malloc(i64) -> !llvm.ptr")
             self.op(s"llvm.store $cell, ${self.slot[id]} : !llvm.ptr, !llvm.ptr")
         elif self.slot[id] == ""
-            self.slot.set(id, self.alloca(self.mem_ty(span, t)))
+            if self.managed(t) && !borrowed
+                self.slot.set(id, self.zeroed_alloca(self.mem_ty(span, t)))
+                self.owned.push(id)
+            else
+                self.slot.set(id, self.alloca(self.mem_ty(span, t)))
 
     // A local whose slot holds the address of storage someone else owns: an `inout` parameter, or a
     // capture inside the lambda.
@@ -302,13 +337,19 @@ struct Emitter
 
         self.slot[id]
 
-    // The address a place is stored at: a local or a module-level binding.
+    // The address a place is stored at: a local, a module-level binding, or a field of a place.
     place_ptr(*self, e: TExpr) -> string = *e.kind match
         TLocal(id) -> self.local_ptr(e.span, id)
         TGlobalRef(name) -> self.def(s"llvm.mlir.addressof @\"g.$name\" : !llvm.ptr")
+        TField(v, _, k) -> self.field_ptr(v, k)
+        TTupleField(v, k) -> self.field_ptr(v, k)
         _ ->
             self.later(e.span, "this place")
             "%one"
+
+    // The address of field `k` of the place `v`.
+    field_ptr(*self, v: TExpr, k: usize) -> string =
+        self.def(s"llvm.getelementptr ${self.place_ptr(v)}[0, $k] : (!llvm.ptr) -> !llvm.ptr, ${self.ty(v.span, v.ty)}")
 
     // -- functions --------------------------------------------------------------------------------
 
@@ -322,6 +363,8 @@ struct Emitter
         self.ret_slot = ""
         self.reported = false
         self.dirty = false
+        self.temps = buf()
+        self.owned = buf()
 
         for k in 0..<self.slot.len()
             self.slot.set(k, "")
@@ -334,7 +377,7 @@ struct Emitter
 
             val r = self.ty(body.span, ret)
 
-            if r != "" then self.ret_slot = self.alloca(self.mem_ty(body.span, ret))
+            if r != "" then self.ret_slot = self.zeroed_alloca(self.mem_ty(body.span, ret))
 
     // The current function, finished, under `header`.
     end(*self, header: string)
@@ -344,24 +387,30 @@ struct Emitter
         self.funcs.push(self.body.finish())
         self.funcs.push("  }\n\n")
 
-    // The end of a body whose value is `v`.
+    // The end of a body whose value is `v`: the value kept for the caller, which owns it, and then
+    // what the function still holds released.
     finish_body(*self, span: Span, v: string)
         val r = self.ty(span, self.ret)
 
         if r == ""
+            self.release_all()
             self.op("func.return")
             return
 
         val value = if v == "" then self.zero_of(span, self.ret) else v
 
         if self.ctl == ""
+            self.retain(value, self.ret)
+            self.release_all()
             self.op(s"func.return $value : $r")
             return
 
         // A body that ran to its end gives its value; one that returned stored it already.
         self.op(s"scf.if ${self.flowing()} {")
-        self.store(span, self.ret_slot, value, self.ret)
+        self.dirty = false
+        self.keep(span, self.ret_slot, value, self.ret)
         self.op("}")
+        self.release_all()
         self.op(s"func.return ${self.load(span, self.ret_slot, self.ret)} : $r")
 
     // A parameter's MLIR type: an `inout` one is its caller's place.
@@ -375,8 +424,12 @@ struct Emitter
 
             if is_inout(self.prog.locals[id].kind)
                 self.bind_borrowed(id, s"%a$k")
-            else
+            elif self.boxed[id]
+                // A captured parameter's cell keeps its own count on the value.
                 self.bind_local(span, id)
+                self.keep(span, self.local_ptr(span, id), s"%a$k", self.prog.locals[id].ty)
+            else
+                self.bind_local(span, id, true)
                 self.store(span, self.local_ptr(span, id), s"%a$k", self.prog.locals[id].ty)
 
     params_text(*self, span: Span, params: Buf[usize], env: bool) -> string
@@ -406,10 +459,19 @@ struct Emitter
 
         self.begin(l.ret, l.body)
 
-        for k in 0..<l.captures.len()
-            val p = self.def(s"llvm.getelementptr %env[$k] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")
+        val order = self.env_order(id)
 
-            self.bind_borrowed(l.captures[k], self.def(s"llvm.load $p : !llvm.ptr -> !llvm.ptr"))
+        for k in 0..<order.len()
+            val p = self.def(s"llvm.getelementptr %env[${k + 1}] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")
+
+            self.bind_borrowed(order[k], self.def(s"llvm.load $p : !llvm.ptr -> !llvm.ptr"))
+
+        // A local `def` that calls itself reaches itself through its own code and environment.
+        self.self_local[id] match
+            Some(me) ->
+                self.slot.set(me, self.alloca(CLOSURE))
+                self.op(s"llvm.store ${self.closure(s"l.$id", self.code_type(l.body.span, l.params, l.ret), "%env")}, ${self.slot[me]} : $CLOSURE, !llvm.ptr")
+            None -> ()
 
         self.bind_params(l.body.span, l.params)
         self.finish_body(l.body.span, self.ex(l.body))
@@ -433,7 +495,7 @@ struct Emitter
 
         self.def(s"llvm.insertvalue $env, $a[1] : $CLOSURE")
 
-    // Lambda `id` as a value, its environment the cells of what it captures.
+    // Lambda `id` as a value, its environment the cells of what it captures; the caller owns it.
     lambda_value(*self, span: Span, id: usize) -> string
         val l = self.prog.lambdas[id]
 
@@ -441,21 +503,31 @@ struct Emitter
             self.lambdas_done.set(id, true)
             self.lambdas_wanted.push(id)
 
+        val order = self.env_order(id)
         var env = ""
 
-        if l.captures.len() == 0
+        if order.len() == 0
             env = self.def("llvm.mlir.zero : !llvm.ptr")
         else
-            val n = self.def(s"arith.constant ${8 * l.captures.len()} : i64")
+            // The cells it holds a count on, how many, and then the places of the `inout` parameters it
+            // borrows for the call it is an argument of.
+            self.declare("nex_env_drop", "llvm.func @nex_env_drop(!llvm.ptr)")
+            env = self.new_object(8 * (order.len() + 1), self.def("llvm.mlir.addressof @nex_env_drop : !llvm.ptr"))
 
-            self.declare("malloc", "llvm.func @malloc(i64) -> !llvm.ptr")
-            env = self.def(s"llvm.call @malloc($n) : (i64) -> !llvm.ptr")
+            var counted = 0
 
-            for k in 0..<l.captures.len()
-                val cell = self.local_ptr(span, l.captures[k])
-                val p = self.def(s"llvm.getelementptr $env[$k] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")
+            for k in 0..<order.len()
+                val c = order[k]
+                val cell = self.local_ptr(span, c)
+                val p = self.def(s"llvm.getelementptr $env[${k + 1}] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")
+
+                if !is_inout(self.prog.locals[c].kind)
+                    self.retain_ref(cell)
+                    counted += 1
 
                 self.op(s"llvm.store $cell, $p : !llvm.ptr, !llvm.ptr")
+
+            self.op(s"llvm.store ${self.def(s"arith.constant $counted : i64")}, $env : i64, !llvm.ptr")
 
         self.closure(s"l.$id", self.code_type(span, l.params, l.ret), env)
 
@@ -511,6 +583,7 @@ struct Emitter
 
     whole_module(*self) -> string
         var globals: Buf[TGlobal] = buf()
+        var tuples: Buf[TGlobalTuple] = buf()
 
         for d in self.prog.decls
             self.reported = false
@@ -518,9 +591,9 @@ struct Emitter
             d match
                 FunDecl(f) -> self.fun(f)
                 GlobalDecl(g) -> globals.push(g)
-                TupleGlobalDecl(g) -> self.later(g.span, "a module-level destructuring binding")
-                StructDecl(s) -> self.later(s.span, "a struct")
-                EnumDecl(e) -> self.later(e.span, "an enum")
+                TupleGlobalDecl(g) -> tuples.push(g)
+                StructDecl(_) -> ()
+                EnumDecl(_) -> ()
 
         // Each lambda is emitted after the function that makes it, and may make more.
         var k = 0
@@ -529,11 +602,13 @@ struct Emitter
             self.lambda(self.lambdas_wanted[k])
             k += 1
 
-        self.entry_point(globals)
+        self.entry_point(globals, tuples)
 
         while k < self.lambdas_wanted.len()
             self.lambda(self.lambdas_wanted[k])
             k += 1
+
+        self.helper_bodies()
 
         var out = str_builder()
 
@@ -547,20 +622,24 @@ struct Emitter
 
     // The C `main`: the arguments set aside, every module-level binding initialized before anything
     // reads it, the program's `main` called and what it printed written out.
-    entry_point(*self, globals: Buf[TGlobal])
+    entry_point(*self, globals: Buf[TGlobal], tuples: Buf[TGlobalTuple])
         self.begin(Void, texpr(Span(0, 0), Void, TLiteral(VoidVal, false)))
 
         self.call("nex_set_args", "%argc, %argv", "i32, !llvm.ptr", "")
 
-        for g in init_order(self.prog, globals)
-            val m = self.mem_ty(g.span, g.ty)
+        for k in init_order(self.prog, globals, tuples)
+            val m = self.mark()
 
-            self.top.push(s"  llvm.mlir.global internal @\"g.${g.name}\"() {addr_space = 0 : i32} : $m {\n")
-            self.top.push(s"    %z = llvm.mlir.zero : $m\n    llvm.return %z : $m\n  }\n")
+            if k < globals.len()
+                val g = globals[k]
 
-            val v = self.ex(g.init)
+                self.keep(g.span, self.global_storage(g.span, g.name, g.ty), self.ex(g.init), g.ty)
+            else
+                val g = tuples[k - globals.len()]
 
-            self.store(g.span, self.def(s"llvm.mlir.addressof @\"g.${g.name}\" : !llvm.ptr"), v, g.ty)
+                self.destructure(g.span, g.pat, self.ex(g.init), g.ty)
+
+            self.release_from(m)
 
         self.op("func.call @\"n.main\"() : () -> ()")
         self.call("nex_finish", "", "", "")
@@ -584,14 +663,16 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 
     var done: Buf[bool] = buf()
 
-    for l in p.lambdas
+    val selves = self_locals(p)
+
+    for k in 0..<p.lambdas.len()
         done.push(false)
 
-        for c in l.captures
-            boxed.set(c, true)
+        for c in p.lambdas[k].captures
+            if selves[k] != Some(c) then boxed.set(c, true)
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
-                    buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false)
+                    buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), selves, buf())
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)
@@ -625,15 +706,6 @@ may_leave(e: TExpr) -> bool
 
     false
 
-// The bytes a value of `t` takes in a cell.
-private size_of(t: Ty) -> int = t match
-    Int(b, _) -> b / 8
-    Real(b) -> b / 8
-    Complex(b) -> b / 4
-    Bool -> 1
-    Fn(_) -> 16
-    _ -> 8
-
 // A string's bytes as an MLIR string attribute spells them: printable ASCII as itself, the rest, a
 // quote and a backslash as two hex digits after a backslash.
 mlir_bytes(text: string) -> string
@@ -654,19 +726,47 @@ mlir_bytes(text: string) -> string
 
 // The module-level bindings in an order where each is initialized before any initializer reads it,
 // through the functions it calls too. The elaborator has refused a cycle.
-private init_order(p: TProgram, globals: Buf[TGlobal]) -> Buf[TGlobal]
-    var out: Buf[TGlobal] = buf()
+// The initializers are numbered the plain bindings first, then the destructuring ones.
+private init_order(p: TProgram, globals: Buf[TGlobal], tuples: Buf[TGlobalTuple]) -> Buf[usize]
+    var inits: Buf[TExpr] = buf()
+    var binds: Buf[Buf[string]] = buf()
+
+    for g in globals
+        inits.push(g.init)
+
+        var names: Buf[string] = buf()
+
+        names.push(g.name)
+        binds.push(names)
+
+    for g in tuples
+        inits.push(g.init)
+
+        var names: Buf[string] = buf()
+
+        bound_names(g.pat, &names)
+        binds.push(names)
+
+    var out: Buf[usize] = buf()
     var placed: Buf[bool] = buf()
 
-    for _ in globals
+    for _ in inits
         placed.push(false)
 
-    for k in 0..<globals.len()
-        place_global(p, globals, k, &placed, &out)
+    for k in 0..<inits.len()
+        place_global(p, inits, binds, k, &placed, &out)
 
     out
 
-private place_global(p: TProgram, globals: Buf[TGlobal], k: usize, placed: *Buf[bool], out: *Buf[TGlobal])
+private bound_names(pat: TBind, out: *Buf[string])
+    pat match
+        BGlobal(n) -> out.push(n)
+        BTuple(elems) ->
+            for e in elems
+                bound_names(e, out)
+        _ -> ()
+
+private place_global(p: TProgram, inits: Buf[TExpr], binds: Buf[Buf[string]], k: usize, placed: *Buf[bool], out: *Buf[usize])
     if placed[k] then return
 
     placed.set(k, true)
@@ -674,13 +774,13 @@ private place_global(p: TProgram, globals: Buf[TGlobal], k: usize, placed: *Buf[
     var names: Buf[string] = buf()
     var seen: Buf[string] = buf()
 
-    reads(p, globals[k].init, &names, &seen)
+    reads(p, inits[k], &names, &seen)
 
     for n in names
-        for j in 0..<globals.len()
-            if globals[j].name == n then place_global(p, globals, j, placed, out)
+        for j in 0..<inits.len()
+            if contains(binds[j], n) then place_global(p, inits, binds, j, placed, out)
 
-    out.push(globals[k])
+    out.push(k)
 
 // The module-level bindings `e` reads, directly or through the functions and lambdas it reaches;
 // `seen` holds the functions already walked.

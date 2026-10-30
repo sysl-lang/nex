@@ -13,6 +13,9 @@ import sh.sysl.parsing.Span
 // which lower at every width.
 private val LIBM = ["cbrt", "exp", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "atan2", "hypot"]
 
+// The prelude's complex functions that are one `complex` operation of the same name.
+private val COMPLEX_OPS = ["exp", "log", "sin", "cos", "tan"]
+
 private among(name: string, names: []const string) -> bool
     for n in names
         if n == name then return true
@@ -93,8 +96,9 @@ impl Emitter
             if name == "conj" then return self.def(s"complex.conj $x : $c")
             if name == "arg" then return self.def(s"complex.angle $x : $c")
             if name == "sqrt" then return self.complex_sqrt(x, bits_of(args[0].ty))
+            if among(name, COMPLEX_OPS) then return self.def(s"complex.$name $x : $c")
 
-            return self.def(s"complex.$name $x : $c")
+            return self.unsupported(span, s"`$name` of a complex")
 
         val bits = bits_of(t)
 
@@ -234,7 +238,7 @@ impl Emitter
                 self.call(s"nex_put_complex${if bits == 64 then "" else s"$bits"}", s"$sink, $re, $im", s"i64, f$at, f$at", "")
             Bool -> self.call("nex_put_bool", s"$sink, $v", "i64, i1", "")
             Str -> self.call("nex_put_str", s"$sink, $v", "i64, !llvm.ptr", "")
-            _ -> self.later(span, s"printing ${show_ty(t)}")
+            _ -> self.put_aggregate(span, sink, v, t)
 
     // A value under an `f"..."` specifier, which the elaborator has checked against its type.
     put_formatted(*self, span: Span, sink: string, v: string, t: Ty, spec: string)
@@ -247,7 +251,7 @@ impl Emitter
                 val inner = self.call("nex_sink_new", "", "", "i64")
 
                 self.put_value(span, inner, v, t)
-                text = self.call("nex_sink_finish", inner, "i64", "!llvm.ptr")
+                text = self.own(self.call("nex_sink_finish", inner, "i64", "!llvm.ptr"), Ty.Str)
 
             self.call("nex_put_fmt_str", s"$sink, $text, $s", "i64, !llvm.ptr, !llvm.ptr", "")
             return
@@ -280,7 +284,7 @@ impl Emitter
                         TSubAt(k) ->
                             val i = self.ex(k)
 
-                            return self.call("nex_arg", self.widen64(i, bits_of(k.ty), is_signed(k.ty)), "i64", "!llvm.ptr")
+                            return self.own(self.call("nex_arg", self.widen64(i, bits_of(k.ty), is_signed(k.ty)), "i64", "!llvm.ptr"), Ty.Str)
                         _ -> ()
             TForEach(id, var_id, a, body) ->
                 if self.is_args(a) then return self.for_args(e.span, id, var_id, body)
@@ -303,9 +307,12 @@ impl Emitter
 
         val k = self.def(s"llvm.load $counter : !llvm.ptr -> i64")
 
+        val m = self.mark()
+
         self.bind_local(span, var_id)
-        self.store(span, self.local_ptr(span, var_id), self.call("nex_arg", k, "i64", "!llvm.ptr"), Ty.Str)
-        self.ex(body)
+        self.keep(span, self.local_ptr(span, var_id), self.own(self.call("nex_arg", k, "i64", "!llvm.ptr"), Ty.Str), Ty.Str)
+        self.region(body)
+        self.release_from(m)
         self.end_pass(id)
         self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
         self.op("scf.yield")
