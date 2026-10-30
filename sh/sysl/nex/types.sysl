@@ -43,11 +43,14 @@ struct Ratio
 // A unit of measure (DESIGN §13): its base units and unit parameters with their exponents, the exact
 // factor that relates it to the product of those base units (`mm` is `m` to the power 1 with factor
 // 1/1000), and the named units it is spelt with, which are what it prints as. Two units are one unit
-// when `dims` and `factor` agree, whatever their spelling: `N` and `kg m / s^2`.
+// when `dims` and `factor` agree, whatever their spelling: `N` and `kg m / s^2`. The factor is the
+// exact rational `factor` times π to the integer power `pi`, which is how an angle's scale is held
+// exactly: `deg` is `rad` with factor 1/180 and `pi` 1.
 struct Unit
     dims: Buf[Power]
     factor: Ratio
     spelling: Buf[Power]
+    pi: int
 
 enum Ty
     // `int8` … `int64` (`signed`) and `uint8` … `uint64`.

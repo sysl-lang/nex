@@ -1,0 +1,139 @@
+module sh.sysl.nex
+@tests
+
+// Angles as a kind of unit (DESIGN §13.3): `rad` is a base unit, the other angle units are scaled from
+// it exactly by a power of π, a plain number is not an angle, and an angle drops out, in radians,
+// where it meets another dimension in a product. Each rule is checked both ways.
+
+private val DEG_TO_RAD = "0.017453292519943295"
+
+private bare(lit: string, at: string) -> string = s"a bare number is not an angle; write `${lit}<rad>` for radians or `${lit}<deg>` for degrees ${at}"
+
+// -- the angle units ----------------------------------------------------------------------------------
+
+@test("deg, turn, arcmin and arcsec convert to rad and to each other by exact scales")
+angles_convert()
+    assert_eq(elaborated("def main() = print(90.0<deg> + 0.5<rad>)\n"),
+        "(def main () void (print (s (strip:real64 (+:real64<deg> 90.0<deg> (rescale:real64<deg> 57.29577951308232 0.5<rad>))) \" deg\")))")
+    assert_eq(elaborated("def main() = print(to<rad>(180.0<deg>))\n"),
+        s"(def main () void (print (s (strip:real64 (rescale:real64<rad> ${DEG_TO_RAD} 180.0<deg>)) \" rad\")))")
+    assert_eq(elaborated("def main() = print(to<deg>(1.0<turn>))\n"), "(def main () void (print (s (strip:real64 (rescale:real64<deg> 360.0 1.0<turn>)) \" deg\")))")
+    assert_eq(elaborated("def main() = print(to<arcsec>(1.0<deg>))\n"), "(def main () void (print (s (strip:real64 (rescale:real64<arcsec> 3600.0 1.0<deg>)) \" arcsec\")))")
+    assert_eq(elaborated("def main() = print(1.0<sr>)\n"), "(def main () void (print (s (strip:real64 1.0<sr>) \" sr\")))")
+    assert_eq(elaborated("def main() = print(2pi<rad>)\n"), "(def main () void (print (s (strip:real64 (*:real64<rad> (adopt:real64 2) pi<rad>)) \" rad\")))")
+    assert_eq(refused("def main() = print(1.0<deg> + 1.0<m>)\n"), "error: cannot add deg and m: angle and length are different dimensions @1:20")
+    assert_eq(refused("def main() = print(to<m>(1.0<deg>))\n"), "error: `to<m>` converts within one dimension: deg is angle, and m is length @1:20")
+
+@test("a power of π is exact through a whole power and refused through a root")
+angles_pi_powers()
+    assert_eq(elaborated("def main() = print(to<rad^2>(1.0<deg^2>))\n"),
+        "(def main () void (print (s (strip:real64 (rescale:real64<rad^2> 0.0003046174197867086 1.0<deg^2>)) \" rad^2\")))")
+    assert_eq(refused("def main() = print(sqrt(1.0<deg>))\n"), "error: `sqrt` of deg has no exact scale; convert it to base units first: `sqrt(to<rad>(x))` @1:20")
+
+// -- a plain number is not an angle -------------------------------------------------------------------
+
+@test("a plain number meeting an angle in +, -, a comparison or an if is refused")
+angles_plain_operators()
+    assert_eq(refused("def main() = print(30.0<deg> + 0.5)\n"), "error: cannot add deg and a bare number: " + bare("0.5", "@1:20"))
+    assert_eq(refused("def main() = print(30.0<deg> - 1)\n"), "error: cannot subtract deg and a bare number: " + bare("1", "@1:20"))
+    assert_eq(refused("def main() = print(1.0<rad> > 0.0)\n"), "error: cannot compare rad and a bare number: " + bare("0.0", "@1:20"))
+    assert_eq(refused("def main() =\n  val x = 0.5\n  print(x < 1.0<rad>)\n"),
+        "error: cannot compare a plain number and rad: a plain number is not an angle; give it a unit by multiplying, `y * 1.0<rad>` for radians or `y * 1.0<deg>` for degrees @3:9")
+    assert_eq(refused("def main() = print(if true then 1.0<rad> else 0.5)\n"), "error: the branches of this `if` differ: real64<rad> and real64 @1:20")
+    assert_eq(elaborated("def main() = print(1.0<deg> > 0.0<rad>)\n"), "(def main () void (print (>:bool 1.0<deg> (rescale:real64<deg> 57.29577951308232 0.0<rad>))))")
+    assert_eq(elaborated("def main() =\n  val x = if true then 1.0<deg> else 1.0<rad>\n  print(x)\n"),
+        "(def main () void (block (val x#0:real64<deg> (if:real64<deg> true 1.0<deg> (rescale:real64<deg> 57.29577951308232 1.0<rad>))) (print (s (strip:real64 x#0) \" deg\"))))")
+
+@test("a plain number bound, assigned or passed where an angle is expected is refused, the literal 0 among them")
+angles_plain_expected()
+    assert_eq(refused("def main() =\n  val t: real<rad> = 0.5\n  print(t)\n"), "error: `t` must be real<rad>, but this is real64: " + bare("0.5", "@2:22"))
+    assert_eq(refused("def main() =\n  val t: real<rad> = 0\n  print(t)\n"), "error: `t` must be real<rad>, but this is real64: " + bare("0", "@2:22"))
+    assert_eq(refused("def main() =\n  var t = 1.0<rad>\n  t = 2.0\n  print(t)\n"), "error: the value must be real64<rad>, but this is real64: " + bare("2.0", "@3:7"))
+    assert_eq(refused("def rotate(a: real<rad>) = print(a)\ndef main() = rotate(30)\n"), "error: argument `a` must be real<rad>, but this is real64: " + bare("30", "@2:21"))
+    assert_eq(refused("def rotate(a: real<deg>) = print(a)\ndef main() = rotate(30)\n"), "error: argument `a` must be real<deg>, but this is real64: " + bare("30", "@2:21"))
+    assert_eq(elaborated("def rotate(a: real<rad>) = print(a)\ndef main() = rotate(30.0<deg>)\n"),
+        s"(def rotate ((a#0 real64<rad>)) void (print (s (strip:real64 a#0) \" rad\")))\n(def main () void (call rotate (rescale:real64<rad> ${DEG_TO_RAD} 30.0<deg>)))")
+    assert_eq(elaborated("def main() =\n  val t: real<rad> = 0.0<deg>\n  print(t)\n"),
+        s"(def main () void (block (val t#0:real64<rad> (rescale:real64<rad> ${DEG_TO_RAD} 0.0<deg>)) (print (s (strip:real64 t#0) \" rad\"))))")
+
+@test("an angle where a plain number is expected is refused; strip takes its number")
+angles_to_plain()
+    assert_eq(refused("def main() =\n  val x: real = 1.0<rad>\n  print(x)\n"), "error: `x` must be real, but this is real64<rad>: strip the unit to take the number, `strip(x)` @2:17")
+    assert_eq(elaborated("def main() =\n  val x: real = strip(1.0<deg>)\n  print(x)\n"), "(def main () void (block (val x#0:real64 (strip:real64 1.0<deg>)) (print x#0)))")
+
+// -- products -----------------------------------------------------------------------------------------
+
+@test("an angle meeting another dimension in * or / drops out, in radians")
+angles_drop_in_products()
+    assert_eq(elaborated("def main() = print(2.0<m> * 30.0<deg>)\n"),
+        s"(def main () void (print (s (strip:real64 (*:real64<m> 2.0<m> (rescale:real64 ${DEG_TO_RAD} 30.0<deg>))) \" m\")))")
+    assert_eq(elaborated("def main() = print(1.0<rad> / 2.0<s>)\n"), "(def main () void (print (s (strip:real64 (/:real64<1/s> (strip:real64 1.0<rad>) 2.0<s>)) \" 1/s\")))")
+    assert_eq(elaborated("def main() = print(2.0<mm> / 1.0<turn>)\n"),
+        "(def main () void (print (s (strip:real64 (/:real64<mm> 2.0<mm> (rescale:real64 6.283185307179586 1.0<turn>))) \" mm\")))")
+    // The angle drops at the operator where it meets the other dimension.
+    assert_eq(elaborated("def main() = print(1.0<rad> * 1.0<m> / 1.0<m>)\n"), "(def main () void (print (/:real64 (*:real64<m> (strip:real64 1.0<rad>) 1.0<m>) 1.0<m>)))")
+
+@test("an angle times a plain number or an angle stays an angle; an angle over an angle is a plain number")
+angles_kept_in_products()
+    assert_eq(elaborated("def main() = print(2.0 * 1.0<deg>)\n"), "(def main () void (print (s (strip:real64 (*:real64<deg> 2.0 1.0<deg>)) \" deg\")))")
+    assert_eq(elaborated("def main() = print(1.0<deg> * 1.0<deg>)\n"), "(def main () void (print (s (strip:real64 (*:real64<deg^2> 1.0<deg> 1.0<deg>)) \" deg^2\")))")
+    assert_eq(elaborated("def main() = print(1.0<deg> / 1.0<deg>)\n"), "(def main () void (print (/:real64 1.0<deg> 1.0<deg>)))")
+    assert_eq(refused("def main() = print(2.0 * 1.0<deg> + 1.0)\n"), "error: cannot add deg and a bare number: " + bare("1.0", "@1:20"))
+
+@test("a unit that mixes an angle with another dimension meets the same dimension without it")
+angles_mixed_units()
+    assert_eq(elaborated("def main() =\n  val w: real<rad/s> = 1.0<rad> / 2.0<s>\n  print(w * 2.0<s>)\n  print(w * 3.0<m>)\n"),
+        "(def main () void (block (val w#0:real64<rad/s> (unit:real64<rad/s> (/:real64<1/s> (strip:real64 1.0<rad>) 2.0<s>))) (print (s (strip:real64 (*:real64<rad> w#0 2.0<s>)) \" rad\")) (print (s (strip:real64 (*:real64<m/s> (unit:real64<1/s> w#0) 3.0<m>)) \" m/s\"))))")
+    assert_eq(elaborated("unit min = 60 s\nunit rpm = turn / min\ndef main() = print(2.0<rpm> * 1.0<m>)\n"),
+        "(def main () void (print (s (strip:real64 (*:real64<m/s> (rescale:real64<1/s> 0.10471975511965978 2.0<rpm>) 1.0<m>)) \" m/s\")))")
+    assert_eq(elaborated("def main() = print(to<Hz>(1.0<deg> / 1.0<s>))\n"),
+        s"(def main () void (print (s (strip:real64 (unit:real64<Hz> (/:real64<1/s> (rescale:real64 ${DEG_TO_RAD} 1.0<deg>) 1.0<s>))) \" Hz\")))")
+    assert_eq(refused("def main() =\n  val w: real<rad/s> = 1.0<rad> / 2.0<m>\n  print(w)\n"),
+        "error: `w` must be real<rad/s>, but this is real64<1/m>: 1/m and rad/s are different dimensions @2:24")
+
+// -- trigonometry -------------------------------------------------------------------------------------
+
+@test("sin, cos and tan take an angle in any angle unit, or a plain number, which is radians")
+angles_trig()
+    assert_eq(elaborated("def main() = print(sin(30.0<deg>))\n"), s"(def main () void (print (sin:real64 (rescale:real64 ${DEG_TO_RAD} 30.0<deg>))))")
+    assert_eq(elaborated("def main() = print(cos(0.5<rad>))\n"), "(def main () void (print (cos:real64 (strip:real64 0.5<rad>))))")
+    assert_eq(elaborated("def main() = print(tan(0.5))\n"), "(def main () void (print (tan:real64 0.5)))")
+    assert_eq(refused("def main() = print(sin(1.0<sr>))\n"),
+        "error: `sin` takes an angle or a plain number, which is radians, and this is real64<sr> (solid angle); strip the unit to pass the number: `sin(strip(x))` @1:20")
+    assert_eq(refused("def main() = print(cos(1.0<m>))\n"),
+        "error: `cos` takes an angle or a plain number, which is radians, and this is real64<m> (length); strip the unit to pass the number: `cos(strip(x))` @1:20")
+
+@test("the other elementary functions refuse an angle; the inverse functions give a plain number")
+angles_other_functions()
+    assert_eq(refused("def main() = print(exp(1.0<rad>))\n"), "error: `exp` takes a dimensionless argument, and this is real64<rad> (angle); strip the unit to pass the number: `exp(strip(x))` @1:20")
+    assert_eq(refused("def main() = print(asin(1.0<deg>))\n"), "error: `asin` takes a dimensionless argument, and this is real64<deg> (angle); strip the unit to pass the number: `asin(strip(x))` @1:20")
+    assert_eq(elaborated("def main() = print(asin(0.5) * 1.0<rad>)\n"), "(def main () void (print (s (strip:real64 (*:real64<rad> (asin:real64 0.5) 1.0<rad>)) \" rad\")))")
+    assert_eq(refused("def main() =\n  val a: real<rad> = asin(0.5)\n  print(a)\n"),
+        "error: `a` must be real<rad>, but this is real64: a plain number is not an angle; give it a unit by multiplying, `y * 1.0<rad>` for radians or `y * 1.0<deg>` for degrees @2:22")
+    assert_eq(elaborated("def main() = print(atan2(1.0<deg>, 2.0<rad>))\n"), "(def main () void (print (atan2:real64 1.0<deg> (rescale:real64<deg> 57.29577951308232 2.0<rad>))))")
+
+// -- generic units and arrays -------------------------------------------------------------------------
+
+@test("a unit parameter binds an angle; it counts as a dimension other than angle in a product")
+angles_generic()
+    assert_eq(elaborated("def twice[U: Unit](x: real<U>) = 2.0 * x\ndef main() = print(twice(30.0<deg>))\n"),
+        "(def twice ((x#0 real64<U>)) real64<U> (*:real64<U> 2.0 x#0))\n(def main () void (print (s (strip:real64 (call:real64<deg> twice 30.0<deg>)) \" deg\")))")
+    assert_eq(elaborated("def arc[U: Unit](r: real<U>, a: real<rad>) = r * a\ndef main() = print(arc(2.0<m>, 90.0<deg>))\n"),
+        s"(def arc ((r#0 real64<U>) (a#1 real64<rad>)) real64<U> (*:real64<U> r#0 (strip:real64 a#1)))\n(def main () void (print (s (strip:real64 (call:real64<m> arc 2.0<m> (rescale:real64<rad> ${DEG_TO_RAD} 90.0<deg>))) \" m\")))")
+    assert_eq(refused("def same[U: Unit](a: real<U>, b: real<U>): real<U> = a + b\ndef main() = print(same(1.0<deg>, 2.0))\n"),
+        "error: argument `b` must be real<U>, but this is real64: " + bare("2.0", "@2:35"))
+
+@test("an array of angles converts, drops out of a product and goes through trig element by element")
+angles_arrays()
+    assert_eq(elaborated("def main() = print([1.0<rad>, 90.0<deg>])\n"),
+        s"(def main () void (print (s (strip:[real64] (array:[real64<rad>] 1.0<rad> (rescale:real64<rad> ${DEG_TO_RAD} 90.0<deg>))) \" rad\")))")
+    assert_eq(elaborated("def main() = print([30.0, 60.0]<deg> * 2.0<m>)\n"),
+        s"(def main () void (print (s (strip:[real64] (.*:[real64<m>] (rescale:[real64] ${DEG_TO_RAD} (unit:[real64<deg>] (array:[real64] 30.0 60.0))) 2.0<m>)) \" m\")))")
+    assert_eq(elaborated("def main() = print(sin([30.0, 90.0]<deg>))\n"),
+        s"(def main () void (print (.sin:[real64] (rescale:[real64] ${DEG_TO_RAD} (unit:[real64<deg>] (array:[real64] 30.0 90.0))))))")
+    assert_eq(elaborated("def main() = print(dot([1.0, 2.0]<m>, [90.0, 180.0]<deg>))\n"),
+        s"(def main () void (print (s (strip:real64 (dot:real64<m> (unit:[real64<m>] (array:[real64] 1.0 2.0)) (rescale:[real64] ${DEG_TO_RAD} (unit:[real64<deg>] (array:[real64] 90.0 180.0))))) \" m\")))")
+    assert_eq(refused("def main() = print([1.0<rad>, 0.5])\n"), "error: an element of this array must be real64<rad>, but this is real64: " + bare("0.5", "@1:31"))
+    assert_eq(refused("def main() =\n  val a = [1.0, 2.0]<rad>\n  print(a + 0.5)\n"), "error: cannot add rad and a bare number: " + bare("0.5", "@3:9"))
+    assert_eq(refused("def main() = print(sin([1.0, 2.0]<sr>))\n"),
+        "error: `sin` takes an angle or a plain number, which is radians, and this is real64<sr> (solid angle); strip the unit to pass the number: `sin(strip(x))` @1:20")
