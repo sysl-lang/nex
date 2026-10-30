@@ -535,7 +535,16 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       MLIR lowers it through `expm1`, which sysl's `Float` does not have (reported upstream).
     - **I5 — the embedding API**: load a program and get its diagnostics as values, call a function
       by name with values, give the program host functions, redirect its output, and turn a trap
-      into an `Err` instead of an abort.
+      into an `Err` instead of an abort. Built (`embed.sysl`, DESIGN §16): `load_script` /
+      `load_script_file` answer a `Script` or `NexDiagnostic`s; `run`, `call`, `get`, `set` and
+      `cancel` on it; values cross as `NexValue`, checked against the declared type they meet, an
+      array as one typed buffer; `@host extern def` and `@host struct` are the host's functions and
+      reference-counted objects, which the compiler refuses; a trap answers its message and its nex
+      stack (`TraceFrame`s the interpreter records as the trap leaves each frame, the site from the
+      statement or call it passed); a step budget and `cancel` halt a runaway; a sandboxed script may
+      not `stop`. `examples/embed/` is a host, built and reloaded 50 times on a counted heap in
+      `tests_toolchain.sysl`. An array still crosses into the interpreter's storage a value per
+      element (`array_in`, `array_out`), the one copy the storage's representation decides.
 
     **Every program test runs on both engines through one harness** (`compiler/tests_engines.sysl`).
     `Engine` is `Compiled` or `Interpreted`, and `ENGINES` is the list a test iterates: the corpus
@@ -568,7 +577,10 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
   registers or on the stack, never on the heap; an embedding API, in which the host exposes its
   geometry kernel through the C FFI and callbacks and calls into compiled scripts; and a sandbox mode
   (no `extern`, no file I/O, no `stop`) for models from untrusted sources. Units (`mm` and `in` in
-  one model, DESIGN §13) are the CAD selling point. *Exit*: a sample host loads a script, calls it
+  one model, DESIGN §13) are the CAD selling point. The interpreted half exists (DESIGN §16): the
+  embedding API, `@host` functions and types, the budget and the sandbox; what is left is the
+  compiled half — a script compiled to a library whose `@host` functions are callbacks the host
+  passes, which the compiler refuses today. *Exit*: a sample host loads a script, calls it
   with a transform and a point array, re-runs an edited script within the latency target, and
   refuses a sandboxed script with an `extern`.
 
