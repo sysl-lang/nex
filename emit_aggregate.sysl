@@ -199,6 +199,7 @@ impl Emitter
         self.op(if rt == "" then s"scf.index_switch $idx" else s"$r = scf.index_switch $idx -> $rt")
 
         var fallback: Option[TArm] = None
+        val before = copy_strings(self.arr)
 
         for arm in arms
             arm.pat match
@@ -211,15 +212,17 @@ impl Emitter
                     if fields.len() > 0
                         val p = self.payload(s, st, fields)
                         val pt = self.payload_ty(e.span, fields)
+                        // A view a binding takes of a stored array is the case's own.
+                        val m = self.mark()
 
                         for k in 0..<binds.len()
                             binds[k] match
-                                Some(id) ->
-                                    self.bind_local(e.span, id)
-                                    self.keep(e.span, self.local_ptr(e.span, id), self.field(p, pt, k, fields[k].ty), fields[k].ty)
+                                Some(id) -> self.bind_value(e.span, id, self.field(p, pt, k, fields[k].ty), fields[k].ty)
                                 None -> ()
 
-                    self.arm_end(arm.body, e.ty, rt)
+                        self.release_from(m)
+
+                    self.arm_end(arm.body, e.ty, rt, before)
                 PAny(_) -> if fallback.is_none() then fallback = Some(arm)
 
         self.op("default {")
@@ -228,7 +231,7 @@ impl Emitter
         fallback match
             Some(arm) ->
                 self.bind_whole(e.span, arm.pat, s, st)
-                self.arm_end(arm.body, e.ty, rt)
+                self.arm_end(arm.body, e.ty, rt, before)
             None ->
                 // Every variant has its arm; the tag is never another.
                 if rt == "" then self.op("scf.yield") else self.yield_value("", e.ty)
@@ -241,13 +244,12 @@ impl Emitter
     // `name -> ...`: the whole value bound.
     bind_whole(*self, span: Span, pat: TPat, s: string, t: Ty)
         pat match
-            PAny(Some(id)) ->
-                self.bind_local(span, id)
-                self.keep(span, self.local_ptr(span, id), s, t)
+            PAny(Some(id)) -> self.bind_value(span, id, s, t)
             _ -> ()
 
-    // An arm's body as its case's region, yielding its value of `t` (MLIR type `rt`).
-    arm_end(*self, body: TExpr, t: Ty, rt: string)
+    // An arm's body as its case's region, yielding its value of `t` (MLIR type `rt`); the array
+    // values held as SSA values, `before` the `match`, are what they were again after it.
+    arm_end(*self, body: TExpr, t: Ty, rt: string, before: Buf[string])
         if rt == ""
             self.region(body)
             self.op("scf.yield")
@@ -256,14 +258,17 @@ impl Emitter
 
         self.op("}")
 
+        for k in 0..<before.len()
+            if before[k] != "" && self.arr[k] != before[k] then self.later(body.span, "an array assigned inside a `match` arm")
+
+        self.arr = copy_strings(before)
+
     // -- destructuring ----------------------------------------------------------------------------
 
     // `val a, (b, _) = v`: each name bound to its element of `v`, of type `t`.
     destructure(*self, span: Span, pat: TBind, v: string, t: Ty)
         pat match
-            BLocal(id) ->
-                self.bind_local(span, id)
-                self.keep(span, self.local_ptr(span, id), v, self.prog.locals[id].ty)
+            BLocal(id) -> self.bind_value(span, id, v, t)
             BGlobal(name) -> self.keep(span, self.global_storage(span, name, t), v, t)
             BSkip -> ()
             BTuple(elems) ->
@@ -311,6 +316,14 @@ impl Emitter
     targets(*self, span: Span, target: TTarget, v: string, t: Ty, ptrs: *Buf[string], vals: *Buf[string], tys: *Buf[Ty])
         target match
             TPlace(place) ->
+                // An array local held as a value is rebound at once: the right side is whole already.
+                *place.kind match
+                    TLocal(id) ->
+                        if self.in_ssa(id)
+                            self.arr.set(id, self.copied(span, v, t))
+                            return
+                    _ -> ()
+
                 ptrs.push(self.place_ptr(place))
                 vals.push(v)
                 tys.push(t)
