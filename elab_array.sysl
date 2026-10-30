@@ -1,0 +1,855 @@
+// Arrays: literals, ranges as values, index lists and `end`, element and slice assignment, the
+// element-wise operators, `@`, elemental calls and `for` over an array (DESIGN §3–§7).
+//
+// **An array type is an element type and one extent per axis**, so its rank is the number of axes
+// and is always known. A static extent is checked at compile time wherever it meets another static
+// one; where a dynamic shape meets a static one the check is a `TShapeCheck` that traps at run time
+// (DESIGN §3.3).
+//
+// **An element-wise operator is typed by its elements.** Its scalar form is elaborated over the two
+// element types — so the lattice, the literal adoption and every diagnostic of a scalar operator
+// hold unchanged — and the array operands are widened to the element type it computes in. A typed
+// `real64` scalar therefore makes a `[real32]` array `[real64]`, while a literal adapts to the array
+// (DESIGN §2.2, §2.3).
+//
+// **A literal is dynamically shaped** unless the type its position expects gives it a static one;
+// then every extent the brackets make visible is checked against it at compile time (DESIGN §3.3,
+// §4.1).
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// -- array types ------------------------------------------------------------------------------------
+
+// The element type of an array, or the type itself for a scalar.
+elem_of(t: Ty) -> Ty = t match
+    Array(e, _) -> *e
+    _ -> t
+
+axes_of(t: Ty) -> Buf[Extent] = t match
+    Array(_, axes) -> axes
+    _ -> buf()
+
+rank_of(t: Ty) -> usize = axes_of(t).len()
+
+// `t` with its element type replaced: an array of the same shape, or `elem` itself for a scalar.
+with_elem(t: Ty, elem: Ty) -> Ty = t match
+    Array(_, axes) -> Ty.Array(elem, axes)
+    _ -> elem
+
+// `rank` axes, every one known only at run time.
+dynamic_axes(rank: usize) -> Buf[Extent]
+    var out: Buf[Extent] = buf()
+
+    for _ in 0..<rank
+        out.push(Dynamic)
+
+    out
+
+// The type two arrays meet in where they stand for one value, as the branches of an `if` do: one
+// rank, the common element type, and a static extent only where both have it.
+array_common(a: Ty, b: Ty) -> Option[Ty]
+    if !is_array(a) || !is_array(b) || rank_of(a) != rank_of(b) then return None
+
+    val ea = elem_of(a)
+    val eb = elem_of(b)
+
+    val e = if ty_eq(ea, eb) then ea else (if is_numeric(ea) && is_numeric(eb) then common(ea, eb).unwrap_or(Error) else Error)
+
+    if is_error(e) then return None
+
+    val xs = axes_of(a)
+    val ys = axes_of(b)
+    var axes: Buf[Extent] = buf()
+
+    for k in 0..<xs.len()
+        axes.push(if same_extent(xs[k], ys[k]) then xs[k] else Dynamic)
+
+    Some(Ty.Array(e, axes))
+end array_common
+
+any_array(vs: Buf[TExpr]) -> bool
+    for v in vs
+        if is_array(v.ty) then return true
+
+    false
+
+// Whether a declaration's attributes are only `@elemental`, which the elaborator understands.
+only_elemental(attrs: Buf[Attribute]) -> bool
+    for a in attrs
+        if a.name != "elemental" || a.args.len() > 0 then return false
+
+    true
+
+private has_elemental(attrs: Buf[Attribute]) -> bool
+    for a in attrs
+        if a.name == "elemental" then return true
+
+    false
+
+// Whether two axes are both static and differ: a mismatch known at compile time.
+private clash(a: Extent, b: Extent) -> bool = a match
+    Fixed(n) -> b match
+        Fixed(m) -> n != m
+        _ -> false
+    _ -> false
+
+private same_extent(a: Extent, b: Extent) -> bool = a match
+    Dynamic -> is_dynamic(b)
+    Fixed(n) -> b match
+        Fixed(m) -> n == m
+        _ -> false
+    Extent.Named(n) -> b match
+        Extent.Named(m) -> n == m
+        _ -> false
+
+// The axis two operands of one shape share: static where either one is.
+private meet(a: Extent, b: Extent) -> Extent = a match
+    Dynamic -> b
+    Fixed(_) -> a
+    Extent.Named(_) -> b match
+        Fixed(_) -> b
+        _ -> a
+
+private extent_text(x: Extent) -> string = x match
+    Dynamic -> ":"
+    Fixed(n) -> s"${n}"
+    Extent.Named(n) -> n
+
+private is_relational(op: string) -> bool = op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">="
+
+private is_chain_operand(v: TExpr) -> bool = *v.kind match
+    TChainOperand(_) -> true
+    _ -> false
+
+private larger(a: int, b: int) -> int = if a > b then a else b
+
+// The items of a bracket list, with every nested bracket list opened: the elements of a literal, or
+// the arrays standing as its rows.
+private leaves_into(e: Expr, out: *Buf[Expr])
+    *e.kind match
+        ExprKind.Array(items) ->
+            for x in items
+                leaves_into(x, out)
+        _ -> out.push(e)
+
+impl Elab
+    // -- shapes -----------------------------------------------------------------------------------
+
+    // The shape two arrays of one rank combine to, or the diagnostic where they cannot.
+    shape_meet(*self, span: Span, what: string, xs: Buf[Extent], ys: Buf[Extent]) -> Option[Buf[Extent]]
+        if xs.len() != ys.len()
+            self.fail(span, s"${what} combines arrays of one rank; these have rank ${xs.len()} and rank ${ys.len()}")
+            return None
+
+        var out: Buf[Extent] = buf()
+
+        for k in 0..<xs.len()
+            if clash(xs[k], ys[k])
+                self.fail(span, s"${what} combines arrays of one shape; axis ${k + 1} is ${extent_text(xs[k])} in one and ${extent_text(ys[k])} in the other")
+                return None
+
+            out.push(meet(xs[k], ys[k]))
+
+        Some(out)
+    end shape_meet
+
+    // The shape the array arguments of an elemental call share.
+    args_shape(*self, span: Span, what: string, args: Buf[TExpr]) -> Option[Buf[Extent]]
+        var shape: Option[Buf[Extent]] = None
+
+        for a in args
+            if !is_array(a.ty) then continue
+
+            shape = shape match
+                Some(s) -> self.shape_meet(span, what, s, axes_of(a.ty))
+                None -> Some(axes_of(a.ty))
+
+            if shape.is_none() then return None
+
+        shape
+
+    // `v` where the array type `ty` is required, or an array where a scalar is: the element type
+    // widened along the lattice, a static shape taken as a dynamic one, a dynamic shape checked at run
+    // time against a static one; a different rank, a narrowing or two static shapes that differ are
+    // refused (DESIGN §3.3).
+    coerce_array(*self, v: TExpr, ty: Ty, what: string) -> TExpr
+        val head = s"${what} must be ${show_ty(ty)}, but this is ${show_ty(v.ty)}"
+
+        if !is_array(v.ty) || !is_array(ty)
+            self.fail(value_span(v), head)
+            return texpr(v.span, Error, TInvalid)
+
+        val from = elem_of(v.ty)
+        val to = elem_of(ty)
+        val xs = axes_of(v.ty)
+        val ys = axes_of(ty)
+
+        if xs.len() != ys.len()
+            self.fail(value_span(v), s"${head}: its rank is ${xs.len()}, not ${ys.len()}")
+            return texpr(v.span, Error, TInvalid)
+
+        if !promotes(from, to)
+            val why = if is_numeric(from) && is_numeric(to) then s": that would narrow it; convert it explicitly, `${show_ty(to)}(...)`" else ""
+
+            self.fail(value_span(v), head + why)
+            return texpr(v.span, Error, TInvalid)
+
+        var checked = false
+
+        for k in 0..<xs.len()
+            if clash(xs[k], ys[k])
+                self.fail(value_span(v), s"${head}: axis ${k + 1} is ${extent_text(xs[k])} here, and ${extent_text(ys[k])} is required")
+                return texpr(v.span, Error, TInvalid)
+
+            if !is_dynamic(ys[k]) && !same_extent(xs[k], ys[k]) then checked = true
+
+        if checked then return texpr(v.span, ty, TArray(TShapeCheck(promote(v, Ty.Array(to, xs)))))
+
+        promote(v, ty)
+    end coerce_array
+
+    // -- literals ---------------------------------------------------------------------------------
+
+    // `[a, b, c]`, `[[1, 2], [3, 4]]`: an array of rank one more than its items. Its element type is
+    // the one its position expects, or the common type of its elements, a literal element adopting
+    // the type of the others.
+    array_literal(*self, span: Span, elems: Buf[Expr], want: Option[Ty]) -> TExpr
+        val wanted = want match
+            Some(t) -> if is_array(t) && !has_error(t) then Some(t) else None
+            None -> None
+
+        if elems.len() == 0
+            wanted match
+                Some(t) -> return texpr(span, Ty.Array(elem_of(t), dynamic_axes(rank_of(t))), TArray(TArrayLit(buf())))
+                None ->
+                    self.fail(span, "an empty array literal has no element type; write its type: `val a: [real] = []`")
+                    return self.invalid(span)
+
+        var leaves: Buf[Expr] = buf()
+
+        for e in elems
+            leaves_into(e, &leaves)
+
+        // Every element that is not a literal first, so the literals can adopt their type.
+        var vals: Buf[Option[TExpr]] = buf()
+        var shared: Option[Ty] = None
+        var class = NOT_LITERAL
+
+        wanted match
+            Some(t) -> shared = Some(elem_of(t))
+            None -> ()
+
+        for leaf in leaves
+            val c = self.literal_class(leaf)
+
+            if c != NOT_LITERAL
+                class = larger(class, c)
+                vals.push(None)
+            else
+                val v = self.elab(leaf, wanted match
+                    Some(t) -> Some(elem_of(t))
+                    None -> None)
+
+                if wanted.is_none() then shared = self.element_join(leaf.span, shared, elem_of(v.ty))
+
+                vals.push(Some(v))
+
+        // A literal element that cannot take the others' type (`2.5` beside integers) widens it.
+        val elem = shared match
+            Some(t) ->
+                if class != NOT_LITERAL && is_numeric(t) then common(t, adoption(class, t).unwrap_or(default_of(class))).unwrap_or(t) else t
+            None -> default_of(class)
+
+        var items: Buf[TExpr] = buf()
+
+        for k in 0..<leaves.len()
+            val v = vals[k] match
+                Some(v) -> v
+                None ->
+                    val c = self.literal_class(leaves[k])
+
+                    self.elab(leaves[k], Some(adoption(c, elem).unwrap_or(default_of(c))))
+
+            items.push(if is_array(v.ty) then self.coerce(v, with_elem(v.ty, elem), "an item of this array") else self.coerce(v, elem, "an element of this array"))
+
+        var at: usize = 0
+        val built = self.build_literal(span, elems, items, &at, elem)
+
+        wanted match
+            Some(t) -> self.fix_literal_shape(built, elems, t)
+            None -> built
+    end array_literal
+
+    // The element type of a literal so far, met with one more element's.
+    element_join(*self, span: Span, so_far: Option[Ty], t: Ty) -> Option[Ty]
+        if is_error(t) then return so_far
+
+        so_far match
+            None -> Some(t)
+            Some(s) ->
+                if is_wild(s) || ty_eq(s, t) then return Some(t)
+
+                if is_numeric(s) && is_numeric(t)
+                    common(s, t) match
+                        Some(c) -> return Some(c)
+                        None -> ()
+
+                self.fail(span, s"the elements of this array differ: ${show_ty(s)} and ${show_ty(t)}")
+                Some(Error)
+    end element_join
+
+    // One bracket list over its elaborated leaves, nested lists becoming arrays of rank one less.
+    private build_literal(*self, span: Span, elems: Buf[Expr], leaves: Buf[TExpr], at: *usize, elem: Ty) -> TExpr
+        var items: Buf[TExpr] = buf()
+        var width: Option[usize] = None
+
+        for e in elems
+            *e.kind match
+                ExprKind.Array(inner) ->
+                    width match
+                        Some(w) -> if w != inner.len() then self.fail(e.span, s"this row has ${inner.len()} items, and the first has ${w}: an array is not jagged")
+                        None -> width = Some(inner.len())
+
+                    if inner.len() == 0
+                        self.fail(e.span, "an empty row has no extent to give its array; build an empty matrix with `zeros((0, n))`")
+                        items.push(self.invalid(e.span))
+                    else
+                        items.push(self.build_literal(e.span, inner, leaves, at, elem))
+                _ ->
+                    items.push(leaves[*at])
+                    *at += 1
+
+        val rank = rank_of(items[0].ty)
+
+        for x in items
+            if rank_of(x.ty) != rank && !has_error(x.ty)
+                self.fail(x.span, s"the items of this array differ in rank: ${rank} and ${rank_of(x.ty)}")
+                return self.invalid(span)
+
+        texpr(span, Ty.Array(elem, dynamic_axes(rank + 1)), TArray(TArrayLit(items)))
+    end build_literal
+
+    // A literal in a position that gives it a static shape: each extent its brackets make visible is
+    // checked, and the literal takes the static shape where all of them agree.
+    private fix_literal_shape(*self, lit: TExpr, elems: Buf[Expr], want: Ty) -> TExpr
+        val ys = axes_of(want)
+
+        if is_error(lit.ty) || rank_of(lit.ty) != ys.len() then return lit
+
+        // The extents along the first row at each depth.
+        var visible: Buf[usize] = buf()
+        var row = elems
+
+        loop
+            visible.push(row.len())
+
+            if row.len() == 0 then break
+
+            row = *row[0].kind match
+                ExprKind.Array(inner) -> inner
+                _ -> break
+
+        var out: Buf[Extent] = buf()
+
+        for k in 0..<ys.len()
+            val seen = if k < visible.len() then Some(visible[k]) else None
+
+            out.push(ys[k] match
+                Fixed(n) -> seen match
+                    Some(m) ->
+                        if u64(m) != n
+                            self.fail(lit.span, s"this literal has ${m} items along axis ${k + 1}, and its type has ${n}")
+                            return self.invalid(lit.span)
+
+                        ys[k]
+                    None -> Dynamic
+                _ -> Dynamic)
+
+        texpr(lit.span, Ty.Array(elem_of(lit.ty), out), *lit.kind)
+    end fix_literal_shape
+
+    // `lo..hi` or `lo..<hi` where a value stands: the rank-1 array of the integers it counts.
+    range_value(*self, span: Span, lo: Option[Expr], hi: Option[Expr], inclusive: bool, stride: Option[Expr], want: Option[Ty]) -> TExpr
+        val l = lo match
+            Some(x) -> x
+            None -> return self.open_range(span)
+
+        val h = hi match
+            Some(x) -> x
+            None -> return self.open_range(span)
+
+        val goal = want match
+            Some(t) -> if is_array(t) && is_int(elem_of(t)) then Some(elem_of(t)) else None
+            None -> None
+
+        val bounds = self.operands(l, h, goal)
+        var ty = self.common_of(span, "..", bounds.lhs.ty, bounds.rhs.ty).unwrap_or(Error)
+
+        if !is_int(ty) && !is_error(ty)
+            self.fail(span, s"a range counts in integers; this one is ${show_ty(ty)} (`linspace` spaces reals)")
+            ty = Error
+
+        val step = stride match
+            Some(s) -> Some(self.check(s, ty, "the step"))
+            None -> None
+
+        texpr(span, Ty.Array(ty, dynamic_axes(1)), TArray(TRangeValue(promote(bounds.lhs, ty), promote(bounds.rhs, ty), inclusive, step)))
+    end range_value
+
+    private open_range(*self, span: Span) -> TExpr
+        self.fail(span, "a range as a value needs both its bounds, `lo..hi`; a bound is left open only in an index list")
+        self.invalid(span)
+
+    // -- index lists ------------------------------------------------------------------------------
+
+    // `base[s1, ..., sk]`, with `base` elaborated as a value or as a place (DESIGN §5.1). The trailing
+    // axes a short list leaves are written out whole.
+    index(*self, span: Span, base: TExpr, indices: Buf[Expr]) -> TExpr
+        if is_error(base.ty) then return self.invalid(span)
+
+        val axes = base.ty match
+            Array(_, axes) -> axes
+            _ ->
+                self.fail(base.span, s"this is ${show_ty(base.ty)} and cannot be indexed")
+                return self.invalid(span)
+
+        if indices.len() > axes.len()
+            self.fail(span, s"this array has rank ${axes.len()}, and ${indices.len()} subscripts are given")
+            return self.invalid(span)
+
+        var subs: Buf[TSub] = buf()
+        var kept: Buf[Extent] = buf()
+
+        for k in 0..<indices.len()
+            val x = indices[k]
+
+            self.ends.push(k + 1)
+
+            *x.kind match
+                AxisAll ->
+                    subs.push(TSubAll)
+                    kept.push(axes[k])
+                Range(lo, hi, inclusive, stride) ->
+                    subs.push(TSubWindow(self.bound(lo, "a bound"), self.bound(hi, "a bound"), inclusive, self.bound(stride, "the stride")))
+                    kept.push(Dynamic)
+                _ -> subs.push(TSubAt(self.check(x, INTEGER, "an index")))
+
+            self.ends.pop()
+
+        for k in indices.len()..<axes.len()
+            subs.push(TSubAll)
+            kept.push(axes[k])
+
+        val ty = if kept.len() == 0 then elem_of(base.ty) else Ty.Array(elem_of(base.ty), kept)
+
+        texpr(span, ty, TArray(TIndex(base, subs)))
+    end index
+
+    private bound(*self, e: Option[Expr], what: string) -> Option[TExpr] = e match
+        Some(x) -> Some(self.check(x, INTEGER, what))
+        None -> None
+
+    // `end` in a subscript: the extent of the axis it indexes (DESIGN §5.2).
+    end_index(*self, span: Span) -> TExpr
+        if self.ends.len() == 0
+            self.fail(span, "`end` as an index stands only in an index list")
+            return self.invalid(span)
+
+        texpr(span, INTEGER, TArray(TEnd(self.ends[self.ends.len() - 1])))
+
+    // -- assignment -------------------------------------------------------------------------------
+
+    // A store into an array place: a whole variable, an element's slice, or a slice that a scalar
+    // fills (DESIGN §5.3). A compound store computes element by element and must not narrow.
+    array_assign(*self, span: Span, op: string, target: Expr, p: TExpr, value: Expr) -> TExpr
+        val slice = *target.kind match
+            Index(_, _) -> true
+            _ -> false
+
+        val elem = elem_of(p.ty)
+
+        if op == "="
+            val v = self.elab(value, Some(p.ty))
+
+            if slice && !is_array(v.ty) && !is_wild(v.ty)
+                return texpr(span, Void, TAssign(op, p, texpr(v.span, p.ty, TArray(TBroadcast(self.coerce(v, elem, "the value"))))))
+
+            return texpr(span, Void, TAssign(op, p, self.coerce(v, p.ty, "the value")))
+
+        val bop = op[0..<op.len - 1]
+        val class = self.literal_class(value)
+        val v = if class != NOT_LITERAL then self.elab(value, Some(adoption(class, p.ty).unwrap_or(default_of(class)))) else self.infer(value)
+        val r = self.apply(span, bop, p, v)
+
+        if is_error(r.ty) || has_error(r.ty) then return texpr(span, Void, TAssign(op, p, v))
+
+        if !ty_eq(elem_of(r.ty), elem)
+            self.fail(span, s"`${op}` computes ${show_ty(r.ty)}, which the target (${show_ty(p.ty)}) cannot hold without narrowing")
+
+        texpr(span, Void, TAssign(op, p, promote(v, with_elem(v.ty, elem))))
+    end array_assign
+
+    // -- operators --------------------------------------------------------------------------------
+
+    // A binary operator with an array operand: element by element, typed by its scalar form over the
+    // element types (DESIGN §7.1). Two arrays need one rank and, where both are static, one shape; a
+    // scalar broadcasts.
+    elementwise(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
+        if is_chain_operand(a) || is_chain_operand(b)
+            self.fail(span, s"a chained comparison compares scalars; this compares ${show_ty(a.ty)} with ${show_ty(b.ty)}")
+            return texpr(span, Error, TBinary(op, a, b))
+
+        var axes = if is_array(a.ty) then axes_of(a.ty) else axes_of(b.ty)
+
+        if is_array(a.ty) && is_array(b.ty)
+            self.shape_meet(span, s"`${op}`", axes_of(a.ty), axes_of(b.ty)) match
+                Some(m) -> axes = m
+                None -> return self.invalid(span)
+
+        val ea = elem_of(a.ty)
+        val eb = elem_of(b.ty)
+
+        if !is_relational(op) && (!is_numeric(ea) && !is_wild(ea) || !is_numeric(eb) && !is_wild(eb))
+            self.fail(span, s"element-wise `${op}` needs numbers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+            return self.invalid(span)
+
+        val sa = texpr(a.span, ea, TInvalid)
+        val sb = texpr(b.span, eb, TInvalid)
+        val s = if op == "^" then self.power_of(span, sa, sb) else self.apply(span, op, sa, sb)
+
+        if is_error(s.ty) then return self.invalid(span)
+
+        var ca = ea
+        var cb = eb
+
+        *s.kind match
+            TBinary(_, x, y) ->
+                ca = x.ty
+                cb = y.ty
+            _ -> ()
+
+        texpr(span, Ty.Array(s.ty, axes), TArray(TElementwise(op, promote(a, with_elem(a.ty, ca)), promote(b, with_elem(b.ty, cb)))))
+    end elementwise
+
+    // `-a` on numbers, `not a` on bools, element by element.
+    elementwise_unary(*self, span: Span, op: string, v: TExpr) -> TExpr
+        val e = elem_of(v.ty)
+        val fits = if op == "not" then ty_eq(e, Bool) else is_numeric(e)
+
+        if !fits && !is_error(e)
+            self.fail(span, s"`${op}` needs ${if op == "not" then "bools" else "numbers"}; found ${show_ty(v.ty)}")
+            return self.invalid(span)
+
+        texpr(span, v.ty, TArray(TElementwiseUnary(op, v)))
+
+    // `and` or `or` with an array operand: element by element on bools, both sides evaluated.
+    elementwise_logical(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
+        var axes = if is_array(a.ty) then axes_of(a.ty) else axes_of(b.ty)
+
+        if is_array(a.ty) && is_array(b.ty)
+            self.shape_meet(span, s"`${op}`", axes_of(a.ty), axes_of(b.ty)) match
+                Some(m) -> axes = m
+                None -> return self.invalid(span)
+
+        for v in [a, b]
+            if !ty_eq(elem_of(v.ty), Bool) && !is_error(elem_of(v.ty))
+                self.fail(v.span, s"an operand of `${op}` must be bool or [bool], but this is ${show_ty(v.ty)}")
+                return self.invalid(span)
+
+        texpr(span, Ty.Array(Bool, axes), TArray(TElementwise(op, a, b)))
+
+    // `a @ b` on ranks 1 and 2 (DESIGN §7.2): the inner extents agree, static ones carry into the
+    // result, and two vectors give their dot product.
+    matmul(*self, span: Span, l: Expr, r: Expr) -> TExpr
+        val o = self.operands(l, r, None)
+        val a = o.lhs
+        val b = o.rhs
+
+        if is_error(a.ty) || is_error(b.ty) then return self.invalid(span)
+
+        if !is_array(a.ty) || !is_array(b.ty)
+            self.fail(span, s"`@` multiplies matrices and vectors; this is ${show_ty(a.ty)} @ ${show_ty(b.ty)} (scale with `*`)")
+            return self.invalid(span)
+
+        for v in [a, b]
+            if rank_of(v.ty) > 2
+                self.fail(v.span, s"`@` takes ranks 1 and 2, and this has rank ${rank_of(v.ty)}; a batch of products is a loop over the trailing axis: `C[:, :, k] = A[:, :, k] @ B[:, :, k]`")
+                return self.invalid(span)
+
+        val ea = elem_of(a.ty)
+        val eb = elem_of(b.ty)
+
+        if !is_numeric(ea) || !is_numeric(eb)
+            self.fail(span, s"`@` needs numbers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+            return self.invalid(span)
+
+        val c = self.common_of(span, "@", ea, eb) match
+            Some(t) -> t
+            None -> return self.invalid(span)
+
+        val xs = axes_of(a.ty)
+        val ys = axes_of(b.ty)
+        val inner = xs[xs.len() - 1]
+
+        if clash(inner, ys[0])
+            self.fail(span, s"`@` needs the inner extents to agree; they are ${extent_text(inner)} and ${extent_text(ys[0])}")
+            return self.invalid(span)
+
+        var out: Buf[Extent] = buf()
+
+        if xs.len() == 2 then out.push(xs[0])
+        if ys.len() == 2 then out.push(ys[1])
+
+        val ty = if out.len() == 0 then c else Ty.Array(c, out)
+
+        texpr(span, ty, TArray(TMatMul(promote(a, with_elem(a.ty, c)), promote(b, with_elem(b.ty, c)))))
+    end matmul
+
+    // -- elemental calls --------------------------------------------------------------------------
+
+    // A prelude function applied element by element (DESIGN §7.3): its arguments already of their
+    // element types, the arrays among them of one shape; `ret` is its result per element.
+    elemental(*self, span: Span, name: string, args: Buf[TExpr], ret: Ty) -> TExpr = self.args_shape(span, s"`${name}`", args) match
+        Some(axes) -> texpr(span, Ty.Array(ret, axes), TArray(TElemental(name, args)))
+        None -> self.invalid(span)
+
+    // A conversion function on an array: element by element (DESIGN §2.4).
+    elemental_conversion(*self, span: Span, name: string, target: Ty, v: TExpr) -> TExpr
+        val from = elem_of(v.ty)
+        val ty = with_elem(v.ty, target)
+
+        if is_error(from) then return self.invalid(span)
+        if ty_eq(from, target) then return v
+        if promotes(from, target) then return texpr(span, ty, TPromote(v))
+
+        if !is_numeric(from)
+            self.fail(v.span, s"`${name}(...)` converts numbers, and this is ${show_ty(v.ty)}")
+            return self.invalid(span)
+
+        if is_complex(from)
+            self.fail(v.span, s"a complex number does not convert to ${show_ty(target)}: take `.re` (or `abs`, `arg`) first")
+            return self.invalid(span)
+
+        texpr(span, ty, TArray(TElementalConvert(v, is_int(target))))
+    end elemental_conversion
+
+    is_elemental(self, k: usize) -> bool = has_elemental(self.funs[k].decl.attrs)
+
+    // An argument of the `k`th `def`. An array where the parameter is a scalar is applied element by
+    // element when the function is `@elemental`, and refused, with the two ways to write it, when not.
+    fun_argument(*self, k: usize, arg: Expr, ty: Ty, mode: Mode, what: string) -> TExpr
+        if mode == Inout || is_array(ty) || is_wild(ty) || has_error(ty) then return self.argument(arg, ty, mode, what)
+
+        val v = self.elab(arg, Some(ty))
+
+        if !is_array(v.ty) then return self.coerce(v, ty, what)
+
+        if !self.is_elemental(k)
+            val name = self.funs[k].name
+
+            self.fail(arg.span, s"`${name}` takes ${show_ty(ty)}, and this is ${show_ty(v.ty)}: mark it `@elemental` to apply it to every element, or write `map(a, ${name})`")
+            return texpr(v.span, Error, TInvalid)
+
+        self.coerce(v, with_elem(v.ty, ty), what)
+    end fun_argument
+
+    elemental_call(*self, span: Span, callee: TExpr, args: Buf[TExpr], ret: Ty) -> TExpr = self.args_shape(span, "an elemental call", args) match
+        Some(axes) -> texpr(span, Ty.Array(ret, axes), TArray(TElementalCall(callee, args)))
+        None -> self.invalid(span)
+
+    // An `@elemental` function obeys the parallel-body rules (DESIGN §7.3, §9.4): scalar parameters,
+    // none `inout`, a result, and a body that writes no module variable and does no I/O but `print`.
+    check_elemental(*self, k: usize)
+        if !self.is_elemental(k) then return
+
+        val f = self.funs[k]
+        val sig = self.fsig[k]
+        val span = f.decl.span
+
+        for j in 0..<sig.names.len()
+            if sig.modes[j] == Inout
+                self.fail(span, s"an `@elemental` function takes no `inout` parameter, and `${sig.names[j]}` is one")
+            elif is_array(sig.tys[j])
+                self.fail(span, s"an `@elemental` function takes scalars, and `${sig.names[j]}` is ${show_ty(sig.tys[j])}")
+
+        if is_void(self.fret[k]) then self.fail(span, s"an `@elemental` function gives a value for each element, and `${f.name}` returns nothing")
+
+        for t in self.fout
+            if t.name == f.name
+                impurity(t.body) match
+                    Some(why) -> self.fail(span, s"an `@elemental` function may be run in any order, so it cannot ${why}")
+                    None -> ()
+    end check_elemental
+
+    // -- loops ------------------------------------------------------------------------------------
+
+    // `for x in a`: every element of an array, in storage order (DESIGN §4.3).
+    for_each(*self, span: Span, label: Option[string], name: string, at: Span, iterable: Expr, body: Expr) -> TExpr
+        val a = self.infer(iterable)
+
+        val ty = a.ty match
+            Array(e, _) -> *e
+            Error -> Error
+            _ ->
+                self.fail(iterable.span, s"a `for` walks a range or an array; this is ${show_ty(a.ty)}")
+                Error
+
+        val id = self.new_loop(label)
+
+        self.open()
+
+        val var_id = self.declare_local(at, name, ty, LLoop)
+
+        self.fx.loops.push(id)
+
+        val b = self.elab(body, Some(Void))
+
+        self.fx.loops.pop()
+        self.close()
+        texpr(span, Void, TArray(TForEach(id, var_id, a, b)))
+    end for_each
+end Elab
+
+// What in a body an elemental function may not do: write a module variable, or do I/O other than
+// `print`; `None` where it does neither. Lambdas are their own functions and are not looked into.
+private impurity(e: TExpr) -> Option[string]
+    *e.kind match
+        TAssign(_, target, _) ->
+            root_global(target) match
+                Some(n) -> return Some(s"write the module variable `${n}`")
+                None -> ()
+        TBuiltin(name, _) ->
+            if name == "eprint" || name == "read_bytes" || name == "write_bytes" then return Some(s"do I/O with `${name}`")
+        _ -> ()
+
+    for c in children(e)
+        impurity(c) match
+            Some(why) -> return Some(why)
+            None -> ()
+
+    None
+end impurity
+
+// The module-level binding a place is in, where it is in one.
+private root_global(place: TExpr) -> Option[string] = *place.kind match
+    TGlobalRef(n) -> Some(n)
+    TArray(op) -> *op match
+        TIndex(target, _) -> root_global(target)
+        _ -> None
+    _ -> None
+
+// The expressions directly inside `e`.
+private children(e: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    *e.kind match
+        TPromote(v) -> out.push(v)
+        TConvert(v, _) -> out.push(v)
+        TMakeComplex(re, im) ->
+            out.push(re)
+            out.push(im)
+        TComplexPart(v, _) -> out.push(v)
+        TBinary(_, l, r) ->
+            out.push(l)
+            out.push(r)
+        TLogical(_, l, r) ->
+            out.push(l)
+            out.push(r)
+        TUnary(_, x) -> out.push(x)
+        TChain(operands, _) -> out.extend(operands.view())
+        TCall(f, args) ->
+            out.push(f)
+            out.extend(args.view())
+        TBuiltin(_, args) -> out.extend(args.view())
+        TBorrow(p) -> out.push(p)
+        TInterp(parts, _) ->
+            for p in parts
+                p match
+                    TValue(v, _) -> out.push(v)
+                    _ -> ()
+        TIf(c, a, b) ->
+            out.push(c)
+            out.push(a)
+
+            b match
+                Some(x) -> out.push(x)
+                None -> ()
+        TWhile(_, c, b) ->
+            out.push(c)
+            out.push(b)
+        TFor(_, _, lo, hi, _, step, b) ->
+            out.push(lo)
+            out.push(hi)
+
+            step match
+                Some(s) -> out.push(s)
+                None -> ()
+
+            out.push(b)
+        TBlock(items, r) ->
+            out.extend(items.view())
+            out.push(r)
+        TLet(_, v) -> out.push(v)
+        TAssign(_, t, v) ->
+            out.push(t)
+            out.push(v)
+        TReturn(v) -> v match
+            Some(x) -> out.push(x)
+            None -> ()
+        TStop(v) -> v match
+            Some(x) -> out.push(x)
+            None -> ()
+        TArray(op) -> array_children(*op, &out)
+        _ -> ()
+
+    out
+end children
+
+private array_children(op: TArr, out: *Buf[TExpr])
+    op match
+        TArrayLit(items) -> out.extend(items.view())
+        TRangeValue(lo, hi, _, step) ->
+            out.push(lo)
+            out.push(hi)
+
+            step match
+                Some(s) -> out.push(s)
+                None -> ()
+        TIndex(target, subs) ->
+            out.push(target)
+
+            for s in subs
+                s match
+                    TSubAt(x) -> out.push(x)
+                    TSubAll -> ()
+                    TSubWindow(lo, hi, _, stride) ->
+                        for b in [lo, hi, stride]
+                            b match
+                                Some(x) -> out.push(x)
+                                None -> ()
+        TEnd(_) -> ()
+        TElementwise(_, l, r) ->
+            out.push(l)
+            out.push(r)
+        TElementwiseUnary(_, x) -> out.push(x)
+        TMatMul(l, r) ->
+            out.push(l)
+            out.push(r)
+        TElemental(_, args) -> out.extend(args.view())
+        TElementalConvert(v, _) -> out.push(v)
+        TElementalCall(f, args) ->
+            out.push(f)
+            out.extend(args.view())
+        TBroadcast(v) -> out.push(v)
+        TShapeCheck(v) -> out.push(v)
+        TReduction(_, args, dim) ->
+            out.extend(args.view())
+
+            dim match
+                Some(d) -> out.push(d)
+                None -> ()
+        TForEach(_, _, a, b) ->
+            out.push(a)
+            out.push(b)
+end array_children

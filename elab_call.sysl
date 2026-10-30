@@ -26,7 +26,7 @@ private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "
 
 // The prelude's array functions (DESIGN §4.2, §4.3, §7.4), which come with arrays, and the
 // assertions over arrays and lambdas.
-private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "assert_approx", "assert_traps"]
+private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "flatten", "transpose", "shape", "rows", "cols", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "to_integers", "to_bytes", "assert_approx", "assert_traps"]
 
 private among(name: string, set: []const string) -> bool
     for s in set
@@ -60,7 +60,7 @@ impl Elab
                     None -> ()
 
                 if is_builtin(n) then return self.builtin(span, n, args, want)
-                if is_array_builtin(n) then return self.not_yet(span, s"the array function `${n}`")
+                if is_array_builtin(n) then return self.array_builtin(span, n, args, want)
 
                 self.unknown_name(callee.span, n)
                 self.invalid(span)
@@ -223,7 +223,7 @@ impl Elab
 
         for j in 0..<slots.len()
             slots[j] match
-                Some(a) -> out.push(self.argument(a, sig.tys[j], sig.modes[j], s"argument `${sig.names[j]}`"))
+                Some(a) -> out.push(self.fun_argument(k, a, sig.tys[j], sig.modes[j], s"argument `${sig.names[j]}`"))
                 None ->
                     sig.defaults[j] match
                         Some(d) -> out.push(d)
@@ -235,6 +235,8 @@ impl Elab
         val ret = ty match
             Fn(s) -> s.ret
             _ -> Error
+
+        if self.is_elemental(k) && any_array(out) then return self.elemental_call(span, texpr(at, ty, TFnRef(name)), out, ret)
 
         texpr(span, ret, TCall(texpr(at, ty, TFnRef(name)), out))
     end call_fun
@@ -263,6 +265,7 @@ impl Elab
         val from = v.ty
 
         if is_error(from) then return self.invalid(span)
+        if is_array(from) then return self.elemental_conversion(span, name, target, v)
         if ty_eq(from, target) then return v
         if promotes(from, target) then return texpr(span, target, TPromote(v))
 
@@ -292,8 +295,8 @@ impl Elab
                 val v = self.infer(a)
 
                 shared = shared match
-                    Some(t) -> self.common_of(span, what, t, v.ty)
-                    None -> Some(v.ty)
+                    Some(t) -> self.common_of(span, what, t, elem_of(v.ty))
+                    None -> Some(elem_of(v.ty))
                 vals.push(Some(v))
 
         var out: Buf[TExpr] = buf()
@@ -308,13 +311,14 @@ impl Elab
                         Some(t) -> Some(adoption(class, t).unwrap_or(default_of(class)))
                         None -> None))
 
-        var ty = out[0].ty
+        // An array argument meets the others by its element type, and is widened element by element.
+        var ty = elem_of(out[0].ty)
 
         for k in 1..<out.len()
-            ty = common(ty, out[k].ty).unwrap_or(Error)
+            ty = common(ty, elem_of(out[k].ty)).unwrap_or(Error)
 
         for k in 0..<out.len()
-            out.set(k, promote(out[k], ty))
+            out.set(k, promote(out[k], with_elem(out[k].ty, ty)))
 
         out
     end unified
@@ -351,21 +355,26 @@ impl Elab
             if args.len() < 2 then return self.arity(span, name, "two or more values")
 
             val out = self.unified(span, name, args)
+            val ty = elem_of(out[0].ty)
 
-            if !is_ordered(out[0].ty) && !is_error(out[0].ty) then self.fail(span, s"`${name}` compares integers and reals; these are ${show_ty(out[0].ty)}")
+            if !is_ordered(ty) && !is_error(ty) then self.fail(span, s"`${name}` compares integers and reals; these are ${show_ty(ty)}")
+            if any_array(out) then return self.elemental(span, name, out, ty)
 
-            return texpr(span, out[0].ty, TBuiltin(name, out))
+            return texpr(span, ty, TBuiltin(name, out))
 
         if name == "atan2" || name == "hypot"
             if args.len() != 2 then return self.arity(span, name, "two values")
 
             var out = self.unified(span, name, args)
-            val ty = if is_int(out[0].ty) then REAL else out[0].ty
+            val ety = elem_of(out[0].ty)
+            val ty = if is_int(ety) then REAL else ety
 
             if !is_real(ty) && !is_error(ty) then self.fail(span, s"`${name}` takes reals; these are ${show_ty(ty)}")
 
             for k in 0..<out.len()
-                out.set(k, promote(out[k], ty))
+                out.set(k, promote(out[k], with_elem(out[k].ty, ty)))
+
+            if any_array(out) then return self.elemental(span, name, out, ty)
 
             return texpr(span, ty, TBuiltin(name, out))
 
@@ -377,6 +386,13 @@ impl Elab
         out.push(v)
 
         if is_error(v.ty) then return texpr(span, Error, TBuiltin(name, out))
+
+        if is_array(v.ty)
+            val r = self.scalar_result(span, name, elem_of(v.ty))
+
+            if is_real(r) && is_int(elem_of(v.ty)) then out.set(0, promote(v, with_elem(v.ty, REAL)))
+
+            return self.elemental(span, name, out, r)
 
         val result = self.scalar_result(span, name, v.ty)
 

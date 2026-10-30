@@ -66,8 +66,31 @@ corpus_scalar_programs_elaborate()
 
                 waiting += 1
 
-    assert_eq(clean, 114)
-    assert_eq(waiting, 39)
+    assert_eq(clean, 151)
+    assert_eq(waiting, 2)
+
+// The categories whose programs are arrays and the array prelude.
+private val ARRAY_CATEGORIES = ["arrays", "prelude", "[byte] buffer"]
+
+@test("every corpus program of arrays, the array prelude and byte buffers elaborates")
+corpus_array_programs_elaborate()
+    var clean = 0
+
+    for line in split(INDEX, "\n")
+        if line.len == 0 || line.starts_with("file\t") then continue
+
+        val cols = split(line, "\t")
+
+        for c in ARRAY_CATEGORIES
+            if cols[1] != c then continue
+
+            val src = source_of(cols[0], read_text(s"testdata/corpus/${cols[0]}.nex").unwrap())
+
+            elaborate(parse_program(src).unwrap()) match
+                Ok(_) -> clean += 1
+                Err(ds) -> assert(false, s"${cols[0]}: ${ds[0].message} @${src.locate(ds[0].span.start)}")
+
+    assert_eq(clean, 139)
 
 @test("all 433 corpus programs parse")
 corpus_parses()

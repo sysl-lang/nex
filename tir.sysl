@@ -98,6 +98,8 @@ enum TKind
     TExit(loop_id: usize)
     TCycle(loop_id: usize)
     TStop(code: Option[TExpr])
+    // An array node: `tir_array.sysl`.
+    TArray(op: &TArr)
     // What could not be elaborated, after its diagnostic.
     TInvalid
 end TKind
