@@ -187,6 +187,9 @@ fortran_runtime(gfortran: string) -> Result[Buf[string], string]
 
 private val MPI_SHIM = from_utf8(embed("../mpi/nex_mpi.c")).unwrap()
 
+// The descriptor the shim reads every buffer through (DESIGN §10.7), written beside it.
+private val NEX_DESC = from_utf8(embed("../include/nex_desc.h")).unwrap()
+
 // The MPI a program links: the `mpicc` that compiles the shim (none where `pkg-config` found the MPI,
 // and the toolchain's clang compiles it), the options it compiles with, and the link's options.
 struct Mpi
@@ -244,7 +247,7 @@ private wrapper_mpi(cc: string) -> Result[Mpi, string]
 
 // The shim compiled for `mpi`, from nex's cache where it was compiled before; the object's path.
 mpi_shim(mpi: Mpi, work: string, tc: Toolchain) -> Result[string, string]
-    var key = MPI_SHIM + "\n" + mpi.cc.unwrap_or(s"${tc.llvm_bin}/clang")
+    var key = MPI_SHIM + "\n" + NEX_DESC + "\n" + mpi.cc.unwrap_or(s"${tc.llvm_bin}/clang")
 
     for a in mpi.compile
         key += "\n" + a
@@ -258,13 +261,15 @@ mpi_shim(mpi: Mpi, work: string, tc: Toolchain) -> Result[string, string]
     val source = s"$work/nex_mpi.c"
 
     write_text(source, MPI_SHIM).map_err((e) -> s"nex: cannot write $source: $e")?
+    write_text(s"$work/nex_desc.h", NEX_DESC).map_err((e) -> s"nex: cannot write $work/nex_desc.h: $e")?
 
     // Compiled beside where it is kept and moved there whole, so a build running alongside never
     // links half an object.
     val pending = if cached == "" then obj else s"$obj.${hash_str(work)}.pending"
     var args: Buf[string] = buf()
 
-    for a in ["-O2", "-fPIC", "-c", source, "-o", pending]
+    // Each product and sum rounded on its own, as nex rounds them: no contraction into a fused one.
+    for a in ["-O2", "-fPIC", "-ffp-contract=off", "-c", source, "-o", pending]
         args.push(a)
 
     mpi.cc match

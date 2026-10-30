@@ -610,12 +610,17 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       interpreter's refusal. *Exit*: a hello-ranks program at `-np 1, 2, 4, 7`; a trap on rank 2
       ends a 4-rank job with `rank 2:` in front of its message and a non-zero status, no hang.
     - **D2 — point to point and collectives** of every element type of §9.6.3, units and complexes
-      included: `send`/`recv`/`sendrecv`, `bcast`, `reduce_to`/`allreduce`/`scan` with every §9.2
-      operator and a user one, `gather`/`allgather`/`scatter`/`alltoall` (the `v` forms chosen
-      automatically), `blocks`; the reproducible reductions and `global_sum` of §9.6.5. *Exit*: each
-      collective against a sequential oracle at `-np 1, 2, 3, 4, 7`; `allreduce` of reals gives
-      identical bits run to run and on both MPIs; `global_sum` equals the undistributed `sum`'s
-      bits at every `-np`; a shape mismatch traps with the counts.
+      included. The collectives are compiler intrinsics of the module, typed by
+      `sh/sysl/nex/elab_mpi.sysl` (DESIGN §9.6.2, decision 8): `bcast`,
+      `reduce_to`/`allreduce`/`scan` with every §9.2 operator and a user one, `gather`/`allgather`
+      (rank k → k + 1), `gather_concat`/`allgather_concat` (MPI's `v` forms), `scatter`/
+      `scatter_concat`, `alltoall`, and `global_sum`/`global_dot`/`global_norm2` of §9.6.5;
+      `send`/`recv`/`sendrecv`, `Status` and `blocks` are nex in `mpi.nex`. Structs and tuples wait
+      for §15, `minloc`/`maxloc`'s pair aside. *Exit*: each collective against a sequential oracle
+      at `-np 1, 2, 3, 4, 7` (`testdata/mpi/collectives.nex`); `allreduce` of reals gives the
+      pairwise tree's bits, identical run to run (`testdata/mpi/reproducible.nex`; the other MPI is
+      D5's); `global_sum` equals the undistributed `sum`'s bits at every `-np`; a shape mismatch
+      traps with the counts; every refusal with its diagnostic (`compiler/tests_mpi_module.sysl`).
     - **D3 — views as datatypes and the `exchange` block**: every window and strided view of
       §9.6.3 crossing with no copy (checked: no `nex_c_gather` in the emitted module), the datatype
       cache, `exchange` with §8.3's borrow of a received place. *Exit*: the strided `mpi_irecv`

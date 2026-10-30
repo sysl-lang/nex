@@ -1,0 +1,132 @@
+// Every collective of `mpi` against a sequential oracle. Each rank's operand is a function of its
+// rank, so every rank computes what each collective must answer from all the ranks' operands, in a
+// plain loop, and compares. A rank prints a line only for a check that fails, then the number of
+// checks it made.
+
+import mpi.*
+
+def add(a: integer, b: integer): integer = a + b
+
+// Rank r's operand.
+def piece(r: integer): [integer] = [r + 1, 2 * r, 7 - r]
+
+def piece_real(r: integer): real = 0.5 * r - 1.0
+
+// The failed checks of `oks` printed under `name`; how many checks there were.
+def report(name: string, oks: [bool]): integer =
+  for k in 1..size(oks)
+    if not oks[k] then print(s"BAD rank ${this_rank()}: ${name} ${k}")
+  size(oks)
+
+def main() =
+  val me = this_rank()
+  val p = num_ranks()
+  val root = p - 1
+  var checks = 0
+
+  // -- allreduce, reduce_to, scan with every built-in operator and a user one ------------------------
+  var total = [0, 0, 0]
+  var prefix = [0, 0, 0]
+  var low = piece_real(0)
+  var high = piece_real(0)
+  var low_at = 0
+  var high_at = 0
+  var factorial = 1
+  for r in 0..p - 1
+    total = total + piece(r)
+    if r <= me then prefix = prefix + piece(r)
+    factorial = factorial * (r + 1)
+    if piece_real(r) < low
+      low = piece_real(r)
+      low_at = r
+    if piece_real(r) > high
+      high = piece_real(r)
+      high_at = r
+
+  checks += report("allreduce sums", [all(allreduce(piece(me), +) == total), all(allreduce(piece(me), add) == total), all(allreduce(piece(me), (a, b) -> a + b, comm = world()) == total), all(allreduce(piece(me), +, fast = true) == total), allreduce(me + 1, *) == factorial, allreduce(me + 1, *, fast = true) == factorial])
+  checks += report("allreduce extremes", [allreduce(piece_real(me), min) == low, allreduce(piece_real(me), max) == high, allreduce(piece_real(me), max, fast = true) == high, allreduce(me == 0, and) == (p == 1), allreduce(me == p - 1, or), allreduce(me == p - 1, or, fast = true)])
+
+  val (lv, lr) = allreduce(piece_real(me), minloc)
+  val (hv, hr) = allreduce([piece_real(me), 1.0], maxloc)
+  val (rv, rr) = reduce_to(piece_real(me), maxloc, root = root)
+
+  checks += report("minloc, maxloc", [lv == low and lr == low_at, hv[1] == high and hr[1] == high_at, hv[2] == 1.0 and hr[2] == 0, if me == root then rv == high and rr == high_at else rv == piece_real(me) and rr == me])
+
+  val to_root = reduce_to(piece(me), +, root = root)
+  val to_root_user = reduce_to(piece(me), add, root = root)
+
+  checks += report("reduce_to", [if me == root then all(to_root == total) and all(to_root_user == total) else all(to_root == piece(me)) and all(to_root_user == piece(me)), reduce_to(me, +) == (if me == 0 then p * (p - 1) div 2 else me)])
+  checks += report("scan", [all(scan(piece(me), +) == prefix), all(scan(piece(me), add) == prefix), all(scan(piece(me), +, fast = true) == prefix)])
+
+  // -- element types and units: each type's sum is the oracle's ----------------------------------------
+  val counted = p * (p + 1) div 2
+
+  checks += report("element types", [allreduce(int8(me + 1), +) == int8(counted), allreduce(uint8(me + 1), +) == uint8(counted), allreduce(int32(me + 1), +, fast = true) == int32(counted), allreduce(uint64(me + 1), max) == uint64(p), allreduce(real32(me + 1), +) == real32(counted), allreduce(real16(me + 1), +) == real16(counted), allreduce(complex(1.0, me), +) == complex(1.0 * p, 1.0 * (counted - p)), allreduce(complex[real32](real32(me), 1.0), +) == complex[real32](real32(counted - p), real32(p)), all(allreduce([me == 0, true], and) == [p == 1, true])])
+
+  val metres: real<m> = allreduce(2.0<m>, +)
+  val times: [real<s>] = allreduce([1.0<s>, me * 1.0<s>], max)
+
+  checks += report("units", [metres == p * 2.0<m>, times[2] == (p - 1) * 1.0<s>, bcast(3.0<kg>, root = root) == 3.0<kg>])
+
+  // -- bcast, gather, allgather: rank k in, rank k + 1 out --------------------------------------------
+  var all_pieces: [integer] = zeros(3 * p)
+  for r in 0..p - 1
+    all_pieces[3 * r + 1..3 * r + 3] = piece(r)
+  val g = gather(piece(me), root = root)
+  val ag = allgather(piece(me))
+  val ag_scalar = allgather(10 * me)
+  val ag_matrix = allgather([[me, 1], [2, me]])
+
+  checks += report("bcast, gather", [all(bcast(piece(me), root = root) == piece(root)), bcast(me == root, root = root), all(flatten(ag) == all_pieces), extent(ag, 1) == 3 and extent(ag, 2) == p, size(ag_scalar) == p and ag_scalar[p] == 10 * (p - 1), extent(ag_matrix, 3) == p and ag_matrix[1, 1, p] == p - 1 and ag_matrix[2, 1, p] == 2, if me == root then all(flatten(g) == all_pieces) else extent(g, 2) == 0])
+
+  // -- the concatenating forms, of pieces whose lengths differ ----------------------------------------
+  var joined: [integer] = zeros(p * (p + 1) div 2)
+  var at = 0
+  for r in 0..p - 1
+    for k in 1..r + 1
+      joined[at + k] = r
+    at += r + 1
+  val cat = allgather_concat(fill(me + 1, me))
+  val cat_root = gather_concat(fill(me + 1, me))
+  val cat_matrix = allgather_concat(fill((2, me), me))
+
+  checks += report("gather_concat", [all(cat == joined), if me == 0 then all(cat_root == joined) else size(cat_root) == 0, extent(cat_matrix, 1) == 2 and extent(cat_matrix, 2) == p * (p - 1) div 2])
+
+  // -- scatter, scatter_concat and alltoall ----------------------------------------------------------
+  var parts: [integer; :, :] = zeros((2, p))
+  for r in 1..p
+    parts[1, r] = 100 + r
+    parts[2, r] = 200 + r
+  val mine = scatter(if me == 0 then parts else zeros((2, p)))
+  val one = scatter(if me == root then parts[1, :] else zeros(p), root = root)
+  val (first, last) = blocks(10)
+  val cut = scatter_concat(linspace(1.0, 10.0, 10))
+  var outgoing: [integer] = zeros(p)
+  var incoming: [integer] = zeros(p)
+  for r in 1..p
+    outgoing[r] = 1000 * me + r - 1
+    incoming[r] = 1000 * (r - 1) + me
+  var covered = 0
+  for r in 0..p - 1
+    val (f, l) = blocks(10, p, r)
+    covered += l - f + 1
+
+  checks += report("scatter, alltoall", [all(mine == [101 + me, 201 + me]), one == 101 + me, size(cut) == last - first + 1 and (size(cut) == 0 or cut[1] == 1.0 * first), covered == 10, all(alltoall(outgoing) == incoming)])
+
+  // -- point to point: a ring, and a tagged message ----------------------------------------------------
+  val right = (me + 1) % p
+  val left = (me + p - 1) % p
+  var got = [0.0, 0.0]
+  val st = sendrecv([1.0 * me, 2.0], right, got, left)
+
+  checks += report("sendrecv", [st.source == left, st.count == 2, got[1] == 1.0 * left])
+
+  if p > 1
+    if me == 0 then send([5, 6, 7], 1, tag = 3)
+    if me == 1
+      var three: [integer] = zeros(3)
+      val s = recv(three, from = 0, tag = 3)
+
+      checks += report("send, recv", [all(three == [5, 6, 7]), s.tag == 3, s.source == 0])
+
+  print(s"rank ${me}: ${checks} checks")
