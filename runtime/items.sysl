@@ -81,6 +81,19 @@ items_own(slot: **u8)
     slot[0] = q
     release(p)
 
+// How many elements the array at `p` holds; none where there is no array yet.
+@export("nex_items_count")
+items_count(p: *u8) -> long = if p == null then 0 else items(p).count
+
+// The address of element `k`, counted from 1, of the array at `p`; outside the array a trap.
+@export("nex_items_at")
+items_at(p: *u8, k: long) -> *u8
+    if k < 1 || k > items_count(p) then trap_with("index out of bounds")
+
+    val a = items(p)
+
+    &a.data[usize(k - 1) * usize(a.size)]
+
 // A stored array of numbers released: its storage, the descriptor's first word.
 @export("nex_array_free")
 array_free(p: *u8)

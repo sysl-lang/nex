@@ -361,6 +361,13 @@ struct Emitter
         TGlobalRef(name) -> self.def(s"llvm.mlir.addressof @\"g.$name\" : !llvm.ptr")
         TField(v, _, k) -> self.field_ptr(v, k)
         TTupleField(v, k) -> self.field_ptr(v, k)
+        TArray(op) ->
+            *op match
+                TIndex(target, subs) -> if is_items(target.ty) then return self.items_place(e.span, target, subs, true)
+                _ -> ()
+
+            self.later(e.span, "this place")
+            "%one"
         _ ->
             self.later(e.span, "this place")
             "%one"

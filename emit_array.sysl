@@ -612,6 +612,8 @@ impl Emitter
 
     // An array node's value.
     array(*self, e: TExpr, op: TArr) -> string
+        if is_items(array_of_node(e, op)) && !self.on_args(op) then return self.items_node(e, op)
+
         op match
             TIndex(target, subs) ->
                 if self.is_args(target) && subs.len() == 1
@@ -1168,6 +1170,8 @@ impl Emitter
 
     // `a[…] op= value`: one element or a window of the array place `target`, written in place.
     assign_index(*self, span: Span, op: string, target: TExpr, subs: Buf[TSub], value: TExpr)
+        if is_items(target.ty) then return self.items_assign(span, op, target, subs, value)
+
         val v = self.ex(value)
         val cur = self.place_value(target)
         val tt = self.tensor_ty(span, target.ty)

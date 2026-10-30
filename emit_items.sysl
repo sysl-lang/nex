@@ -1,0 +1,251 @@
+// Arrays whose elements are not numbers: strings, functions, tuples, structs and enums. A memref
+// holds only numbers, so such an array is never a tensor: it is an object of the counted heap
+// (`runtime/items.sysl`) holding its elements in their stored form, and a value of it is the object's
+// address, held and counted as a string is (`emit_own.sysl`).
+//
+// **Places share an array until one writes it.** Binding or passing an array takes a count on it;
+// a write through a place first makes the place's array its own (`nex_items_own`, a copy where
+// another place holds it), so value semantics hold with no copy where nothing writes. A loop over an
+// array holds a count on it for the loop, so the loop sees the elements it started with whatever the
+// body writes.
+//
+// Element access goes through the runtime, which checks the index and answers the element's
+// address; an array not yet given a value has no elements.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Emitter
+    // -- objects ----------------------------------------------------------------------------------
+
+    // The bytes one element of type `et` takes, as an `i64`.
+    item_size(*self, span: Span, et: Ty) -> string
+        val z = self.def("llvm.mlir.zero : !llvm.ptr")
+        val end = self.def(s"llvm.getelementptr $z[1] : (!llvm.ptr) -> !llvm.ptr, ${self.mem_ty(span, et)}")
+
+        self.def(s"llvm.ptrtoint $end : !llvm.ptr to i64")
+
+    // A new rank-1 array of type `t` with `n` (an `i64`) zeroed elements, which the statement owns.
+    new_items(*self, span: Span, t: Ty, n: string) -> string
+        val et = elem_of(t)
+        var hold = ""
+        var drop = ""
+
+        if self.part_managed(et)
+            hold = self.helper_ref("hold", et)
+            drop = self.helper_ref("cell", et)
+        else
+            hold = self.def("llvm.mlir.zero : !llvm.ptr")
+            drop = hold
+
+        val r = self.call("nex_items_new", s"$n, ${self.item_size(span, et)}, $hold, $drop, %one", "i64, i64, !llvm.ptr, !llvm.ptr, i64", "!llvm.ptr")
+
+        self.own_ref(r)
+
+    items_count(*self, h: string) -> string = self.call("nex_items_count", h, "!llvm.ptr", "i64")
+
+    // The address of element `k` (an `i64` counted from 1) of the array `h`; a trap outside it.
+    item_at(*self, h: string, k: string) -> string = self.call("nex_items_at", s"$h, $k", "!llvm.ptr, i64", "!llvm.ptr")
+
+    // The element of type `et` at `p`, borrowed from its array.
+    item_load(*self, span: Span, p: string, et: Ty) -> string =
+        self.from_mem(self.effect(s"llvm.load $p : !llvm.ptr -> ${self.mem_ty(span, et)}", self.mem_ty(span, et)), et)
+
+    // `v` stored as element `k` (from 1) of the new array `h`, whose element it now holds.
+    item_init(*self, span: Span, h: string, k: string, v: string, et: Ty)
+        self.retain(v, et)
+        self.store(span, self.item_at(h, k), v, et)
+
+    // -- nodes ------------------------------------------------------------------------------------
+
+    // Whether an array node indexes or loops over the program's arguments (`emit_builtin.sysl`).
+    on_args(*self, op: TArr) -> bool = op match
+        TIndex(target, _) -> self.is_args(target)
+        TForEach(_, _, a, _) -> self.is_args(a)
+        _ -> false
+
+    // An array node whose array is one of non-numbers.
+    items_node(*self, e: TExpr, op: TArr) -> string
+        op match
+            TArrayLit(xs) -> self.items_literal(e, xs)
+            TIndex(target, subs) -> self.item_load(e.span, self.items_place(e.span, target, subs, false), e.ty)
+            TForEach(id, var_id, a, body) -> self.items_for_each(e.span, id, var_id, a, body)
+            TCopy(v, _) -> self.ex(v)
+            TTransfer(v, _) -> self.ex(v)
+            _ -> self.unsupported(e.span, s"this operation on an array of ${show_ty(elem_of(array_of_node(e, op)))}")
+
+    // `[a, b, c]` of non-numbers.
+    items_literal(*self, e: TExpr, xs: Buf[TExpr]) -> string
+        val et = elem_of(e.ty)
+
+        if rank_of(e.ty) != 1 || is_arr(et) then return self.unsupported(e.span, s"an array of ${show_ty(et)} of rank ${rank_of(e.ty)}")
+
+        var vals: Buf[string] = buf()
+
+        for x in xs
+            vals.push(self.ex(x))
+
+        val h = self.new_items(e.span, e.ty, self.def(s"arith.constant ${xs.len()} : i64"))
+
+        for k in 0..<vals.len()
+            self.item_init(e.span, h, self.def(s"arith.constant ${k + 1} : i64"), vals[k], et)
+
+        h
+
+    // The address of the element of `target` that `subs` names: one integer subscript, the array made
+    // the place's own first where the element is to be written.
+    items_place(*self, span: Span, target: TExpr, subs: Buf[TSub], write: bool) -> string
+        if subs.len() != 1 then return self.unsupported(span, "an array of non-numbers of rank above 1")
+
+        subs[0] match
+            TSubAt(i) ->
+                var h = ""
+
+                if write
+                    val slot = self.place_ptr(target)
+
+                    self.call("nex_items_own", slot, "!llvm.ptr", "")
+                    h = self.effect(s"llvm.load $slot : !llvm.ptr -> !llvm.ptr", "!llvm.ptr")
+                else
+                    h = self.ex(target)
+
+                self.item_at(h, self.widen64(self.ex(i), bits_of(i.ty), is_signed(i.ty)))
+            _ ->
+                self.unsupported(span, "a slice of an array of non-numbers")
+                "%one"
+
+    // `a[i] op= v` on an array of non-numbers.
+    items_assign(*self, span: Span, op: string, target: TExpr, subs: Buf[TSub], value: TExpr)
+        val v = self.ex(value)
+        val et = elem_of(target.ty)
+        val p = self.items_place(span, target, subs, true)
+
+        if op == "="
+            self.keep(span, p, v, et)
+        else
+            self.keep(span, p, self.binary(span, op[0..<op.len - 1], self.item_load(span, p, et), v, et), et)
+
+    // `for x in a` over an array of non-numbers: the array held for the loop, each element bound in
+    // turn.
+    items_for_each(*self, span: Span, id: usize, var_id: usize, a: TExpr, body: TExpr) -> string
+        val h = self.ex(a)
+        val et = elem_of(a.ty)
+
+        self.retain_ref(h)
+
+        val n = self.items_count(h)
+        val counter = self.alloca("i64")
+
+        self.op(s"llvm.store %one, $counter : i64, !llvm.ptr")
+
+        val l = self.loop_open()
+
+        self.loop_condition(l, self.def(s"arith.cmpi sle, ${self.def(s"llvm.load $counter : !llvm.ptr -> i64")}, $n : i64"))
+
+        val k = self.def(s"llvm.load $counter : !llvm.ptr -> i64")
+        val m = self.mark()
+
+        self.bind_local(span, var_id)
+        self.keep(span, self.local_ptr(span, var_id), self.item_load(span, self.item_at(h, k), et), et)
+        self.region(body)
+        self.release_from(m)
+        self.end_pass(id)
+        self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
+        self.loop_close(l)
+        self.after_loop(id)
+        self.release_ref(h)
+        ""
+
+    // -- the prelude ------------------------------------------------------------------------------
+
+    // A prelude function taking or making an array of non-numbers.
+    items_builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        if name == "enumerate" || name == "zip" then return self.paired(span, name, args, t)
+
+        if !is_items(args[0].ty) then return self.unsupported(span, s"`$name` making an array of ${show_ty(elem_of(t))}")
+
+        if name == "length" || name == "size" || name == "shape" || (name == "extent" && args.len() == 1)
+            return self.convert(span, self.items_count(self.ex(args[0])), INTEGER, t, false)
+
+        if name == "rank" then return self.int_const("1", bits_of(t))
+
+        self.unsupported(span, s"`$name` on an array of ${show_ty(elem_of(args[0].ty))}")
+
+    // The length of any rank-1 array, as an `i64`, and element `k` (an `i64` from 1) of it.
+    any_length(*self, span: Span, v: string, t: Ty) -> string =
+        if is_items(t) then self.items_count(v) else self.to_i64(self.dim(span, v, t, 1))
+
+    any_element(*self, span: Span, v: string, t: Ty, k: string) -> string =
+        if is_items(t) then self.item_load(span, self.item_at(v, k), elem_of(t))
+        else self.def(s"tensor.extract $v[${self.def(s"arith.index_cast ${self.def(s"arith.subi $k, %one : i64")} : i64 to index")}] : ${self.tensor_ty(span, t)}")
+
+    // `enumerate(a)`, each element with its index from 1, or `zip(a, b)`, each pair of elements, the
+    // shorter array's length; an array of rank above 1 in storage order.
+    paired(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        var vals: Buf[string] = buf()
+        var tys: Buf[Ty] = buf()
+
+        for a in args
+            val v = self.ex(a)
+
+            if is_items(a.ty)
+                vals.push(v)
+                tys.push(a.ty)
+            else
+                val ft = self.view_ty(Ty.Array(elem_of(a.ty), dynamic_axes(1)))
+
+                vals.push(self.flat(span, v, a.ty))
+                tys.push(ft)
+
+        var n = self.any_length(span, vals[0], tys[0])
+
+        if vals.len() == 2 then n = self.def(s"arith.minsi $n, ${self.any_length(span, vals[1], tys[1])} : i64")
+
+        val h = self.new_items(span, t, n)
+        val et = elem_of(t)
+        val m = self.ty(span, et)
+        val iv = self.fresh()
+
+        self.op(s"scf.for $iv = %one to ${self.def(s"arith.addi $n, %one : i64")} step %one : i64 {")
+
+        var parts: Buf[string] = buf()
+        var part_tys: Buf[Ty] = buf()
+
+        if name == "enumerate"
+            parts.push(iv)
+            part_tys.push(INTEGER)
+
+        for k in 0..<vals.len()
+            parts.push(self.any_element(span, vals[k], tys[k], iv))
+            part_tys.push(elem_of(tys[k]))
+
+        val mark = self.mark()
+
+        self.item_init(span, h, iv, self.make(m, parts, part_tys), et)
+        self.release_from(mark)
+        self.op("}")
+        h
+    end paired
+
+    // -- printing ---------------------------------------------------------------------------------
+
+    // An array of non-numbers written to a sink: `[a, b, c]`.
+    put_items(*self, span: Span, sink: string, h: string, t: Ty)
+        val n = self.items_count(h)
+        val iv = self.fresh()
+
+        self.put_text(sink, "[")
+        self.op(s"scf.for $iv = %one to ${self.def(s"arith.addi $n, %one : i64")} step %one : i64 {")
+        self.op(s"scf.if ${self.def(s"arith.cmpi ne, $iv, %one : i64")} {")
+        self.put_text(sink, ", ")
+        self.op("}")
+        self.put_value(span, sink, self.item_load(span, self.item_at(h, iv), elem_of(t)), elem_of(t))
+        self.op("}")
+        self.put_text(sink, "]")
+end Emitter
+
+// The type of the array array node `e` is about: the one it indexes or loops over, or its own.
+array_of_node(e: TExpr, op: TArr) -> Ty = op match
+    TIndex(target, _) -> target.ty
+    TForEach(_, _, a, _) -> a.ty
+    _ -> e.ty
