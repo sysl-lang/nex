@@ -18,7 +18,7 @@ import sysl.text.{join, split}
 // How long a job may take before it counts as hung.
 private val JOB_TIMEOUT = 120000
 
-private val HELLO = "import mpi.*\n\ndef main() =\n  val me = rank()\n  barrier()\n  print(s\"rank ${me} of ${size()}\")\n"
+private val HELLO = "import mpi.*\n\ndef main() =\n  val me = this_rank()\n  barrier()\n  print(s\"rank ${me} of ${num_ranks()}\")\n"
 
 // The program `text` written into the bench as `<case>.nex` and compiled to `<case>`; its path.
 private built(b: Bench, text: string, case: string) -> string
@@ -93,10 +93,10 @@ mpi_hello_ranks()
         assert(out.status.ok(), s"-np $np: ${out.status}\n${out.err.unwrap_or("")}")
         assert_eq(sorted_lines(out.text), hello_lines(np))
 
-@test("a program importing mpi run with no launcher is a job of one rank, and `mpi.x` names the module's `x` beside the array `rank` and `size`")
+@test("a program importing mpi run with no launcher is a job of one rank, and `mpi.x` names the module's `x`")
 mpi_single_rank_without_launcher()
     val b = mpi_bench()
-    val exe = built(b, "import mpi\n\nval me = mpi.rank()\n\ndef main() =\n  val a = [[1, 2], [3, 4]]\n  print(s\"${me} ${mpi.size(mpi.world())} ${mpi.size(mpi.self())} ${rank(a)} ${size(a)} ${mpi.no_rank < 0 or mpi.no_rank >= mpi.size()}\")\n  mpi.barrier(mpi.self())\n", "single")
+    val exe = built(b, "import mpi\n\nval me = mpi.this_rank()\n\ndef main() =\n  val a = [[1, 2], [3, 4]]\n  print(s\"${me} ${mpi.num_ranks(mpi.world())} ${mpi.num_ranks(mpi.self())} ${rank(a)} ${size(a)} ${mpi.no_rank < 0 or mpi.no_rank >= mpi.num_ranks()}\")\n  mpi.barrier(mpi.self())\n", "single")
     val out = capture(exe, [], stderr = true, timeout = JOB_TIMEOUT).unwrap()
     val four = job(exe, 4)
 
@@ -106,13 +106,37 @@ mpi_single_rank_without_launcher()
     assert(four.status.ok(), four.err.unwrap_or(""))
     assert_eq(sorted_lines(four.text), "0 4 1 2 4 true\n1 4 1 2 4 true\n2 4 1 2 4 true\n3 4 1 2 4 true")
 
+@test("`import mpi.*` hides no prelude function: `rank(a)`, `size(a)` and `reduce(a, init, f)` of an array keep their meaning beside `this_rank()` and `num_ranks()`, and `rank()` with no array is the prelude's error")
+mpi_star_hides_no_prelude_name()
+    val b = mpi_bench()
+    val dir = s"${b.work}/old_names"
+    val text = "import mpi.*\n\ndef main() =\n  val a = [[1, 2, 3], [4, 5, 6]]\n  print(s\"${this_rank()} ${num_ranks()} ${rank(a)} ${size(a)} ${reduce([1, 2, 3], 0, (s, x) -> s + x)}\")\n"
+    val exe = built(b, text, "names")
+
+    make_dir_all(dir).unwrap()
+    write_text(s"$dir/old.nex", "import mpi.*\n\ndef main() = print(rank())\n").unwrap()
+    write_text(s"$dir/old_size.nex", "import mpi.*\n\ndef main() = print(size(world()))\n").unwrap()
+
+    val alone = capture(exe, [], stderr = true, timeout = JOB_TIMEOUT).unwrap()
+    val three = job(exe, 3)
+    val old = load(s"$dir/old.nex")
+    val old_size = load(s"$dir/old_size.nex")
+
+    finish(b)
+    assert(alone.status.ok(), alone.err.unwrap_or(""))
+    assert_eq(alone.text, "0 1 2 6 6\n")
+    assert(three.status.ok(), three.err.unwrap_or(""))
+    assert_eq(sorted_lines(three.text), "0 3 2 6 6\n1 3 2 6 6\n2 3 2 6 6")
+    assert(old.err().unwrap_or("").contains("`rank` takes an array"), old.err().unwrap_or(""))
+    assert(old_size.is_err(), "size(world()) is not an array's size")
+
 @test("a trap on rank 2 of a 4-rank job ends the whole job, with `rank 2:` in front of its message and a non-zero status, while the other ranks wait in a barrier")
 mpi_trap_ends_the_job()
     val b = mpi_bench()
-    val exe = built(b, "import mpi.*\n\ndef main() =\n  val xs = [1, 2, 3]\n  if rank() == 2 then print(xs[rank() + 5])\n  barrier()\n  print(\"after\")\n", "trap")
+    val exe = built(b, "import mpi.*\n\ndef main() =\n  val xs = [1, 2, 3]\n  if this_rank() == 2 then print(xs[this_rank() + 5])\n  barrier()\n  print(\"after\")\n", "trap")
     val out = job(exe, 4)
     // A trap caught by `assert_traps` is the rank's own business and ends nothing.
-    val caught = job(built(b, "import mpi.*\n\ndef main() =\n  val xs = [1, 2, 3]\n  assert_traps(() -> print(xs[rank() + 5]))\n  barrier()\n  if rank() == 0 then print(\"after\")\n", "caught"), 4)
+    val caught = job(built(b, "import mpi.*\n\ndef main() =\n  val xs = [1, 2, 3]\n  assert_traps(() -> print(xs[this_rank() + 5]))\n  barrier()\n  if this_rank() == 0 then print(\"after\")\n", "caught"), 4)
 
     finish(b)
 
@@ -129,8 +153,8 @@ mpi_trap_ends_the_job()
 @test("`stop n` with n not zero on one rank ends the whole job with `rank 1: stop 3`; `stop 0` ends only that rank's part, after the others' last collective")
 mpi_stop_ends_the_job()
     val b = mpi_bench()
-    val failing = job(built(b, "import mpi.*\n\ndef main() =\n  if rank() == 1 then stop 3\n  barrier()\n  print(\"after\")\n", "stop_failing"), 4)
-    val clean = job(built(b, "import mpi.*\n\ndef main() =\n  barrier()\n  print(s\"rank ${rank()}\")\n  if rank() == 1 then stop 0\n  print(s\"rank ${rank()} returns\")\n", "stop_clean"), 3)
+    val failing = job(built(b, "import mpi.*\n\ndef main() =\n  if this_rank() == 1 then stop 3\n  barrier()\n  print(\"after\")\n", "stop_failing"), 4)
+    val clean = job(built(b, "import mpi.*\n\ndef main() =\n  barrier()\n  print(s\"rank ${this_rank()}\")\n  if this_rank() == 1 then stop 0\n  print(s\"rank ${this_rank()} returns\")\n", "stop_clean"), 3)
 
     finish(b)
 
@@ -152,7 +176,7 @@ mpi_only_where_imported()
     val with_mpi = s"${b.work}/with_mpi.nex"
 
     write_text(plain, "def main() =\n  val a = [1, 2, 3]\n  print(size(a))\n").unwrap()
-    write_text(with_mpi, "import mpi.{rank}\n\ndef main() = print(rank())\n").unwrap()
+    write_text(with_mpi, "import mpi.{this_rank}\n\ndef main() = print(this_rank())\n").unwrap()
 
     val p = mlir_of(plain, false).unwrap()
     val m = mlir_of(with_mpi, false).unwrap()
@@ -172,8 +196,8 @@ mpi_is_the_shipped_module()
     val dir = s"${b.work}/proj"
 
     make_dir_all(s"$dir/mpi").unwrap()
-    write_text(s"$dir/mpi/other.nex", "module mpi\n\ndef rank(): integer = 99\n").unwrap()
-    write_text(s"$dir/main.nex", "import mpi.{rank, world}\n\ndef main() = print(rank(world()))\n").unwrap()
+    write_text(s"$dir/mpi/other.nex", "module mpi\n\ndef this_rank(): integer = 99\n").unwrap()
+    write_text(s"$dir/main.nex", "import mpi.{this_rank, world}\n\ndef main() = print(this_rank(world()))\n").unwrap()
     write_text(s"$dir/missing.nex", "import mpi.{nex_mpi_rank}\n\ndef main() = ()\n").unwrap()
 
     val good = load(s"$dir/main.nex")
@@ -190,7 +214,7 @@ mpi_not_interpreted_where_imported()
     val dir = s"${b.work}/proj"
 
     make_dir_all(s"$dir/util").unwrap()
-    write_text(s"$dir/util/u.nex", "module util\n\nimport mpi.*\n\ndef me(): integer = rank()\n").unwrap()
+    write_text(s"$dir/util/u.nex", "module util\n\nimport mpi.*\n\ndef me(): integer = this_rank()\n").unwrap()
     write_text(s"$dir/main.nex", "import util.{me}\n\ndef main() = print(me())\n").unwrap()
     write_text(s"$dir/plain.nex", "def main() = print(1)\n").unwrap()
 
@@ -223,7 +247,7 @@ mpi_command_np()
     val fake = s"${b.work}/fake"
 
     write_text(src, HELLO).unwrap()
-    write_text(tests, "import mpi.*\n\n@test\ndef test_size() = assert_eq(size(), 3)\n\n@test\ndef test_rank_two_traps() =\n  val xs = [1, 2, 3]\n  if rank() == 2 then print(xs[4])\n  barrier()\n\ndef main() = ()\n").unwrap()
+    write_text(tests, "import mpi.*\n\n@test\ndef test_size() = assert_eq(num_ranks(), 3)\n\n@test\ndef test_rank_two_traps() =\n  val xs = [1, 2, 3]\n  if this_rank() == 2 then print(xs[4])\n  barrier()\n\ndef main() = ()\n").unwrap()
     make_dir_all(fake).unwrap()
     symlink("/bin/echo", s"$fake/srun").unwrap()
 

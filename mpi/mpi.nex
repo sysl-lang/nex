@@ -30,11 +30,12 @@ def self(): Comm = Comm(nex_mpi_self())
 // The rank to send to or receive from that does nothing: `MPI_PROC_NULL`.
 val no_rank: integer = nex_mpi_proc_null()
 
-// This process's rank in `comm`, from 0 to `size(comm) - 1`.
-def rank(comm: Comm = world()): integer = nex_mpi_rank(comm.handle)
+// This process's rank in `comm`, from 0 to `num_ranks(comm) - 1`. The name is Fortran's
+// `this_image()`'s, and leaves the prelude's `rank(a)` of an array in sight under `import mpi.*`.
+def this_rank(comm: Comm = world()): integer = nex_mpi_rank(comm.handle)
 
-// How many ranks `comm` holds.
-def size(comm: Comm = world()): integer = nex_mpi_size(comm.handle)
+// How many ranks `comm` holds; Fortran's `num_images()`, beside the prelude's `size(a)`.
+def num_ranks(comm: Comm = world()): integer = nex_mpi_size(comm.handle)
 
 // Waits until every rank of `comm` has reached it.
 def barrier(comm: Comm = world()) = nex_mpi_barrier(comm.handle)

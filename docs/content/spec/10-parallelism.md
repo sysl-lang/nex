@@ -457,22 +457,23 @@ program moves it.
 import mpi.*
 
 def main() =
-  val me = rank()
+  val me = this_rank()
   barrier()
-  print(s"rank ${me} of ${size()}")
+  print(s"rank ${me} of ${num_ranks()}")
 ```
 
 | name | what it is |
 |---|---|
 | `world()` | every rank of the job, a `Comm` |
 | `self()` | this rank alone |
-| `rank(comm = world())` | this process's rank in `comm`, counted from 0 |
-| `size(comm = world())` | how many ranks `comm` holds |
+| `this_rank(comm = world())` | this process's rank in `comm`, counted from 0 |
+| `num_ranks(comm = world())` | how many ranks `comm` holds |
 | `barrier(comm = world())` | waits until every rank of `comm` has reached it |
 | `no_rank` | the rank a send or receive to which does nothing (`MPI_PROC_NULL`) |
 
-`import mpi.*` makes `rank` and `size` the module's, so `rank(a)` and `size(a)` of an array are then
-refused; a program that needs both writes `import mpi` and calls `mpi.rank()`.
+No name in `mpi` is a prelude function's, so `import mpi.*` hides nothing: `rank(a)` and `size(a)`
+of an array mean what they always do beside `this_rank()` and `num_ranks()`, which are named after
+Fortran's `this_image()` and `num_images()`.
 
 **Starting and ending are implicit.** Importing `mpi` makes the program initialise MPI before its
 module-level bindings and finalise it after `main` returns. A trap nothing catches, or `stop n` with
