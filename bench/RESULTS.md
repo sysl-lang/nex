@@ -135,6 +135,27 @@ at `efd44c1`:
 gives 1.10, 1.06 and 0.95: every kernel of the oracle now meets its bar. The same change makes
 `y = x * a + y` 1.16× faster (6.26 to 5.40 ms) and leaves `y = x * y` as it was (5.36 and 5.39 ms).
 
+## On a quiet machine
+
+The whole oracle at dev `7378a37`, `zsh bench/run.zsh`, 2026-10-30 16:18 EDT, at a load of 4.3 to
+6.0 — the run the earlier sections waited for. Every kernel meets its bar, with no allocation its
+twin does not make, and every checksum agrees.
+
+| kernel | twin | nex | ratio | allocs (nex/twin) | ref/nex |
+|---|---:|---:|---:|---:|---:|
+| axpy | 1.61 | 1.61 | 1.00 | 2 / 2 | 2.83 |
+| dot | 8.18 | 5.02 | 0.61 | 2 / 2 | 1.68 |
+| nrm2 | 7.96 | 4.94 | 0.62 | 1 / 1 | 1.70 |
+| gemv | 2.02 | 1.94 | 0.96 | 1 / 1 | 18.06 |
+| gemm (naive) | 131.88 | 115.60 | 0.88 | 3 / 3 | 21.20 |
+| stencil | 1.47 | 1.46 | 0.99 | 2 / 2 | 13.91 |
+| complex axpy | 3.42 | 3.61 | 1.06 | 2 / 2 | n/m |
+| point distance | 3.68 | 3.58 | 0.97 | 5 / 5 | n/m |
+| axpy, real32 | 0.82 | 0.80 | 0.98 | 2 / 2 | n/m |
+| BLAS gemm (vs `cblas_dgemm`) | 6.23 | 3.82 | 0.61 | 3 / 3 | n/m |
+| parallel axpy | 1.19 | 1.17 | 0.99 | 2 / 2 | n/m |
+| parallel dot | 1.43 | 0.98 | 0.69 | 2 / 2 | n/m |
+
 ## The misses of the baseline, ranked by ratio
 
 The diagnoses come from `nex emit` (MLIR) and `zsh bench/run.zsh --ir <kernel>` (the LLVM IR as
