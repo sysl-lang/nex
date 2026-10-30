@@ -9,7 +9,9 @@
 // the link gains LLVM's `libomp`. A program without one links no OpenMP runtime at all.
 //
 // **The link takes the command line's `-L`/`-l` options and the libraries the program's externs
-// `@link`**, which the emitter writes as `// nex.link` lines before the module (DESIGN §10.1).
+// `@link`**, which the emitter writes as `// nex.link` lines before the module (DESIGN §10.1). **A
+// program whose `@` or linear-algebra prelude calls BLAS or LAPACK** says so in a `// nex.blas` line,
+// and links Accelerate on macOS and OpenBLAS elsewhere, or what `NEX_BLAS` names.
 //
 // LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm`; the runtime at `NEX_RUNTIME`, else
 // `libnex_rt.a` beside the `nex` executable.
@@ -96,6 +98,36 @@ module_links(mlir: string) -> Buf[string]
 
     out
 
+// Whether the module calls BLAS or LAPACK for `@` or the linear-algebra prelude, which its
+// `// nex.blas` line says.
+uses_blas(mlir: string) -> bool
+    for line in split(mlir, "\n")
+        if line == "module {" then return false
+        if line == "// nex.blas" then return true
+
+    false
+
+// The link inputs of the BLAS and LAPACK a program calls (DESIGN §10.4): `NEX_BLAS`, split at its
+// spaces, where it is set; else Accelerate on macOS and OpenBLAS elsewhere.
+blas_links() -> Buf[string]
+    var out: Buf[string] = buf()
+    val chosen = get_or("NEX_BLAS", "")
+
+    if chosen != ""
+        for a in split(chosen, " ")
+            if a != "" then out.push(a)
+
+        return out
+
+#if macos
+    out.push("-framework")
+    out.push("Accelerate")
+#else
+    out.push("-lopenblas")
+#endif
+
+    out
+
 // An MLIR module lowered to LLVM IR in `work`; the file's path.
 private translate(mlir: string, work: string, tc: Toolchain) -> Result[string, string]
     val input = s"$work/program.mlir"
@@ -128,6 +160,10 @@ lower_module(mlir: string, out: string, work: string, tc: Toolchain, links: []co
 
     for a in module_links(mlir)
         args.push(a)
+
+    if uses_blas(mlir)
+        for a in blas_links()
+            args.push(a)
 
     args.push("-lm")
 

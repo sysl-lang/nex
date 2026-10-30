@@ -61,6 +61,18 @@ run_array_equality()
     assert_eq(out.text, "[true, false, true]\n(false, true, true)\n[true, false, false]\n")
     assert_eq(out.err.unwrap_or(""), "trap: shape mismatch\n")
 
+@test("a for over an array's elements gives back each pass's temporaries in the pass: a closure last, before a cycle, nested")
+run_for_each_temporaries()
+    val b = bench()
+    val program = "def main() =\n  var t = 0.0\n  for n in [3, 70]\n    val a = [1.0 * n, 2.0]\n    t = t + a[1]\n    assert_traps(() -> print(a[3]), \"out of bounds\")\n" +
+        "  for k in [1, 2, 3]\n    val f = () -> k * 10\n    if k == 2 then cycle\n    print(f())\n" +
+        "  for i in [1, 2]\n    for j in [10, 20]\n      val g = () -> i + j\n      print(g())\n  print(t)\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "10\n30\n11\n21\n12\n22\n73.0\n")
+
 @test("element-wise operands whose shapes differ trap at run time, also where folding learns both shapes")
 run_elementwise_folded_shape_mismatch()
     val b = bench()

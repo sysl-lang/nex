@@ -1585,7 +1585,7 @@ impl Emitter
 
         self.bind_local(span, var_id)
         self.store(span, self.local_ptr(span, var_id), x, self.prog.locals[var_id].ty)
-        self.ex(body)
+        self.region(body)
         self.end_pass(id)
         self.op(s"llvm.store ${self.def(s"arith.addi $k, %one : i64")}, $counter : i64, !llvm.ptr")
         self.loop_close(l)

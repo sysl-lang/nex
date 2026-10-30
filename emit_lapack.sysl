@@ -1,0 +1,685 @@
+// Emission of the linear-algebra prelude through LAPACK (DESIGN §10.5).
+//
+// **A value form copies its inputs** into fresh dense column-major buffers, since LAPACK overwrites
+// them, calls the routine for the element type (`s`, `d`, `c`, `z`), and hands back buffers it
+// allocated as the results' tensors. LAPACK is Fortran: every argument is an address, so each
+// integer and character argument is a slot in the frame, and each `character` argument adds the
+// hidden length gfortran's convention passes after the others. A routine that wants a workspace is
+// asked for its size first (`lwork = -1`). Where `info` reports a failure the call **traps** with the
+// function's name and the cause, the index LAPACK gives written in (`nex_trap_info`); an `info` below
+// zero names an argument LAPACK refused, which no well-typed call makes.
+//
+// **An `inout` form works where its arrays lie**: it goes through a wrapper function, as an `extern`
+// call with `inout` windows does (`emit_extern.sysl`), and answers LAPACK's `info` without trapping.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// Fortran's `character` arguments, as their codes.
+private val CHAR_N = 78
+private val CHAR_V = 86
+private val CHAR_S = 83
+private val CHAR_L = 76
+private val CHAR_U = 85
+
+private tuple_elems(t: Ty) -> Buf[Ty] = t match
+    Tuple(ts) -> ts
+    _ -> buf()
+
+private real_part(t: Ty) -> Ty = Real(bits_of(base_of(t)))
+
+impl Emitter
+    // A call of the linear-algebra prelude, of type `t`.
+    lapack(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        if name.ends_with("_inplace") then return self.lapack_inout(span, name, args, t)
+
+        val et = elem_of(args[0].ty)
+        val p = blas_prefix(et)
+        val a = self.lp_copy(span, self.ex(args[0]), args[0].ty)
+
+        if name == "solve" then return self.lp_solve(span, p, et, a, self.ex(args[1]), args[1].ty, t)
+        if name == "lstsq" then return self.lp_lstsq(span, p, et, a, self.ex(args[1]), args[1].ty, t)
+        if name == "chol" then return self.lp_chol(span, p, et, a, self.ex(args[1]), t)
+        if name == "lu" then return self.lp_lu(span, p, et, a, t)
+        if name == "qr" then return self.lp_qr(span, p, et, a, t)
+        if name == "svd" || name == "svdvals" then return self.lp_svd(span, name, p, et, a, t)
+
+        self.lp_square(a, name)
+
+        if name == "inv" then return self.lp_inv(span, p, a, t)
+        if name == "det" then return self.lp_det(span, p, et, a)
+        if name == "eigh" then return self.lp_eigh(span, p, et, a, t)
+
+        self.lp_eig(span, name, p, et, a, t)
+
+    // `solve(A, b)`: `?gesv`.
+    private lp_solve(*self, span: Span, p: string, et: Ty, a: LBuf, bv: string, bt: Ty, t: Ty) -> string
+        self.lp_square(a, "solve")
+
+        val x = self.lp_copy(span, bv, bt)
+
+        self.trap_if(self.def(s"arith.cmpi ne, ${x.rows}, ${a.rows} : index"), "solve: the right-hand side has not the matrix's number of rows")
+
+        val ipiv = self.fresh_buffer(span, Int(32, true), a.rows, "")
+        val info = self.lp_info()
+
+        self.lp_call(s"${p}gesv", [self.lp_int(a.rows), self.lp_int(x.cols), a.ptr, self.lp_ld(a), ipiv.ptr, x.ptr, self.lp_ld(x), info], 0)
+        self.lp_check(info, "solve: matrix is singular (U[#,#] = 0)", s"${p}gesv", "solve")
+        self.buffer_tensor(span, x, t)
+
+    // `lstsq(A, b)`: `?gelsd`, the right-hand sides in a buffer of max(m, n) rows, the solution its
+    // first n.
+    private lp_lstsq(*self, span: Span, p: string, et: Ty, a: LBuf, bv: string, bt: Ty, t: Ty) -> string
+        val m = a.rows
+        val n = a.cols
+        val src = self.read_buffer(span, bv, bt)
+        val br = self.dim(span, bv, bt, 1)
+        val nrhs = if rank_of(bt) == 2 then self.dim(span, bv, bt, 2) else self.index_const(1)
+
+        self.trap_if(self.def(s"arith.cmpi ne, $br, $m : index"), "lstsq: the right-hand side has not the matrix's number of rows")
+
+        val mx = self.def(s"arith.maxsi ${self.def(s"arith.maxsi $m, $n : index")}, ${self.index_const(1)} : index")
+        val b = self.fresh_buffer(span, et, mx, if rank_of(bt) == 2 then nrhs else "")
+        val zero = self.one_or_zero(span, et, false)
+
+        // Every row zero, then b's rows copied over the first m.
+        val j0 = self.lp_loop(b.cols)
+        val i0 = self.lp_loop(b.rows)
+
+        self.lp_store(zero, b, i0, j0)
+        self.op("}")
+        self.op("}")
+
+        val j = self.lp_loop(nrhs)
+        val i = self.lp_loop(m)
+        val at = if rank_of(bt) == 2 then s"[$j, $i]" else s"[$i]"
+
+        self.lp_store(self.def(s"memref.load $src$at : ${self.boundary_ty(span, bt)}"), b, i, j)
+        self.op("}")
+        self.op("}")
+
+        val mn = self.def(s"arith.minsi $m, $n : index")
+        val rt = real_part(et)
+        val sv = self.fresh_buffer(span, rt, self.def(s"arith.maxsi $mn, ${self.index_const(1)} : index"), "")
+        val rcond = self.alloca(self.elem_ty(span, rt))
+
+        self.op(s"llvm.store ${self.real_const(-1.0, bits_of(rt))}, $rcond : ${self.elem_ty(span, rt)}, !llvm.ptr")
+
+        // gelsd's integer and real workspaces, by LAPACK's formulas with the tree's depth bounded by
+        // the bits of min(m, n): smlsiz is 25.
+        val nlvl = self.def(s"arith.index_cast ${self.def(s"arith.subi ${self.def("arith.constant 64 : i64")}, ${self.def(s"math.ctlz ${self.to_i64(mn)} : i64")} : i64")} : i64 to index")
+        val liwork = self.def(s"arith.addi ${self.lp_mul(mn, self.lp_mul(nlvl, self.index_const(3)))}, ${self.lp_mul(mn, self.index_const(11))} : index")
+        val iwork = self.fresh_buffer(span, Int(32, true), self.def(s"arith.maxsi $liwork, ${self.index_const(1)} : index"), "")
+        val rank = self.alloca("i32")
+        val info = self.lp_info()
+        var ptrs: Buf[string] = buf()
+
+        for q in [self.lp_int(m), self.lp_int(n), self.lp_int(nrhs), a.ptr, self.lp_ld(a), b.ptr, self.lp_int(mx), sv.ptr, rcond, rank]
+            ptrs.push(q)
+
+        var rwork = ""
+
+        if is_complex(base_of(et))
+            val small = self.index_const(25)
+            val sq = self.lp_mul(self.index_const(26), self.index_const(26))
+            val other = self.def(s"arith.addi ${self.lp_mul(n, self.def(s"arith.addi $nrhs, ${self.index_const(1)} : index"))}, ${self.lp_mul(nrhs, self.index_const(2))} : index")
+            var lr = self.lp_mul(mn, self.index_const(10))
+
+            for x in [self.lp_mul(self.lp_mul(mn, small), self.index_const(2)), self.lp_mul(self.lp_mul(mn, nlvl), self.index_const(8)), self.lp_mul(self.lp_mul(small, nrhs), self.index_const(3)), self.def(s"arith.maxsi $sq, $other : index")]
+                lr = self.def(s"arith.addi $lr, $x : index")
+
+            rwork = self.fresh_buffer(span, rt, lr, "").ptr
+
+        val work = self.lp_workspace(span, s"${p}gelsd", et, ptrs, rwork, iwork.ptr, info, 0)
+
+        self.lp_check(info, "lstsq: did not converge", s"${p}gelsd", "lstsq")
+
+        val bt_full = self.buffer_tensor(span, b, self.view_ty(t))
+        val vt = self.tensor_ty(span, self.view_ty(t))
+        val x = if rank_of(t) == 2 then self.def(s"tensor.extract_slice $bt_full[0, 0] [$nrhs, $n] [1, 1] : $vt to $vt") else self.def(s"tensor.extract_slice $bt_full[0] [$n] [1] : $vt to $vt")
+
+        self.cast(span, x, self.view_ty(t), t)
+
+    // `inv(A)`: `?getrf`, then `?getri`.
+    private lp_inv(*self, span: Span, p: string, a: LBuf, t: Ty) -> string
+        val ipiv = self.fresh_buffer(span, Int(32, true), a.rows, "")
+        val info = self.lp_info()
+        val n = self.lp_int(a.rows)
+
+        self.lp_call(s"${p}getrf", [n, n, a.ptr, self.lp_ld(a), ipiv.ptr, info], 0)
+        self.lp_check(info, "inv: matrix is singular (U[#,#] = 0)", s"${p}getrf", "inv")
+
+        var ptrs: Buf[string] = buf()
+
+        for q in [n, a.ptr, self.lp_ld(a), ipiv.ptr]
+            ptrs.push(q)
+
+        self.lp_workspace(span, s"${p}getri", elem_of(t), ptrs, "", "", info, 0)
+        self.lp_check(info, "inv: matrix is singular (U[#,#] = 0)", s"${p}getri", "inv")
+        self.buffer_tensor(span, a, t)
+
+    // `det(A)`: `?getrf`, the product of U's diagonal, negated for each row interchange; zero for a
+    // singular matrix.
+    private lp_det(*self, span: Span, p: string, et: Ty, a: LBuf) -> string
+        val ipiv = self.fresh_buffer(span, Int(32, true), a.rows, "")
+        val info = self.lp_info()
+        val n = self.lp_int(a.rows)
+
+        self.lp_call(s"${p}getrf", [n, n, a.ptr, self.lp_ld(a), ipiv.ptr, info], 0)
+        self.lp_check(info, "", s"${p}getrf", "det")
+
+        val ety = self.elem_ty(span, et)
+        val complex = is_complex(base_of(et))
+        val r = self.fresh()
+        val iv = self.fresh()
+        val acc = self.fresh()
+
+        self.op(s"$r = scf.for $iv = ${self.index_const(0)} to ${a.rows} step ${self.index_const(1)} iter_args($acc = ${self.one_or_zero(span, et, true)}) -> ($ety) {")
+
+        val d = self.lp_load(a, iv, iv)
+        val piv = self.def(s"memref.load ${ipiv.m}[$iv] : ${ipiv.mty}")
+        val row = self.i32_of(self.def(s"arith.addi $iv, ${self.index_const(1)} : index"))
+        val swapped = self.def(s"arith.cmpi ne, $piv, $row : i32")
+        val neg = self.def(if complex then s"complex.neg $d : $ety" else s"arith.negf $d : $ety")
+        val f = self.def(s"arith.select $swapped, $neg, $d : $ety")
+
+        self.op(s"scf.yield ${self.def(if complex then s"complex.mul $acc, $f : $ety" else s"arith.mulf $acc, $f : $ety")} : $ety")
+        self.op("}")
+
+        val singular = self.def(s"arith.cmpi sgt, ${self.def(s"llvm.load $info : !llvm.ptr -> i32")}, ${self.def("arith.constant 0 : i32")} : i32")
+
+        self.def(s"arith.select $singular, ${self.one_or_zero(span, et, false)}, $r : $ety")
+
+    // `lu(A)`: `?getrf`, then L (unit lower, m × k), U (upper, k × n) and the permutation p with
+    // `A[p[i], :] == (L @ U)[i, :]`, from the row interchanges in order.
+    private lp_lu(*self, span: Span, p: string, et: Ty, a: LBuf, t: Ty) -> string
+        val ts = tuple_elems(t)
+        val k = self.def(s"arith.minsi ${a.rows}, ${a.cols} : index")
+        val ipiv = self.fresh_buffer(span, Int(32, true), k, "")
+        val info = self.lp_info()
+
+        self.lp_call(s"${p}getrf", [self.lp_int(a.rows), self.lp_int(a.cols), a.ptr, self.lp_ld(a), ipiv.ptr, info], 0)
+        self.lp_check(info, "", s"${p}getrf", "lu")
+
+        val l = self.fresh_buffer(span, et, a.rows, k)
+        val u = self.fresh_buffer(span, et, k, a.cols)
+
+        self.lp_triangle(span, et, a, l, "ugt", true)
+        self.lp_triangle(span, et, a, u, "ule", false)
+
+        val perm = self.fresh_buffer(span, INTEGER, a.rows, "")
+        val i = self.lp_loop(a.rows)
+
+        self.op(s"memref.store ${self.to_i64(self.def(s"arith.addi $i, ${self.index_const(1)} : index"))}, ${perm.m}[$i] : ${perm.mty}")
+        self.op("}")
+
+        val step = self.lp_loop(k)
+        val piv = self.def(s"memref.load ${ipiv.m}[$step] : ${ipiv.mty}")
+        val other = self.def(s"arith.subi ${self.def(s"arith.index_cast ${self.def(s"arith.extsi $piv : i32 to i64")} : i64 to index")}, ${self.index_const(1)} : index")
+        val here = self.def(s"memref.load ${perm.m}[$step] : ${perm.mty}")
+        val there = self.def(s"memref.load ${perm.m}[$other] : ${perm.mty}")
+
+        self.op(s"memref.store $there, ${perm.m}[$step] : ${perm.mty}")
+        self.op(s"memref.store $here, ${perm.m}[$other] : ${perm.mty}")
+        self.op("}")
+
+        var vals: Buf[string] = buf()
+
+        vals.push(self.buffer_tensor(span, l, ts[0]))
+        vals.push(self.buffer_tensor(span, u, ts[1]))
+        vals.push(self.buffer_tensor(span, perm, ts[2]))
+        self.make(self.ty(span, t), vals, ts)
+
+    // `chol(A, upper)`: `?potrf` on the triangle `upper` names, the other one zeroed.
+    private lp_chol(*self, span: Span, p: string, et: Ty, a: LBuf, upper: string, t: Ty) -> string
+        self.lp_square(a, "chol")
+
+        val info = self.lp_info()
+
+        self.lp_call(s"${p}potrf", [self.lp_uplo(upper), self.lp_int(a.rows), a.ptr, self.lp_ld(a), info], 1)
+        self.lp_check(info, "chol: matrix is not positive definite (leading minor #)", s"${p}potrf", "chol")
+
+        val zero = self.one_or_zero(span, et, false)
+        val j = self.lp_loop(a.cols)
+        val i = self.lp_loop(a.rows)
+        val keep = self.def(s"arith.select $upper, ${self.def(s"arith.cmpi ule, $i, $j : index")}, ${self.def(s"arith.cmpi uge, $i, $j : index")} : i1")
+
+        self.lp_store(self.def(s"arith.select $keep, ${self.lp_load(a, i, j)}, $zero : ${self.elem_ty(span, et)}"), a, i, j)
+        self.op("}")
+        self.op("}")
+        self.buffer_tensor(span, a, t)
+
+    // `qr(A)`: `?geqrf`, R from its upper triangle (k × n), then `?orgqr` / `?ungqr` making Q of the
+    // reflectors, its first k columns.
+    private lp_qr(*self, span: Span, p: string, et: Ty, a: LBuf, t: Ty) -> string
+        val ts = tuple_elems(t)
+        val k = self.def(s"arith.minsi ${a.rows}, ${a.cols} : index")
+        val tau = self.fresh_buffer(span, et, self.def(s"arith.maxsi $k, ${self.index_const(1)} : index"), "")
+        val info = self.lp_info()
+        var ptrs: Buf[string] = buf()
+
+        for q in [self.lp_int(a.rows), self.lp_int(a.cols), a.ptr, self.lp_ld(a), tau.ptr]
+            ptrs.push(q)
+
+        self.lp_workspace(span, s"${p}geqrf", et, ptrs, "", "", info, 0)
+        self.lp_check(info, "", s"${p}geqrf", "qr")
+
+        val r = self.fresh_buffer(span, et, k, a.cols)
+
+        self.lp_triangle(span, et, a, r, "ule", false)
+
+        val gen = if is_complex(base_of(et)) then s"${p}ungqr" else s"${p}orgqr"
+        var qs: Buf[string] = buf()
+
+        for q in [self.lp_int(a.rows), self.lp_int(k), self.lp_int(k), a.ptr, self.lp_ld(a), tau.ptr]
+            qs.push(q)
+
+        self.lp_workspace(span, gen, et, qs, "", "", info, 0)
+        self.lp_check(info, "", gen, "qr")
+
+        val vt = self.view_ty(ts[0])
+        val tt = self.tensor_ty(span, vt)
+        val q = self.def(s"tensor.extract_slice ${self.buffer_tensor(span, a, vt)}[0, 0] [$k, ${a.rows}] [1, 1] : $tt to $tt")
+        var vals: Buf[string] = buf()
+
+        vals.push(self.cast(span, q, vt, ts[0]))
+        vals.push(self.buffer_tensor(span, r, ts[1]))
+        self.make(self.ty(span, t), vals, ts)
+
+    // `eigvals(A)` and `eig(A)`: `?geev`, the values complex; a real matrix's conjugate pairs of
+    // values and vectors made complex from the real and imaginary parts LAPACK gives.
+    private lp_eig(*self, span: Span, name: string, p: string, et: Ty, a: LBuf, t: Ty) -> string
+        val vectors = name == "eig"
+        val n = a.rows
+        val one = self.index_const(1)
+        val ct = Complex(bits_of(base_of(et)))
+        val rt = real_part(et)
+        val vr = if vectors then self.fresh_buffer(span, et, n, n) else self.fresh_buffer(span, et, one, one)
+        val vl = self.fresh_buffer(span, et, one, one)
+        val info = self.lp_info()
+        val complex = is_complex(base_of(et))
+        val w = self.fresh_buffer(span, if complex then ct else rt, n, "")
+        val wi = self.fresh_buffer(span, rt, n, "")
+        var ptrs: Buf[string] = buf()
+
+        for q in [self.lp_char(CHAR_N), self.lp_char(if vectors then CHAR_V else CHAR_N), self.lp_int(n), a.ptr, self.lp_ld(a), w.ptr]
+            ptrs.push(q)
+
+        if !complex then ptrs.push(wi.ptr)
+
+        for q in [vl.ptr, self.lp_int(one), vr.ptr, if vectors then self.lp_ld(vr) else self.lp_int(one)]
+            ptrs.push(q)
+
+        val rwork = if complex then self.fresh_buffer(span, rt, self.def(s"arith.maxsi ${self.lp_mul(n, self.index_const(2))}, $one : index"), "").ptr else ""
+
+        self.lp_workspace(span, s"${p}geev", et, ptrs, rwork, "", info, 2)
+        self.lp_check(info, s"$name: did not converge", s"${p}geev", name)
+
+        val vt = if vectors then tuple_elems(t)[0] else t
+        var values = w
+
+        if !complex
+            values = self.fresh_buffer(span, ct, n, "")
+
+            val i = self.lp_loop(n)
+
+            self.op(s"memref.store ${self.def(s"complex.create ${self.lp_load(w, i, "")}, ${self.lp_load(wi, i, "")} : complex<f${bits_of(rt)}>")}, ${values.m}[$i] : ${values.mty}")
+            self.op("}")
+
+        if !vectors then return self.buffer_tensor(span, values, vt)
+
+        var vecs = vr
+
+        if !complex
+            vecs = self.fresh_buffer(span, ct, n, n)
+
+            val ety = self.elem_ty(span, rt)
+            val j = self.lp_loop(n)
+            val i = self.lp_loop(n)
+            val im_j = self.lp_load(wi, j, "")
+            val last = self.def(s"arith.subi $n, $one : index")
+            val next = self.def(s"arith.minsi ${self.def(s"arith.addi $j, $one : index")}, $last : index")
+            val prev = self.def(s"arith.maxsi ${self.def(s"arith.subi $j, $one : index")}, ${self.index_const(0)} : index")
+            val zero = self.real_const(0.0, bits_of(rt))
+            val above = self.def(s"arith.cmpf ogt, $im_j, $zero : $ety")
+            val below = self.def(s"arith.cmpf olt, $im_j, $zero : $ety")
+            val x = self.lp_load(vr, i, j)
+            val re = self.def(s"arith.select $below, ${self.lp_load(vr, i, prev)}, $x : $ety")
+            val im = self.def(s"arith.select $above, ${self.lp_load(vr, i, next)}, ${self.def(s"arith.select $below, ${self.def(s"arith.negf $x : $ety")}, $zero : $ety")} : $ety")
+
+            self.lp_store(self.def(s"complex.create $re, $im : complex<f${bits_of(rt)}>"), vecs, i, j)
+            self.op("}")
+            self.op("}")
+
+        var vals: Buf[string] = buf()
+
+        vals.push(self.buffer_tensor(span, values, vt))
+        vals.push(self.buffer_tensor(span, vecs, tuple_elems(t)[1]))
+        self.make(self.ty(span, t), vals, tuple_elems(t))
+
+    // `eigh(A)`: `?syevd` / `?heevd` on the lower triangle; the values ascending, the vectors in A.
+    private lp_eigh(*self, span: Span, p: string, et: Ty, a: LBuf, t: Ty) -> string
+        val ts = tuple_elems(t)
+        val w = self.fresh_buffer(span, real_part(et), a.rows, "")
+        val info = self.lp_info()
+        val complex = is_complex(base_of(et))
+        var ptrs: Buf[string] = buf()
+
+        for q in [self.lp_char(CHAR_V), self.lp_char(CHAR_L), self.lp_int(a.rows), a.ptr, self.lp_ld(a), w.ptr]
+            ptrs.push(q)
+
+        self.lp_workspace_d(span, if complex then s"${p}heevd" else s"${p}syevd", et, ptrs, complex, info)
+        self.lp_check(info, "eigh: did not converge", if complex then s"${p}heevd" else s"${p}syevd", "eigh")
+
+        var vals: Buf[string] = buf()
+
+        vals.push(self.buffer_tensor(span, w, ts[0]))
+        vals.push(self.buffer_tensor(span, a, ts[1]))
+        self.make(self.ty(span, t), vals, ts)
+
+    // `svd(A)` and `svdvals(A)`: `?gesdd`, thin (`jobz = 'S'`) or values only; V is Vᴴ's conjugate
+    // transpose.
+    private lp_svd(*self, span: Span, name: string, p: string, et: Ty, a: LBuf, t: Ty) -> string
+        val vectors = name == "svd"
+        val m = a.rows
+        val n = a.cols
+        val one = self.index_const(1)
+        val k = self.def(s"arith.minsi $m, $n : index")
+        val rt = real_part(et)
+        val sv = self.fresh_buffer(span, rt, k, "")
+        val u = if vectors then self.fresh_buffer(span, et, m, k) else self.fresh_buffer(span, et, one, one)
+        val vh = if vectors then self.fresh_buffer(span, et, k, n) else self.fresh_buffer(span, et, one, one)
+        val iwork = self.fresh_buffer(span, Int(32, true), self.def(s"arith.maxsi ${self.lp_mul(k, self.index_const(8))}, $one : index"), "")
+        val info = self.lp_info()
+        var ptrs: Buf[string] = buf()
+
+        for q in [self.lp_char(if vectors then CHAR_S else CHAR_N), self.lp_int(m), self.lp_int(n), a.ptr, self.lp_ld(a), sv.ptr, u.ptr, self.lp_ld(u), vh.ptr, self.lp_ld(vh)]
+            ptrs.push(q)
+
+        var rwork = ""
+
+        if is_complex(base_of(et))
+            val mx = self.def(s"arith.maxsi $m, $n : index")
+            val wide = self.def(s"arith.addi ${self.lp_mul(self.def(s"arith.addi $mx, $k : index"), self.index_const(2))}, $one : index")
+            val tall = self.def(s"arith.addi ${self.lp_mul(k, self.index_const(5))}, ${self.index_const(7)} : index")
+
+            rwork = self.fresh_buffer(span, rt, self.def(s"arith.maxsi ${self.lp_mul(k, self.def(s"arith.maxsi $tall, $wide : index"))}, $one : index"), "").ptr
+
+        self.lp_workspace(span, s"${p}gesdd", et, ptrs, rwork, iwork.ptr, info, 1)
+        self.lp_check(info, s"$name: did not converge", s"${p}gesdd", name)
+
+        if !vectors then return self.buffer_tensor(span, sv, t)
+
+        val ts = tuple_elems(t)
+        val v = self.fresh_buffer(span, et, n, k)
+        val j = self.lp_loop(k)
+        val i = self.lp_loop(n)
+        val x = self.lp_load(vh, j, i)
+
+        self.lp_store(if is_complex(base_of(et)) then self.def(s"complex.conj $x : ${self.elem_ty(span, et)}") else x, v, i, j)
+        self.op("}")
+        self.op("}")
+
+        var vals: Buf[string] = buf()
+
+        vals.push(self.buffer_tensor(span, u, ts[0]))
+        vals.push(self.buffer_tensor(span, sv, ts[1]))
+        vals.push(self.buffer_tensor(span, v, ts[2]))
+        self.make(self.ty(span, t), vals, ts)
+
+    // -- the `inout` forms ------------------------------------------------------------------------
+
+    // `name(…)`, an `inout` form: its arrays opened as windows and handed to a wrapper, LAPACK's
+    // `info` answered as an `integer`.
+    private lapack_inout(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        var vals: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+        var roots: Buf[CRoot] = buf()
+        var windows: Buf[CWindow] = buf()
+
+        for a in args
+            *a.kind match
+                TBorrow(place) ->
+                    windows.push(self.open_window(place, false, &roots))
+                    vals.push("")
+                    tys.push("")
+                _ ->
+                    vals.push(self.ex(a))
+                    tys.push(self.ty(a.span, a.ty))
+
+        self.c_wrapped(span, self.c_wrapper(span, WrapJob.Lapack(name, elem_of(args[0].ty)), vals, tys, "i64", roots, windows), "i64", t, roots)
+
+    // Inside the wrapper of `name`, an `inout` form on elements of `et`: the windows' buffers `wms`
+    // of types `wts`, each where it lies or gathered (`copies`), and the scalar arguments `inner`
+    // (`""` at each array's place); LAPACK's `info` as an `i64`.
+    lapack_in_place(*self, span: Span, name: string, et: Ty, inner: Buf[string], wms: Buf[string], wts: Buf[Ty], copies: *Buf[CArray]) -> string
+        val p = blas_prefix(et)
+        var xs: Buf[BlasArg] = buf()
+
+        for k in 0..<wms.len()
+            val x = self.blas_arg(span, wms[k], wts[k], true)
+
+            xs.push(x)
+            copies.push(x.copy)
+
+        val a = xs[0]
+        val info = self.lp_info()
+        val k = self.def(s"arith.minsi ${a.rows}, ${a.cols} : index")
+        val lda = self.lp_i32(a.ld)
+
+        if name == "lu_inplace"
+            self.trap_if(self.def(s"arith.cmpi slt, ${xs[1].rows}, $k : index"), "lu_inplace: ipiv holds fewer than min(m, n) pivots")
+            self.lp_call(s"${p}getrf", [self.lp_int(a.rows), self.lp_int(a.cols), a.ptr, lda, xs[1].ptr, info], 0)
+        elif name == "chol_inplace"
+            self.trap_if(self.def(s"arith.cmpi ne, ${a.rows}, ${a.cols} : index"), "chol_inplace: the matrix is not square")
+            self.lp_call(s"${p}potrf", [self.lp_uplo(inner[1]), self.lp_int(a.rows), a.ptr, lda, info], 1)
+        elif name == "qr_inplace"
+            self.trap_if(self.def(s"arith.cmpi slt, ${xs[1].rows}, $k : index"), "qr_inplace: tau holds fewer than min(m, n) elements")
+
+            var ptrs: Buf[string] = buf()
+
+            for q in [self.lp_int(a.rows), self.lp_int(a.cols), a.ptr, lda, xs[1].ptr]
+                ptrs.push(q)
+
+            self.lp_workspace(span, s"${p}geqrf", et, ptrs, "", "", info, 0)
+        else
+            val b = xs[2]
+
+            self.trap_if(self.def(s"arith.cmpi ne, ${a.rows}, ${a.cols} : index"), "solve_inplace: the matrix is not square")
+            self.trap_if(self.def(s"arith.cmpi slt, ${xs[1].rows}, ${a.rows} : index"), "solve_inplace: ipiv holds fewer pivots than the matrix has rows")
+            self.trap_if(self.def(s"arith.cmpi ne, ${b.rows}, ${a.rows} : index"), "solve_inplace: the right-hand side has not the matrix's number of rows")
+            self.lp_call(s"${p}gesv", [self.lp_int(a.rows), self.lp_int(b.cols), a.ptr, lda, xs[1].ptr, b.ptr, self.lp_i32(b.ld), info], 0)
+
+        self.def(s"arith.extsi ${self.def(s"llvm.load $info : !llvm.ptr -> i32")} : i32 to i64")
+
+    // -- pieces -----------------------------------------------------------------------------------
+
+    // A dense copy of the array value `v` of type `t`, which LAPACK may overwrite.
+    private lp_copy(*self, span: Span, v: string, t: Ty) -> LBuf
+        val vt = self.view_ty(t)
+        val src = self.read_buffer(span, self.cast(span, v, t, vt), vt)
+        val b = self.fresh_buffer(span, elem_of(t), self.dim(span, v, t, 1), if rank_of(t) == 2 then self.dim(span, v, t, 2) else "")
+
+        self.op(s"memref.copy $src, ${b.m} : ${self.boundary_ty(span, vt)} to ${b.mty}")
+        b
+
+    // A trap unless the matrix `a` is square.
+    private lp_square(*self, a: LBuf, name: string)
+        self.trap_if(self.def(s"arith.cmpi ne, ${a.rows}, ${a.cols} : index"), s"$name: the matrix is not square")
+
+    // The address of a slot holding the `index` `i` as Fortran's `integer`.
+    private lp_int(*self, i: string) -> string = self.lp_i32(self.i32_of(i))
+
+    private lp_i32(*self, v: string) -> string
+        val slot = self.alloca("i32")
+
+        self.op(s"llvm.store $v, $slot : i32, !llvm.ptr")
+        slot
+
+    // The leading dimension of the dense buffer `b`.
+    private lp_ld(*self, b: LBuf) -> string = self.lp_int(self.def(s"arith.maxsi ${b.rows}, ${self.index_const(1)} : index"))
+
+    // The address of a slot holding the character `code`.
+    private lp_char(*self, code: int) -> string
+        val slot = self.alloca("i8")
+
+        self.op(s"llvm.store ${self.def(s"arith.constant $code : i8")}, $slot : i8, !llvm.ptr")
+        slot
+
+    // `'U'` where the `i1` `upper` holds, else `'L'`.
+    private lp_uplo(*self, upper: string) -> string
+        val slot = self.alloca("i8")
+        val c = self.def(s"arith.select $upper, ${self.def(s"arith.constant $CHAR_U : i8")}, ${self.def(s"arith.constant $CHAR_L : i8")} : i8")
+
+        self.op(s"llvm.store $c, $slot : i8, !llvm.ptr")
+        slot
+
+    // The slot of LAPACK's `info`, zero until a call sets it.
+    private lp_info(*self) -> string = self.lp_i32(self.def("arith.constant 0 : i32"))
+
+    private lp_mul(*self, a: string, b: string) -> string = self.def(s"arith.muli $a, $b : index")
+
+    // A call of the Fortran routine `routine` with the addresses `ptrs`, then the hidden lengths of
+    // its `chars` character arguments.
+    private lp_call(*self, routine: string, ptrs: []const string, chars: usize)
+        var args: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+
+        for q in ptrs
+            push_arg(&args, &tys, q, "!llvm.ptr")
+
+        if chars > 0
+            val one = self.def("arith.constant 1 : i64")
+
+            for _ in 0..<chars
+                push_arg(&args, &tys, one, "i64")
+
+        self.blas_call(s"${routine}_", args, tys, "")
+
+    // A call of `routine` whose arguments `ptrs` are followed by a workspace of `et` and its size,
+    // then, where given, a real workspace `rwork` and an integer one `iwork`, then `info`: asked for
+    // the workspace's size, then made with it.
+    private lp_workspace(*self, span: Span, routine: string, et: Ty, ptrs: Buf[string], rwork: string, iwork: string, info: string, chars: usize)
+        val st = self.mem_ty(span, base_of(et))
+        val slot = self.alloca(st)
+
+        self.op(s"llvm.store ${self.def(s"llvm.mlir.zero : $st")}, $slot : $st, !llvm.ptr")
+        self.lp_call(routine, self.lp_args(ptrs, slot, self.lp_i32(self.def("arith.constant -1 : i32")), rwork, iwork, info).view(), chars)
+
+        val work = self.fresh_buffer(span, et, self.lp_count(slot, et), "")
+
+        self.lp_call(routine, self.lp_args(ptrs, work.ptr, self.lp_int(work.rows), rwork, iwork, info).view(), chars)
+
+    private lp_args(*self, ptrs: Buf[string], work: string, lwork: string, rwork: string, iwork: string, info: string) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for q in ptrs
+            out.push(q)
+
+        out.push(work)
+        out.push(lwork)
+
+        if rwork != "" then out.push(rwork)
+        if iwork != "" then out.push(iwork)
+
+        out.push(info)
+        out
+
+    // `?syevd` / `?heevd`: a workspace of `et`, for `?heevd` a real one too, and an integer one, each
+    // with its size, every size asked for first.
+    private lp_workspace_d(*self, span: Span, routine: string, et: Ty, ptrs: Buf[string], complex: bool, info: string)
+        val st = self.mem_ty(span, base_of(et))
+        val rt = real_part(et)
+        val slot = self.alloca(st)
+        val rslot = self.alloca(self.elem_ty(span, rt))
+        val islot = self.alloca("i32")
+        val query = self.lp_i32(self.def("arith.constant -1 : i32"))
+
+        self.op(s"llvm.store ${self.def(s"llvm.mlir.zero : $st")}, $slot : $st, !llvm.ptr")
+        self.op(s"llvm.store ${self.real_const(0.0, bits_of(rt))}, $rslot : ${self.elem_ty(span, rt)}, !llvm.ptr")
+        self.op(s"llvm.store ${self.def("arith.constant 0 : i32")}, $islot : i32, !llvm.ptr")
+        self.lp_call(routine, self.lp_args_d(ptrs, slot, query, if complex then rslot else "", query, islot, query, info).view(), 2)
+
+        val work = self.fresh_buffer(span, et, self.lp_count(slot, et), "")
+        val rwork = if complex then self.fresh_buffer(span, rt, self.lp_count(rslot, rt), "") else work
+        val count = self.def(s"arith.maxsi ${self.def(s"arith.index_cast ${self.def(s"arith.extsi ${self.def(s"llvm.load $islot : !llvm.ptr -> i32")} : i32 to i64")} : i64 to index")}, ${self.index_const(1)} : index")
+        val iwork = self.fresh_buffer(span, Int(32, true), count, "")
+
+        self.lp_call(routine, self.lp_args_d(ptrs, work.ptr, self.lp_int(work.rows), if complex then rwork.ptr else "", self.lp_int(rwork.rows), iwork.ptr, self.lp_int(iwork.rows), info).view(), 2)
+
+    private lp_args_d(*self, ptrs: Buf[string], work: string, lwork: string, rwork: string, lrwork: string, iwork: string, liwork: string, info: string) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for q in ptrs
+            out.push(q)
+
+        out.push(work)
+        out.push(lwork)
+
+        if rwork != ""
+            out.push(rwork)
+            out.push(lrwork)
+
+        out.push(iwork)
+        out.push(liwork)
+        out.push(info)
+        out
+
+    // The workspace size a query left in `slot`, the first element of a buffer of `et`, as an
+    // `index` of at least 1.
+    private lp_count(*self, slot: string, et: Ty) -> string
+        val b = bits_of(base_of(et))
+        val x = self.def(s"arith.fptosi ${self.def(s"llvm.load $slot : !llvm.ptr -> f$b")} : f$b to i64")
+
+        self.def(s"arith.maxsi ${self.def(s"arith.index_cast $x : i64 to index")}, ${self.index_const(1)} : index")
+
+    // `info` checked after a call of `routine` made for `name`: above zero it traps with `message`
+    // where one is given, its `#` the index LAPACK names; below zero, with the argument LAPACK refused.
+    private lp_check(*self, info: string, message: string, routine: string, name: string)
+        val i = self.def(s"llvm.load $info : !llvm.ptr -> i32")
+        val zero = self.def("arith.constant 0 : i32")
+
+        if message != "" then self.trap_info(self.def(s"arith.cmpi sgt, $i, $zero : i32"), message, i)
+
+        self.trap_info(self.def(s"arith.cmpi slt, $i, $zero : i32"), s"$name: LAPACK's $routine refused its argument #", self.def(s"arith.subi $zero, $i : i32"))
+
+    // A trap where `cond` holds, its message `message` with each `#` the `i32` `n`.
+    private trap_info(*self, cond: string, message: string, n: string)
+        self.external("nex_trap_info", "!llvm.ptr, i64", "")
+
+        val m = self.string_ref(message)
+        val w = self.def(s"arith.extsi $n : i32 to i64")
+        val c = if self.dirty then self.def(s"arith.andi $cond, ${self.flowing()} : i1") else cond
+
+        self.op(s"scf.if $c {")
+        self.op(s"  func.call @nex_trap_info($m, $w) : (!llvm.ptr, i64) -> ()")
+        self.op("}")
+
+    // `scf.for` over 0 to `n`, opened: its induction variable. The caller closes it.
+    private lp_loop(*self, n: string) -> string
+        val iv = self.fresh()
+
+        self.op(s"scf.for $iv = ${self.index_const(0)} to $n step ${self.index_const(1)} {")
+        iv
+
+    // Element (i, j) of `b`, nex's indices from 0; `j` is `""` for a vector.
+    private lp_load(*self, b: LBuf, i: string, j: string) -> string =
+        self.def(s"memref.load ${b.m}${if j == "" then s"[$i]" else s"[$j, $i]"} : ${b.mty}")
+
+    private lp_store(*self, v: string, b: LBuf, i: string, j: string)
+        self.op(s"memref.store $v, ${b.m}${if b.mty.starts_with("memref<?x?x") then s"[$j, $i]" else s"[$i]"} : ${b.mty}")
+
+    // Every element of `dst` from `src` where `i pred j` holds (an `arith.cmpi` predicate), else one
+    // on the diagonal where `unit`, else zero.
+    private lp_triangle(*self, span: Span, et: Ty, src: LBuf, dst: LBuf, pred: string, unit: bool)
+        val ety = self.elem_ty(span, et)
+        val zero = self.one_or_zero(span, et, false)
+        val j = self.lp_loop(dst.cols)
+        val i = self.lp_loop(dst.rows)
+        val keep = self.def(s"arith.cmpi $pred, $i, $j : index")
+        val other = if unit then self.def(s"arith.select ${self.def(s"arith.cmpi eq, $i, $j : index")}, ${self.one_or_zero(span, et, true)}, $zero : $ety") else zero
+
+        self.lp_store(self.def(s"arith.select $keep, ${self.lp_load(src, i, j)}, $other : $ety"), dst, i, j)
+        self.op("}")
+        self.op("}")
+end Emitter

@@ -1,0 +1,92 @@
+// `@` through BLAS (DESIGN §10.4). Products past the threshold go to `gemm`, `gemv` and `dot`;
+// `transpose(X)` and `conj(transpose(X))` pass BLAS's `T` and `C` flags, so they dispatch at any size
+// with no transposed copy; a sub-block view crosses with its source's leading dimension, and a view
+// strided along its first axis or running backwards is copied first. Every element here is a small
+// multiple of 1/8, so every sum is exact and BLAS's order of additions cannot show: each product is
+// checked against the same product written as loops.
+
+def filled(m: integer, n: integer, s: real): [real; :, :] =
+  var a: [real; :, :] = zeros((m, n))
+  for j in 1..n
+    for i in 1..m
+      a[i, j] = s * ((3 * i + 5 * j) % 7) - 2.0
+  a
+
+def looped(a: [real; :, :], b: [real; :, :]): [real; :, :] =
+  var c: [real; :, :] = zeros((rows(a), cols(b)))
+  for j in 1..cols(b)
+    for k in 1..cols(a)
+      for i in 1..rows(a)
+        c[i, j] = c[i, j] + a[i, k] * b[k, j]
+  c
+
+def looped_v(a: [real; :, :], x: [real]): [real] =
+  var y: [real] = zeros(rows(a))
+  for k in 1..cols(a)
+    for i in 1..rows(a)
+      y[i] = y[i] + a[i, k] * x[k]
+  y
+
+def flipped(a: [real; :, :]): [real; :, :] =
+  var t: [real; :, :] = zeros((cols(a), rows(a)))
+  for j in 1..cols(a)
+    for i in 1..rows(a)
+      t[j, i] = a[i, j]
+  t
+
+def main() =
+  val a = filled(70, 60, 0.5)
+  val b = filled(60, 80, 0.25)
+
+  // Matrix by matrix: 70·60·80 is past 64³.
+  val c = a @ b
+  print(shape(c))
+  print(c[1, 1])
+  print(c[70, 80])
+  print(sum(c))
+  print(all(c == looped(a, b)))
+
+  // Sub-blocks where they lie, with their source's leading dimension; a strided and a reversed
+  // view, copied first.
+  print(all(a[2..69, 3..60] @ b[3..60, 2..79] == looped(a[2..69, 3..60], b[3..60, 2..79])))
+  print(all(a[1..70 by 2, :] @ b == looped(a[1..70 by 2, :], b)))
+  print(all(a[70..1 by -1, :] @ b == looped(a[70..1 by -1, :], b)))
+
+  // Transposed operands, by flag, at any size.
+  print(all(transpose(a) @ a == looped(flipped(a), a)))
+  print(all(b @ transpose(b) == looped(b, flipped(b))))
+  print(all(transpose(b[1..60, 1..70]) @ transpose(a) == looped(flipped(b[1..60, 1..70]), flipped(a))))
+  val small = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+  print(transpose(small) @ small)
+  print(transpose(small) @ [1.0, -1.0])
+  print([1.0, 0.5, -1.0] @ transpose(small))
+
+  // Matrix by vector and vector by matrix: 200·100 is past 128².
+  val m = filled(200, 100, 0.125)
+  val x = filled(100, 1, 0.5)[:, 1]
+  val y = m @ x
+  print(length(y))
+  print(sum(y))
+  print(all(y == looped_v(m, x)))
+  val w = filled(200, 1, 0.25)[:, 1]
+  print(all(w @ m == looped_v(flipped(m), w)))
+  print(all(transpose(m) @ w == looped_v(flipped(m), w)))
+
+  // Vector by vector: 5000 elements.
+  val u = filled(5000, 1, 0.5)[:, 1]
+  print(u @ u)
+  print(u @ u == sum(u * u))
+
+  // Complex, through `zgemm` with the `C` flag and `zgemv`: `@` does not conjugate.
+  val z = [[1 + 1i, 2 + 0i], [0 + 1i, 3 - 1i]]
+  print(conj(transpose(z)) @ z)
+  print(transpose(z) @ z)
+  print([1 + 0i, 0 + 1i] @ conj(transpose(z)))
+  print(transpose(z) @ [1 + 0i, 0 + 1i])
+
+  // real32, through `sgemm`.
+  val a32 = real32(filled(70, 60, 0.5))
+  val b32 = real32(filled(60, 80, 0.25))
+  val c32 = a32 @ b32
+  print(c32[70, 80])
+  print(sum(c32))

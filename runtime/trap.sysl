@@ -70,6 +70,23 @@ trap_owned(message: *u8) -> never
     release(message)
     raise_trap()
 
+// The same for a message the compiler wrote with a number to come: each `#` in `message` is `n`,
+// as LAPACK's `info` names the pivot or minor that failed.
+@export("nex_trap_info")
+trap_info(message: *u8, n: long) -> never
+    note_trap(with_number(c_text(message), n))
+    raise_trap()
+
+private with_number(text: string, n: long) -> string
+    var out = ""
+
+    for k in 0..<text.len
+        val c = text[k..<k + 1]
+
+        out += if c == "#" then s"$n" else c
+
+    out
+
 @export("nex_trap_complex_div_zero")
 trap_complex_div_zero() -> never
     trap_with("complex division by zero")

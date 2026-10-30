@@ -1,0 +1,104 @@
+// The LAPACK prelude (DESIGN §10.5). The value forms copy their inputs and answer values: `solve`
+// for one right-hand side and several, `lstsq`, `inv`, `det` (zero for a singular matrix, no trap),
+// `lu` with its permutation, `chol` lower and upper, `qr`, `eigvals` and `eig` — complex, as a
+// rotation's are — `eigh` ascending, `svd` and `svdvals` descending, in real32, real64 and complex.
+// A singular `solve` and an indefinite `chol` trap with the routine's cause, and the `inout` forms
+// return the same `info` LAPACK gave, working where the arrays lie, a window of a larger matrix with
+// its leading dimension included. A factor's sign is LAPACK's choice, so products of factors are
+// printed, each element rounded to eight places.
+
+def r8(x: real): real = round(x * 1.0e8) / 1.0e8 + 0.0
+def c8(z: complex): complex = r8(z.re) + r8(z.im) * 1i
+
+def main() =
+  val a = [[4.0, 1.0, 2.0], [1.0, 5.0, 3.0], [2.0, 3.0, 6.0]]
+  print(map(solve(a, [7.0, 9.0, 11.0]), r8))
+  print(map(solve(a, [[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]), r8))
+  print(map(inv(a), r8))
+  print(map(inv(a) @ a, r8))
+  print(r8(det(a)))
+  print(det([[1.0, 2.0], [2.0, 4.0]]))
+  print(det([[0.0, 1.0], [1.0, 0.0]]))
+
+  // lu: L @ U is A with its rows taken in the order p gives.
+  val g = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0]]
+  val (l, u, p) = lu(g)
+  print(p)
+  print(map(l, r8))
+  print(map(u, r8))
+  val (lw, uw, pw) = lu([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+  print(shape(lw))
+  print(shape(uw))
+  print(pw)
+
+  print(map(chol(a), r8))
+  print(map(transpose(chol(a, upper = true)) @ chol(a, upper = true), r8))
+
+  val (q, r) = qr(g)
+  print(map(q @ r, r8))
+  print(map(transpose(q) @ q, r8))
+  print(map(r, x -> r8(abs(x))))
+
+  // A rotation's eigenvalues are complex; a symmetric matrix's are real and ascending.
+  print(eigvals([[0.0, -1.0], [1.0, 0.0]]))
+  val (rw, rv) = eig([[0.0, -1.0], [1.0, 0.0]])
+  print(rw)
+  print(map([[0.0, -1.0], [1.0, 0.0]] @ rv - rv * [rw, rw], c8))
+  val (ew, ev) = eigh([[2.0, 1.0], [1.0, 2.0]])
+  print(map(ew, r8))
+  print(map(transpose(ev) @ [[2.0, 1.0], [1.0, 2.0]] @ ev, r8))
+
+  val t = [[3.0, 0.0], [4.0, 5.0]]
+  print(map(svdvals(t), r8))
+  val (su, s, sv) = svd([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+  print(shape(su))
+  print(map(s, r8))
+  print(map(su @ diag(s) @ transpose(sv), r8))
+  print(map(lstsq([[1.0, 1.0], [1.0, 2.0], [1.0, 3.0]], [1.0, 2.0, 2.0]), r8))
+  print(map(lstsq([[1.0, 1.0], [1.0, 2.0], [1.0, 3.0]], [[1.0, 0.0], [2.0, 1.0], [2.0, 2.0]]), r8))
+
+  // real32 and complex.
+  val f = real32([[4.0, 1.0], [1.0, 3.0]])
+  print(solve(f, real32([5.0, 4.0])))
+  val z = [[2 + 0i, 0 + 1i], [0 - 1i, 3 + 0i]]
+  print(map(solve(z, [2 + 1i, -1 + 3i]), c8))
+  print(c8(det(z)))
+  val (zw, zv) = eigh(z)
+  print(map(zw, r8))
+  print(map(conj(transpose(zv)) @ zv, c8))
+  print(map(chol(z), c8))
+
+  // Failures: the value forms trap, the inout forms answer the same info.
+  val singular = [[1.0, 2.0], [2.0, 4.0]]
+  assert_traps(() -> print(solve(singular, [1.0, 1.0])), "solve: matrix is singular (U[2,2] = 0)")
+  assert_traps(() -> print(inv(singular)), "inv: matrix is singular (U[2,2] = 0)")
+  val indefinite = [[1.0, 2.0], [2.0, 1.0]]
+  assert_traps(() -> print(chol(indefinite)), "chol: matrix is not positive definite (leading minor 2)")
+  var s1 = singular
+  var piv: [int32] = [0, 0]
+  var rhs = [1.0, 1.0]
+  print(solve_inplace(s1, piv, rhs))
+  var s2 = indefinite
+  print(chol_inplace(s2))
+  var s3 = singular
+  print(lu_inplace(s3, piv))
+  print(s3)
+
+  // The inout forms where the arrays lie: a 2 × 2 window of a 4 × 4 matrix.
+  var big: [real; :, :] = zeros((4, 4))
+  big[2, 2] = 4.0
+  big[2, 3] = 2.0
+  big[3, 2] = 2.0
+  big[3, 3] = 5.0
+  val before = big
+  print(chol_inplace(big[2..3, 2..3]))
+  print(big)
+  print(before[2, 2])
+  var m = [[4.0, 1.0], [1.0, 3.0]]
+  var b = [[5.0, 1.0], [4.0, 0.0]]
+  print(solve_inplace(m, piv, b))
+  print(map(b, r8))
+  var h = [[3.0, 1.0], [4.0, 2.0]]
+  var tau = [0.0, 0.0]
+  print(qr_inplace(h, tau))
+  print(map(h, x -> r8(abs(x))))

@@ -54,6 +54,8 @@ private fn_ret(t: Ty) -> Ty = t match
 
 impl Elab
     array_builtin(*self, span: Span, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        if is_lapack(name) then return self.lapack(span, name, args)
+
         var pos: Buf[Expr] = buf()
         var dim: Option[Expr] = None
 

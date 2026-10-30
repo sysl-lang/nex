@@ -1,5 +1,5 @@
 // Emission of the array prelude: the constructors and shape functions of DESIGN §4.2–§4.3, the
-// higher-order functions, the reductions of §7.4 and `@` (§7.2).
+// higher-order functions, the reductions of §7.4 and `@` (§7.2) below BLAS's threshold.
 //
 // **A reduction is reproducible** (DESIGN §9.2.1): `sum`, `product`, `dot` and `norm2` cut the
 // elements, in storage order, into blocks of 4096, reduce each block sequentially from the
@@ -839,19 +839,19 @@ impl Emitter
 
     // -- `@` --------------------------------------------------------------------------------------
 
-    // `a @ b`. With the axes reversed, nex's `A @ B` is storage's `Bᵀ Aᵀ`, so the operands swap.
-    matmul(*self, e: TExpr, l: TExpr, r: TExpr) -> string
-        val a = self.ex(l)
-        val b = self.ex(r)
-        val ra = rank_of(l.ty)
-        val rb = rank_of(r.ty)
-        val inner_a = self.dim(e.span, a, l.ty, ra)
-        val inner_b = self.dim(e.span, b, r.ty, 1)
+    // `a @ b` of the operand types `lt` and `rt` as a `linalg` operation, below BLAS's threshold
+    // (`emit_blas.sysl`). With the axes reversed, nex's `A @ B` is storage's `Bᵀ Aᵀ`, so the operands
+    // swap.
+    linalg_matmul(*self, e: TExpr, lt: Ty, rt: Ty, a: string, b: string) -> string
+        val ra = rank_of(lt)
+        val rb = rank_of(rt)
+        val inner_a = self.dim(e.span, a, lt, ra)
+        val inner_b = self.dim(e.span, b, rt, 1)
 
         self.trap_if(self.def(s"arith.cmpi ne, $inner_a, $inner_b : index"), "shape mismatch")
 
-        val at = self.tensor_ty(e.span, l.ty)
-        val bt = self.tensor_ty(e.span, r.ty)
+        val at = self.tensor_ty(e.span, lt)
+        val bt = self.tensor_ty(e.span, rt)
         val et = elem_of(e.ty)
         val zero = self.one_or_zero(e.span, et, false)
         val ez = self.elem_ty(e.span, et)
@@ -864,8 +864,8 @@ impl Emitter
 
         var dims: Buf[string] = buf()
 
-        if ra == 2 then dims.push(self.dim(e.span, a, l.ty, 1))
-        if rb == 2 then dims.push(self.dim(e.span, b, r.ty, 2))
+        if ra == 2 then dims.push(self.dim(e.span, a, lt, 1))
+        if rb == 2 then dims.push(self.dim(e.span, b, rt, 2))
 
         val c = self.filled(e.span, e.ty, dims, zero)
         val ct = self.tensor_ty(e.span, e.ty)

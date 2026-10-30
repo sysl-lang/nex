@@ -88,7 +88,7 @@ private has_elemental(attrs: Buf[Attribute]) -> bool
     false
 
 // Whether two axes are both static and differ: a mismatch known at compile time.
-private clash(a: Extent, b: Extent) -> bool = a match
+clash(a: Extent, b: Extent) -> bool = a match
     Fixed(n) -> b match
         Fixed(m) -> n != m
         _ -> false
@@ -104,14 +104,14 @@ private same_extent(a: Extent, b: Extent) -> bool = a match
         _ -> false
 
 // The axis two operands of one shape share: static where either one is.
-private meet(a: Extent, b: Extent) -> Extent = a match
+meet(a: Extent, b: Extent) -> Extent = a match
     Dynamic -> b
     Fixed(_) -> a
     Extent.Named(_) -> b match
         Fixed(_) -> b
         _ -> a
 
-private extent_text(x: Extent) -> string = x match
+extent_text(x: Extent) -> string = x match
     Dynamic -> ":"
     Fixed(n) -> s"${n}"
     Extent.Named(n) -> n

@@ -37,7 +37,7 @@ private among(name: string, set: []const string) -> bool
 // Whether `name` is a prelude function.
 is_builtin(name: string) -> bool = among(name, REAL_FUNCTIONS) || among(name, OTHER_BUILTINS)
 
-is_array_builtin(name: string) -> bool = among(name, ARRAY_BUILTINS)
+is_array_builtin(name: string) -> bool = among(name, ARRAY_BUILTINS) || is_lapack(name)
 
 impl Elab
     call(*self, span: Span, callee: Expr, args: Buf[Expr], want: Option[Ty]) -> TExpr

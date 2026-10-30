@@ -1,0 +1,36 @@
+// `@` through BLAS and the LAPACK prelude give back every buffer they make: the copies of their
+// inputs, the workspaces, the results, the gathered copies of strided operands, the factors of a
+// tuple taken apart, and what a trapping call had made when it trapped.
+
+def grid(m: integer, n: integer): [real; :, :] =
+  var a: [real; :, :] = zeros((m, n))
+  for j in 1..n
+    for i in 1..m
+      a[i, j] = 1.0 * ((i + 2 * j) % 5) + (if i == j then 10.0 else 0.0)
+  a
+
+def main() =
+  var total = 0.0
+  for n in [3, 70]
+    val a = grid(n, n)
+    val c = a @ a
+    val s = transpose(a[1..n by 2, :]) @ a[1..n by 2, :]
+    total = total + c[1, 1] + s[n, n] + (a @ a[:, 1])[1] + a[:, 1] @ a[:, 2]
+    val (l, u, p) = lu(a)
+    val (q, r) = qr(a)
+    val (w, v) = eigh(transpose(a) @ a)
+    val (su, sv, vv) = svd(a)
+    val (ew, ev) = eig(a)
+    total = total + l[n, 1] + u[1, 1] + p[1] + r[1, 1] * 0.0 + w[n] * 0.0 + sv[1] * 0.0 + ev[1, 1].re * 0.0
+    total = total + solve(a, a[:, 1])[1] + det(a) * 0.0 + inv(a)[1, 1] * 0.0 + lstsq(a, a[:, 2])[2]
+    total = total + chol(transpose(a) @ a)[1, 1] * 0.0 + svdvals(a)[1] * 0.0 + eigvals(a)[1].re * 0.0
+    var b: [real; :, :] = zeros((n + 2, n + 2))
+    b[2..n + 1, 2..n + 1] = a
+    var piv: [int32] = zeros(n)
+    print(lu_inplace(b[2..n + 1, 2..n + 1], piv))
+    var t: [real] = zeros(n)
+    print(qr_inplace(b[2..n + 1, 2..n + 1], t))
+    assert_traps(() -> print(solve(zeros((n, n)) * 1.0, a[:, 1])), "solve: matrix is singular (U[1,1] = 0)")
+    assert_traps(() -> print(chol(-1.0 * a)), "chol: matrix is not positive definite (leading minor 1)")
+    assert_traps(() -> print(a @ a[1..2, :]), "shape mismatch")
+  print(round(total * 1000.0) / 1000.0)

@@ -34,6 +34,9 @@ import sysl.buf.{Buf, buf}
 import sysl.text.str_builder
 import sh.sysl.parsing.Span
 
+// What `declared` holds where the module calls BLAS or LAPACK.
+private val BLAS_MARK = "nex.blas"
+
 // An array argument as C receives it: its buffer `m` (array type `t`), the address C gets, and where
 // it may have been copied, the condition that it was not (`""` where it never is) and the slot
 // holding its descriptor.
@@ -51,6 +54,12 @@ struct CRoot
     place: TExpr
     value: string
     t: Ty
+
+// What a wrapper does with its C arguments and its windows' buffers: calls the C function `symbol`,
+// or runs `name`, an `inout` form of the LAPACK prelude on elements of `et` (`emit_lapack.sysl`).
+enum WrapJob
+    CallC(symbol: string)
+    Lapack(name: string, et: Ty)
 
 // An `inout` array argument: its root, by number, each slice opened from the root to the window, and
 // whether its parameter is `@strided`.
@@ -87,7 +96,13 @@ impl Emitter
         for s in seen
             out += s"// nex.link $s\n"
 
+        if contains_text(self.declared, BLAS_MARK) then out += "// nex.blas\n"
+
         out
+
+    // The module calls BLAS or LAPACK, which the driver links (`driver.sysl`).
+    use_blas(*self)
+        if !contains_text(self.declared, BLAS_MARK) then self.declared.push(BLAS_MARK)
 
     // The call of the extern `x` with `args`, its value of type `ret` answered.
     extern_call(*self, span: Span, x: TExtern, args: Buf[TExpr], ret: Ty) -> string
@@ -141,7 +156,7 @@ impl Emitter
         val value = if windows.len() == 0
             self.c_value(self.effect(s"func.call @\"${x.symbol}\"(${joined(vals)}) : (${joined(tys)}) -> ${result_text(rt)}", rt), rt, ret)
         else
-            self.c_wrapped(span, self.c_wrapper(span, x, vals, tys, rt, roots, windows), rt, ret, roots)
+            self.c_wrapped(span, self.c_wrapper(span, WrapJob.CallC(x.symbol), vals, tys, rt, roots, windows), rt, ret, roots)
 
         self.give_back(arrays)
         value
@@ -149,7 +164,7 @@ impl Emitter
 
     // The `inout` array place `place` opened: its root, numbered in `roots`, which gains it unless an
     // earlier argument of the call holds the same one, and the slices opened from it to the window.
-    private open_window(*self, place: TExpr, strided: bool, roots: *Buf[CRoot]) -> CWindow
+    open_window(*self, place: TExpr, strided: bool, roots: *Buf[CRoot]) -> CWindow
         var frames: Buf[Opened] = buf()
         val v = self.open_place(place, &frames)
         val root = if frames.len() > 0 then frames[0].src else place
@@ -160,10 +175,11 @@ impl Emitter
         roots.push(CRoot(root, if frames.len() > 0 then frames[0].cur else v, root.ty))
         CWindow(roots.len() - 1, frames, strided)
 
-    // The function through which a call of `x` writes its `inout` arrays, and the operands and their
-    // types of a call of it: the C arguments `vals` of types `tys` made by the caller (`""` for each
-    // `inout` array), each root of `roots` as a tensor, and every operand of the windows' slices.
-    private c_wrapper(*self, span: Span, x: TExtern, vals: Buf[string], tys: Buf[string], rt: string, roots: Buf[CRoot], windows: Buf[CWindow]) -> string
+    // The function through which `job` writes its `inout` arrays, and the operands and their types of
+    // a call of it: the C arguments `vals` of types `tys` made by the caller (`""` for each `inout`
+    // array), each root of `roots` as a tensor, and every operand of the windows' slices. Its value
+    // is of C type `rt`.
+    c_wrapper(*self, span: Span, job: WrapJob, vals: Buf[string], tys: Buf[string], rt: string, roots: Buf[CRoot], windows: Buf[CWindow]) -> string
         var head: Buf[string] = buf()
         var ops: Buf[string] = buf()
         var optys: Buf[string] = buf()
@@ -214,12 +230,11 @@ impl Emitter
         for k in 0..<roots.len()
             ms.push(self.def(s"bufferization.to_buffer ${params[k]} : ${self.tensor_ty(span, roots[k].t)} to ${self.boundary_ty(span, roots[k].t)}"))
 
-        var copies: Buf[CArray] = buf()
-        var next = 0
+        // Each window's buffer, a subview of its root's.
+        var wms: Buf[string] = buf()
+        var wts: Buf[Ty] = buf()
 
-        for j in 0..<inner.len()
-            if inner[j] != "" then continue
-
+        for next in 0..<windows.len()
             val w = windows[next]
             var m = ms[w.root]
             var mt = roots[w.root].t
@@ -230,19 +245,37 @@ impl Emitter
                 m = self.def(s"memref.subview $m${self.slice_text(w.frames[i].subs, offs[next][i], sizes[next][i], strides[next][i])} : ${self.boundary_ty(span, mt)} to ${self.boundary_ty(span, nt)}")
                 mt = nt
 
-            val c = self.c_pointer(span, m, mt, w.strided, true)
+            wms.push(m)
+            wts.push(mt)
 
-            copies.push(c)
-            inner.set(j, c.ptr)
-            next += 1
+        var copies: Buf[CArray] = buf()
 
-        val call = s"func.call @\"${x.symbol}\"(${joined(inner)}) : (${joined(tys)}) -> ${result_text(rt)}"
+        val result = job match
+            CallC(symbol) ->
+                var next = 0
+
+                for j in 0..<inner.len()
+                    if inner[j] != "" then continue
+
+                    val c = self.c_pointer(span, wms[next], wts[next], windows[next].strided, true)
+
+                    copies.push(c)
+                    inner.set(j, c.ptr)
+                    next += 1
+
+                val call = s"func.call @\"$symbol\"(${joined(inner)}) : (${joined(tys)}) -> ${result_text(rt)}"
+
+                if rt == "" then
+                    self.op(call)
+                    ""
+                else self.def(call)
+            Lapack(name, et) -> self.lapack_in_place(span, name, et, inner, wms, wts, &copies)
+
         var outs: Buf[string] = buf()
         var out_tys: Buf[string] = buf()
 
-        if rt == "" then self.op(call)
-        else
-            outs.push(self.def(call))
+        if rt != ""
+            outs.push(result)
             out_tys.push(rt)
 
         self.give_back(copies)
@@ -270,7 +303,7 @@ impl Emitter
     // The wrapper call `call` made, each root of `roots` rebound to what it hands back, and its value
     // of C type `rt` read as a value of `ret`. Where an `exit`, `cycle` or `return` may already have
     // run in the statement, it runs only where none did.
-    private c_wrapped(*self, span: Span, call: string, rt: string, ret: Ty, roots: Buf[CRoot]) -> string
+    c_wrapped(*self, span: Span, call: string, rt: string, ret: Ty, roots: Buf[CRoot]) -> string
         if self.dirty
             val ok = self.flowing()
 
@@ -302,7 +335,7 @@ impl Emitter
 
     // Each copy of `copies` scattered back over its window or freed, whether or not the call ran: the
     // window holds what it did.
-    private give_back(*self, copies: Buf[CArray])
+    give_back(*self, copies: Buf[CArray])
         for c in copies
             if c.ok == "" then continue
 
@@ -347,7 +380,7 @@ impl Emitter
 
     // A call of the runtime's `name` that runs whether or not an `exit`, `cycle` or `return` has run
     // in the statement: a copy is made and given back either way.
-    private always(*self, name: string, args: string, params: string, result: string) -> string
+    always(*self, name: string, args: string, params: string, result: string) -> string
         self.external(name, params, result)
 
         val text = s"func.call @$name($args) : ($params) -> ${result_text(result)}"
@@ -359,10 +392,10 @@ impl Emitter
         self.def(text)
 
     // The bytes of an element of the array type `t`, as an `i64` constant.
-    private elem_const(*self, t: Ty) -> string = self.def(s"arith.constant ${self.elem_bytes(elem_of(t))} : i64")
+    elem_const(*self, t: Ty) -> string = self.def(s"arith.constant ${self.elem_bytes(elem_of(t))} : i64")
 
     // The address of the first element of the buffer `m` of the array type `t`.
-    private first_element(*self, span: Span, m: string, t: Ty) -> string
+    first_element(*self, span: Span, m: string, t: Ty) -> string
         val b = self.boundary_ty(span, t)
         val md = self.metadata(m, t)
         val base = self.def(s"arith.index_cast ${self.def(s"memref.extract_aligned_pointer_as_index $m : $b -> index")} : index to i64")
@@ -373,7 +406,7 @@ impl Emitter
 
     // `memref.extract_strided_metadata` of the buffer `m` of an array of type `t`: `#1` is the
     // offset, then the sizes and the strides, buffer order (nex's last axis first).
-    private metadata(*self, m: string, t: Ty) -> string
+    metadata(*self, m: string, t: Ty) -> string
         val r = rank_of(t)
         val v = self.fresh()
         var tys = s"memref<${self.elem_ty(Span(0, 0), elem_of(t))}>, index"

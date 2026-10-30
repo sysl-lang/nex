@@ -37,8 +37,9 @@ private runtime_archive(work: string) -> string
     tool(compiler(), ["build-c", "runtime", "-o", archive])
     archive
 
-// Lower one proof to a native program in `work`, linked against the runtime alone, and answer its path.
-private lower(bin: string, work: string, proof: string) -> string
+// Lower one proof to a native program in `work`, linked against the runtime and `links`, and answer
+// its path.
+private lower(bin: string, work: string, proof: string, links: []const string = []) -> string
     val pipeline = read_text("experiments/mlir/pipeline.txt").unwrap().trim()
     val lowered = s"$work/$proof.llvm.mlir"
 
@@ -47,8 +48,15 @@ private lower(bin: string, work: string, proof: string) -> string
     // `mlir-translate` reads the lowered module on its stdin and writes LLVM IR to its stdout.
     write_text(s"$work/$proof.ll", tool(s"$bin/mlir-translate", ["--mlir-to-llvmir"],
                                         stdin = Stdio.FromPath(lowered))).unwrap()
-    tool(s"$bin/clang", ["-Wno-override-module", "-O2", s"$work/$proof.ll", runtime_archive(work),
-                         "-lm", "-o", s"$work/$proof"])
+    var args: Buf[string] = buf()
+
+    for a in ["-Wno-override-module", "-O2", s"$work/$proof.ll", runtime_archive(work), "-lm", "-o", s"$work/$proof"]
+        args.push(a)
+
+    for a in links
+        args.push(a)
+
+    tool(s"$bin/clang", args.view())
     s"$work/$proof"
 
 private check_proof(proof: string, oracle: string)
@@ -86,6 +94,32 @@ proof_negative_stride()
 @test("a read window and a disjoint inout window of one array passed to one call give the right values")
 proof_disjoint_read_inout()
     check_proof("disjoint-read-inout", "experiments/mlir/disjoint-read-inout.out")
+
+@test("a nex matrix and a view of one reach cblas_dgemm where they lie and agree with linalg.matmul; skipped without a BLAS")
+proof_blas()
+    val bin = llvm_bin()
+    val work = make_temp_dir("nex-toolchain").unwrap()
+    val links = blas_links()
+
+    // A BLAS is there when a C program calling one links.
+    write_text(s"$work/probe.c", "void cblas_dscal(int, double, double *, int);\nint main(void) { double x = 1.0; cblas_dscal(1, 2.0, &x, 1); return x != 2.0; }\n").unwrap()
+
+    var args: Buf[string] = buf()
+
+    for a in [s"$work/probe.c", "-o", s"$work/probe"]
+        args.push(a)
+
+    for a in links
+        args.push(a)
+
+    if !capture(s"$bin/clang", args.view(), stderr = true).unwrap().status.ok()
+        remove_dir_all(work).unwrap()
+        skip(s"no BLAS links with ${links.len()} options from NEX_BLAS or the platform")
+
+    val got = tool(lower(bin, work, "blas", links.view()), [])
+
+    remove_dir_all(work).unwrap()
+    assert_eq(got, read_text("experiments/mlir/blas.out").unwrap())
 
 @test("a trap inside MLIR-generated frames is caught and resumed by the runtime, and aborts uncaught")
 proof_trap_catch()

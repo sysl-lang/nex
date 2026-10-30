@@ -1,0 +1,261 @@
+// The prelude's linear algebra (DESIGN §10.5), typed: the value forms `solve`, `lstsq`, `inv`, `det`,
+// `lu`, `chol`, `qr`, `eigvals`, `eig`, `eigh`, `svd` and `svdvals`, and the `inout` forms
+// `solve_inplace`, `lu_inplace`, `chol_inplace` and `qr_inplace`.
+//
+// **A value form works in the four number types LAPACK has**: `real32`, `real64`, `complex[real32]`
+// and `complex[real64]`; an integer matrix is taken as `real64`, and `solve` and `lstsq` meet their
+// two operands in one type as `@` does. A matrix argument has rank 2; where both its extents are
+// static and must agree (a square matrix, a right-hand side with the matrix's rows), a mismatch is a
+// compile error, and otherwise the call checks at run time. Static extents carry into the results.
+//
+// **Units follow DESIGN §13.6**: `solve` and `lstsq` divide the right-hand side's unit by the
+// matrix's, `inv` takes its reciprocal, `det` its power of the order (which must then be static),
+// `chol` its square root, and the values of `eigvals`, `eig`, `eigh` and `svdvals`, the `U` of `lu`,
+// the `R` of `qr` and the `s` of `svd` keep it, while the other factors are dimensionless.
+//
+// **An `inout` form takes its arrays as they are** — borrowed, so of one of the four types exactly,
+// and without a unit, which factoring in place would leave meaning nothing — and answers LAPACK's
+// `info` as an `integer`.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+private val LAPACK = ["solve", "lstsq", "inv", "det", "lu", "chol", "qr", "eigvals", "eig", "eigh", "svd", "svdvals", "solve_inplace", "lu_inplace", "chol_inplace", "qr_inplace"]
+
+// The functions that need a square matrix.
+private val SQUARE = ["solve", "inv", "det", "chol", "eigvals", "eig", "eigh", "solve_inplace", "chol_inplace"]
+
+private among_names(name: string, names: []const string) -> bool
+    for n in names
+        if n == name then return true
+
+    false
+
+// Whether `name` is one of the prelude's linear-algebra functions.
+is_lapack(name: string) -> bool = among_names(name, LAPACK)
+
+// Whether `t` is a number type LAPACK computes in.
+private lapack_number(t: Ty) -> bool = t match
+    Real(b) -> b == 32 || b == 64
+    Complex(b) -> b == 32 || b == 64
+    _ -> false
+
+private ext(x: Extent) -> Buf[Extent]
+    var out: Buf[Extent] = buf()
+
+    out.push(x)
+    out
+
+private exts(x: Extent, y: Extent) -> Buf[Extent]
+    var out = ext(x)
+
+    out.push(y)
+    out
+
+// The smaller of two extents, static where both are.
+private least(x: Extent, y: Extent) -> Extent = x match
+    Fixed(n) -> y match
+        Fixed(m) -> Fixed(if n < m then n else m)
+        _ -> Dynamic
+    _ -> Dynamic
+
+private tuple_of(ts: []const Ty) -> Ty
+    var out: Buf[Ty] = buf()
+
+    for t in ts
+        out.push(t)
+
+    Ty.Tuple(out)
+
+impl Elab
+    // A call of a linear-algebra function.
+    lapack(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        var pos: Buf[Expr] = buf()
+        var upper: Option[Expr] = None
+        val chol = name == "chol" || name == "chol_inplace"
+
+        for a in args
+            *a.kind match
+                NamedArg(n, v) ->
+                    if n == "upper" && chol && upper.is_none()
+                        upper = Some(v)
+                    else
+                        self.fail(a.span, if chol then s"`$name` takes one named argument, `upper =`" else s"`$name` takes no named arguments")
+                        return self.invalid(span)
+                _ -> pos.push(a)
+
+        val flag = upper match
+            Some(u) -> self.check(u, Bool, "`upper`")
+            None -> texpr(span, Bool, TLiteral(BoolVal(false), false))
+
+        if name.ends_with("_inplace") then return self.lapack_inout(span, name, pos, flag)
+
+        val two = name == "solve" || name == "lstsq"
+
+        if pos.len() != (if two then 2 else 1) then return self.arity(span, name, if two then "a matrix and a right-hand side" else "a matrix")
+
+        val a = self.array_arg(name, pos[0])
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        if rank_of(a.ty) != 2
+            self.fail(pos[0].span, s"`$name` takes a matrix (rank 2); this has rank ${rank_of(a.ty)}")
+            return self.invalid(span)
+
+        val xs = axes_of(a.ty)
+        val ua = elem_unit(a.ty)
+        var n = base_of(elem_of(a.ty))
+        var b: Option[TExpr] = None
+
+        if two
+            val v = self.array_arg(name, pos[1])
+
+            if is_error(v.ty) then return self.invalid(span)
+
+            if rank_of(v.ty) > 2
+                self.fail(pos[1].span, s"`$name`'s right-hand side is a vector or a matrix of right-hand sides; this has rank ${rank_of(v.ty)}")
+                return self.invalid(span)
+
+            if !is_numeric(n) || !is_numeric(base_of(elem_of(v.ty)))
+                self.fail(span, s"`$name` takes numbers; these are ${self.shown(a)} and ${self.shown(v)}")
+                return self.invalid(span)
+
+            n = self.common_of(span, name, n, base_of(elem_of(v.ty))) match
+                Some(t) -> t
+                None -> return self.invalid(span)
+
+            if clash(xs[0], axes_of(v.ty)[0])
+                self.fail(span, s"`$name` needs a right-hand side with the matrix's ${extent_text(xs[0])} rows; it has ${extent_text(axes_of(v.ty)[0])}")
+                return self.invalid(span)
+
+            b = Some(v)
+
+        if is_int(n) then n = REAL
+
+        if !lapack_number(n)
+            self.fail(pos[0].span, s"`$name` works in real32, real64, complex[real32] and complex[real64], as LAPACK does; this is ${self.shown(a)}")
+            return self.invalid(span)
+
+        if among_names(name, SQUARE) && clash(xs[0], xs[1])
+            self.fail(pos[0].span, s"`$name` takes a square matrix; this is ${extent_text(xs[0])} × ${extent_text(xs[1])}")
+            return self.invalid(span)
+
+        var out: Buf[TExpr] = buf()
+
+        out.push(promote(a, with_elem(a.ty, measured(n, ua))))
+
+        b match
+            Some(v) -> out.push(promote(v, with_elem(v.ty, measured(n, elem_unit(v.ty)))))
+            None -> ()
+
+        if chol then out.push(flag)
+
+        val ty = self.lapack_type(span, name, n, ua, xs, b) match
+            Some(t) -> t
+            None -> return self.invalid(span)
+
+        texpr(span, ty, TBuiltin(name, out))
+    end lapack
+
+    // The type of `name`'s result for a matrix of number type `n`, unit `ua` and extents `xs`, and
+    // the right-hand side `b` of `solve` and `lstsq`.
+    private lapack_type(*self, span: Span, name: string, n: Ty, ua: Unit, xs: Buf[Extent], b: Option[TExpr]) -> Option[Ty]
+        val m = xs[0]
+        val k = least(xs[0], xs[1])
+        val order = meet(xs[0], xs[1])
+        val re = Real(bits_of(n))
+        val cx = Complex(bits_of(n))
+        val keep = measured(n, ua)
+
+        if name == "solve" || name == "lstsq"
+            val v = b.unwrap()
+            val u = self.exact(span, unit_div(elem_unit(v.ty), ua))?
+            var axes = ext(xs[1])
+
+            if rank_of(v.ty) == 2 then axes.push(axes_of(v.ty)[1])
+
+            return Some(Ty.Array(measured(n, u), axes))
+
+        if name == "inv" then return Some(Ty.Array(measured(n, self.exact(span, unit_div(unit_one(), ua))?), exts(order, order)))
+
+        if name == "det"
+            if is_one(ua) then return Some(n)
+
+            order match
+                Fixed(count) -> return Some(measured(n, self.exact(span, unit_pow(ua, ratio(i256(count), 1)))?))
+                _ ->
+                    self.fail(span, s"`det` of a matrix in ${spell(ua)} is in ${spell(ua)} to the power of the matrix's order, so the order must be static, and this one's is not; take `det(strip(A))`")
+                    return None
+
+        if name == "chol" then return Some(Ty.Array(measured(n, self.exact(span, unit_pow(ua, ratio(1, 2)))?), exts(order, order)))
+        if name == "lu" then return Some(tuple_of([Ty.Array(n, exts(m, k)), Ty.Array(keep, exts(k, xs[1])), Ty.Array(INTEGER, ext(m))]))
+        if name == "qr" then return Some(tuple_of([Ty.Array(n, exts(m, k)), Ty.Array(keep, exts(k, xs[1]))]))
+        if name == "eigvals" then return Some(Ty.Array(measured(cx, ua), ext(order)))
+        if name == "eig" then return Some(tuple_of([Ty.Array(measured(cx, ua), ext(order)), Ty.Array(cx, exts(order, order))]))
+        if name == "eigh" then return Some(tuple_of([Ty.Array(measured(re, ua), ext(order)), Ty.Array(n, exts(order, order))]))
+        if name == "svd" then return Some(tuple_of([Ty.Array(n, exts(m, k)), Ty.Array(measured(re, ua), ext(k)), Ty.Array(n, exts(xs[1], k))]))
+
+        Some(Ty.Array(measured(re, ua), ext(k)))
+
+    // An `inout` form: the matrix, then `ipiv` (`lu_inplace`, `solve_inplace`), `tau` (`qr_inplace`)
+    // and the right-hand sides (`solve_inplace`), each borrowed; `chol_inplace`'s `upper`.
+    private lapack_inout(*self, span: Span, name: string, pos: Buf[Expr], upper: TExpr) -> TExpr
+        val wants = if name == "solve_inplace" then "a matrix, its pivots `ipiv` and the right-hand sides" elif name == "lu_inplace" then "a matrix and its pivots `ipiv`" elif name == "qr_inplace" then "a matrix and its reflectors' scales `tau`" else "a matrix"
+        val count: usize = if name == "solve_inplace" then 3 elif name == "chol_inplace" then 1 else 2
+
+        if pos.len() != count then return self.arity(span, name, wants)
+
+        val a = self.lapack_place(name, pos[0], "the matrix", 2, 2, None)
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        val xs = axes_of(a.ty)
+
+        if among_names(name, SQUARE) && clash(xs[0], xs[1])
+            self.fail(pos[0].span, s"`$name` takes a square matrix; this is ${extent_text(xs[0])} × ${extent_text(xs[1])}")
+            return self.invalid(span)
+
+        var out: Buf[TExpr] = buf()
+
+        out.push(a)
+
+        if name == "chol_inplace" then out.push(upper)
+        elif name == "qr_inplace" then out.push(self.lapack_place(name, pos[1], "`tau`", 1, 1, Some(elem_of(a.ty))))
+        else
+            out.push(self.lapack_place(name, pos[1], "`ipiv`", 1, 1, Some(Int(32, true))))
+
+            if name == "solve_inplace" then out.push(self.lapack_place(name, pos[2], "the right-hand side", 1, 2, Some(elem_of(a.ty))))
+
+        for x in out
+            if is_error(x.ty) then return self.invalid(span)
+
+        texpr(span, INTEGER, TBuiltin(name, out))
+
+    // An array argument of an `inout` form, borrowed: of rank `lo` to `hi`, its elements of `elem`
+    // exactly, or of a number type LAPACK computes in where `elem` is `None`, and without a unit.
+    private lapack_place(*self, name: string, e: Expr, what: string, lo: usize, hi: usize, elem: Option[Ty]) -> TExpr
+        val v = self.infer(e)
+
+        if is_error(v.ty) then return self.invalid(e.span)
+
+        val r = rank_of(v.ty)
+        val et = elem_of(v.ty)
+        val ok = is_array(v.ty) && r >= lo && r <= hi && (elem match
+            Some(t) -> ty_eq(base_of(et), t)
+            None -> lapack_number(base_of(et)))
+
+        if !ok
+            val shape = if lo == 2 then "a matrix" elif hi == 2 then "a vector or a matrix" else "a vector"
+            val number = elem match
+                Some(t) -> show_ty(t)
+                None -> "real32, real64, complex[real32] or complex[real64]"
+
+            self.fail(e.span, s"`$name` takes $what as $shape of $number, borrowed as it is; this is ${self.shown(v)}")
+            return self.invalid(e.span)
+
+        if carries_unit(v.ty)
+            self.fail(e.span, s"`$name` overwrites $what with factors that do not share its unit, so it takes an array without one; this is ${self.shown(v)}")
+            return self.invalid(e.span)
+
+        self.borrow(e, v.ty, "")
+end Elab

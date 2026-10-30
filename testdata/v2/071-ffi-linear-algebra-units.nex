@@ -1,0 +1,51 @@
+// Units through `@` and the LAPACK prelude (DESIGN §13.6). A spring network's stiffness matrix in
+// N/m and its loads in N solve to displacements in m; in N/mm they solve to mm, the same numbers
+// read in the smaller unit. `inv` takes the reciprocal unit, `det` the unit to the matrix's order,
+// `chol` its square root; eigenvalues and singular values keep it, the factors that are rotations or
+// unit triangles are dimensionless. Each binding's type is written out, so the program compiles only
+// where the units come out as the table says. `strip` hands BLAS the numbers with no copy.
+
+@link(framework = "Accelerate")
+extern def cblas_ddot(n: int32, x: [real], incx: int32, y: [real], incy: int32): real
+
+def r8(x: real): real = round(x * 1.0e8) / 1.0e8 + 0.0
+
+def main() =
+  val k: [real<N/m>; 3, 3] = [[2.0, -1.0, 0.0], [-1.0, 2.0, -1.0], [0.0, -1.0, 2.0]]<N/m>
+  val f = [1.0<N>, 0.0<N>, 1.0<N>]
+  val x: [real<m>; 3] = solve(k, f)
+  print(map(strip(x), r8) * 1.0<m>)
+  print(map(strip(k @ x), r8) * 1.0<N>)
+  val per_mm = [[2.0, -1.0, 0.0], [-1.0, 2.0, -1.0], [0.0, -1.0, 2.0]]<N/mm>
+  val in_mm: [real<mm>] = solve(per_mm, f)
+  print(map(strip(in_mm), r8) * 1.0<mm>)
+  val y: [real<m>] = lstsq(k, f)
+  print(map(strip(y), r8) * 1.0<m>)
+
+  val flexibility: [real<m/N>; 3, 3] = inv(k)
+  print(r8(strip(flexibility[1, 1])) * 1.0<m/N>)
+  print(r8(strip(flexibility[2, 2])) * 1.0<m/N>)
+  val d: real<N^3/m^3> = det(k)
+  print(r8(strip(d)))
+  val root: [real<N^(1/2)/m^(1/2)>; 3, 3] = chol(k)
+  print(r8(strip(root[1, 1] * root[1, 1])) * 1.0<N/m>)
+
+  val ev: [complex<N/m>; 3] = eigvals(k)
+  print(r8(strip(sum(ev).re)))
+  val (w, v): ([real<N/m>; 3], [real; 3, 3]) = eigh(k)
+  print(map(strip(w), r8))
+  print(map(transpose(v) @ v, r8))
+  val (l, u, p): ([real; 3, 3], [real<N/m>; 3, 3], [integer; 3]) = lu(k)
+  print(u[1, 1])
+  print(l[2, 1])
+  print(p)
+  val (q, r): ([real; 3, 3], [real<N/m>; 3, 3]) = qr(k)
+  print(map(strip(q @ r), r8))
+  val s: [real<N/m>; 3] = svdvals(k)
+  print(map(strip(s), r8))
+
+  val lengths = [1.0<m>, 2.0<m>, 3.0<m>]
+  val forces = [4.0<N>, 5.0<N>, 6.0<N>]
+  val work: real<J> = lengths @ forces
+  print(work)
+  print(cblas_ddot(3, strip(lengths), 1, strip(forces), 1) * 1.0<J>)

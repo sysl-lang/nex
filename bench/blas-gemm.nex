@@ -1,0 +1,20 @@
+// The perf oracle's BLAS gemm kernel (PLAN.md): `C = A @ B` at 1000 × 1000 through the BLAS
+// dispatch, timed over 20 products and printed in milliseconds per product, with a checksum.
+
+extern def clock_gettime_nsec_np(clock: int32): uint64
+
+def main() =
+  val n = 1000
+  var a: [real; :, :] = zeros((n, n))
+  var b: [real; :, :] = zeros((n, n))
+  for j in 1..n
+    for i in 1..n
+      a[i, j] = 1.0 / (i + j)
+      b[i, j] = 1.0 * ((i * 7 + j * 3) % 11) - 5.0
+  var c: [real; :, :] = a @ b
+  val start = clock_gettime_nsec_np(4)
+  for k in 1..20
+    c = a @ b
+  val done = clock_gettime_nsec_np(4)
+  print((done - start) / 20000)
+  print(sum(c))

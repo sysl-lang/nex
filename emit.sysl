@@ -799,7 +799,7 @@ end Emitter
 val CLOSURE = "!llvm.struct<(ptr, ptr)>"
 
 // The runtime functions that never return: each traps or ends the program.
-private never_returns(name: string) -> bool = name == "nex_trap" || name == "nex_trap_owned" || name == "nex_trap_complex_div_zero" || name == "nex_stop"
+private never_returns(name: string) -> bool = name == "nex_trap" || name == "nex_trap_owned" || name == "nex_trap_info" || name == "nex_trap_complex_div_zero" || name == "nex_stop"
 
 // The program as an MLIR module, or why it cannot be compiled.
 emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]

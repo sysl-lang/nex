@@ -1,0 +1,223 @@
+@tests
+
+// `@` through BLAS and the LAPACK prelude (DESIGN §10.4, §10.5, §13.6): the types and units the
+// elaborator gives the linear-algebra functions and what it refuses, the routines the emitter calls
+// and where it keeps to `linalg`, and the link and the traps of the programs that call them. The
+// `testdata/v2` programs 069–071 run the values.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{exists, write_text}
+import sysl.process.{Status, Var, capture}
+import sysl.testing.compiler
+import sysl.text.split
+
+private val M = "def main() = ()\n"
+
+// The first line of what `text` elaborates to: its first function.
+private first(text: string) -> string = split(elaborated(text + "\n" + M), "\n")[0]
+
+// -- types ------------------------------------------------------------------------------------------
+
+@test("the linear-algebra functions are typed by rule: static extents carry, an integer matrix is real64, two operands meet")
+lapack_types()
+    assert_eq(first("def f(a: [real; 3, 2], b: [real; 3]) = lstsq(a, b)"), "(def f ((a#0 [real64; 3, 2]) (b#1 [real64; 3])) [real64; 2] (lstsq:[real64; 2] a#0 b#1))")
+    assert_eq(first("def f(i: [integer; 2, 2]) = solve(i, [1, 2])"), "(def f ((i#0 [int64; 2, 2])) [real64; 2] (solve:[real64; 2] (promote:[real64; 2, 2] i#0) (promote:[real64] (array:[int64] 1 2))))")
+    assert_eq(first("def f(a: [real; 3, 2]) = (lu(a), qr(a), svd(a))"), "(def f ((a#0 [real64; 3, 2])) (([real64; 3, 2], [real64; 2, 2], [int64; 3]), ([real64; 3, 2], [real64; 2, 2]), ([real64; 3, 2], [real64; 2], [real64; 2, 2])) (tuple:(([real64; 3, 2], [real64; 2, 2], [int64; 3]), ([real64; 3, 2], [real64; 2, 2]), ([real64; 3, 2], [real64; 2], [real64; 2, 2])) (lu:([real64; 3, 2], [real64; 2, 2], [int64; 3]) a#0) (qr:([real64; 3, 2], [real64; 2, 2]) a#0) (svd:([real64; 3, 2], [real64; 2], [real64; 2, 2]) a#0)))")
+    assert_eq(first("def f(c: [complex[real32]; :, :]) = (svdvals(c), eig(c), eigh(c), eigvals(c))"), "(def f ((c#0 [complex[real32]; :, :])) ([real32], ([complex[real32]], [complex[real32]; :, :]), ([real32], [complex[real32]; :, :]), [complex[real32]]) (tuple:([real32], ([complex[real32]], [complex[real32]; :, :]), ([real32], [complex[real32]; :, :]), [complex[real32]]) (svdvals:[real32] c#0) (eig:([complex[real32]], [complex[real32]; :, :]) c#0) (eigh:([real32], [complex[real32]; :, :]) c#0) (eigvals:[complex[real32]] c#0)))")
+    assert_eq(first("def f(a: [real; 2, 2], b: [real32; 2, 2]) = solve(a, b)"), "(def f ((a#0 [real64; 2, 2]) (b#1 [real32; 2, 2])) [real64; 2, 2] (solve:[real64; 2, 2] a#0 (promote:[real64; 2, 2] b#1)))")
+
+@test("units follow DESIGN §13.6: solve divides, inv inverts, det takes the order's power, chol the square root, the values keep it")
+lapack_units()
+    assert_eq(first("def f(k: [real<N/m>; 2, 2], m: [real<N/m>; :, :]) = (det(k), chol(k, upper = true), inv(m), solve(m, [1.0<N>, 2.0<N>]))"),
+        "(def f ((k#0 [real64<N/m>; 2, 2]) (m#1 [real64<N/m>; :, :])) (real64<N^2/m^2>, [real64<N^(1/2)/m^(1/2)>; 2, 2], [real64<m/N>; :, :], [real64<m>]) (tuple:(real64<N^2/m^2>, [real64<N^(1/2)/m^(1/2)>; 2, 2], [real64<m/N>; :, :], [real64<m>]) (det:real64<N^2/m^2> k#0) (chol:[real64<N^(1/2)/m^(1/2)>; 2, 2] k#0 true) (inv:[real64<m/N>; :, :] m#1) (solve:[real64<m>] m#1 (array:[real64<N>] 1.0<N> 2.0<N>))))")
+    assert_eq(first("def f(k: [real<Pa>; :, :]) = (lu(k), qr(k), svd(k), eigh(k), eig(k), lstsq(k, [1.0<N>]))"),
+        "(def f ((k#0 [real64<Pa>; :, :])) (([real64; :, :], [real64<Pa>; :, :], [int64; :]), ([real64; :, :], [real64<Pa>; :, :]), ([real64; :, :], [real64<Pa>], [real64; :, :]), ([real64<Pa>], [real64; :, :]), ([complex[real64]<Pa>], [complex[real64]; :, :]), [real64<m^2>]) (tuple:(([real64; :, :], [real64<Pa>; :, :], [int64; :]), ([real64; :, :], [real64<Pa>; :, :]), ([real64; :, :], [real64<Pa>], [real64; :, :]), ([real64<Pa>], [real64; :, :]), ([complex[real64]<Pa>], [complex[real64]; :, :]), [real64<m^2>]) (lu:([real64; :, :], [real64<Pa>; :, :], [int64; :]) k#0) (qr:([real64; :, :], [real64<Pa>; :, :]) k#0) (svd:([real64; :, :], [real64<Pa>], [real64; :, :]) k#0) (eigh:([real64<Pa>], [real64; :, :]) k#0) (eig:([complex[real64]<Pa>], [complex[real64]; :, :]) k#0) (lstsq:[real64<m^2>] k#0 (array:[real64<N>] 1.0<N>))))")
+    assert_eq(refused("def f(a: [real<m>; :, :]) = det(a)\n" + M), "error: `det` of a matrix in m is in m to the power of the matrix's order, so the order must be static, and this one's is not; take `det(strip(A))` @1:29")
+    assert_eq(refused("def f(a: [real<mm>; 2, 2]) = chol(a)\n" + M), "error: the scale of this unit has no exact value: it is too large to hold, or the root of a scale that is not a perfect power @1:30")
+    assert_eq(refused("def f(a: [real<m>; 2, 2]) = det(a)\n" + M), "ok")
+
+@test("the inout forms borrow their arrays as they are and answer an integer")
+lapack_inout_types()
+    assert_eq(first("def f(a: inout [real; :, :], p: inout [int32], t: inout [real], b: inout [real; :, :]) = (lu_inplace(a, p), chol_inplace(a[1..2, 1..2], upper = true), qr_inplace(a, t), solve_inplace(a, p, b))"),
+        "(def f ((a#0 inout [real64; :, :]) (p#1 inout [int32]) (t#2 inout [real64]) (b#3 inout [real64; :, :])) (int64, int64, int64, int64) (tuple:(int64, int64, int64, int64) (lu_inplace:int64 (inout a#0) (inout p#1)) (chol_inplace:int64 (inout (index:[real64; :, :] a#0 (1 .. 2) (1 .. 2))) true) (qr_inplace:int64 (inout a#0) (inout t#2)) (solve_inplace:int64 (inout a#0) (inout p#1) (inout b#3))))")
+
+@test("a linear-algebra call is refused where its arguments say nothing LAPACK takes")
+lapack_refusals()
+    assert_eq(refused("def main() = print(solve([1.0, 2.0], [1.0]))\n"), "error: `solve` takes a matrix (rank 2); this has rank 1 @1:26")
+    assert_eq(refused("def f(a: [real; 3, 2], b: [real; 3]) = solve(a, b)\n" + M), "error: `solve` takes a square matrix; this is 3 × 2 @1:46")
+    assert_eq(refused("def f(a: [real; 2, 2], b: [real; 3]) = solve(a, b)\n" + M), "error: `solve` needs a right-hand side with the matrix's 2 rows; it has 3 @1:40")
+    assert_eq(refused("def f(a: [real; :, :], b: [real; :, :, :]) = solve(a, b)\n" + M), "error: `solve`'s right-hand side is a vector or a matrix of right-hand sides; this has rank 3 @1:55")
+    assert_eq(refused("def f(a: [real16; :, :]) = inv(a)\n" + M), "error: `inv` works in real32, real64, complex[real32] and complex[real64], as LAPACK does; this is [real16; :, :] @1:32")
+    assert_eq(refused("def f(a: [bool; :, :], b: [bool]) = solve(a, b)\n" + M), "error: `solve` takes numbers; these are [bool; :, :] and [bool] @1:37")
+    assert_eq(refused("def f(a: [real; :, :], b: [string]) = lstsq(a, b)\n" + M), "error: `lstsq` takes numbers; these are [real; :, :] and [string] @1:39")
+    assert_eq(refused("def f(a: [real; :, :]) = inv(a, upper = true)\n" + M), "error: `inv` takes no named arguments @1:33")
+    assert_eq(refused("def f(a: [real; :, :]) = chol(a, lower = true)\n" + M), "error: `chol` takes one named argument, `upper =` @1:34")
+    assert_eq(refused("def f(a: [real; :, :]) = chol(a, upper = 1)\n" + M), "error: `upper` must be bool, but this is int64 @1:42")
+    assert_eq(refused("def f(a: [real; :, :]) = solve(a)\n" + M), "error: `solve` takes a matrix and a right-hand side @1:26")
+    assert_eq(refused("def f() = inv(3.0)\n" + M), "error: `inv` takes an array; this is real64 @1:15")
+    assert_eq(refused("def f(a: [real; 3, 2]) = eig(a)\n" + M), "error: `eig` takes a square matrix; this is 3 × 2 @1:30")
+    assert_eq(refused("def f(a: [real; 3, 2]) = svd(a)\n" + M), "ok")
+
+@test("an inout form is refused an array it cannot factor where it lies")
+lapack_inout_refusals()
+    assert_eq(refused("def f(a: inout [real; :, :], p: inout [integer]) = lu_inplace(a, p)\n" + M), "error: `lu_inplace` takes `ipiv` as a vector of int32, borrowed as it is; this is [integer] @1:66")
+    assert_eq(refused("def f(a: inout [real<m>; :, :], p: inout [int32]) = lu_inplace(a, p)\n" + M), "error: `lu_inplace` overwrites the matrix with factors that do not share its unit, so it takes an array without one; this is [real<m>; :, :] @1:64")
+    assert_eq(refused("def f(a: [real; :, :], p: inout [int32]) = lu_inplace(a + a, p)\n" + M), "error: an `inout` argument is a variable the callee can write to @1:55")
+    assert_eq(refused("def f(a: inout [real16; :, :]) = chol_inplace(a)\n" + M), "error: `chol_inplace` takes the matrix as a matrix of real32, real64, complex[real32] or complex[real64], borrowed as it is; this is [real16; :, :] @1:47")
+    assert_eq(refused("def f(a: inout [real; 2, 3]) = chol_inplace(a)\n" + M), "error: `chol_inplace` takes a square matrix; this is 2 × 3 @1:45")
+    assert_eq(refused("def f(a: inout [real; :, :], t: inout [real32]) = qr_inplace(a, t)\n" + M), "error: `qr_inplace` takes `tau` as a vector of real64, borrowed as it is; this is [real32] @1:65")
+    assert_eq(refused("def f(a: inout [real; :, :], p: inout [int32]) = solve_inplace(a, p)\n" + M), "error: `solve_inplace` takes a matrix, its pivots `ipiv` and the right-hand sides @1:50")
+    assert_eq(refused("def f(a: inout [real; :, :], p: inout [int32], b: inout [real; :, :, :]) = solve_inplace(a, p, b)\n" + M), "error: `solve_inplace` takes the right-hand side as a vector or a matrix of real64, borrowed as it is; this is [real; :, :, :] @1:100")
+
+// -- emission ---------------------------------------------------------------------------------------
+
+private val PRODUCT = "def f(a: [real; :, :], b: [real; :, :]) = a @ b\ndef main() = print(f([[1.0]], [[2.0]]))\n"
+
+@test("@ goes to BLAS past its threshold and stays linalg.matmul below it; static extents decide at compile time, dynamic ones at run time")
+emit_blas_threshold()
+    val small = emitted("def f(a: [real; 8, 8], b: [real; 8, 8]) = a @ b\n" + M).unwrap()
+    val large = emitted("def f(a: [real; 64, 64], b: [real; 64, 64]) = a @ b\n" + M).unwrap()
+    val dynamic = emitted(PRODUCT).unwrap()
+
+    assert(small.contains("linalg.matmul"), small)
+    assert(!small.contains("cblas") && !small.contains("// nex.blas"), small)
+    assert(large.starts_with("// nex.blas\n"), large)
+    assert(large.contains("func.call @\"cblas_dgemm\"("), large)
+    assert(!large.contains("linalg.matmul"), large)
+    assert(dynamic.contains("arith.constant 262144 : index"), dynamic)
+    assert(dynamic.contains("func.call @\"cblas_dgemm\"("), dynamic)
+    assert(dynamic.contains("linalg.matmul ins("), dynamic)
+
+    for p in ["def f(a: [real; :, :], x: [real]) = a @ x\n", "def f(x: [real], a: [real; :, :]) = x @ a\n"]
+        val m = emitted(p + M).unwrap()
+
+        assert(m.contains("arith.constant 16384 : index") && m.contains("func.call @\"cblas_dgemv\"(") && (m.contains("linalg.matvec") || m.contains("linalg.vecmat")), m)
+
+    val dot = emitted("def f(x: [real32], y: [real32]) = x @ y\n" + M).unwrap()
+
+    assert(dot.contains("arith.constant 4096 : index") && dot.contains("func.call @\"cblas_sdot\"(") && dot.contains("linalg.dot"), dot)
+
+@test("@ of integers and of real16 never goes to BLAS")
+emit_blas_never()
+    for t in ["integer", "real16", "int32"]
+        val m = emitted(s"def f(a: [$t; :, :], b: [$t; :, :]) = a @ b\n" + M).unwrap()
+
+        assert(!m.contains("cblas") && !m.contains("// nex.blas") && m.contains("linalg.matmul"), m)
+
+@test("transpose(A) @ B passes BLAS's T flag with no transposed copy, conj(transpose(Z)) its C flag, at any size")
+emit_blas_flags()
+    val t = emitted("def f(a: [real; 3, 2], b: [real; 3, 2]) = transpose(a) @ b\n" + M).unwrap()
+
+    assert(t.contains("arith.constant 112 : i32") && t.contains("func.call @\"cblas_dgemm\"("), t)
+    assert(!t.contains("linalg.transpose") && !t.contains("linalg.matmul"), t)
+
+    val c = emitted("def f(z: [complex; :, :]) = conj(transpose(z)) @ z\n" + M).unwrap()
+
+    assert(c.contains("arith.constant 113 : i32") && c.contains("func.call @\"cblas_zgemm\"("), c)
+    assert(!c.contains("linalg.transpose") && !c.contains("complex.conj"), c)
+
+    val v = emitted("def f(a: [real; :, :], x: [real]) = x @ transpose(a)\n" + M).unwrap()
+
+    assert(v.contains("func.call @\"cblas_dgemv\"(") && !v.contains("linalg.transpose"), v)
+
+    // An operand that is promoted is made first, and BLAS reads what was made.
+    val p = emitted("def f(a: [real32; :, :], b: [real; :, :]) = transpose(a) @ b\n" + M).unwrap()
+
+    assert(p.contains("linalg.transpose"), p)
+
+@test("an operand crosses where it lies, its leading dimension read from its strides, and is gathered only where its first axis is not at unit stride")
+emit_blas_operands()
+    val m = emitted("def f(a: [real; 70, 70], b: [real; 70, 70]) = a[2..69, :] @ b[:, 2..69]\n" + M).unwrap()
+
+    assert(m.contains("memref.extract_strided_metadata"), m)
+    assert(m.contains("func.call @nex_c_gather("), m)
+    assert(m.contains("func.call @nex_c_free("), m)
+    assert(!m.contains("memref.copy"), m)
+
+@test("strip of an array passed to cblas_ddot copies nothing")
+emit_strip_to_cblas()
+    val m = emitted("@link(framework = \"Accelerate\")\nextern def cblas_ddot(n: int32, x: [real], incx: int32, y: [real], incy: int32): real\ndef main() =\n  val a = [1.0<m>, 2.0<m>]\n  val b = [3.0<N>, 4.0<N>]\n  print(cblas_ddot(2, strip(a), 1, strip(b), 1))\n").unwrap()
+
+    assert(m.contains("func.call @\"cblas_ddot\"("), m)
+    assert(!m.contains("memref.copy") && !m.contains("linalg.copy") && !m.contains("linalg.generic"), m)
+
+@test("each value form calls its LAPACK routine for the element type, by reference, its character arguments' lengths after")
+emit_lapack_routines()
+    val d = emitted("def f(a: [real; :, :], b: [real]) = (solve(a, b), inv(a), det(a), lu(a), chol(a), qr(a), eigvals(a), eig(a), eigh(a), svd(a), svdvals(a), lstsq(a, b))\n" + M).unwrap()
+
+    assert(d.starts_with("// nex.blas\n"), d)
+
+    for r in ["dgesv_", "dgetrf_", "dgetri_", "dpotrf_", "dgeqrf_", "dorgqr_", "dgeev_", "dsyevd_", "dgesdd_", "dgelsd_"]
+        assert(d.contains(s"func.call @\"$r\"("), r)
+
+    assert(d.contains("func.func private @\"dpotrf_\"(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64)"), d)
+    assert(d.contains("func.func private @\"dgesv_\"(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr)"), d)
+
+    val z = emitted("def f(a: [complex[real32]; :, :]) = (qr(a), eigh(a), eig(a), svdvals(a))\n" + M).unwrap()
+
+    for r in ["cgeqrf_", "cungqr_", "cheevd_", "cgeev_", "cgesdd_"]
+        assert(z.contains(s"func.call @\"$r\"("), r)
+
+@test("an inout form writes where its arrays lie, through a wrapper taking their roots")
+emit_lapack_in_place()
+    val m = emitted("def main() =\n  var a: [real; :, :] = zeros((4, 4))\n  var p: [int32] = zeros(2)\n  print(lu_inplace(a[2..3, 2..3], p))\n  print(a)\n").unwrap()
+
+    assert(m.contains("func.func private @\"x.0\"("), m)
+    assert(m.contains("memref.subview"), m)
+    assert(m.contains("bufferization.materialize_in_destination"), m)
+    assert(m.contains("func.call @\"dgetrf_\"("), m)
+
+// -- programs ---------------------------------------------------------------------------------------
+
+@test("a failed factorization nothing catches writes the routine and its cause to standard error, and aborts")
+run_lapack_uncaught()
+    val b = bench()
+    val singular = ran(b, "def main() =\n  print(\"before\")\n  print(solve([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 0.0, 1.0]], [1.0, 1.0, 1.0]))\n")
+    val indefinite = ran(b, "def main() =\n  val a: [real; :, :] = [[4.0, 2.0, 0.0], [2.0, 1.0, 0.0], [0.0, 0.0, 1.0]]\n  print(chol(a))\n")
+    val square = ran(b, "def main() =\n  val a: [real; :, :] = zeros((2, 3))\n  print(inv(a))\n")
+
+    finish(b)
+    assert_eq(singular.text, "before\n")
+    assert_eq(singular.err.unwrap_or(""), "trap: solve: matrix is singular (U[3,3] = 0)\n")
+    assert(singular.status == Status.Signalled(6), s"${singular.status}")
+    assert_eq(indefinite.err.unwrap_or(""), "trap: chol: matrix is not positive definite (leading minor 2)\n")
+    assert_eq(square.err.unwrap_or(""), "trap: inv: the matrix is not square\n")
+
+@test("a program calling BLAS links the platform's, or the one NEX_BLAS names; one that does not links none")
+run_blas_link()
+    val b = bench()
+    val nex = s"${b.work}/nex"
+    val built = capture(compiler(), ["build", ".", "-o", nex], stderr = true).unwrap()
+
+    assert(built.status.ok(), built.err.unwrap_or(""))
+
+    val src = s"${b.work}/la.nex"
+    val plain = s"${b.work}/plain.nex"
+
+    write_text(src, "def main() = print(det([[2.0, 1.0], [1.0, 3.0]]))\n").unwrap()
+    write_text(plain, "def main() = print([[2.0, 1.0]] @ [[1.0], [3.0]])\n").unwrap()
+
+    val env = [Var("NEX_RUNTIME", b.tc.runtime)]
+    val default = capture(nex, ["build", src, "-o", s"${b.work}/la"], env = env, stderr = true).unwrap()
+    val none = capture(nex, ["build", plain, "-o", s"${b.work}/plain"], env = env, stderr = true).unwrap()
+
+    assert(default.status.ok(), default.err.unwrap_or(""))
+    assert(none.status.ok(), none.err.unwrap_or(""))
+    assert_eq(capture(s"${b.work}/la", [], stderr = true).unwrap().text, "5.0\n")
+
+    if exists("/usr/bin/otool")
+        assert(capture("/usr/bin/otool", ["-L", s"${b.work}/la"], stderr = true).unwrap().text.contains("Accelerate.framework"))
+        assert(!capture("/usr/bin/otool", ["-L", s"${b.work}/plain"], stderr = true).unwrap().text.contains("Accelerate"))
+
+    val openblas = "/opt/homebrew/opt/openblas/lib"
+
+    if exists(s"$openblas/libopenblas.dylib")
+        val chosen = capture(nex, ["build", src, "-o", s"${b.work}/la-openblas"], env = [Var("NEX_RUNTIME", b.tc.runtime), Var("NEX_BLAS", s"-L$openblas -lopenblas")], stderr = true).unwrap()
+
+        assert(chosen.status.ok(), chosen.err.unwrap_or(""))
+        assert_eq(capture(s"${b.work}/la-openblas", [], stderr = true).unwrap().text, "5.0\n")
+        assert(capture("/usr/bin/otool", ["-L", s"${b.work}/la-openblas"], stderr = true).unwrap().text.contains("libopenblas"))
+
+    finish(b)
+    assert(uses_blas("// nex.blas\nmodule {\n"))
+    assert(!uses_blas("module {\n// nex.blas\n"))
