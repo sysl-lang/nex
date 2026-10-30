@@ -48,7 +48,7 @@ private mpi_bench() -> Bench
     b
 
 // The program at `exe` run as an `np`-rank job.
-private job(exe: string, np: int, args: []const string = []) -> Output
+private job(exe: string, np: int, args: []const string = [], env: []const Var = []) -> Output
     var line = mpi_launcher(np).unwrap()
 
     line.push(exe)
@@ -56,7 +56,7 @@ private job(exe: string, np: int, args: []const string = []) -> Output
     for a in args
         line.push(a)
 
-    capture(line[0], line.view()[1..], stderr = true, timeout = JOB_TIMEOUT).unwrap()
+    capture(line[0], line.view()[1..], env = env, stderr = true, timeout = JOB_TIMEOUT).unwrap()
 
 // A job's standard output, its lines sorted: the ranks print in no fixed order.
 private sorted_lines(text: string) -> string
@@ -185,10 +185,10 @@ mpi_only_where_imported()
     assert(!uses_mpi(p), p)
     assert(!p.contains("nex_mpi"), p)
     assert(uses_mpi(m), m)
-    assert(m.contains("func.call @nex_mpi_init()"), m)
+    assert(m.contains("func.call @nex_mpi_init(%"), m)
     // Before every module-level binding: the call follows the arguments' and precedes the rest.
-    assert(m.index_of("func.call @nex_set_args").unwrap() < m.index_of("func.call @nex_mpi_init()").unwrap(), m)
-    assert(m.index_of("func.call @nex_mpi_init()").unwrap() < m.index_of("func.call @\"nex_mpi_proc_null\"").unwrap(), m)
+    assert(m.index_of("func.call @nex_set_args").unwrap() < m.index_of("func.call @nex_mpi_init(").unwrap(), m)
+    assert(m.index_of("func.call @nex_mpi_init(").unwrap() < m.index_of("func.call @\"nex_mpi_proc_null\"").unwrap(), m)
 
 @test("`import mpi` names the module nex ships even where a directory `mpi` stands beside the program; its shim's externs are private to it")
 mpi_is_the_shipped_module()
@@ -670,3 +670,72 @@ mpi_exchange_without_mpi()
     finish(b)
     assert(err.contains("`exchange` is the `mpi` module's block of nonblocking sends and receives: the program imports `mpi`"), err)
     assert(ok.is_ok(), ok.err().unwrap_or(""))
+
+// -- errors (DESIGN §9.6.4) -------------------------------------------------------------------------
+
+@test("a send or recv to or from a rank outside the communicator, a send or recv with a tag the MPI cannot carry, and a collective with a root outside it, trap with the operation and the cause, the job ends with a non-zero status and does not hang; the communicator's own size is named, `self()` included")
+mpi_errors_trap_with_the_operation()
+    val b = mpi_bench()
+    val sent = trapped(b, "bad_to", "  send([1.0], to = 9)\n")
+    val below = trapped(b, "bad_below", "  send([1.0], to = -5)\n")
+    val received = trapped(b, "bad_from", "  var x = [0.0]\n  recv(x, from = 7)\n")
+    val tagged = trapped(b, "bad_tag", "  send([1.0], to = 0, tag = -3)\n")
+    val tagged_recv = trapped(b, "bad_recv_tag", "  var x = [0.0]\n  recv(x, from = 0, tag = -4)\n")
+    val rooted = trapped(b, "bad_root", "  print(bcast([1.0], root = 5))\n")
+    val reduced = trapped(b, "bad_reduce_root", "  print(reduce_to([1.0], +, root = 3))\n")
+    val gathered = trapped(b, "bad_gather_root", "  print(gather([1.0], root = 4))\n")
+    val scattered = trapped(b, "bad_scatter_root", "  print(scatter([1.0, 2.0, 3.0], root = 8))\n")
+    val own = trapped(b, "bad_self", "  send([1.0], to = 1, comm = self())\n")
+    val posted = trapped(b, "bad_exchange", "  var x = [0.0]\n  exchange\n    recv(x, from = 6)\n")
+    val swapped = trapped(b, "bad_sendrecv", "  var x = [0.0]\n  sendrecv([1.0], 9, x, 0)\n")
+
+    finish(b)
+    assert(sent.contains("trap: send: invalid rank 9 (communicator has 3 ranks)"), sent)
+    assert(below.contains("trap: send: invalid rank -5 (communicator has 3 ranks)"), below)
+    assert(received.contains("trap: recv: invalid rank 7 (communicator has 3 ranks)"), received)
+    assert(tagged.contains("trap: send: invalid tag -3 (tags are 0 to "), tagged)
+    assert(tagged_recv.contains("trap: recv: invalid tag -4 (tags are 0 to "), tagged_recv)
+    assert(rooted.contains("trap: bcast: invalid root 5 (communicator has 3 ranks)"), rooted)
+    assert(reduced.contains("trap: reduce_to: invalid root 3 (communicator has 3 ranks)"), reduced)
+    assert(gathered.contains("trap: gather: invalid root 4 (communicator has 3 ranks)"), gathered)
+    assert(scattered.contains("trap: scatter: invalid root 8 (communicator has 3 ranks)"), scattered)
+    assert(own.contains("trap: send: invalid rank 1 (communicator has 1 ranks)"), own)
+    assert(posted.contains("trap: recv: invalid rank 6 (communicator has 3 ranks)"), posted)
+    assert(swapped.contains("trap: sendrecv: invalid rank 9 (communicator has 3 ranks)"), swapped)
+    // The rank is in front of the message, as for every trap.
+    assert(sent.contains("rank 0: trap: ") || sent.contains("rank 1: trap: ") || sent.contains("rank 2: trap: "), sent)
+
+@test("an MPI error trap is caught by `assert_traps` on one rank, which goes on: later sends and receives, `no_rank` and `any_rank` still work and the job ends with status 0")
+mpi_errors_are_caught_locally()
+    val b = mpi_bench()
+    val text = "import mpi.*\n\ndef main() =\n  val me = this_rank()\n  assert_traps(() -> send([1.0], to = 9), \"send: invalid rank 9 (communicator has 3 ranks)\")\n  assert_traps(() -> send([1.0], to = 0, tag = -1), \"send: invalid tag -1\")\n  assert_traps(() -> print(bcast([1.0], root = 3)), \"bcast: invalid root 3 (communicator has 3 ranks)\")\n  var x = [0.0]\n  send([2.0], to = no_rank)\n  recv(x, from = no_rank)\n  if me == 0 then send([5.0], to = 1)\n  if me == 1 then recv(x, from = any_rank, tag = any_tag)\n  barrier()\n  print(s\"${me} ${x[1]} ${allreduce(1, +)}\")\n"
+    val out = job(built(b, text, "caught_errors"), 3)
+
+    finish(b)
+    assert(out.status.ok(), s"${out.status}\n${out.err.unwrap_or("")}")
+    assert_eq(sorted_lines(out.text), "0 0.0 3\n1 5.0 3\n2 0.0 3")
+
+// -- the thread level (DESIGN §9.6.6) ---------------------------------------------------------------
+
+private val HYBRID = "import mpi.*\n\ndef main() =\n  val me = this_rank()\n  val n = 100000\n  var x: [real] = zeros(n)\n  parallel for i in 1..n do x[i] = 1.0 / real(i + 7 * me)\n  val local = parallel sum(x)\n  val total = allreduce(local, +)\n  print(s\"${me} ${local} ${total}\")\n"
+
+@test("a program with a `parallel` construct asks the MPI for FUNNELED and one without for SINGLE, and each runs; a hybrid job at -np 2 prints the same bits with OMP_NUM_THREADS=4 as with 1")
+mpi_thread_level_and_hybrid_bits()
+    val b = mpi_bench()
+    val report = Var("NEX_MPI_REPORT_THREADS", "1")
+    val hybrid = built(b, HYBRID, "hybrid")
+    val plain = built(b, HELLO, "plain_level")
+    val one = job(hybrid, 2, env = [Var("OMP_NUM_THREADS", "1"), report])
+    val four = job(hybrid, 2, env = [Var("OMP_NUM_THREADS", "4"), report])
+    val flat = job(plain, 2, env = [report])
+
+    finish(b)
+    assert(one.status.ok(), s"${one.status}\n${one.err.unwrap_or("")}")
+    assert(four.status.ok(), s"${four.status}\n${four.err.unwrap_or("")}")
+    assert(flat.status.ok(), s"${flat.status}\n${flat.err.unwrap_or("")}")
+    assert_eq(sorted_lines(one.text), sorted_lines(four.text))
+    assert_eq(split(sorted_lines(one.text), "\n").len, 2)
+    assert(one.err.unwrap_or("").contains("rank 0: mpi threads: requested funneled"), one.err.unwrap_or(""))
+    assert(four.err.unwrap_or("").contains("rank 1: mpi threads: requested funneled"), four.err.unwrap_or(""))
+    assert(flat.err.unwrap_or("").contains("rank 0: mpi threads: requested single"), flat.err.unwrap_or(""))
+    assert(!flat.err.unwrap_or("").contains("requested funneled"), flat.err.unwrap_or(""))

@@ -836,8 +836,12 @@ struct Emitter
         self.call("nex_set_args", "%argc, %argv", "i32, !llvm.ptr", "")
 
         // An MPI program joins its job before anything else runs (DESIGN §9.6.2); `nex_finish`, and
-        // `stop`, end its part in it.
-        if self.prog.mpi.is_some() then self.call("nex_mpi_init", "", "", "")
+        // `stop`, end its part in it. A program with a `parallel` construct asks the MPI for
+        // `MPI_THREAD_FUNNELED` (DESIGN §9.6.6), one without for `MPI_THREAD_SINGLE`.
+        if self.prog.mpi.is_some()
+            val threads = self.def(if self.threaded then "arith.constant 1 : i32" else "arith.constant 0 : i32")
+
+            self.call("nex_mpi_init", threads, "i32", "")
 
         for k in init_order(self.prog, globals, tuples)
             val m = self.mark()

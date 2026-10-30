@@ -557,6 +557,16 @@ module-level bindings and finalise it after `main` returns. A trap nothing catch
 `n` not 0, writes its message with the rank in front (`rank 2: trap: index out of bounds`) and ends
 the whole job, so the other ranks never hang waiting for the one that failed.
 
+**MPI errors are traps.** A call MPI refuses traps with the operation and the cause, on the rank
+that made it: `send: invalid rank 9 (communicator has 4 ranks)`, `recv: invalid tag -4 (tags are 0
+to 32767)`, `bcast: invalid root 5 (communicator has 3 ranks)`. An uncaught one ends the job as any
+trap does; `assert_traps` catches it on its own rank.
+
+**Threads.** A program with a `parallel` construct starts MPI at `MPI_THREAD_FUNNELED` (only the
+thread running `main` calls MPI, since an `mpi` call is not allowed in a parallel body), any other
+at `MPI_THREAD_SINGLE`; an MPI providing less traps at start-up. A hybrid job, `mpirun -np 2` with
+`OMP_NUM_THREADS=4`, prints the same bits as `-np 2` with one thread each.
+
 **MPI programs run compiled.** The interpreter never calls C, so `nex run --interp` refuses a
 program importing `mpi` at the `import`. `nex run --np 4 program.nex` runs it as a 4-rank job
 ([Command Line](/tooling/01-cli/)); `nex build` writes an executable you start with your cluster's

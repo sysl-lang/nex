@@ -64,16 +64,69 @@ static void finalize_job(void) {
     if (!finalized) MPI_Finalize();
 }
 
-void nex_mpi_init(void) {
+/* -- traps ------------------------------------------------------------------------------------ */
+
+/* A trap's message, kept where the runtime can read it after this frame is gone. */
+static char message[512];
+
+#define TRAP(...)                                             \
+    do {                                                      \
+        snprintf(message, sizeof message, __VA_ARGS__);       \
+        nex_trap(message);                                    \
+    } while (0)
+
+/* A trap for MPI error code `code` of nex's operation `op`: the operation in nex's terms and the
+ * cause from `MPI_Error_string` (DESIGN §9.6.4). */
+static void mpi_failed(const char *op, int code) {
+    char text[MPI_MAX_ERROR_STRING];
+    int len = 0;
+
+    if (MPI_Error_string(code, text, &len) != MPI_SUCCESS) snprintf(text, sizeof text, "MPI error %d", code);
+    TRAP("%s: %s", op, text);
+}
+
+/* The MPI call `call`, a trap where it returns an error. Every communicator has `MPI_ERRORS_RETURN`
+ * (`nex_mpi_init`), so a failed call comes back here rather than ending the job inside MPI. */
+#define MPI(op, call)                                         \
+    do {                                                      \
+        int code_ = (call);                                   \
+        if (code_ != MPI_SUCCESS) mpi_failed((op), code_);    \
+    } while (0)
+
+/* The thread level the program asked for and the one the MPI gave, as `NEX_MPI_REPORT_THREADS` shows. */
+static const char *level_name(int level) {
+    if (level == MPI_THREAD_SINGLE) return "single";
+    if (level == MPI_THREAD_FUNNELED) return "funneled";
+    if (level == MPI_THREAD_SERIALIZED) return "serialized";
+    return "multiple";
+}
+
+/* `threaded` is not 0 where the program has a `parallel` construct: it asks for `MPI_THREAD_FUNNELED`,
+ * because only the thread that runs `main` calls MPI (DESIGN §9.6.6); any other program asks for
+ * `MPI_THREAD_SINGLE`. An MPI providing less than asked traps here. */
+void nex_mpi_init(int32_t threaded) {
+    int wanted = threaded ? MPI_THREAD_FUNNELED : MPI_THREAD_SINGLE;
     int provided = 0;
     int rank = 0;
 
-    if (MPI_Init_thread(NULL, NULL, MPI_THREAD_SINGLE, &provided) != MPI_SUCCESS) {
+    if (MPI_Init_thread(NULL, NULL, wanted, &provided) != MPI_SUCCESS) {
         fputs("trap: mpi: MPI_Init_thread failed\n", stderr);
         exit(134);
     }
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN);
+    MPI_Comm_set_errhandler(MPI_COMM_SELF, MPI_ERRORS_RETURN);
+
+    if (getenv("NEX_MPI_REPORT_THREADS") != NULL)
+        fprintf(stderr, "rank %d: mpi threads: requested %s, provided %s\n", rank, level_name(wanted), level_name(provided));
+
+    if (provided < wanted) {
+        fprintf(stderr, "rank %d: trap: mpi: the program has a `parallel` construct and needs MPI_THREAD_FUNNELED, and this MPI provides only the %s level\n", rank, level_name(provided));
+        MPI_Abort(MPI_COMM_WORLD, 134);
+        _Exit(134);
+    }
+
     joining_thread = pthread_self();
     nex_mpi_joined(rank, abort_job, finalize_job, unwound);
 }
@@ -87,35 +140,24 @@ int32_t nex_mpi_self(void) { return (int32_t) MPI_Comm_c2f(MPI_COMM_SELF); }
 int64_t nex_mpi_rank(int32_t comm) {
     int rank = 0;
 
-    MPI_Comm_rank(comm_of(comm), &rank);
+    MPI("this_rank", MPI_Comm_rank(comm_of(comm), &rank));
     return rank;
 }
 
 int64_t nex_mpi_size(int32_t comm) {
     int size = 0;
 
-    MPI_Comm_size(comm_of(comm), &size);
+    MPI("num_ranks", MPI_Comm_size(comm_of(comm), &size));
     return size;
 }
 
-void nex_mpi_barrier(int32_t comm) { MPI_Barrier(comm_of(comm)); }
+void nex_mpi_barrier(int32_t comm) { MPI("barrier", MPI_Barrier(comm_of(comm))); }
 
 int64_t nex_mpi_proc_null(void) { return MPI_PROC_NULL; }
 
 int64_t nex_mpi_any_source(void) { return MPI_ANY_SOURCE; }
 
 int64_t nex_mpi_any_tag(void) { return MPI_ANY_TAG; }
-
-/* -- traps ------------------------------------------------------------------------------------ */
-
-/* A trap's message, kept where the runtime can read it after this frame is gone. */
-static char message[512];
-
-#define TRAP(...)                                             \
-    do {                                                      \
-        snprintf(message, sizeof message, __VA_ARGS__);       \
-        nex_trap(message);                                    \
-    } while (0)
 
 /* The collectives in the order `elab_mpi.sysl`'s `COLLECTIVES` gives their codes. */
 enum {
@@ -257,17 +299,17 @@ static MPI_Datatype built(const char *name, const nex_desc *d) {
         a++;
     }
 
-    MPI_Type_contiguous(counted(name, run), MPI_BYTE, &t);
+    MPI(name, MPI_Type_contiguous(counted(name, run), MPI_BYTE, &t));
 
     for (; a < d->rank; a++) {
         if (d->dim[a].extent == 1) continue;
 
-        MPI_Type_create_hvector(counted(name, d->dim[a].extent), 1, (MPI_Aint) d->dim[a].stride, t, &next);
-        MPI_Type_free(&t);
+        MPI(name, MPI_Type_create_hvector(counted(name, d->dim[a].extent), 1, (MPI_Aint) d->dim[a].stride, t, &next));
+        MPI(name, MPI_Type_free(&t));
         t = next;
     }
 
-    MPI_Type_commit(&t);
+    MPI(name, MPI_Type_commit(&t));
     return t;
 }
 
@@ -290,7 +332,7 @@ static buffer buffer_of(const char *name, const nex_desc *d) {
     } else {
         slot = replaced;
         replaced = (replaced + 1) % CACHED;
-        MPI_Type_free(&cache[slot].type);
+        MPI(name, MPI_Type_free(&cache[slot].type));
     }
 
     layout *l = &cache[slot];
@@ -341,12 +383,12 @@ static const char *shape_text(const int64_t *s, char *out, size_t cap) {
 }
 
 /* Every rank's shape of `d`, rank q's at `q * SHAPE`, in a buffer the caller frees. */
-static int64_t *all_shapes(const nex_desc *d, MPI_Comm c, int p) {
+static int64_t *all_shapes(const char *name, const nex_desc *d, MPI_Comm c, int p) {
     int64_t mine[SHAPE];
     int64_t *all = allocated((int64_t) p * SHAPE * (int64_t) sizeof *all);
 
     shape_of(d, mine);
-    MPI_Allgather(mine, SHAPE, MPI_INT64_T, all, SHAPE, MPI_INT64_T, c);
+    MPI(name, MPI_Allgather(mine, SHAPE, MPI_INT64_T, all, SHAPE, MPI_INT64_T, c));
     return all;
 }
 
@@ -382,19 +424,19 @@ static void same_shapes(const char *name, const int64_t *all, int p, int who, bo
 static int size_of(MPI_Comm c) {
     int p = 0;
 
-    MPI_Comm_size(c, &p);
+    MPI("num_ranks", MPI_Comm_size(c, &p));
     return p;
 }
 
 static int rank_in(MPI_Comm c) {
     int r = 0;
 
-    MPI_Comm_rank(c, &r);
+    MPI("this_rank", MPI_Comm_rank(c, &r));
     return r;
 }
 
 static void root_checked(const char *name, int64_t root, int p) {
-    if (root < 0 || root >= p) TRAP("%s: root %lld is no rank of a communicator of %d", name, (long long) root, p);
+    if (root < 0 || root >= p) TRAP("%s: invalid root %lld (communicator has %d ranks)", name, (long long) root, p);
 }
 
 /* -- arithmetic ------------------------------------------------------------------------------- */
@@ -662,7 +704,7 @@ void nex_mpi_reduce(int32_t name_code, const nex_desc *x, const nex_desc *loc, i
     axes_checked(name, x);
     if (name_code == REDUCE_TO) root_checked(name, root, p);
 
-    int64_t *shapes = all_shapes(x, c, p);
+    int64_t *shapes = all_shapes(name, x, c, p);
 
     same_shapes(name, shapes, p, 0, false, shapes);
     free(shapes);
@@ -674,10 +716,10 @@ void nex_mpi_reduce(int32_t name_code, const nex_desc *x, const nex_desc *loc, i
         int count = counted(name, n);
         MPI_Datatype dt = datatype_of(x->type);
 
-        if (name_code == ALLREDUCE) MPI_Allreduce(MPI_IN_PLACE, mine, count, dt, mop, c);
-        else if (name_code == SCAN) MPI_Scan(MPI_IN_PLACE, mine, count, dt, mop, c);
-        else if (me == root) MPI_Reduce(MPI_IN_PLACE, mine, count, dt, mop, (int) root, c);
-        else MPI_Reduce(mine, NULL, count, dt, mop, (int) root, c);
+        if (name_code == ALLREDUCE) MPI(name, MPI_Allreduce(MPI_IN_PLACE, mine, count, dt, mop, c));
+        else if (name_code == SCAN) MPI(name, MPI_Scan(MPI_IN_PLACE, mine, count, dt, mop, c));
+        else if (me == root) MPI(name, MPI_Reduce(MPI_IN_PLACE, mine, count, dt, mop, (int) root, c));
+        else MPI(name, MPI_Reduce(mine, NULL, count, dt, mop, (int) root, c));
 
         if (name_code != REDUCE_TO || me == root) copy_in(x, mine);
         free(mine);
@@ -694,8 +736,8 @@ void nex_mpi_reduce(int32_t name_code, const nex_desc *x, const nex_desc *loc, i
         int64_t len = n - at < chunk ? n - at : chunk;
         int bytes = counted(name, len * es);
 
-        if (name_code == REDUCE_TO) MPI_Gather(mine + at * es, bytes, MPI_BYTE, all, bytes, MPI_BYTE, (int) root, c);
-        else MPI_Allgather(mine + at * es, bytes, MPI_BYTE, all, bytes, MPI_BYTE, c);
+        if (name_code == REDUCE_TO) MPI(name, MPI_Gather(mine + at * es, bytes, MPI_BYTE, all, bytes, MPI_BYTE, (int) root, c));
+        else MPI(name, MPI_Allgather(mine + at * es, bytes, MPI_BYTE, all, bytes, MPI_BYTE, c));
 
         if (keeps) continue;
 
@@ -735,14 +777,14 @@ void nex_mpi_bcast(const nex_desc *x, int64_t root, int32_t comm) {
     axes_checked("bcast", x);
     root_checked("bcast", root, p);
 
-    int64_t *shapes = all_shapes(x, c, p);
+    int64_t *shapes = all_shapes("bcast", x, c, p);
 
     same_shapes("bcast", shapes, p, (int) root, false, shapes);
     free(shapes);
 
     char *mine = packed(x);
 
-    MPI_Bcast(mine, counted("bcast", nex_desc_count(x) * x->elem_size), MPI_BYTE, (int) root, c);
+    MPI("bcast", MPI_Bcast(mine, counted("bcast", nex_desc_count(x) * x->elem_size), MPI_BYTE, (int) root, c));
     copy_in(x, mine);
     free(mine);
 }
@@ -767,7 +809,7 @@ int64_t nex_mpi_gathered(int32_t name_code, const nex_desc *x, int64_t root, int
     axes_checked(name, x);
     if (!to_all(name_code)) root_checked(name, root, p);
 
-    int64_t *shapes = all_shapes(x, c, p);
+    int64_t *shapes = all_shapes(name, x, c, p);
 
     same_shapes(name, shapes, p, 0, concat, shapes);
 
@@ -787,7 +829,7 @@ void nex_mpi_gather(int32_t name_code, const nex_desc *x, const nex_desc *into, 
     MPI_Comm c = comm_of(comm);
     int p = size_of(c);
     int64_t es = x->elem_size;
-    int64_t *shapes = all_shapes(x, c, p);
+    int64_t *shapes = all_shapes(name, x, c, p);
     int *counts = allocated((int64_t) p * (int64_t) sizeof *counts);
     int *displs = allocated((int64_t) p * (int64_t) sizeof *displs);
     int64_t total = 0;
@@ -809,8 +851,8 @@ void nex_mpi_gather(int32_t name_code, const nex_desc *x, const nex_desc *into, 
     char *all = allocated(total);
     int me = rank_in(c);
 
-    if (to_all(name_code)) MPI_Allgatherv(mine, counts[me], MPI_BYTE, all, counts, displs, MPI_BYTE, c);
-    else MPI_Gatherv(mine, counts[me], MPI_BYTE, all, counts, displs, MPI_BYTE, (int) root, c);
+    if (to_all(name_code)) MPI(name, MPI_Allgatherv(mine, counts[me], MPI_BYTE, all, counts, displs, MPI_BYTE, c));
+    else MPI(name, MPI_Gatherv(mine, counts[me], MPI_BYTE, all, counts, displs, MPI_BYTE, (int) root, c));
 
     if (to_all(name_code) || me == root) copy_in(into, all);
 
@@ -837,7 +879,7 @@ static void root_shape(int32_t name_code, const nex_desc *x, int64_t root, MPI_C
     axes_checked(name, x);
     root_checked(name, root, p);
     shape_of(x, s);
-    MPI_Bcast(s, SHAPE, MPI_INT64_T, (int) root, c);
+    MPI(name, MPI_Bcast(s, SHAPE, MPI_INT64_T, (int) root, c));
 
     if (name_code == SCATTER && s[s[0]] != p)
         TRAP("scatter: the root's array has %lld parts along its last axis, and the communicator %d ranks", (long long) s[s[0]], p);
@@ -891,7 +933,7 @@ void nex_mpi_scatter(int32_t name_code, const nex_desc *x, const nex_desc *into,
     char *all = me == root ? packed(x) : NULL;
     char *mine = allocated(counts[me]);
 
-    MPI_Scatterv(all, counts, displs, MPI_BYTE, mine, counts[me], MPI_BYTE, (int) root, c);
+    MPI(name, MPI_Scatterv(all, counts, displs, MPI_BYTE, mine, counts[me], MPI_BYTE, (int) root, c));
     copy_in(into, mine);
     free(all);
     free(mine);
@@ -906,7 +948,7 @@ void nex_mpi_alltoall(const nex_desc *x, const nex_desc *into, int32_t comm) {
 
     axes_checked("alltoall", x);
 
-    int64_t *shapes = all_shapes(x, c, p);
+    int64_t *shapes = all_shapes("alltoall", x, c, p);
 
     same_shapes("alltoall", shapes, p, 0, false, shapes);
 
@@ -923,7 +965,7 @@ void nex_mpi_alltoall(const nex_desc *x, const nex_desc *into, int32_t comm) {
     char *mine = packed(x);
     char *out = allocated((int64_t) part * p);
 
-    MPI_Alltoall(mine, part, MPI_BYTE, out, part, MPI_BYTE, c);
+    MPI("alltoall", MPI_Alltoall(mine, part, MPI_BYTE, out, part, MPI_BYTE, c));
     copy_in(into, out);
     free(mine);
     free(out);
@@ -931,12 +973,39 @@ void nex_mpi_alltoall(const nex_desc *x, const nex_desc *into, int32_t comm) {
 
 /* -- point to point --------------------------------------------------------------------------- */
 
+/* A trap where `rank` is no rank of `c`: `no_rank` always passes, and so does `any_source` where the
+ * operation receives. */
+static void peer_checked(const char *op, int64_t rank, MPI_Comm c, bool receives) {
+    if (rank == MPI_PROC_NULL || (receives && rank == MPI_ANY_SOURCE)) return;
+
+    int p = size_of(c);
+
+    if (rank < 0 || rank >= p) TRAP("%s: invalid rank %lld (communicator has %d ranks)", op, (long long) rank, p);
+}
+
+/* A trap where `tag` is no tag the MPI carries (0 up to its `MPI_TAG_UB`); `any_tag` passes where the
+ * operation receives. */
+static void tag_checked(const char *op, int64_t tag, bool receives) {
+    int *upper = NULL;
+    int found = 0;
+    int64_t most = 32767;
+
+    if (receives && tag == MPI_ANY_TAG) return;
+
+    if (MPI_Comm_get_attr(MPI_COMM_WORLD, MPI_TAG_UB, &upper, &found) == MPI_SUCCESS && found) most = *upper;
+    if (tag < 0 || tag > most) TRAP("%s: invalid tag %lld (tags are 0 to %lld)", op, (long long) tag, (long long) most);
+}
+
 void nex_mpi_send(const nex_desc *x, int64_t to, int64_t tag, int32_t comm) {
+    MPI_Comm c = comm_of(comm);
+
     axes_checked("send", x);
+    peer_checked("send", to, c, false);
+    tag_checked("send", tag, false);
 
     buffer b = buffer_of("send", x);
 
-    MPI_Send(b.base, b.count, b.type, (int) to, (int) tag, comm_of(comm));
+    MPI("send", MPI_Send(b.base, b.count, b.type, (int) to, (int) tag, c));
 }
 
 /* The message matched by `from` and `tag` into `x`, whose element count must be the message's;
@@ -948,21 +1017,23 @@ static void received(const char *name, const nex_desc *x, int64_t from, int64_t 
     int64_t n = nex_desc_count(x);
 
     axes_checked(name, x);
+    peer_checked(name, from, c, true);
+    tag_checked(name, tag, true);
 
     if (from == MPI_PROC_NULL) {
         copy_in(status, (const char *) out);
         return;
     }
 
-    MPI_Probe((int) from, (int) tag, c, &st);
-    MPI_Get_count(&st, MPI_BYTE, &bytes);
+    MPI(name, MPI_Probe((int) from, (int) tag, c, &st));
+    MPI(name, MPI_Get_count(&st, MPI_BYTE, &bytes));
 
     if (bytes != n * x->elem_size)
         TRAP("%s: the message from rank %d holds %lld values; the array holds %lld", name, st.MPI_SOURCE, (long long) (bytes / x->elem_size), (long long) n);
 
     buffer b = buffer_of(name, x);
 
-    MPI_Recv(b.base, b.count, b.type, st.MPI_SOURCE, st.MPI_TAG, c, MPI_STATUS_IGNORE);
+    MPI(name, MPI_Recv(b.base, b.count, b.type, st.MPI_SOURCE, st.MPI_TAG, c, MPI_STATUS_IGNORE));
     out[0] = st.MPI_SOURCE;
     out[1] = st.MPI_TAG;
     out[2] = n;
@@ -979,12 +1050,14 @@ void nex_mpi_sendrecv(const nex_desc *x, int64_t to, int64_t send_tag, const nex
     MPI_Request request;
 
     axes_checked("sendrecv", x);
+    peer_checked("sendrecv", to, c, false);
+    tag_checked("sendrecv", send_tag, false);
 
     buffer b = buffer_of("sendrecv", x);
 
-    MPI_Isend(b.base, b.count, b.type, (int) to, (int) send_tag, c, &request);
+    MPI("sendrecv", MPI_Isend(b.base, b.count, b.type, (int) to, (int) send_tag, c, &request));
     received("sendrecv", y, from, recv_tag, c, status);
-    MPI_Wait(&request, MPI_STATUS_IGNORE);
+    MPI("sendrecv", MPI_Wait(&request, MPI_STATUS_IGNORE));
 }
 
 /* -- the exchange block ----------------------------------------------------------------------- */
@@ -1041,46 +1114,36 @@ static posted *posting(void) {
 /* `send` in an `exchange` block: `MPI_Isend` of `x` where it lies, which the block's end waits for. */
 void nex_mpi_isend(const nex_desc *x, int64_t to, int64_t tag, int32_t comm) {
     axes_checked("send", x);
+    peer_checked("send", to, comm_of(comm), false);
+    tag_checked("send", tag, false);
 
     buffer b = buffer_of("send", x);
     posted *p = posting();
 
     *p = (posted){MPI_REQUEST_NULL, comm_of(comm), false, nex_desc_count(x), x->elem_size};
-    MPI_Isend(b.base, b.count, b.type, (int) to, (int) tag, p->comm, &p->request);
+    MPI("send", MPI_Isend(b.base, b.count, b.type, (int) to, (int) tag, p->comm, &p->request));
 }
 
 /* `recv` in an `exchange` block: `MPI_Irecv` into `x` where it lies; the end checks the count. */
 void nex_mpi_irecv(const nex_desc *x, int64_t from, int64_t tag, int32_t comm) {
     axes_checked("recv", x);
+    peer_checked("recv", from, comm_of(comm), true);
+    tag_checked("recv", tag, true);
 
     buffer b = buffer_of("recv", x);
     posted *p = posting();
 
     *p = (posted){MPI_REQUEST_NULL, comm_of(comm), true, nex_desc_count(x), x->elem_size};
-    MPI_Irecv(b.base, b.count, b.type, (int) from, (int) tag, p->comm, &p->request);
+    MPI("recv", MPI_Irecv(b.base, b.count, b.type, (int) from, (int) tag, p->comm, &p->request));
 }
 
-/* Every request of block `k` completed, each communicator's errors returned rather than fatal for
- * the wait, so a receive the message overflows traps with nex's words: `statuses` gets each one's
- * status and `codes` its error code. Each request is waited for on its own, which completes them
+/* Every request of block `k` completed: `statuses` gets each one's status and `codes` its error
+ * code, the communicators' errors being returned (`nex_mpi_init`), so a receive the message
+ * overflows traps with nex's words. Each request is waited for on its own, which completes them
  * all as `MPI_Waitall` would, since all are posted, and says which failed and how. */
 static void waited(block *k, MPI_Status *statuses, int *codes) {
-    MPI_Errhandler *handlers = allocated((int64_t) k->count * (int64_t) sizeof *handlers);
-
-    for (int i = 0; i < k->count; i++) {
-        MPI_Comm_get_errhandler(k->posts[i].comm, &handlers[i]);
-        MPI_Comm_set_errhandler(k->posts[i].comm, MPI_ERRORS_RETURN);
-    }
-
     for (int i = 0; i < k->count; i++)
         codes[i] = MPI_Wait(&k->posts[i].request, &statuses[i]);
-
-    for (int i = k->count - 1; i >= 0; i--) {
-        MPI_Comm_set_errhandler(k->posts[i].comm, handlers[i]);
-        MPI_Errhandler_free(&handlers[i]);
-    }
-
-    free(handlers);
 }
 
 /* The end of an `exchange` block: every request it posted completed, and each receive's message
@@ -1117,7 +1180,7 @@ void nex_mpi_exchange_end(void) {
 
         if (!p.receives || st.MPI_SOURCE == MPI_PROC_NULL) continue;
 
-        MPI_Get_count(&st, MPI_BYTE, &bytes);
+        MPI("recv", MPI_Get_count(&st, MPI_BYTE, &bytes));
 
         if (bytes != p.values * p.elem_size) {
             free(statuses);
@@ -1297,7 +1360,7 @@ void nex_mpi_global(int32_t name_code, const nex_desc *x, const nex_desc *y, con
     int64_t span[2] = {offset, n};
     int64_t *spans = allocated((int64_t) p * 2 * (int64_t) sizeof *spans);
 
-    MPI_Allgather(span, 2, MPI_INT64_T, spans, 2, MPI_INT64_T, c);
+    MPI(name, MPI_Allgather(span, 2, MPI_INT64_T, spans, 2, MPI_INT64_T, c));
 
     int64_t total = 0;
     int64_t next = 1;
@@ -1379,7 +1442,7 @@ void nex_mpi_global(int32_t name_code, const nex_desc *x, const nex_desc *y, con
     int64_t all_runs = 0;
     int64_t all_values = 0;
 
-    MPI_Allgather(mine, 2, MPI_INT, both, 2, MPI_INT, c);
+    MPI(name, MPI_Allgather(mine, 2, MPI_INT, both, 2, MPI_INT, c));
 
     for (int q = 0; q < p; q++) {
         run_counts[q] = both[2 * q];
@@ -1393,8 +1456,8 @@ void nex_mpi_global(int32_t name_code, const nex_desc *x, const nex_desc *y, con
     run *every = allocated(all_runs);
     char *every_value = allocated(all_values);
 
-    MPI_Allgatherv(runs, mine[0], MPI_BYTE, every, run_counts, run_displs, MPI_BYTE, c);
-    MPI_Allgatherv(values, mine[1], MPI_BYTE, every_value, value_counts, value_displs, MPI_BYTE, c);
+    MPI(name, MPI_Allgatherv(runs, mine[0], MPI_BYTE, every, run_counts, run_displs, MPI_BYTE, c));
+    MPI(name, MPI_Allgatherv(values, mine[1], MPI_BYTE, every_value, value_counts, value_displs, MPI_BYTE, c));
 
     /* Where each run's values begin, before the runs are put in global order. */
     int64_t count = all_runs / (int64_t) sizeof(run);

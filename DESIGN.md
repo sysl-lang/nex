@@ -1566,10 +1566,15 @@ gathered shapes.
 
 #### 9.6.4 Errors
 
-Every communicator nex creates has `MPI_ERRORS_RETURN`, and a failed call **traps**, as the value
-forms of LAPACK do (§10.5): the message names the operation in nex's terms and the cause from
-`MPI_Error_string` — *"send: rank 9 does not exist in a communicator of 8"*, *"recv: message
-truncated: 12 values into an array of 10"*. A trap can be caught locally by `assert_traps`, but no
+`MPI_COMM_WORLD` and `MPI_COMM_SELF` have `MPI_ERRORS_RETURN` from the start of the job, and every
+communicator derived from them inherits it, so no MPI call ends the job inside the MPI. A failed
+call **traps**, as the value forms of LAPACK do (§10.5): the message names the operation in nex's
+terms and the cause. The commonest causes are checked before the call so the words are nex's own
+and the same under every MPI — *"send: invalid rank 9 (communicator has 4 ranks)"*, *"recv: invalid
+tag -4 (tags are 0 to 32767)"*, *"bcast: invalid root 5 (communicator has 3 ranks)"* (`no_rank`
+always passes, `any_rank` and `any_tag` where the operation receives) — and any other error an MPI
+call returns traps with `MPI_Error_string`'s text, *"recv: message truncated: 12 values into an
+array of 10"*. A trap can be caught locally by `assert_traps`, but no
 MPI error leaves the other ranks in a known state, so an uncaught one aborts the job (§9.6.2). MPI
 reports no error a program could handle the way `solve_inplace` reports a singular matrix, so there
 is no `Result` form; fault tolerance (ULFM's `MPI_Comm_shrink`, Fortran's `stat_failed_image`) is §15.
@@ -1614,7 +1619,12 @@ MPI+OpenMP layout of every modern cluster (`srun --ntasks-per-node=4 --cpus-per-
 call is not `@pure`, so §9.4 already refuses it in a parallel body: only the thread that runs `main`
 calls MPI, which is **`MPI_THREAD_FUNNELED`**. The program decides the level, as it decides libomp
 (§9.5): one with a `parallel` construct asks for `FUNNELED`, one without for `SINGLE`, and a library
-providing less traps at start-up with the level it gave.
+providing less traps at start-up with the level it gave (*"rank 0: trap: mpi: the program has a
+`parallel` construct and needs MPI_THREAD_FUNNELED, and this MPI provides only the single level"*).
+The compiler passes the choice to the shim's `nex_mpi_init`. Setting `NEX_MPI_REPORT_THREADS` in the
+environment makes every rank print the level it requested and the one the MPI provided
+(*"rank 0: mpi threads: requested funneled, provided funneled"*) to standard error. A hybrid job gives
+the same bits at every `OMP_NUM_THREADS` (§9.2.1), and so for any `-np` × thread split of one rank count.
 
 #### 9.6.7 Building, linking and launching
 
