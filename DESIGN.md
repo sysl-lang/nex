@@ -1921,8 +1921,8 @@ result) and an `alpha` of zero leaves `A` and `B` unread. Both engines make the 
 extents the statement traps *"shape mismatch"* on either path.
 
 **A BLAS result may differ in the last bits from the `linalg` path**, since it sums in a different
-order. Every corpus matrix is far below the threshold. A build flag disables dispatch
-(**PROPOSED**: `nex build --no-blas`).
+order. Every corpus matrix is far below the threshold. No build option disables
+dispatch.
 
 ### 10.5 LAPACK
 

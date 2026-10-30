@@ -43,7 +43,7 @@ output = "/juicerdocs.js"
 minify = true
 
 [juicerdocs]
-version    = "v0.0.1"
+version    = "v0.1.0"
 getStarted = true
 logo       = "/nex-logo.png"
 icon       = "/nex-icon.png"

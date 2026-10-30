@@ -5,7 +5,7 @@
 // arguments after `--` and exits with its status; `run --interp` and `test --interp` interpret it
 // instead (`interp.sysl` of the library), with no toolchain. `test` runs the project's `@test` functions, those
 // whose names contain the substring after the file where one is given (`test_runner.sysl`).
-// `--fpe-trap` makes real division by zero, invalid operations and overflow trap (DESIGN §2.5);
+// `nex --version` (or `nex version`) prints the version. `--fpe-trap` makes real division by zero, invalid operations and overflow trap (DESIGN §2.5);
 // `--prelude-path <dir>` names the source prelude's directory (`modules.sysl`); `-L dir` and
 // `-l lib` add a library search directory and a library to the link (DESIGN §10.1). `run --np N`
 // and `test --np N` run the program, or each test, as an N-rank MPI job under the launcher the
@@ -19,9 +19,13 @@ import sysl.process.run
 import sysl.text.parse_int
 import sh.sysl.parsing.source
 
-private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run | test> [--fpe-trap] [--interp] [--np ranks] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
+private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run | test | version> [--fpe-trap] [--interp] [--np ranks] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
 
 main(args: []string)
+    if args.len == 2 && (args[1] == "--version" || args[1] == "version")
+        print(s"nex $NEX_VERSION")
+        return
+
     if args.len < 3
         print(usage)
         exit(2)

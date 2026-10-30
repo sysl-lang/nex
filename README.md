@@ -20,9 +20,13 @@ reference is right until the specification says otherwise. The architecture and 
 
 ## Status
 
-The port has started: what exists is the command's skeleton and the oracle. `testdata/corpus/`
-holds the reference's program corpus — 425 programs, each beside the exact output it must print —
-and six more for units of measure, and every milestone of the port is measured against it.
+Version 0.1.0. nex compiles a program through MLIR to a native executable, and runs it on an
+interpreter with no toolchain (`nex run --interp`); both engines are held to the same output on
+`testdata/corpus/` — the reference's 425 programs, each beside the exact output it must print — and
+the programs of `testdata/v2/`. Units of measure, `parallel`, the C and Fortran FFI, BLAS and LAPACK
+dispatch, assumed-rank descriptors and the embedding API are built. The `mpi` module is a preview.
+It is built and tested on macOS (Apple silicon) only; Linux has not been tried. `bench/RESULTS.md`
+has the performance against gfortran.
 
 ## Layout
 

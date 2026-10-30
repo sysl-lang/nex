@@ -7,7 +7,7 @@
 
 package {
   name    = "embed"
-  version = "0.0.1"
+  version = "0.1.0"
   sysl    = "0.8.4"
 }
 

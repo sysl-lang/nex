@@ -15,6 +15,9 @@ module sh.sysl.nex
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.{Diagnostic, Source}
 
+// The version `nex --version` prints; it is the `version` of every `sysl.hocon` of the workspace.
+val NEX_VERSION = "0.1.0"
+
 // A program loaded and elaborated: its typed IR, and the project it was read from, against whose files
 // a diagnostic a later pass gives is rendered (`Project.render`).
 struct Loaded
