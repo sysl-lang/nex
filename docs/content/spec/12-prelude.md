@@ -70,8 +70,8 @@ of its argument (an integer argument to a transcendental function gives `real64`
 | `exp(x)`, `log(x)` | exponential, natural logarithm | `EXP`, `LOG` |
 | `log2(x)`, `log10(x)` | base-2 and base-10 logarithms | `LOG(x)/LOG(2.0)`, `LOG10` |
 | `sin`, `cos`, `tan` | trigonometric functions, radians | `SIN`, `COS`, `TAN` |
-| `asin`, `acos`, `atan` | inverse trigonometric functions | `ASIN`, `ACOS`, `ATAN` |
-| `atan2(y, x)` | angle of the point (x, y), in (−π, π] | `ATAN2(Y, X)` |
+| `asin`, `acos`, `atan` | inverse trigonometric functions; the result is an angle, a `real<rad>` | `ASIN`, `ACOS`, `ATAN` |
+| `atan2(y, x)` | angle of the point (x, y), in (−π, π], a `real<rad>` | `ATAN2(Y, X)` |
 | `sinh`, `cosh`, `tanh` | hyperbolic functions | `SINH`, `COSH`, `TANH` |
 | `asinh`, `acosh`, `atanh` | inverse hyperbolic functions | `ASINH`, `ACOSH`, `ATANH` |
 | `hypot(x, y)` | √(x² + y²) without intermediate overflow | `HYPOT` |

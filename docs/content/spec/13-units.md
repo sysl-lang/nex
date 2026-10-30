@@ -200,12 +200,21 @@ and `1/s` are one dimension, so `omega: real<rad/s>` holds `theta / t`, and `ome
 - `sqrt` halves every power: the square root of a `real<m^2>` is a `real<m>`.
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit. `min`, `max` and `hypot` convert their second argument as `+` does.
-- `atan2(y, x)` takes two values of one dimension and gives a plain number, in radians.
+- `atan2(y, x)` takes two values of one dimension and gives an angle, a `real<rad>`: their unit
+  cancels, so `atan2(1.0<m>, 2.0<mm>)` is an angle.
 - `sin`, `cos` and `tan` take an angle in any angle unit (`sin(30.0<deg>)`), or a plain number,
   which is radians.
-- `exp`, `log`, `asin`, `acos`, `atan` and the other elementary functions take and return
-  dimensionless values; an angle is not one. The inverse functions return radians as a plain
-  number: `asin(x) * 1.0<rad>` makes it an angle.
+- `exp`, `log`, `asin`, `acos`, `atan` and the other elementary functions take dimensionless
+  values; an angle is not one. `asin`, `acos` and `atan` give an angle, a `real<rad>` (on an array,
+  an array of angles); the others give a dimensionless value. The angle goes straight back into
+  `sin`, converts with `to<deg>(atan(x))`, and where a plain number is wanted `strip(asin(x))` gives
+  its number in radians:
+
+  ```nex
+  print(asin(0.5))                 // 0.5235987755982988 rad
+  print(to<deg>(atan(1.0)))        // 45.0 deg
+  print(sin(asin(0.25)))           // 0.25
+  ```
 - `product(a)` has `a`'s unit to the power of its length, so an `a` that carries a unit needs a
   static extent.
 - `print` and string interpolation show the unit after the number, separated by a space:

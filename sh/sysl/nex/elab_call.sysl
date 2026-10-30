@@ -36,6 +36,14 @@ private among(name: string, set: []const string) -> bool
 
     false
 
+// The inverse trigonometric functions of one argument, whose real result is an angle in radians
+// (DESIGN §13.4); `atan2` gives one too.
+private val INVERSE_TRIG = ["asin", "acos", "atan"]
+
+// The real result `t` of prelude function `name`: an angle in radians where `name` is an inverse
+// trigonometric function, and `t` itself otherwise.
+private inverse_angle(name: string, t: Ty) -> Ty = if among(name, INVERSE_TRIG) then measured(t, base_unit(ANGLE)) else t
+
 // Whether `name` is a prelude function.
 is_builtin(name: string) -> bool = among(name, REAL_FUNCTIONS) || among(name, OTHER_BUILTINS)
 
@@ -411,8 +419,8 @@ impl Elab
             for k in 0..<out.len()
                 out.set(k, promote(out[k], with_elem(out[k].ty, ty)))
 
-            // `atan2` gives an angle, dimensionless whatever its arguments' one unit (DESIGN §13.4).
-            val result = if name == "atan2" then base_of(ty) else ty
+            // `atan2` gives an angle in radians, whatever its arguments' one unit (DESIGN §13.4).
+            val result = if name == "atan2" then measured(base_of(ty), base_unit(ANGLE)) else ty
 
             if any_array(out) then return self.elemental(span, name, out, result)
 
@@ -444,14 +452,14 @@ impl Elab
         if is_array(v.ty)
             val r = self.scalar_result(span, name, elem_of(v.ty))
 
-            if is_real(r) && is_int(elem_of(v.ty)) then out.set(0, promote(v, with_elem(v.ty, REAL)))
+            if is_real(base_of(r)) && is_int(elem_of(v.ty)) then out.set(0, promote(v, with_elem(v.ty, REAL)))
 
             return self.elemental(span, name, out, r)
 
         val result = self.scalar_result(span, name, v.ty)
 
         // An integer argument to a real function is widened to `real64` first.
-        if is_real(result) && is_int(v.ty) then out.set(0, promote(v, REAL))
+        if is_real(base_of(result)) && is_int(v.ty) then out.set(0, promote(v, REAL))
 
         texpr(span, result, TBuiltin(name, out))
     end builtin
@@ -473,8 +481,8 @@ impl Elab
         elif name == "arg"
             if is_complex(t) then return Real(bits_of(t))
         else
-            if is_int(t) then return REAL
-            if is_real(t) then return t
+            if is_int(t) then return inverse_angle(name, REAL)
+            if is_real(t) then return inverse_angle(name, t)
             if is_complex(t) && among(name, COMPLEX_FUNCTIONS) then return t
 
         self.fail(span, s"`${name}` does not take ${show_ty(t)}")

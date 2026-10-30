@@ -87,7 +87,7 @@ units_array_elemental()
     assert_eq(elaborated("def main() =\n  val x = [1.0<mm>]\n  val y = [1.0<in>]\n  print(sin(x / y))\n"),
         "(def main () void (block (val x#0:[real64<mm>] (array:[real64<mm>] 1.0<mm>)) (val y#1:[real64<in>] (array:[real64<in>] 1.0<in>)) (print (.sin:[real64] (rescale:[real64] 0.03937007874015748 (./:[real64<mm/in>] x#0 y#1))))))")
     assert_eq(elaborated("def main() =\n  val x = [1.0<m>]\n  print(min(x, [1.0<mm>]))\n  print(atan2(x, x))\n"),
-        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.min:[real64<m>] x#0 (rescale:[real64<m>] 0.001 (array:[real64<mm>] 1.0<mm>)))) \" m\")) (print (.atan2:[real64] x#0 x#0))))")
+        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.min:[real64<m>] x#0 (rescale:[real64<m>] 0.001 (array:[real64<mm>] 1.0<mm>)))) \" m\")) (print (s (strip:[real64] (.atan2:[real64<rad>] x#0 x#0)) \" rad\"))))")
     assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(sin(x))\n"), "error: `sin` takes an angle or a plain number, which is radians, and this is real64<m> (length); strip the unit to pass the number: `sin(strip(x))` @3:9")
     assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(min(x, [1.0<s>]))\n"), "error: `min` cannot combine m and s: length and time are different dimensions @3:9")
 
