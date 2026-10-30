@@ -59,7 +59,7 @@ run_leak_programs()
 run_struct_with_array_waits()
     val e = emitted("struct Grid\n  cells: [real]\n\ndef main() =\n  val g = Grid([1.0, 2.0])\n  print(g.cells[1])\n").err().unwrap_or("")
 
-    assert_eq(e, "error: an array inside a struct, tuple or enum (Grid) is not compiled yet @5:11")
+    assert_eq(e, "error: an array inside a struct, tuple or enum (Grid) is not compiled yet @5:3")
 
 // `text` compiled into `exe`.
 private compiled(b: Bench, text: string, exe: string)

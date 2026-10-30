@@ -37,13 +37,17 @@ run_m6_corpus()
 
 // `m` lowered by the pipeline's passes up to and including the first whose text starts `last`.
 private lowered_until(b: Bench, m: string, last: string) -> string
-    val at = STAGES.find(last).unwrap()
-    val end = at + STAGES[at..].find(",").unwrap()
+    var passes: Buf[string] = buf()
+
+    for p in split(STAGES, ",")
+        passes.push(p)
+        if p.starts_with(last) then break
+
     val input = s"${b.work}/stage.mlir"
 
     write_text(input, m).unwrap()
 
-    val out = capture(s"${b.tc.llvm_bin}/mlir-opt", [input, s"--pass-pipeline=${STAGES[0..<end]})"], stderr = true).unwrap()
+    val out = capture(s"${b.tc.llvm_bin}/mlir-opt", [input, s"--pass-pipeline=${join(passes.view(), ",")})"], stderr = true).unwrap()
 
     assert(out.status.ok(), out.err.unwrap_or(""))
     out.text
@@ -81,4 +85,4 @@ static_shape_errors()
               "error: argument `m` must be [real; 2, 2], but this is [real; 3, 3]: axis 1 is 3 here, and 2 is required @4:11")
     assert_eq(emitted("def main() =\n  val a: [real; 2, 3] = zeros((2, 3)) * 1.0\n  val b: [real; 2, 2] = zeros((2, 2)) * 1.0\n  print(a @ b)\n").err().unwrap_or(""),
               "error: `@` needs the inner extents to agree; they are 3 and 2 @4:9")
-    assert_eq(emitted("def main() =\n  val a = [[1, 2]]\n  print(extent(a, 3))\n").err().unwrap_or(""), "error: there is no axis 3: this array has rank 2 @3:20")
+    assert_eq(emitted("def main() =\n  val a = [[1, 2]]\n  print(extent(a, 3))\n").err().unwrap_or(""), "error: there is no axis 3: this array has rank 2 @3:19")

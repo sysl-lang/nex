@@ -749,7 +749,8 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
 `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`, `dot`.
 
 - `minloc(a)` and `maxloc(a)` return the index of the extreme element, a tuple of indices for rank
-  ≥ 2; ties go to the first in storage order.
+  ≥ 2; ties go to the first in storage order. A `nan` is never the extreme unless every element is
+  one, when the location is the first; an empty array's location is `0`.
 - **Every reduction takes a named `dim =` argument**, reducing along that axis to rank R − 1:
   `sum(m, dim = 2)`, `maxval(a, dim = 1)`, `maxloc(a, dim = 1)`.
 - `min` and `max` are elemental (§7.3), never reductions: `max(a, 0.0)` clamps, and the extremes of
@@ -971,7 +972,9 @@ fixed-size blocks (4096 iterations; the size is a compile-time constant, not a t
 block is reduced sequentially from the operator's identity (`0` for `+`, `1` for `*`, `+inf` for
 a real `min` and the type's largest value for an integer `min`, `-inf` / the type's smallest value
 for `max`, …; for a user operator, the variable's starting value), the block partials are combined in
-a **fixed pairwise tree** over the block numbers, and the tree's result is combined once with the
+a **fixed pairwise tree** over the block numbers — in rounds, each combining partials 1 and 2, 3 and
+4, and so on, an odd last one carried into the next round as it is, until one is left — and the
+tree's result is combined once with the
 variable's starting value. Threads only decide who computes
 which block, never the order of combination, so `OMP_NUM_THREADS=1` and `OMP_NUM_THREADS=64` give
 identical bits.
