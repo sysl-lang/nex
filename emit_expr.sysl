@@ -658,6 +658,8 @@ impl Emitter
         var tys = ""
         // The `inout` array arguments, which the call hands back.
         var back: Buf[Held] = buf()
+        // The `inout` windows of arrays of non-numbers, which are written back after the call.
+        var lent: Buf[ItemsLent] = buf()
 
         for a in args
             var v = ""
@@ -671,6 +673,12 @@ impl Emitter
                         v = self.open_place(place, &frames)
                         t = self.ty(a.span, place.ty)
                         back.push(Held(place, frames))
+                    elif self.is_items_window(place)
+                        val l = self.items_lend(a.span, place)
+
+                        lent.push(l)
+                        v = l.lent
+                        t = "!llvm.ptr"
                     else
                         v = self.place_ptr(place)
                         t = "!llvm.ptr"
@@ -690,12 +698,29 @@ impl Emitter
             vals += v
             tys += t
 
+        val result = self.call_with(span, callee, args, vals, tys, ret, back)
+
+        for l in lent
+            self.items_hand_back(l)
+
+        result
+    end call_value
+
+    // The call of `callee` with the arguments `args`, their values `vals` of MLIR types `tys`,
+    // handing back the `inout` arrays `back`.
+    call_with(*self, span: Span, callee: TExpr, args: Buf[TExpr], vals: string, tys: string, ret: Ty, back: Buf[Held]) -> string
         val r = self.ty(span, ret)
 
         if back.len() > 0
             *callee.kind match
                 TFnRef(name) -> return self.call_handing_back(span, s"@\"n.$name\"($vals) : ($tys)", ret, back)
-                _ -> return self.unsupported(span, "an `inout` array passed through a function value")
+                _ ->
+                    val c = self.ex(callee)
+                    val code = self.def(s"llvm.extractvalue $c[0] : $CLOSURE")
+                    val env = self.def(s"llvm.extractvalue $c[1] : $CLOSURE")
+                    val through = self.through_value(span, args, ret)
+
+                    return self.call_handing_back(span, s"@\"$through\"($code, $env, $vals) : (!llvm.ptr, !llvm.ptr, $tys)", ret, back)
 
         *callee.kind match
             TFnRef(name) -> self.own(self.effect(s"func.call @\"n.$name\"($vals) : ($tys) -> ${result_text(r)}", r), ret)
@@ -711,7 +736,7 @@ impl Emitter
                 val v = self.effect(s"func.call_indirect $f($with_env) : $fty", rb)
 
                 if is_arr(ret) then self.def(s"bufferization.to_tensor $v restrict : $rb to $r") else self.own(v, ret)
-    end call_value
+    end call_with
 end Emitter
 
 private is_fn_ref(e: TExpr) -> bool = *e.kind match

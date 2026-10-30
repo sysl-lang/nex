@@ -1,0 +1,146 @@
+struct P
+  name: string
+  n: integer
+
+enum Cell =
+  Wall
+  Open(label: string)
+
+def shout(v: inout [string]) =
+  for k in 1..length(v)
+    v[k] = v[k] + "!"
+
+def grow(v: inout [string]) =
+  v = ["only"]
+
+def share_then_write(v: inout [string]) =
+  val keep = v
+  v[1] = keep[2] + "k"
+
+def deeper(v: inout [string]) =
+  shout(v[1..1])
+
+def half(v: inout [string]) =
+  v[1] = "w"
+  print(v[99])
+
+def put_one(v: inout [string]) =
+  v[1..2] = ["x"]
+
+def glyph(c: Cell): string =
+  c match
+    Wall -> "#"
+    Open(l) -> l
+
+def corner(g: [string; :, :]): string = g[1, 1] + g[end, end]
+
+def main() =
+  // A matrix of strings: rows, columns, elements, and its shape.
+  var m = [["a", "b", "c"], ["d", "e", "f"]]
+  val first = m
+  print(m)
+  print(m[2])
+  print(m[:, 2])
+  print(m[2, 3])
+  print(m[end, end - 1])
+  print(shape(m))
+  print(size(m))
+  print(rank(m))
+  print(extent(m, 2))
+
+  // Slices, negative strides and `reverse`, read as values.
+  print(m[1..2, 2..])
+  print(m[.. by -1, :])
+  print(m[:, .. by -2])
+  print(m[2, 3..1 by -1])
+  print(reverse(m))
+  print(reverse(m, 2))
+  var k = 1
+  k += 1
+  print(reverse(m, k))
+  print(corner(m[.. by -1, .. by -1]))
+  for x in m[:, 2..]
+    print(x)
+
+  // Writes: an element, a window filled, a window given an array, a slice of a slice, an inout window.
+  m[1, 1] = "A"
+  m[:, 3] = "q"
+  m[2, 1..2] = ["D", "E"]
+  m[1..2][1, 2..][1] = "B"
+  shout(m[2, ..])
+  shout(m[.. by -1, 1])
+  print(m)
+  // `first` shared the array until the writes, and keeps what it had.
+  print(first)
+
+  // An `inout` window the callee shares before writing, passes on as a window of its own, or writes
+  // and then traps in: every write reaches the caller's array.
+  var part = ["a", "b", "c", "d"]
+  share_then_write(part[2..3])
+  deeper(part[.. by -1])
+  print(part)
+  var halfway = ["a", "b", "c"]
+  assert_traps(() -> half(halfway[2..3]), "index out of bounds")
+  print(halfway)
+
+  // A view keeps the values it had when it was taken; a var copied from one is its own.
+  val row = m[1]
+  var col = m[:, 1]
+  m[1, 1] = "zz"
+  col[2] = "yy"
+  print(row)
+  print(col)
+  print(m[:, 1])
+
+  // An `origin` view: indices and `end` shifted, a slice of it 1-based again.
+  val w = origin(m, 0, -1)
+  print(w[0, -1])
+  print(w[1, end])
+  print(w[0..1, 0])
+  print(rebase(w)[1, 1])
+
+  // Rank 3, and structs, enums, tuples and closures at rank 2.
+  val t = [[["a", "b"], ["c", "d"]], [["e", "f"], ["g", "h"]]]
+  print(t[2, 1, 2])
+  print(t[:, 2, :])
+  print(t[2])
+  var ps = [[P("x", 1), P("y", 2)], [P("z", 3), P("w", 4)]]
+  val qs = ps
+  ps[2, 1].n = 30
+  ps[1, :] = P("r", 0)
+  print(ps[2, 1].n)
+  print(qs[2, 1].n)
+  print(ps[1, 2].name)
+  print(map(ps, p -> p.n))
+  val cells = [[Wall, Open("door")], [Open("hall"), Wall]]
+  print(map(cells, glyph))
+  val pairs = [[(1, "one"), (2, "two")], [(3, "three"), (4, "four")]]
+  print(pairs[2, 1])
+  print(pairs[:, 2])
+  val fs = [[(x: integer) -> x + 1, (x: integer) -> x * 2], [(x: integer) -> x - 1, (x: integer) -> x * x]]
+  print(fs[2, 2](7))
+  print(map(fs[:, 1], f -> f(10)))
+
+  // `map` over arrays of non-numbers and into them.
+  val names = ["ann", "bob", "cy"]
+  print(map(names, s -> s + "?"))
+  print(map(names[.. by -1], s -> s == "bob"))
+  print(map([[1, 2], [3, 4]], x -> s"<$x>"))
+  print(flatten(m))
+
+  // The traps.
+  val v = m
+  assert_traps(() -> print(v[3, 1]), "index out of bounds")
+  assert_traps(() -> print(v[1, 0..2]), "slice out of bounds")
+  assert_traps(() -> print(v[:, 1..3 by 0]), "a slice stride of 0")
+  assert_traps(() -> print(w[2, 0]), "index out of bounds")
+  assert_traps(() -> print(reverse(v, k + 1)), "not an axis of the array")
+  val one = ["a"]
+  val two = ["b", "c"]
+  assert_traps(() -> print([one, two]), "shape mismatch")
+  var short = ["a", "b", "c"]
+  assert_traps(() -> put_one(short), "slice assignment length mismatch")
+  print(short)
+  var long = ["a", "b", "c"]
+  assert_traps(() -> grow(long[2..3]), "shape mismatch")
+  print(long)

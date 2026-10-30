@@ -1,0 +1,237 @@
+// The prelude functions that rearrange, filter, fold and concatenate arrays of non-numbers (DESIGN
+// §4.3). Each walks the elements in storage order, as it does for an array of numbers, and calls a
+// function argument once per element; an array it answers shares the source's elements, each
+// counted again, so the result is a value like any other.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Emitter
+    // `transpose(m)`, and `permute(a, (p1, …, pR))`: result axis `n` is source axis `p_n`. An order
+    // written out was checked by the elaborator; the runtime checks a computed one, and traps where it
+    // is not a permutation of the axes.
+    items_permuted(*self, span: Span, args: Buf[TExpr]) -> string
+        val v = self.ex(args[0])
+        val r = rank_of(args[0].ty)
+        val perm = self.alloca(s"!llvm.array<$r x i64>")
+
+        for n in 0..<r
+            var p = ""
+
+            if args.len() == 1
+                p = self.def(s"arith.constant ${r - n} : i64")
+            else
+                val x = args[n + 1]
+
+                p = self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
+
+            self.op(s"llvm.store $p, ${self.def(s"llvm.getelementptr $perm[$n] : (!llvm.ptr) -> !llvm.ptr, i64")} : i64, !llvm.ptr")
+
+        self.own_ref(self.call("nex_items_permute", s"$v, ${self.def(s"arith.constant $r : i64")}, $perm", "!llvm.ptr, i64, !llvm.ptr", "!llvm.ptr"))
+
+    // `reshape(a, (d1, …, dk))`: the elements in storage order laid out column-major in the new
+    // extents, which must take as many.
+    items_reshaped(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val v = self.ex(args[0])
+        var total = "%one"
+        var ns: Buf[string] = buf()
+
+        for d in self.shape_args(span, args, 1, args.len())
+            val x = self.to_i64(d)
+
+            ns.push(x)
+            total = self.def(s"arith.muli $total, $x : i64")
+
+        self.trap_if(self.def(s"arith.cmpi ne, $total, ${self.items_count(v)} : i64"), "reshape to a different size")
+
+        val h = self.new_items(span, t, total)
+
+        for k in 0..<ns.len()
+            self.set_extent(h, k + 1, ns[k])
+
+        self.call("nex_items_fill_from", s"$h, $v", "!llvm.ptr, !llvm.ptr", "")
+        h
+
+    // `filter(a, p)`: the elements for which `p` holds, in storage order. The result is made as long
+    // as `a` and cut to the elements kept.
+    items_filtered(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val et = elem_of(t)
+        val src = self.ex(args[0])
+        val n = self.items_count(src)
+        val h = self.new_items(span, t, n)
+        val kept = self.alloca("i64")
+        var frame: Buf[string] = buf()
+
+        frame.push(self.ex(args[1]))
+        frame.push("")
+        self.op(s"llvm.store ${self.def("arith.constant 0 : i64")}, $kept : i64, !llvm.ptr")
+
+        val l = self.nest_open(self.upto(n), "", "")
+        val m = self.mark()
+        val x = self.item_load(span, self.item_at(src, self.position(l)), et)
+
+        frame.set(1, x)
+
+        val holds = self.in_frame(frame, self.applied(span, Bool, args[1].ty, et))
+
+        self.op(s"scf.if $holds {")
+
+        val j = self.def(s"arith.addi ${self.def(s"llvm.load $kept : !llvm.ptr -> i64")}, %one : i64")
+
+        self.op(s"llvm.store $j, $kept : i64, !llvm.ptr")
+        self.item_init(span, h, j, x, et)
+        self.op("}")
+        self.release_from(m)
+        self.nest_close(l, "")
+        self.call("nex_items_cut", s"$h, ${self.def(s"llvm.load $kept : !llvm.ptr -> i64")}", "!llvm.ptr, i64", "")
+        h
+
+    // `reduce(a, init, f)` where `a` or the accumulator is an array of non-numbers: `f(…f(f(init, a₁),
+    // a₂)…)`, in storage order. An accumulator holding a count is kept in a slot that owns it, each
+    // value `f` answers taken before the one it replaces is given back.
+    items_fold(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val (src, st) = self.source_elements(span, args[0])
+        val et = elem_of(st)
+        val init = self.ex(args[1])
+        var frame: Buf[string] = buf()
+
+        frame.push(self.ex(args[2]))
+        frame.push(init)
+        frame.push("")
+
+        val apply = self.applied2(span, t, args[2].ty, t, et)
+        val n = self.any_length(span, src, st)
+
+        if !self.managed(t)
+            val l = self.nest_open(self.upto(n), init, self.ty(span, t))
+            val m = self.mark()
+
+            frame.set(1, l.accs[0])
+            frame.set(2, self.any_element(span, src, st, self.position(l)))
+
+            val y = self.in_frame(frame, apply)
+
+            self.release_from(m)
+            return self.nest_close(l, y)
+
+        val slot = self.alloca(self.mem_ty(span, t))
+
+        self.retain(init, t)
+        self.store(span, slot, init, t)
+
+        val l = self.nest_open(self.upto(n), "", "")
+        val m = self.mark()
+
+        frame.set(1, self.load(span, slot, t))
+        frame.set(2, self.any_element(span, src, st, self.position(l)))
+        self.keep(span, slot, self.in_frame(frame, apply), t)
+        self.release_from(m)
+        self.nest_close(l, "")
+        self.own(self.load(span, slot, t), t)
+
+    // `flatMap(a, f)` where `a` or the result is an array of non-numbers: the arrays `f` gives for
+    // each element, in storage order, end to end.
+    items_flat_mapped(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val (src, st) = self.source_elements(span, args[0])
+        val et = elem_of(st)
+        val ret = args[1].ty match
+            Fn(sig) -> sig.ret
+            _ -> t
+        var frame: Buf[string] = buf()
+
+        frame.push(self.ex(args[1]))
+        frame.push("")
+
+        val apply = self.applied(span, ret, args[1].ty, et)
+        val n = self.any_length(span, src, st)
+
+        if !is_items(t) then return self.flat_mapped_numbers(span, frame, apply, src, st, n, ret, t)
+
+        val h = self.new_items(span, t, self.def("arith.constant 0 : i64"))
+        val l = self.nest_open(self.upto(n), "", "")
+        val m = self.mark()
+
+        frame.set(1, self.any_element(span, src, st, self.position(l)))
+        self.call("nex_items_append", s"$h, ${self.in_frame(frame, apply)}", "!llvm.ptr, !llvm.ptr", "")
+        self.release_from(m)
+        self.nest_close(l, "")
+        h
+
+    // `flatMap` from an array of non-numbers to one of numbers: the pieces concatenated as for an
+    // array of numbers (`flat_mapped`), each piece `apply` with `frame`'s element set.
+    flat_mapped_numbers(*self, span: Span, frame: Buf[string], apply: TExpr, src: string, st: Ty, n: string, ret: Ty, t: Ty) -> string
+        var f = frame
+        val vt = self.view_ty(t)
+        val tt = self.tensor_ty(span, vt)
+        val pt = self.view_ty(ret)
+        val inner = self.tensor_ty(span, pt)
+        val zero = self.index_const(0)
+        val count = self.def(s"arith.index_cast $n : i64 to index")
+        val start = self.zero_array(span, vt)
+        // An `scf.while`, not an `scf.for`: canonicalize folds a `scf.for` whose carried tensor
+        // starts empty and grows into one that stays empty.
+        val r = self.fresh()
+        val i = self.fresh()
+        val acc = self.fresh()
+
+        self.op(s"$r:2 = scf.while ($i = $zero, $acc = $start) : (index, $tt) -> (index, $tt) {")
+        self.op(s"scf.condition(${self.def(s"arith.cmpi ult, $i, $count : index")}) $i, $acc : index, $tt")
+        self.op("} do {")
+
+        val j = self.fresh()
+        val have_acc = self.fresh()
+
+        self.op(s"^bb0($j: index, $have_acc: $tt):")
+
+        val m = self.mark()
+
+        f.set(1, self.any_element(span, src, st, self.def(s"arith.addi ${self.to_i64(j)}, %one : i64")))
+
+        val piece = self.cast(span, self.in_frame(f, apply), ret, pt)
+        val have = self.def(s"tensor.dim $have_acc, $zero : $tt")
+        val more = self.def(s"tensor.dim $piece, $zero : $inner")
+        val grown = self.def(s"tensor.empty(${self.def(s"arith.addi $have, $more : index")}) : $tt")
+        val kept = self.def(s"tensor.insert_slice $have_acc into $grown[0] [$have] [1] : $tt into $tt")
+        val y = self.def(s"tensor.insert_slice $piece into $kept[$have] [$more] [1] : $inner into $tt")
+
+        self.release_from(m)
+        self.op(s"scf.yield ${self.def(s"arith.addi $j, ${self.index_const(1)} : index")}, $y : index, $tt")
+        self.op("}")
+        self.cast(span, s"$r#1", vt, t)
+
+    // -- helpers ----------------------------------------------------------------------------------
+
+    // The elements of the array argument `a` as an array of non-numbers, or as a rank-1 tensor where
+    // they are numbers, and that array's type.
+    source_elements(*self, span: Span, a: TExpr) -> (string, Ty)
+        val v = self.ex(a)
+
+        if is_items(a.ty) then return (v, a.ty)
+
+        (self.flat(span, v, a.ty), self.view_ty(Ty.Array(elem_of(a.ty), dynamic_axes(1))))
+
+    // One loop of `n` (an `i64`) passes.
+    upto(*self, n: string) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        out.push(self.def(s"arith.index_cast $n : i64 to index"))
+        out
+
+    // The position, an `i64` from 1, of the pass of the loop `l` made by `upto`.
+    position(*self, l: Nest) -> string = self.def(s"arith.addi ${self.to_i64(l.ivs[0])}, %one : i64")
+
+    // The call of the function value at frame operand 0, of type `ft`, on frame operand 1 of type
+    // `x`, answering a `t`.
+    applied(*self, span: Span, t: Ty, ft: Ty, x: Ty) -> TExpr
+        var leaves: Buf[TExpr] = buf()
+
+        leaves.push(texpr(span, x, TChainOperand(1)))
+        texpr(span, t, TCall(texpr(span, ft, TChainOperand(0)), leaves))
+
+    // The same on frame operands 1 and 2, of types `x` and `y`.
+    applied2(*self, span: Span, t: Ty, ft: Ty, x: Ty, y: Ty) -> TExpr
+        var leaves: Buf[TExpr] = buf()
+
+        leaves.push(texpr(span, x, TChainOperand(1)))
+        leaves.push(texpr(span, y, TChainOperand(2)))
+        texpr(span, t, TCall(texpr(span, ft, TChainOperand(0)), leaves))

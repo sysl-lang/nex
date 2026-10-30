@@ -1,0 +1,78 @@
+struct Tag
+  name: string
+  hits: integer
+
+enum Slot =
+  Empty
+  Held(what: string)
+
+def held(s: Slot): string =
+  s match
+    Empty -> "-"
+    Held(w) -> w
+
+def shout(v: inout [string]) =
+  for k in 1..length(v)
+    v[k] = v[k] + "!"
+
+def share_then_write(v: inout [string]) =
+  val keep = v
+  v[1] = keep[2] + "k"
+
+def deeper(v: inout [string]) =
+  shout(v[1..1])
+
+def renamed(v: inout [Tag], to: string) =
+  v[1].name = to
+
+def main() =
+  var m = [["a", "b", "c"], ["d", "e", "f"]]
+  var total = 0
+  var last = ""
+  for k in 1..100
+    val before = m
+    val col = m[:, 2]
+    val back = m[.. by -1, .. by -1]
+    m[1, :] = s"r$k"
+    m[2, 2..] = [s"x$k", s"y$k"]
+    m[1..2][2, 1..2][1] = "z" + s"$k"
+    shout(m[:, 3])
+    shout(m[2, .. by -2])
+    val w = origin(m, 0, 0)
+    last = map(before, s -> s + w[0, 0])[1, 1] + col[2] + back[1, 1]
+    for x in reverse(m, 2)
+      if x != "" then total += 1
+  print(m)
+  print(last)
+  print(total)
+  var tags = [[Tag("a", 1), Tag("b", 2)], [Tag("c", 3), Tag("d", 4)]]
+  val kept = tags
+  for k in 1..50
+    tags[:, 1] = Tag(s"t$k", k)
+    renamed(tags[2, ..], s"n$k")
+    tags[1, 2].hits += 1
+  print(map(tags, t -> t.name))
+  print(map(kept, t -> t.hits))
+  var slots = [[Empty, Held("x")], [Held("y" + "z"), Empty]]
+  for k in 1..20
+    slots[.. by -1, 2] = [Held(s"h$k"), Empty]
+  print(map(slots[2], held))
+  val fs = [[(x: integer) -> x + 1, (x: integer) -> x + total], [(x: integer) -> x * 2, (x: integer) -> x]]
+  var sum = 0
+  for k in 1..30
+    sum += map(fs[:, 2], f -> f(k))[1]
+  print(sum)
+  print(map([[1, 2], [3, 4]], x -> s"<$x>")[2])
+  var part = ["a", "b", "c", "d"]
+  for k in 1..20
+    share_then_write(part[2..3])
+    deeper(part[.. by -1])
+  print(part)
+  // A local a lambda captures, bound on every pass of a loop: each pass's cell given back.
+  var said = ""
+  for k in 1..10
+    val tag = s"t$k"
+    val n = k
+    val f = (s: string) -> s + tag + s"$n"
+    said = f("a")
+  print(said)

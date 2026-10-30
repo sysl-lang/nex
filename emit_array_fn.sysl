@@ -302,6 +302,9 @@ impl Emitter
 
     // `reduce(a, init, f)`: `f(…f(f(init, a₁), a₂)…)`, in storage order.
     fold(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        // An accumulator holding a count is kept in a slot that owns it (`items_fold`).
+        if self.managed(t) then return self.items_fold(span, args, t)
+
         val a = args[0]
         val ft = self.view_ty(Ty.Array(elem_of(a.ty), dynamic_axes(1)))
         val f = self.flat(span, self.ex(a), a.ty)
