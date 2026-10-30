@@ -64,6 +64,9 @@ elab_struct_declaration_errors()
         "error: `A` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1\nerror: `B` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @3:1")
     assert_eq(refused("enum L =\n  Cons(head: real, tail: L)\n  Nil\n" + MAIN), "error: `L` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1")
     assert_eq(refused("struct T\n  kids: [T]\n" + MAIN), "ok")
+    assert_eq(refused("enum E =\n  A(f: F)\n  B\nenum F =\n  C(e: E)\n" + MAIN),
+        "error: `E` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1\nerror: `F` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @4:1")
+    assert_eq(refused("enum L =\n  Cons(head: real, tail: [L])\n  Nil\n" + MAIN), "ok")
     assert_eq(refused("struct P\n  x: real\ndef P() = 1\n" + MAIN), "error: redeclaration of `P` @3:1")
 
 // -- tuples -----------------------------------------------------------------------------------------
@@ -249,6 +252,49 @@ elab_var_array_capture()
     assert_eq(refused("def f(xs: [real]) =\n  var a = xs\n  val g = () -> a\n  val h = () -> a\n" + MAIN), s"error: ${message} @4:11")
     assert_eq(refused("def f(xs: [real]) =\n  var a = xs\n  val g = () -> a\n  val h = () -> () -> a\n" + MAIN), s"error: ${message} @4:11")
     assert_eq(refused("def f(xs: [real]) =\n  var a = xs\n  val g = () -> () -> a\n" + MAIN), "ok")
+
+// -- equality ---------------------------------------------------------------------------------------
+
+@test("== compares structs, tuples and enums field by field, a tuple or a bare variant taking the other side's type")
+elab_aggregate_equality()
+    assert_eq(elaborated(POINT + "def main() =\n  val p = Point(1.0, 2.0)\n  print(p == Point(1.0, 2.0))\n  print(p != Point(1, 2.0))\n"),
+        "(struct Point (x real64) (y real64))\n(def main () void (block (val p#0:Point (new:Point 1.0 2.0)) (print (==:bool p#0 (new:Point 1.0 2.0))) (print (!=:bool p#0 (new:Point (adopt:real64 1) 2.0)))))")
+    assert_eq(elaborated(SHAPE + "def main() =\n  val s = Circle(1.0)\n  print(s == Empty)\n  print(Circle(2.0) != s)\n"),
+        "(enum Shape (Circle (r real64)) (Rect (w real64) (h real64)) Empty)\n(def main () void (block (val s#0:Shape (variant:Shape Circle 1.0)) (print (==:bool s#0 (variant:Shape Empty))) (print (!=:bool (variant:Shape Circle 2.0) s#0))))")
+    assert_eq(elaborated("def main() =\n  val t = 1, 2.5\n  print(t == (1, 2))\n"),
+        "(def main () void (block (val t#0:(int64, real64) (tuple:(int64, real64) 1 2.5)) (print (==:bool t#0 (tuple:(int64, real64) 1 (adopt:real64 2))))))")
+    assert_eq(elaborated("struct Grid\n  cells: [real]\ndef main() =\n  val g = Grid([1.0])\n  print(g == g)\n  print((g.cells, 1) != (g.cells, 2))\n"),
+        "(struct Grid (cells [real64]))\n(def main () void (block (val g#0:Grid (new:Grid (array:[real64] 1.0))) (print (==:bool g#0 g#0)) (print (!=:bool (tuple:([real64], int64) (.cells:[real64] g#0) 1) (tuple:([real64], int64) (.cells:[real64] g#0) 2)))))")
+
+@test("a struct, tuple or enum holding a function value has no ==, and the diagnostic names the field")
+elab_aggregate_equality_errors()
+    val op = "struct Op\n  name: string\n  f: (real) -> real\n"
+
+    assert_eq(refused(op + "def g(a: Op, b: Op) = a == b\n" + MAIN), "error: `==` cannot compare Op values: their field `f` is a function ((real64) -> real64), and function values are not compared @4:23")
+    assert_eq(refused(op + "struct Named\n  at: Op\ndef g(a: Named, b: Named) = a != b\n" + MAIN),
+        "error: `!=` cannot compare Named values: their field `at.f` is a function ((real64) -> real64), and function values are not compared @6:29")
+    assert_eq(refused(op + "def g(a: (integer, Op)) = a == a\n" + MAIN),
+        "error: `==` cannot compare (integer, Op) values: their field `2.f` is a function ((real64) -> real64), and function values are not compared @4:27")
+    assert_eq(refused("enum E =\n  Plain\n  Call(f: () -> void)\ndef g(a: E) = a == Plain\n" + MAIN),
+        "error: `==` cannot compare E values: their field `Call.f` is a function (() -> void), and function values are not compared @4:15")
+    assert_eq(refused("struct Fs\n  fs: [(real) -> real]\ndef g(a: Fs) = a == a\n" + MAIN),
+        "error: `==` cannot compare Fs values: their field `fs` is a function ((real64) -> real64), and function values are not compared @3:16")
+    assert_eq(refused(op + "def g(a: [Op]) = a == a\n" + MAIN),
+        "error: `==` cannot compare Op values: their field `f` is a function ((real64) -> real64), and function values are not compared @4:18")
+    assert_eq(refused(POINT + "def g(a: Point) = a < a\n" + MAIN), "error: `<` orders integers and reals; Point values are only equal or not @4:19")
+    assert_eq(refused(POINT + "def g(a: Point) = a == (1, 2, 3)\n" + MAIN), "error: `==` cannot compare Point with (int64, int64, int64) @4:19")
+    assert_eq(refused(POINT + "def g(a: Point) = a != (1.0, 2.0)\n" + MAIN), "error: `!=` cannot compare Point with (real64, real64) @4:19")
+
+@test("Eq admits a struct, tuple or enum holding no function value, and names the field of one that holds one")
+elab_aggregate_eq_constraint()
+    val same = "def same[T: Eq](a: T, b: T): bool = a == b\n"
+
+    assert_eq(elaborated(POINT + same + "def main() =\n  print(same(Point(1.0, 2.0), Point(1.0, 2.0)))\n  print(same((1, true), (1, false)))\n"),
+        "(struct Point (x real64) (y real64))\n(def main () void (block (print (call:bool same[Point] (new:Point 1.0 2.0) (new:Point 1.0 2.0))) (print (call:bool same[(int64, bool)] (tuple:(int64, bool) 1 true) (tuple:(int64, bool) 1 false)))))\n(def same[Point] ((a#0 Point) (b#1 Point)) bool (==:bool a#0 b#1))\n(def same[(int64, bool)] ((a#2 (int64, bool)) (b#3 (int64, bool))) bool (==:bool a#2 b#3))")
+    assert_eq(refused("struct Op\n  f: (real) -> real\n" + same + "def g(a: Op) = same(a, a)\n" + MAIN),
+        "error: `same` needs `T: Eq`, and Op is not Eq: its field `f` is a function ((real64) -> real64), and function values are not compared @4:16")
+    assert_eq(refused(same + "def g(a: (real) -> real) = same(a, a)\n" + MAIN),
+        "error: `same` needs `T: Eq`, and (real64) -> real64 is not Eq: Eq admits the numeric types, `bool`, `string`, and the structs, enums and tuples that hold no function value @2:28")
 
 @test("a lambda returned from a function keeps the var it captured")
 elab_escaping_closure()

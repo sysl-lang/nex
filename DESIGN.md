@@ -241,7 +241,7 @@ The closed constraint set of ref §6.10 widens to the sized types:
 | `Float` | `real16`, `real32`, `real64` |
 | `Complex` | `complex[real16]`, `complex[real32]`, `complex[real64]` |
 | `Ord` | every integer and real type |
-| `Eq` | every numeric type, `bool`, `string` |
+| `Eq` | every numeric type, `bool`, `string`, and every struct, tuple and enum that holds no function value (§11.4) |
 | `Rank` | not a type: a rank (§3.4) |
 | `Unit` | not a type: a unit of measure (§13.5) |
 
@@ -1424,7 +1424,17 @@ with these rules (**PROPOSED** where marked).
   §6.2 already store arrays and views in enum payloads. **PROPOSED.**
 - **A struct or an enum cannot contain itself** by value, directly or through other structs, enums
   or tuples (`struct Node` with a field `next: Node`, `enum List` with `Cons(head: real, tail:
-  List)`); it may hold itself through an array (`kids: [Node]`), which is a handle. **PROPOSED.**
+  List)`); it may hold itself through an array (`kids: [Node]`), which is a handle.
+- **`==` and `!=` compare structs, tuples and enums field by field**: two values are equal where
+  they are the same variant, for an enum, and every field is equal as `==` compares the field's
+  type, so a `nan` field makes them unequal. A field that is an array is equal where the two arrays
+  have the same shape and `all(a == b)` holds; arrays of different shapes make the values unequal,
+  where `==` on the arrays themselves would trap (§7.1). A struct, tuple or enum that holds a
+  function value, in a field at any depth or as an array's elements, has no `==`: comparing two is a
+  compile error naming the field, and `Eq` (§2.6) does not admit it. A tuple built in place or a
+  bare variant on one side takes its type from the other (`t == (1, 2.0)` with `t: (real, real)`,
+  `s == Empty`); a tuple is never a struct, so `p == (1.0, 2.0)` with `p: Point` is a compile
+  error. `<` and the other orderings are not defined on them.
 - **Struct, enum and variant names share the top level** with functions and module-level bindings,
   and each is declared once: a variant `Empty` in two enums is a redeclaration. A local binding of
   the same name shadows a variant.

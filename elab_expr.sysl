@@ -442,7 +442,7 @@ impl Elab
                     self.fail(span, s"`${op}` cannot compare ${self.shown(a)} with ${self.shown(b)}")
             else
                 self.function_inside(a.ty) match
-                    Some(f) -> self.fail(span, s"`${op}` cannot compare ${self.shown(a)} values: they hold a function value (${show_ty(f)}), and function values are not compared")
+                    Some(f) -> self.fail(span, s"`${op}` cannot compare ${self.shown(a)} values: their $f, and function values are not compared")
                     None -> ()
 
             return texpr(span, Bool, TBinary(op, a, b))

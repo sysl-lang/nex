@@ -656,6 +656,7 @@ impl Emitter
         var first_ty = out
         var ins: Buf[string] = buf()
         var in_tys: Buf[string] = buf()
+        var mismatch = ""
 
         for k in 0..<operands.len()
             if !is_arr(operands[k].ty) then continue
@@ -668,13 +669,34 @@ impl Emitter
                 for a in 1..r
                     val x = self.dim(span, first, first_ty, a)
                     val y = self.dim(span, vals[k], operands[k].ty, a)
+                    val ne = self.def(s"arith.cmpi ne, $x, $y : index")
 
-                    self.trap_if(self.def(s"arith.cmpi ne, $x, $y : index"), "shape mismatch")
+                    self.trap_if(ne, "shape mismatch")
+                    mismatch = if mismatch == "" then ne else self.def(s"arith.ori $mismatch, $ne : i1")
 
             ins.push(vals[k])
             in_tys.push(self.tensor_ty(span, operands[k].ty))
 
         val empty = self.def(s"tensor.empty(${joined(self.dynamic_dims(span, first, first_ty, out))}) : $ot")
+
+        // Past the trap the shapes agree, but where both are known statically and differ, folding
+        // would meet an operation over mismatched operands; the operation is kept off that path.
+        if mismatch != ""
+            val v = self.fresh()
+
+            self.op(s"$v = scf.if $mismatch -> ($ot) {")
+            self.op(s"scf.yield $empty : $ot")
+            self.op("} else {")
+            self.op(s"scf.yield ${self.elementwise(span, out, operands, vals, ins, in_tys, empty, scalar)} : $ot")
+            self.op("}")
+            return v
+
+        self.elementwise(span, out, operands, vals, ins, in_tys, empty, scalar)
+
+    // The `linalg.generic` computing `scalar` over `ins` into `empty`.
+    private elementwise(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], ins: Buf[string], in_tys: Buf[string], empty: string, scalar: TExpr) -> string
+        val r = rank_of(out)
+        val ot = self.tensor_ty(span, out)
         val m = identity_map(r)
         var maps = m
 
@@ -707,7 +729,7 @@ impl Emitter
         self.op(s"linalg.yield $y : ${self.elem_ty(span, elem_of(out))}")
         self.op(s"} -> $ot")
         v
-    end mapped_values
+    end elementwise
 
     // `scalar` emitted with `frame` as the operands its `TChainOperand` leaves read, nothing having
     // left the statement yet.

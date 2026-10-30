@@ -234,32 +234,57 @@ impl Elab
 
     // -- equality ---------------------------------------------------------------------------------
 
-    // The function type inside `t`, which keeps two values of `t` from being compared with `==`
-    // (DESIGN §11.4), if there is one.
-    function_inside(self, t: Ty) -> Option[Ty]
+    // The field of function type inside `t`, which keeps two values of `t` from being compared with
+    // `==` (DESIGN §11.4), if there is one, said by its path from `t` and its type: field `at.f` is a
+    // function ((real64) -> real64). A tuple's elements are numbered from 1 and a variant's field is written
+    // after its variant's name; an array's elements add nothing to the path.
+    function_inside(self, t: Ty) -> Option[string]
         var seen: Buf[string] = buf()
 
-        self.function_within(t, &seen)
+        self.function_within(t, "", &seen)
 
-    private function_within(self, t: Ty, seen: *Buf[string]) -> Option[Ty]
-        val inner = t match
-            Fn(_) -> return Some(t)
-            Array(elem, _) -> return self.function_within(*elem, seen)
-            Ty.Tuple(ts) -> ts
+    private function_within(self, t: Ty, at: string, seen: *Buf[string]) -> Option[string]
+        var parts: Buf[string] = buf()
+        var tys: Buf[Ty] = buf()
+
+        t match
+            Fn(_) -> return Some(s"field `${at}` is a function (${show_ty(t)})")
+            Array(elem, _) -> return self.function_within(*elem, at, seen)
+            Ty.Tuple(ts) ->
+                for k in 0..<ts.len()
+                    parts.push(s"${k + 1}")
+                    tys.push(ts[k])
             Nominal(n, _) ->
                 if contains(*seen, n) then return None
 
                 seen.push(n)
-                self.member_types(n)
+                self.member_paths(n, &parts, &tys)
             _ -> return None
 
-        for x in inner
-            val f = self.function_within(x, seen)
+        for k in 0..<tys.len()
+            val f = self.function_within(tys[k], if at == "" then parts[k] else s"${at}.${parts[k]}", seen)
 
             if f.is_some() then return f
 
         None
     end function_within
+
+    // Each field of struct or enum `name` by the name a path writes it with, and its type.
+    private member_paths(self, name: string, parts: *Buf[string], tys: *Buf[Ty])
+        self.find_struct(name) match
+            Some(k) ->
+                for f in self.agg.structs[k].fields
+                    parts.push(f.name)
+                    tys.push(f.ty)
+            None -> ()
+
+        self.find_enum(name) match
+            Some(k) ->
+                for v in self.agg.enums[k].variants
+                    for f in v.fields
+                        parts.push(s"${v.name}.${f.name}")
+                        tys.push(f.ty)
+            None -> ()
 
     // Whether `e` takes its type from the other side of `==`: a tuple built in place, which converts
     // element by element, or a variant's name, which a generic enum's needs.

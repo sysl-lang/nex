@@ -133,10 +133,13 @@ admits(c: string, t: Ty) -> bool
     true
 
 // Whether `Eq` admits a struct, an enum or a tuple: one `==` compares, holding no function value.
-private admits_aggregate(c: string, t: Ty) -> bool = c == "Eq" && t match
-    Ty.Tuple(_) -> true
-    Nominal(_, _) -> true
-    _ -> false
+private admits_aggregate(c: string, t: Ty) -> bool
+    if c != "Eq" then return false
+
+    t match
+        Ty.Tuple(_) -> true
+        Nominal(_, _) -> true
+        _ -> false
 
 private admitted_text(c: string) -> string
     if c == "Numeric" then return "the integer, real and complex types"
@@ -827,9 +830,16 @@ impl Elab
                 self.fail(span, s"`${tp.name}` of `${inf.owner}` would be ${show_ty(t)}, which holds no value")
                 return false
 
-            if !(admits(c, t) || admits_aggregate(c, t) && self.function_inside(t).is_none())
+            if !(admits(c, t) || admits_aggregate(c, t))
                 self.fail(span, s"`${inf.owner}` needs `${tp.name}: ${c}`, and ${show_ty(t)} is not ${c}: ${c} admits ${admitted_text(c)}")
                 return false
+
+            if !admits(c, t)
+                self.function_inside(t) match
+                    Some(f) ->
+                        self.fail(span, s"`${inf.owner}` needs `${tp.name}: ${c}`, and ${show_ty(t)} is not ${c}: its $f, and function values are not compared")
+                        return false
+                    None -> ()
 
         true
     end constraints_hold
