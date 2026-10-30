@@ -1155,6 +1155,7 @@ impl Elab
             Some(k) -> k
             None -> return self.invalid(span)
 
+        val complete = self.ensure_defaults(k, span)
         val sig = self.fsig[k]
         var out: Buf[TExpr] = buf()
         var given: Buf[bool] = buf()
@@ -1168,7 +1169,7 @@ impl Elab
                     sig.defaults[j] match
                         Some(d) -> out.push(d)
                         None ->
-                            self.fail(span, s"`${n}` needs its argument `${names[j]}`")
+                            self.missing_argument(span, n, k, j, complete)
                             out.push(self.invalid(span))
 
         val ty = self.fun_type(k, at)
@@ -1188,8 +1189,9 @@ impl Elab
 
         if args.len() > sig.tys.len() then return false
 
+        // Whether a default was written, not whether it is elaborated yet: `concrete_call` elaborates it.
         for j in args.len()..<sig.tys.len()
-            if sig.defaults[j].is_none() then return false
+            if self.funs[k].params[j].default.is_none() then return false
 
         for i in 0..<args.len()
             val ty = sig.tys[i]
@@ -1234,6 +1236,7 @@ impl Elab
     end concrete_applies
 
     private concrete_call(*self, span: Span, at: Span, k: usize, args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> TExpr
+        val complete = self.ensure_defaults(k, span)
         val sig = self.fsig[k]
         val name = self.funs[k].name
         var out: Buf[TExpr] = buf()
@@ -1245,7 +1248,11 @@ impl Elab
             if j < args.len()
                 out.push(self.settle_arg(args[j], pre[j], sig.tys[j], sig.modes[j], s"argument `${sig.names[j]}`"))
             else
-                out.push(sig.defaults[j].unwrap())
+                sig.defaults[j] match
+                    Some(d) -> out.push(d)
+                    None ->
+                        self.missing_argument(span, name, k, j, complete)
+                        out.push(self.invalid(span))
 
         val ty = self.fun_type(k, at)
         val ret = ty match

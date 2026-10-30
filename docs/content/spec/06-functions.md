@@ -225,6 +225,19 @@ it never sees the caller's locals. A default may read an `inout` parameter befor
 argument beside the borrow may (§6.8): `by: integer = length(v)` after `v: inout [integer]` is
 legal. A lambda written in a default may not capture a parameter.
 
+A default may call a function declared later in the file, or in another module, and that call may
+leave out arguments the later function defaults in turn. A default may not reach its own function,
+directly or through other functions' defaults; the cycle is a compile error naming each function on
+it:
+
+```nex
+def label(n: integer = first_id()) = print(n)
+def first_id(seed: integer = 1): integer = seed * 100      // label() prints 100
+
+def f(x: integer = g()): integer = x
+def g(y: integer = f()): integer = y    // error: `f` → `g` → `f`
+```
+
 Defaults and named arguments need a call to one named, non-overloaded `def`. A call to an overloaded
 name, to a function value (§6.7) or through method notation (`x.f(…)`) passes every argument by
 position.

@@ -40,7 +40,7 @@ elaborate_modules(p: Program, mods: Modules) -> Result[TProgram, Buf[Diagnostic]
     Ok(e.program())
 
 private elab(p: Program, mods: Modules) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf(), buf())
 
 // How far a declaration has got.
 enum Progress
@@ -67,13 +67,14 @@ struct GlobalSrc
     init: Expr
 
 // A function's parameters once their types are resolved: each one's local, name, type, mode and
-// default.
+// default, and how far its defaults have got (`ensure_defaults`).
 struct Sig
     params: Buf[usize]
     names: Buf[string]
     tys: Buf[Ty]
     modes: Buf[Mode]
     defaults: Buf[Option[TExpr]]
+    stage: Progress
 
 // A `def` as written, with the names of its unit parameters (`[U: Unit]`).
 struct FunSrc
@@ -181,6 +182,9 @@ struct Elab
     // The modules, and the `@test` functions, by internal name, in source order (`elab_module.sysl`).
     mods: Modules
     tests: Buf[string]
+    // The functions whose defaults are being elaborated, innermost last: a default that reaches one
+    // of them again is a cycle.
+    defaulting: Buf[usize]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -208,14 +212,15 @@ struct Elab
             self.resolve_extern(k)
 
         // Counted first: a default may need a generic instance, whose signature is resolved with it.
-        // Every signature's types come before any default, which may call a function declared later.
+        // Every signature's types come before any default, which may call a function declared later:
+        // that function's own defaults are elaborated on demand, at the first call needing them.
         val count = self.funs.len()
 
         for k in 0..<count
             self.sig_types(k)
 
         for k in 0..<count
-            self.sig_defaults(k)
+            self.ensure_defaults(k, self.funs[k].decl.span)
 
         // Each generic's body once, against its constraints, whether or not anything uses it.
         for g in 0..<self.gen.funs.len()
@@ -410,13 +415,13 @@ struct Elab
     // A function's parameter types, modes and defaults, and its result type where it declares one.
     ensure_sig(*self, k: usize)
         self.sig_types(k)
-        self.sig_defaults(k)
+        self.ensure_defaults(k, self.funs[k].decl.span)
 
     // A function's parameter types and modes, and its result type where it declares one; its
-    // defaults are left empty until `sig_defaults`, so a default may call any function.
+    // defaults are left empty until `ensure_defaults`, so a default may call any function.
     sig_types(*self, k: usize)
         val f = self.funs[k]
-        var sig = Sig(buf(), buf(), buf(), buf(), buf())
+        var sig = Sig(buf(), buf(), buf(), buf(), buf(), Waiting)
         val saved = self.fx
         val saved_units = self.enter_unit_params(f.uparams)
         self.fx = self.fx_for(k)
@@ -449,17 +454,63 @@ struct Elab
 
         // An instance of a generic created while another signature is resolved comes before it.
         while self.fsig.len() <= k
-            self.fsig.push(Sig(buf(), buf(), buf(), buf(), buf()))
+            self.fsig.push(Sig(buf(), buf(), buf(), buf(), buf(), Waiting))
 
         self.fsig.set(k, sig)
     end sig_types
 
+    // The `k`th function's defaults, elaborated at the first call that needs them, so that a default
+    // may call a function declared after it whose own call leaves out an argument it defaults
+    // (DESIGN §11.3). Whether they are all known: a call met while they are being elaborated finds
+    // them unfinished, and when that call is itself in a default, the defaults reach their own
+    // function, a cycle refused here, at the call that closes it.
+    ensure_defaults(*self, k: usize, span: Span) -> bool
+        self.fsig[k].stage match
+            Finished -> true
+            Working ->
+                if self.fx.owner != "" then self.default_cycle(k, span)
+                false
+            Waiting ->
+                self.sig_defaults(k)
+                true
+
+    // The cycle closed by a call of the `k`th function met while its defaults are elaborated.
+    default_cycle(*self, k: usize, span: Span)
+        val name = self.written_name(k)
+        var from = self.defaulting.len()
+
+        for i in 0..<self.defaulting.len()
+            if self.defaulting[i] == k && from == self.defaulting.len() then from = i
+
+        if from + 1 >= self.defaulting.len()
+            self.fail(span, s"a default of `${name}` calls `${name}`: a default cannot reach the function it belongs to; give the argument at the call instead")
+            return
+
+        var chain = ""
+
+        for i in from..<self.defaulting.len()
+            chain += s"`${self.written_name(self.defaulting[i])}` → "
+
+        self.fail(span, s"the defaults of these functions call one another in a cycle, ${chain}`${name}`: a default cannot reach the function it belongs to, even through another function's default")
+
+    // The `k`th function's name as the source writes it: a generic instance's is its generic's.
+    private written_name(self, k: usize) -> string
+        for inst in self.gen.fun_insts
+            if inst.fun == k then return self.gen.funs[inst.generic].name
+
+        self.funs[k].name
+
     // A function's defaults, each checked against its parameter's type in the function's module with
     // the parameters before its own in scope: the call fills it in and evaluates it there, afresh at
     // every call that leaves the argument out, after the arguments before it. Defaults come last.
-    sig_defaults(*self, k: usize)
+    private sig_defaults(*self, k: usize)
         val f = self.funs[k]
         var sig = self.fsig[k]
+
+        sig.stage = Working
+        self.fsig.set(k, sig)
+        self.defaulting.push(k)
+
         val saved = self.fx
         val saved_units = self.enter_unit_params(f.uparams)
         var first: Option[string] = None
@@ -498,7 +549,9 @@ struct Elab
             self.bind(sig.params[j])
 
         self.close()
+        sig.stage = Finished
         self.fsig.set(k, sig)
+        self.defaulting.pop()
         self.leave_unit_params(saved_units)
         self.fx = saved
     end sig_defaults

@@ -1,0 +1,42 @@
+// A default may call a function declared after it, and that call may leave out arguments the
+// later function defaults in turn: every function's defaults are known before any call fills them
+// in. A chain of three, a default passing an earlier parameter on to the later function's own
+// default, a generic callee and a later function whose result type its body gives.
+
+var calls = 0
+
+def area(w: real<m>, h: real<m> = side()): real<m^2> = w * h
+
+def label(n: integer = first_id()) = print(s"label ${n}")
+
+def scaled(x: integer, y: integer = times(x)) = print(s"${x} scaled ${y}")
+
+def wrapped(v: integer = boxed(7)) = print(s"wrapped ${v}")
+
+def doubled(n: integer = twice()) = print(s"doubled ${n}")
+
+def side(by: real = 3.0): real<m> = by * 1.0<m>
+
+def first_id(seed: integer = next_seed()): integer = seed * 100
+
+def next_seed(step: integer = 1): integer =
+  calls += step
+  calls
+
+def times(a: integer, b: integer = a + 1): integer = a * b
+
+def boxed[T](x: T, k: integer = 1): T = x
+
+def twice(k: integer = 21) = k * 2
+
+def main() =
+  print(area(2.0<m>))
+  print(area(2.0<m>, 5.0<m>))
+  label()
+  label()
+  label(9)
+  scaled(2)
+  scaled(2, 1)
+  wrapped()
+  doubled()
+  print(s"calls ${calls}")

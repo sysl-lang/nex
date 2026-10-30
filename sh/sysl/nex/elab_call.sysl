@@ -220,6 +220,7 @@ impl Elab
 
     // A call of the `k`th `def`, with positional and named arguments and defaults.
     call_fun(*self, span: Span, at: Span, k: usize, args: Buf[Expr]) -> TExpr
+        val complete = self.ensure_defaults(k, span)
         val sig = self.fsig[k]
         val name = self.funs[k].name
         var slots: Buf[Option[Expr]] = buf()
@@ -272,7 +273,7 @@ impl Elab
                     sig.defaults[j] match
                         Some(d) -> out.push(d)
                         None ->
-                            self.fail(span, s"`${name}` needs its argument `${sig.names[j]}`")
+                            self.missing_argument(span, name, k, j, complete)
                             out.push(self.invalid(span))
 
         val ty = self.fun_type(k, at)
@@ -285,6 +286,17 @@ impl Elab
 
         after_items(span, items, call)
     end call_fun
+
+    // A call of `name`, the `k`th `def`, leaving out its `j`th parameter, whose default is not known:
+    // none was written, or the call is met while `name`'s defaults are still being elaborated, which
+    // they reach in a cycle (`complete` false). A cycle closed in a default was reported there.
+    missing_argument(*self, span: Span, name: string, k: usize, j: usize, complete: bool)
+        val param = self.fsig[k].names[j]
+
+        if complete || self.funs[k].params[j].default.is_none()
+            self.fail(span, s"`${name}` needs its argument `${param}`")
+        elif self.fx.owner == ""
+            self.fail(span, s"this call leaves out `${param}`, whose default is being elaborated: the defaults of `${name}` reach this call, which reaches them again; give `${param}` here")
 
     // The arguments `out` of a call of the `k`th `def`, where each default (`given[j]` false) that
     // reads an earlier parameter reads that parameter's argument (DESIGN §11.3), and the items the

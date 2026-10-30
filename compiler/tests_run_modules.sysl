@@ -60,6 +60,15 @@ mod_run()
 
     finish(b)
 
+@test("a default calling another module's function through `m.f` takes that function's own defaults, at every call")
+mod_run_default_forward()
+    val b = bench()
+
+    assert_eq(run_project(b, [("main.nex", "import lib\ndef f(n: integer = lib.g()) = print(n)\ndef main() =\n  f()\n  f()\n  f(1)\n"),
+        ("lib/lib.nex", "var seed = 0\ndef g(k: integer = later()): integer = k * 2\ndef later(j: integer = 5): integer =\n  seed += j\n  seed\n")]), "10\n20\n1\n")
+
+    finish(b)
+
 @test("a program reaching its modules through bare imports runs, and a local shadowing a module reads its own field")
 mod_run_qualified()
     val b = bench()
