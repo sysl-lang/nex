@@ -471,6 +471,46 @@ def main() =
 | `barrier(comm = world())` | waits until every rank of `comm` has reached it |
 | `no_rank` | the rank a send or receive to which does nothing (`MPI_PROC_NULL`) |
 
+**Point to point.** `send(x, to, tag = 0)` sends the array `x`; `recv(x, from = any_rank, tag =
+any_tag)` receives into the array variable `x`, whose element count must be the message's (a
+message of another count traps: `recv: the message from rank 0 holds 2 values; the array holds 1`),
+and answers a `Status` with the message's `source`, `tag` and `count`; `sendrecv(x, to, y, from)`
+sends and receives at once, so a ring of them never deadlocks. They are ordinary nex functions,
+generic over `[T; R]`, so they take arrays of numbers without a unit.
+
+**Collectives** take the value and answer the result, as nex's own reductions do. `x` is any number
+or `bool`, or an array of them at any rank — whole, a window, a strided view — of any element type
+including the complexes, and its unit is kept. Every one takes `comm = world()` last.
+
+| collective | answers |
+|---|---|
+| `allreduce(x, op)` | every rank's `x` combined by `op`, element by element, on every rank |
+| `reduce_to(x, op, root = 0)` | the combination on `root`; `x` on the other ranks |
+| `scan(x, op)` | on rank r, the combination of ranks 0 to r |
+| `bcast(x, root = 0)` | `root`'s `x` on every rank |
+| `gather(x, root = 0)`, `allgather(x)` | the ranks' `x` along a new last axis: rank k in, rank k + 1 out, one part per rank |
+| `gather_concat(x, root = 0)`, `allgather_concat(x)` | the ranks' `x` joined along their last axis, which may differ in length |
+| `scatter(x, root = 0)` | part r + 1 of `root`'s `x` along its last axis on rank r: rank k + 1 in, rank k out |
+| `scatter_concat(x, root = 0)` | `root`'s `x` cut along its last axis as `blocks` cuts it |
+| `alltoall(x)` | part k of `x`'s last axis sent to rank k |
+| `global_sum(x, offset)`, `global_dot(x, y, offset)`, `global_norm2(x, offset)` | `sum`, `dot`, `norm2` of a vector distributed in pieces, `x` this rank's beginning at global index `offset` |
+| `blocks(n, p = num_ranks(), r = this_rank())` | `(first, last)`: the part of `1..n` rank `r` owns |
+
+`op` is `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc`, or a function `(T, T) -> T` of the
+elements. `minloc` and `maxloc` answer a pair, the value and the rank it came from, ties going to
+the lowest rank. `*` of a measured value is refused, as `product` of one is: its unit's power would
+be the number of ranks. The shapes must agree across the ranks (but for the joined axis of the
+`_concat` forms); where they do not, every rank traps naming two of them: `allreduce: every rank's
+operand has one shape, and rank 1's is [3] where rank 0's is [2]`.
+
+**Reductions are reproducible.** A reduction with a built-in operator combines the ranks'
+contributions in the same fixed pairwise tree over the rank numbers that §10.3 uses for blocks, so a
+sum of reals has the same bits on every run, whatever the MPI and the node layout; a user function
+folds them in rank order. `fast = true` hands a built-in operator to MPI's own `MPI_Allreduce`
+instead, for code that measures the difference and accepts MPI's bits. `global_sum` and its
+siblings go further: their result has the bits `sum` of the undistributed vector has, at every rank
+count, however the vector is cut.
+
 No name in `mpi` is a prelude function's, so `import mpi.*` hides nothing: `rank(a)` and `size(a)`
 of an array mean what they always do beside `this_rank()` and `num_ranks()`, which are named after
 Fortran's `this_image()` and `num_images()`.

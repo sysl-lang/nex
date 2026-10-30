@@ -539,6 +539,13 @@ modules_and_imports()
     assert_eq(parsed("import a.*"), "(import a *)")
     assert_eq(parsed("import a.b.*"), "(import a.b *)")
 
+@test("`+`, `*`, `and` and `or` standing alone as an argument are an operator handed to a call; anywhere else they stay binary")
+parse_operator_arguments()
+    assert_eq(parsed("def main() = allreduce(x, +)\n"), "(def main () _ (call allreduce x +))")
+    assert_eq(parsed("def main() = f(*, and, or)\n"), "(def main () _ (call f * and or))")
+    assert_eq(parsed("def main() = f(a and b, x * y)\n"), "(def main () _ (call f (and a b) (* x y)))")
+    assert(parsed("def main() = f(x +)\n").contains("error"), "a dangling `+` after an operand is no argument")
+
 @test("attributes, with and without arguments, on a function with or without a body")
 parse_attributes()
     assert_eq(parsed("@test\ndef t() =\n  assert_eq(2 + 2, 4)\n"), "(@test def t () _ (call assert_eq (+ 2 2) 4))")

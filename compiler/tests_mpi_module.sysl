@@ -281,3 +281,117 @@ mpi_command_np()
     assert(interp.err.unwrap_or("").contains("`mpi` is not interpreted"), interp.err.unwrap_or(""))
     assert_eq(wrong_cc.err.unwrap_or(""), "nex: the program imports `mpi`, and NEX_MPICC names no compiler: /no/such/mpicc\n")
     assert(no_mpi.err.unwrap_or("").starts_with("nex: the program imports `mpi`, which links an MPI, and none was found"), no_mpi.err.unwrap_or(""))
+
+// -- point to point and the collectives (DESIGN §9.6.2, §9.6.5) ------------------------------------
+
+// The corpus program `testdata/mpi/<name>.nex` compiled into the bench; its executable.
+private built_corpus(b: Bench, name: string) -> string
+    val exe = s"${b.work}/$name"
+
+    compile_file(repo(s"testdata/mpi/$name.nex"), exe, b.work, b.tc, false) match
+        Ok(_) -> ()
+        Err(e) -> fail_with(e)
+
+    exe
+
+// The lines of a job's output that start with `prefix`.
+private lines_with(text: string, prefix: string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for l in split(text, "\n")
+        if l.starts_with(prefix) then out.push(l)
+
+    out
+
+@test("each collective — allreduce, reduce_to and scan with every built-in operator, a named function and a lambda; bcast, gather, allgather, the concatenating forms, scatter, scatter_concat, alltoall, blocks; sendrecv, send and recv — answers what a sequential oracle computes, at -np 1, 2, 3, 4 and 7")
+mpi_collectives_match_the_oracle()
+    val b = mpi_bench()
+    val exe = built_corpus(b, "collectives")
+    var outs: Buf[(int, Output)] = buf()
+
+    for np in [1, 2, 3, 4, 7]
+        outs.push((np, job(exe, np)))
+
+    finish(b)
+
+    for (np, out) in outs
+        var want: Buf[string] = buf()
+
+        for r in 0..<np
+            want.push(s"rank $r: ${if r == 1 then 54 else 51} checks")
+
+        sort(want.view())
+        assert(out.status.ok(), s"-np $np: ${out.status}\n${out.err.unwrap_or("")}")
+        assert_eq(sorted_lines(out.text), join(want.view(), "\n"))
+
+@test("a reduction of reals combines the ranks in the pairwise tree, the same bits run to run; global_sum, global_dot and global_norm2 are the undistributed sum's, dot's and norm2's bits at every -np, however the vector is cut")
+mpi_reductions_of_reals_are_reproducible()
+    val b = mpi_bench()
+    val exe = built_corpus(b, "reproducible")
+    var outs: Buf[(int, Output)] = buf()
+
+    for np in [1, 2, 3, 4, 7, 7]
+        outs.push((np, job(exe, np)))
+
+    finish(b)
+
+    var globals: Buf[string] = buf()
+
+    for (np, out) in outs
+        assert(out.status.ok(), s"-np $np: ${out.status}\n${out.err.unwrap_or("")}")
+        assert(!out.text.contains("BAD"), s"-np $np:\n${out.text}")
+        assert_eq(lines_with(out.text, "rank ").len(), usize(np))
+        globals.extend(lines_with(out.text, "global ").view())
+
+    assert_eq(globals.len(), 6)
+
+    for g in globals
+        assert_eq(g, globals[0])
+
+    // The two runs at -np 7 print the same bits.
+    assert_eq(sorted_lines(outs[4].1.text), sorted_lines(outs[5].1.text))
+
+// A program whose ranks disagree, run at -np 3: its standard error.
+private trapped(b: Bench, case: string, body: string) -> string
+    val out = job(built(b, s"import mpi.*\n\ndef main() =\n  val me = this_rank()\n$body", case), 3)
+
+    assert(out.status != Status.TimedOut, s"$case: the job hung")
+    assert(!out.status.ok(), s"$case: ${out.status}")
+    out.err.unwrap_or("")
+
+@test("operands whose shapes differ across ranks trap on every rank with the shapes and the ranks, before any data moves: allreduce, bcast, gather, gather_concat, scatter, alltoall; recv of the wrong count; global_sum of pieces that leave a gap")
+mpi_shape_mismatch_traps()
+    val b = mpi_bench()
+    val reduced = trapped(b, "reduced", "  print(allreduce(fill(me + 2, 1.0), +))\n")
+    val broadcast = trapped(b, "broadcast", "  print(bcast(fill(if me == 2 then 4 else 2, 1), root = 2))\n")
+    val gathered = trapped(b, "gathered", "  print(gather([me, me + 1, me + 2][1..me + 1]))\n")
+    val joined = trapped(b, "joined", "  print(allgather_concat(fill((me + 1, 2), me)))\n")
+    val scattered = trapped(b, "scattered", "  print(scatter([1, 2]))\n")
+    val swapped = trapped(b, "swapped", "  print(alltoall([1, 2, 3, 4]))\n")
+    val received = trapped(b, "received", "  var x = [0.0]\n  if me == 0 then send([1.0, 2.0], 1)\n  if me == 1 then print(recv(x))\n  barrier()\n")
+    val gap = trapped(b, "gap", "  print(global_sum([1.0, 2.0], 3 * me + 1))\n")
+
+    finish(b)
+    assert(reduced.contains("trap: allreduce: every rank's operand has one shape, and rank 1's is [3] where rank 0's is [2]"), reduced)
+    assert(broadcast.contains("trap: bcast: every rank's operand has one shape, and rank 0's is [2] where rank 2's is [4]"), broadcast)
+    assert(gathered.contains("trap: gather: every rank's operand has one shape, and rank 1's is [2] where rank 0's is [1]"), gathered)
+    assert(joined.contains("trap: allgather_concat: the pieces agree on every axis but the last, and rank 1's is [2, 2] where rank 0's is [1, 2]"), joined)
+    assert(scattered.contains("trap: scatter: the root's array has 2 parts along its last axis, and the communicator 3 ranks"), scattered)
+    assert(swapped.contains("trap: alltoall: the array has 4 parts along its last axis, and the communicator 3 ranks"), swapped)
+    assert(received.contains("rank 1: trap: recv: the message from rank 0 holds 2 values; the array holds 1"), received)
+    assert(gap.contains("trap: global_sum: the ranks' pieces cover 1..6 once each, and none begins at 3"), gap)
+
+@test("a collective refuses what it cannot type, each with its reason: a tuple or a string operand, an operator the element type has no meaning for, `*` of a measured value, a function of the wrong type, `fast` with a user function, unknown and missing arguments, a scalar where an axis is cut, a matrix or integers where a vector of reals is wanted, a collective or an operator as a value, and `@intrinsic` outside the mpi module")
+mpi_collective_refusals()
+    val b = bench()
+    val src = s"${b.work}/refused.nex"
+    val text = "import mpi.*\n\n@intrinsic def mine()\n\ndef main() =\n  val a = allreduce((1.0, 2.0), +)\n  val b = allreduce(\"x\", +)\n  val c = allreduce(true, +)\n  val d = allreduce(complex(1.0, 0.0), max)\n  val e = allreduce(1.0, and)\n  val f = allreduce([1.0<m>], *)\n  val g = allreduce(1, (x: real, y: real) -> x + y)\n  val h = allreduce(1.0, +, root = 1)\n  val i = allreduce(1.0)\n  val j = allreduce(1.0, (x, y) -> x + y, fast = true)\n  val k = scatter(1)\n  val l = global_norm2([1, 2], 1)\n  val m = global_sum([[1.0]], 1)\n  val n = allreduce\n  val o = sum(+)\n  val q = bcast(1, comm = 3)\n  val r = global_dot([1.0], [complex(1.0, 0.0)], 1)\n  val s = alltoall(2.0)\n  val t = reduce_to(1, +, 0, false, world(), 9)\n"
+
+    write_text(src, text).unwrap()
+
+    val err = load(src).err().unwrap_or("")
+
+    finish(b)
+
+    for want in ["`@intrinsic` marks a function the compiler types itself, which only the `mpi` module nex ships declares", "`allreduce` takes its operand as a number or a `bool`, or an array of them; a tuple or a struct waits for structs by value (DESIGN §15), and this is (real64, real64)", "`allreduce` takes its operand as an integer, a real, a complex or a `bool`, or an array of them; this is string", "`allreduce` with `+` combines numbers; this operand is bool", "`allreduce` with `max` combines integers and reals, which are ordered; this operand is complex[real64]", "`allreduce` with `and` combines `bool`s; this operand is real64", "`allreduce` with `*` of [real64<m>] is in m to the power of the number of ranks, which is not static", "`allreduce`'s operator is `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc` or a function `(int64, int64) -> int64` of the operand's elements", "`allreduce` takes `x`, `op`, `fast =`, `comm =`, and no `root =`", "`allreduce` takes `x`, `op`, `fast =`, `comm =`\n", "`fast = true` hands a built-in operator to MPI's own", "`scatter` cuts its operand along the last axis, one part per rank, and a scalar has no axis; this is int64", "`global_norm2` works in reals and complexes; this is [int64]", "`global_sum` takes its operand as a rank's piece of a distributed vector: a vector of numbers; this is [real64; :, :]", "`allreduce` is a collective of `mpi`, typed at each call from its operand, so it is only called", "`+` stands alone only as the operator of one of `mpi`'s reductions, `allreduce(x, +)`", "`comm` must be mpi.Comm, but this is int64", "`global_dot` takes two vectors of one number type; these are [real64] and [complex[real64]]", "`alltoall` sends part k of its operand's last axis to rank k, and a scalar has no axis; this is real64", "`reduce_to` takes `x`, `op`, `root =`, `fast =`, `comm =`"]
+        assert(err.contains(want), s"missing: $want\n$err")
