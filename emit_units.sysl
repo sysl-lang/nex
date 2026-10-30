@@ -5,12 +5,22 @@
 // operand's width.
 
 import sh.sysl.parsing.Span
+import sysl.buf.{Buf, buf}
 import sysl.math.max
 
 impl Emitter
-    // `v` converted to the scale of `t`'s unit: a multiplication by `factor` at `t`'s width, each part
-    // of a complex on its own.
-    rescale(*self, span: Span, v: TExpr, factor: Ratio, t: Ty) -> string
+    // `v` converted to the scale of `e`'s unit: a multiplication by `factor` at the width of `e`'s
+    // type, each part of a complex on its own, and on an array each element.
+    rescale(*self, e: TExpr, v: TExpr, factor: Ratio) -> string
+        val span = e.span
+        val t = e.ty
+
+        if is_arr(t)
+            var operands: Buf[TExpr] = buf()
+
+            operands.push(v)
+            return self.mapped(e, operands, texpr(span, elem_of(t), TRescale(chain_leaf(v, 0), factor)))
+
         val x = self.ex(v)
 
         base_of(t) match

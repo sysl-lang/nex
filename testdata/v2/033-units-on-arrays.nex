@@ -1,0 +1,44 @@
+// Arrays whose elements carry a unit (DESIGN §13.6): converted element by element with one rounded
+// factor, through element-wise arithmetic, reductions, products, writes, loops and generic functions.
+
+def mean[U: Unit](a: [real<U>]) = sum(a) / length(a)
+
+def main() =
+  val xs = [1.0, 2.0, 3.0]<in>
+  print(xs)
+  print(to<mm>(xs))
+  print(strip(xs))
+  print(xs * 2.0 + xs)
+  print(xs + [1.0, 1.0, 1.0]<ft>)
+  print(sqrt([4.0, 9.0]<m^2>))
+
+  // A real32 and a complex array convert at their own width.
+  val w: [real32<ft>] = [1.0, 2.0]<ft>
+  print(to<m>(w))
+  val zs: [complex<in>] = [1.0 + 1i, 2.0 - 1i]<in>
+  print(to<mm>(zs))
+
+  // Reductions keep the unit.
+  print(sum(xs))
+  print(s"${minval(xs)} to ${maxval(xs)}")
+  print(norm2([3.0, 4.0]<m>))
+  print(mean([10.0, 20.0]<s>))
+  print(minloc(xs))
+
+  // Products combine the operands' units.
+  print(dot([1.0, 2.0]<m>, [3.0, 4.0]<s>))
+  val a = [[1.0, 2.0], [3.0, 4.0]]<N/m>
+  print(a @ [1.0, 1.0]<mm>)
+
+  // An expected type converts a whole array; a write converts the element.
+  val d: [real<mm>] = xs
+  print(d)
+  var ys = [0.0, 0.0]<in>
+  ys[1] = 1.0<ft>
+  ys[2] += 25.4<mm>
+  print(ys)
+
+  var total = 0.0<cm>
+  for x in xs
+    total += x
+  print(total)

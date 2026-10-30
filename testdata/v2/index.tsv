@@ -26,3 +26,4 @@ file	category	name
 030-units-imperial-and-si	units	imperial and SI conversions, mixed scales, expected types, real32 and complex, units printed inside aggregates
 031-units-rational-exponents	units	square roots and rational powers of units, and conversions between scales with exact roots
 032-units-through-the-language	units	values with units at module level, through compound assignment, loops, `match`, closures, function values and destructuring
+033-units-on-arrays	units	arrays with units converted element by element, through arithmetic, reductions, products, writes, loops and a generic function
