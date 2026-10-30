@@ -33,7 +33,7 @@ extern_attributes_refused()
     assert_eq(refused("extern def cos(x: real): real\n@symbol(\"cos\")\nextern def cosine(x: real): real\n" + M), "error: `cosine` and `cos` both name the C symbol `cos` @2:1")
     assert_eq(refused("extern def f(@strided x: real): real\n" + M), "error: `@strided` passes an array's view as it lies, and `x` is not an array @1:26")
     assert_eq(refused("extern def f(@strided(\"2\") x: [real]): real\n" + M), "error: `@strided` takes no arguments @1:31")
-    assert_eq(refused("extern def f(@dense x: [real]): real\n" + M), "error: `@dense` is not an attribute of an `extern` parameter, which takes `@strided` @1:25")
+    assert_eq(refused("extern def f(@dense x: [real]): real\n" + M), "error: `@dense` is not an attribute of an `extern` parameter, which takes `@strided` @1:24")
     assert_eq(refused("@fortran\nextern def f(x: real): real\n" + M), "error: a `@fortran` extern is not elaborated yet @1:1")
 
 @test("an extern takes what crosses to C and returns a scalar or nothing; anything else is refused")
