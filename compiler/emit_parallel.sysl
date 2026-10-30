@@ -97,7 +97,7 @@ impl Emitter
     // that is one of the leaves, the result is written over that local's own buffer.
     fused_map(*self, e: TExpr, dest: Option[usize]) -> string
         var leaves: Buf[TExpr] = buf()
-        val scalar = self.fused_scalar(e, &leaves)
+        val scalar = fused_scalar(e, &leaves)
         var vals: Buf[string] = buf()
 
         for l in leaves
@@ -108,40 +108,6 @@ impl Emitter
             None -> None
 
         self.mapped_values(e.span, e.ty, leaves, vals, scalar)
-
-    // The element of `e`, an element-wise operation, as a scalar over `leaves`: an operand that is
-    // itself one is fused in, anything else is a leaf, an array read at the element or a value
-    // broadcast, pushed onto `leaves` in source order.
-    fused_scalar(*self, e: TExpr, leaves: *Buf[TExpr]) -> TExpr
-        if !fusible(e)
-            leaves.push(e)
-            return chain_leaf(e, leaves.len() - 1)
-
-        val et = elem_of(e.ty)
-        val kind = *e.kind match
-            TPromote(v) -> TKind.TPromote(self.fused_scalar(v, leaves))
-            TRescale(v, factor) -> TKind.TRescale(self.fused_scalar(v, leaves), factor)
-            TArray(op) -> *op match
-                TElementwise(o, l, r) ->
-                    val a = self.fused_scalar(l, leaves)
-
-                    self.scalar_op(o, a, self.fused_scalar(r, leaves))
-                TElementwiseUnary(o, v) -> TKind.TUnary(o, self.fused_scalar(v, leaves))
-                TElemental(name, args) -> TKind.TBuiltin(name, self.fused_args(args, leaves))
-                TElementalConvert(v, traps) -> TKind.TConvert(self.fused_scalar(v, leaves), traps)
-                TElementalCall(callee, args) -> TKind.TCall(callee, self.fused_args(args, leaves))
-                _ -> TKind.TChainOperand(0)
-            _ -> TKind.TChainOperand(0)
-
-        texpr(e.span, et, kind)
-
-    fused_args(*self, args: Buf[TExpr], leaves: *Buf[TExpr]) -> Buf[TExpr]
-        var out: Buf[TExpr] = buf()
-
-        for a in args
-            out.push(self.fused_scalar(a, leaves))
-
-        out
 
     // `target = parallel e` where `e` fuses and reads `target`, a local held as a value, at each
     // element: the region writes the local's own buffer in place, each element read before it is
@@ -161,7 +127,7 @@ impl Emitter
 
         var leaves: Buf[TExpr] = buf()
 
-        self.fused_scalar(v, &leaves)
+        fused_scalar(v, &leaves)
 
         if leaf_of(leaves, id).is_none() then return false
 
@@ -177,7 +143,7 @@ impl Emitter
     // `dot(x, y)` read `x` and `y` and never build the product.
     par_reduction(*self, e: TExpr, name: string, args: Buf[TExpr]) -> string
         var leaves: Buf[TExpr] = buf()
-        var scalar = self.fused_scalar(args[0], &leaves)
+        var scalar = fused_scalar(args[0], &leaves)
         var ft = args[0].ty
         var reduced = name
 
@@ -185,7 +151,7 @@ impl Emitter
             // `dot` conjugates its first operand, then sums the products.
             if is_complex(base_of(elem_of(args[0].ty))) then scalar = texpr(e.span, scalar.ty, TBuiltin("conj", one_expr(scalar)))
 
-            scalar = texpr(e.span, elem_of(e.ty), TBinary("*", scalar, self.fused_scalar(args[1], &leaves)))
+            scalar = texpr(e.span, elem_of(e.ty), TBinary("*", scalar, fused_scalar(args[1], &leaves)))
             ft = Ty.Array(elem_of(e.ty), dynamic_axes(1))
             reduced = "sum"
 
@@ -1176,24 +1142,6 @@ end Emitter
 
 // The MLIR type of an environment of `fields`.
 env_ty(fields: Buf[string]) -> string = s"!llvm.struct<(${joined(fields)})>"
-
-// Whether `e` is an array computed element by element from operands of its own shape or broadcast
-// values, so that a `parallel` expression computes it inside its consumer's loop. `and` and `or`
-// stay apart: their scalar forms skip the right side, and an operand array is computed whole.
-private fusible(e: TExpr) -> bool
-    if !is_arr(e.ty) then return false
-
-    *e.kind match
-        TPromote(v) -> !ty_eq(elem_of(v.ty), elem_of(e.ty))
-        TRescale(_, _) -> true
-        TArray(op) -> *op match
-            TElementwise(o, _, _) -> o != "and" && o != "or"
-            TElementwiseUnary(_, _) -> true
-            TElemental(_, _) -> true
-            TElementalConvert(_, _) -> true
-            TElementalCall(_, _) -> true
-            _ -> false
-        _ -> false
 
 // The position among `leaves` of a read of local `id`.
 private leaf_of(leaves: Buf[TExpr], id: usize) -> Option[usize]

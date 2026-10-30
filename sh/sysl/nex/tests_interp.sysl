@@ -125,6 +125,15 @@ itp_complex()
                                    "val zero = 0 + 0i", "assert_traps(() -> print(z / zero), \"complex division by zero\")", "print((1 + 1i) / zero)"])),
               "-3.0+4.0i\n-0.2+0.4i\n5.0\n1.0-2.0i\n0.0+2.0i\ntrap: complex division by zero")
 
+@test("complex ^ as MLIR's complex.pow lowers it, with its special cases, at 64 and 16 bits and to an integer power")
+itp_complex_power()
+    assert_eq(interpreted(main_of(["val zero = 0.0 + 0.0i", "val big = 1.0e308 * 10.0 + 0.0i", "val z = 1.5 - 0.5i", "print(z ^ (0.5 + 1.0i))", "print(z ^ 2.5)",
+                                   "print(zero ^ (2.0 + 0.0i))", "print(zero ^ zero)", "print((1.0 + 0.0i) ^ (nan + 1.0i))", "print(big ^ (2.0 + 0.0i))",
+                                   "print(big ^ (-2.0 + 0.0i))", "print(zero ^ (-1.0 + 0.0i))", "val h: complex[real16] = complex[real16](z)", "print(h ^ h)",
+                                   "print(h ^ 3)", "print(z ^ -2)", "print([z, zero] ^ (0.5 + 0.5i))"])),
+              "1.6585968294944606+0.5081072118979043i\n2.1802657737104196-2.264632165278303i\n0.0+0.0i\n1.0+0.0i\n1.0+0.0i\ninf+0.0i\n0.0+0.0i\nnan-nani\n" +
+              "1.281-1.1045i\n2.246-3.244i\n0.32+0.23999999999999996i\n[1.4734708089188002+0.10064296136371517i, nan-nani]\nexit 0")
+
 // -- traps as values --------------------------------------------------------------------------------
 
 @test("a trap leaves every call between it and assert_traps, keeps what was done, and the program goes on")
@@ -294,7 +303,7 @@ itp_closure_traps()
 
 @test("what the interpreter does not run yet is refused before anything runs, at the construct")
 itp_refusals()
-    assert_eq(interpreted(main_of(["var s = 0", "parallel for i in 1..3 reduce s: +", "  s += i"])), "refused: a `parallel` construct is not interpreted yet @3:3")
+    assert_eq(interpreted(main_of(["val z = 1.5 - 0.5i", "print(tan(z))"])), "refused: `tan` of a complex is not interpreted yet @3:9")
     assert_eq(interpreted(main_of(["var z = 1.0 + 2.0i", "z.re = 3.0", "print(z)"])), "refused: a complex's part as a place is not interpreted yet @3:3")
     assert_eq(interpreted("extern def cos(x: real): real\n" + main_of(["print(cos(0.0))"])),
               "refused: a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled @1:1")

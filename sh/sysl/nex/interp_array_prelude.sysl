@@ -760,7 +760,7 @@ end Interp
 
 // The identity of `minval` (`high` false) or `maxval` over a `t`: the type's largest or smallest
 // value, `+inf` or `-inf` for a real.
-private extreme_identity(high: bool, t: Ty) -> Value = base_of(t) match
+private[nex] extreme_identity(high: bool, t: Ty) -> Value = base_of(t) match
     Int(bits, signed) ->
         if signed then VInt(long.wrap(if high then -(i128(1) << (bits - 1)) else (i128(1) << (bits - 1)) - 1))
         else VInt(if high then 0 else wrapped((i128(1) << bits) - 1, bits, false))

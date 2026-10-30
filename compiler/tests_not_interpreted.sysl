@@ -1,21 +1,7 @@
 @tests
 
-// The programs the interpreter does not run yet (`tests_engines.sysl`), by the stage of PLAN.md M13
+// The programs the interpreter does not run (`tests_engines.sysl`), by the stage of PLAN.md M13
 // that brings what each lacks: a `testdata/` program by its file stem, a program written into a test
-// by the test's function name or the case name it passes. I4 is `parallel`.
-val NOT_INTERPRETED: []const (string, string) = [
-    ("060-parallel-for-writes-owned-elements", "I4"),
-    ("061-parallel-reductions-over-every-operator", "I4"),
-    ("062-parallel-expressions-agree-with-sequential", "I4"),
-    ("063-parallel-traps-strings-and-closures", "I4"),
-    ("064-inout-windows-in-parallel-and-through-function-values", "I4"),
-    ("axpy", "I4"),
-    ("captured", "I4"),
-    ("fused", "I4"),
-    ("lambda", "I4"),
-    ("trap", "I4"),
-    ("windows", "I4"),
-    ("lines", "I4"),
-    ("parallel-strings-and-closures", "I4"),
-    ("parallel-traps", "I4")
-]
+// by the test's function name or the case name it passes. Empty: the interpreter runs every program
+// that calls no C.
+val NOT_INTERPRETED: []const (string, string) = []

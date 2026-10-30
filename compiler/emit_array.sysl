@@ -60,22 +60,9 @@ struct Nest
     results: Buf[string]
     carried: string
 
-// Whether `t` is an array of numbers or booleans: a tensor.
-is_arr(t: Ty) -> bool = t match
-    Array(e, _) -> is_number(*e)
-    _ -> false
-
 // Whether `t` is an array of anything else: an object holding its elements (`emit_items.sysl`).
 is_items(t: Ty) -> bool = t match
-    Array(e, _) -> !is_number(*e)
-    _ -> false
-
-private is_number(t: Ty) -> bool = t match
-    Int(_, _) -> true
-    Real(_) -> true
-    Complex(_) -> true
-    Bool -> true
-    Measured(b, _) -> is_number(*b)
+    Array(e, _) -> !is_number_ty(*e)
     _ -> false
 
 copy_strings(xs: Buf[string]) -> Buf[string]
@@ -1651,6 +1638,3 @@ impl Emitter
         self.op("}")
         self.put_text(sink, ARRAY_CLOSE)
 end Emitter
-
-// An operand of a scalar body: the `k`th value of the innermost chain frame, of `e`'s element type.
-chain_leaf(e: TExpr, k: usize) -> TExpr = texpr(e.span, elem_of(e.ty), TChainOperand(k))

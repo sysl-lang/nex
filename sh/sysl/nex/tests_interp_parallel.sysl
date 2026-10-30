@@ -1,0 +1,51 @@
+module sh.sysl.nex
+@tests
+
+// `parallel`, interpreted: run sequentially in the order one thread of the compiled program runs
+// it, reducing in its blocks and tree. Each expectation is what the compiled program prints for the
+// same text on one thread (and, for the reductions, on any number).
+
+@test("every reduction operator, a user operator among them, past one block of 4096 iterations")
+itp_par_every_operator()
+    val program = "def kahan(a: (real, real), b: (real, real)): (real, real) =\n  val y = b.1 - a.2\n  val t = a.1 + y\n  (t, (t - a.1) - y)\n\n" +
+                  main_of(["val n = 10007", "var x: [real] = zeros(n)", "for i in 1..n do x[i] = 1.0 / i + sin(1.0 * i)",
+                           "var s = 0.25", "var p = 1.0", "var lo = 1.0e300", "var hi = -1.0e300", "var w = (0.0, 0)", "var w2 = (0.0, 0)",
+                           "var k = (0.0, 0.0)", "var cnt = 0", "var all = true", "var any = false",
+                           "parallel for i in 1..n reduce s: +, p: *, lo: min, hi: max, w: maxloc, w2: minloc, k: kahan, cnt: +, all: and, any: or",
+                           "  s += x[i]", "  p *= 1.0 + x[i] / 1.0e5", "  lo = min(lo, x[i])", "  hi = max(hi, x[i])",
+                           "  w = maxloc(w, floor(x[i] * 2.0), i)", "  w2 = minloc(w2, floor(x[i] * 2.0), i)", "  k = kahan(k, (x[i], 0.0))",
+                           "  cnt += 1", "  all = all and x[i] > -2.0", "  any = any or x[i] > 1.5",
+                           "print(s)", "print(p)", "print(lo)", "print(hi)", "print(w)", "print(w2)", "print(k)", "print((cnt, all, any))"])
+
+    assert_eq(interpreted(program), "10.998795839375637\n1.0001072433330063\n-0.9998890278528063\n1.8414709848078965\n(3.0, 1)\n(-2.0, 4)\n" +
+                                    "(10.748795839375594, 0.0)\n(10007, true, true)\nexit 0")
+
+@test("two clauses number the iterations first index fastest; cycle ends one iteration; an empty range leaves the start; ties go to the lowest index")
+itp_par_clauses()
+    assert_eq(interpreted(main_of(["var t = 0.0", "parallel for i in 1..70, j in 1..90 by 2 reduce t: +", "  if (i + j) % 7 == 0 then cycle", "  t += 1.0 * i / j",
+                                   "print(t)", "parallel for i in 1..2, j in 1..2", "  print((i, j))", "var z = 5", "parallel for i in 1..10 by -1 reduce z: +", "  z += i",
+                                   "print(z)", "var m = (0.0, 0)", "parallel for i in 1..5 reduce m: maxloc", "  m = maxloc(m, 1.0 * (i % 2), i)", "print(m)"])),
+              "6125.980092905477\n(1, 1)\n(2, 1)\n(1, 2)\n(2, 2)\n5\n(1.0, 1)\nexit 0")
+
+@test("a trap ends the loop where it happens, after the lines printed before it; the reduction variable keeps its start, written elements stay")
+itp_par_traps()
+    assert_eq(interpreted(main_of(["print(\"before\")", "var y: [integer] = zeros(10)", "var s = 0", "assert_traps(() ->",
+                                   "  parallel for i in 1..10 reduce s: +", "    print(i)", "    s += i", "    y[i] = 100 div (i - 4)",
+                                   ", \"integer division by zero\")", "print(s)", "print(y)", "var u: int8 = 0", "assert_traps(() ->",
+                                   "  parallel for i in 1..200 reduce u: +", "    u += 1", ", \"int8 overflow\")", "print(u)", "var t = 0",
+                                   "assert_traps(() ->", "  parallel for i in 1..10 by t", "    print(i)", ", \"step of 0\")"])),
+              "before\n1\n2\n3\n4\n0\n[-33, -50, -100, 0, 0, 0, 0, 0, 0, 0]\n0\nexit 0")
+    assert_eq(interpreted(main_of(["print(\"before\")", "var y: [integer] = zeros(100000)", "parallel for i in 1..100000", "  y[i] = 1000 div (i - 54321)",
+                                   "print(\"after\")"])),
+              "before\ntrap: integer division by zero")
+
+@test("parallel element-wise expressions, map and reductions give the sequential bits, a shape mismatch and a trap in an element trapping")
+itp_par_expressions()
+    assert_eq(interpreted(main_of(["val n = 10007", "var x: [real] = zeros(n)", "for i in 1..n do x[i] = 1.0 / i + sin(1.0 * i)",
+                                   "print((parallel sum(x * x)) == sum(x * x))", "print(parallel dot(x, x + 1.0))",
+                                   "print((parallel minval(x), parallel maxval(x), parallel product(x / 2.0 + 0.5)))",
+                                   "val xs: [real32] = parallel real32(x) * 3.0", "print(parallel sum(xs))", "val a = [1.0, 2.0, 3.0]", "val v = [1.0, 2.0]",
+                                   "assert_traps(() -> print(parallel a + v), \"shape mismatch\")", "assert_traps(() -> print(parallel sum(a * v)), \"shape mismatch\")",
+                                   "val q = [5, 0, 2]", "assert_traps(() -> print(parallel 10 div q + 1), \"integer division by zero\")",
+                                   "print(parallel map(a, e -> e * 2.0))", "print(parallel minval([nan, 1.0]))", "print(parallel maxval([1.0, nan]))"])),
+              "true\n5018.259477070494\n(-0.9998890278528063, 1.8414709848078965, 0.0)\n32.2464\n[2.0, 4.0, 6.0]\nnan\nnan\nexit 0")

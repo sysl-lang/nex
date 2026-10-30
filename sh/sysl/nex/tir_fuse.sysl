@@ -1,0 +1,77 @@
+module sh.sysl.nex
+
+// Fusion of an element-wise expression under `parallel` (DESIGN §9.5): the operators, elemental
+// calls, conversions, widenings and rescalings of a whole element-wise expression become one scalar
+// computation over the arrays and values at its leaves, so each element is computed whole before the
+// next. Both engines compute a `parallel` element-wise expression and a `parallel` reduction's
+// operand from this one form, so a trap is the same one on each.
+
+import sysl.buf.{Buf, buf}
+
+// Whether `e` is an array computed element by element from operands of its own shape or broadcast
+// values, so that a `parallel` expression computes it inside its consumer's loop. `and` and `or`
+// stay apart: their scalar forms skip the right side, and an operand array is computed whole.
+fusible(e: TExpr) -> bool
+    if !is_arr(e.ty) then return false
+
+    *e.kind match
+        TPromote(v) -> !ty_eq(elem_of(v.ty), elem_of(e.ty))
+        TRescale(_, _) -> true
+        TArray(op) -> *op match
+            TElementwise(o, _, _) -> o != "and" && o != "or"
+            TElementwiseUnary(_, _) -> true
+            TElemental(_, _) -> true
+            TElementalConvert(_, _) -> true
+            TElementalCall(_, _) -> true
+            _ -> false
+        _ -> false
+
+// The element of `e`, an element-wise operation, as a scalar over `leaves`: an operand that is
+// itself one is fused in, anything else is a leaf, an array read at the element or a value
+// broadcast, pushed onto `leaves` in source order and read as `TChainOperand` of its position.
+fused_scalar(e: TExpr, leaves: *Buf[TExpr]) -> TExpr
+    if !fusible(e)
+        leaves.push(e)
+        return chain_leaf(e, leaves.len() - 1)
+
+    val kind = *e.kind match
+        TPromote(v) -> TKind.TPromote(fused_scalar(v, leaves))
+        TRescale(v, factor) -> TKind.TRescale(fused_scalar(v, leaves), factor)
+        TArray(op) -> *op match
+            TElementwise(o, l, r) ->
+                val a = fused_scalar(l, leaves)
+
+                TKind.TBinary(o, a, fused_scalar(r, leaves))
+            TElementwiseUnary(o, v) -> TKind.TUnary(o, fused_scalar(v, leaves))
+            TElemental(name, args) -> TKind.TBuiltin(name, fused_args(args, leaves))
+            TElementalConvert(v, traps) -> TKind.TConvert(fused_scalar(v, leaves), traps)
+            TElementalCall(callee, args) -> TKind.TCall(callee, fused_args(args, leaves))
+            _ -> TKind.TChainOperand(0)
+        _ -> TKind.TChainOperand(0)
+
+    texpr(e.span, elem_of(e.ty), kind)
+
+private fused_args(args: Buf[TExpr], leaves: *Buf[TExpr]) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    for a in args
+        out.push(fused_scalar(a, leaves))
+
+    out
+
+// An operand of a scalar body: the `k`th value of the innermost chain frame, of `e`'s element type.
+chain_leaf(e: TExpr, k: usize) -> TExpr = texpr(e.span, elem_of(e.ty), TChainOperand(k))
+
+// Whether `t` is an array of numbers or booleans: a tensor.
+is_arr(t: Ty) -> bool = t match
+    Array(e, _) -> is_number_ty(*e)
+    _ -> false
+
+// Whether `t` is a number or a boolean, an element a tensor holds.
+is_number_ty(t: Ty) -> bool = t match
+    Int(_, _) -> true
+    Real(_) -> true
+    Complex(_) -> true
+    Bool -> true
+    Measured(b, _) -> is_number_ty(*b)
+    _ -> false

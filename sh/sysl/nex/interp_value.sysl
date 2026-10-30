@@ -277,12 +277,13 @@ private real_pow(x: real, y: real, bits: int, fpe: bool) -> Answer
 
 // -- complex numbers --------------------------------------------------------------------------------
 
-// `a op b` on complex numbers whose parts have `bits` bits; `^` is not among them.
+// `a op b` on complex numbers whose parts have `bits` bits.
 private[nex] complex_op(op: string, bits: int) -> Option[Op2]
     if op == "+" then return Some((a, b) -> Ok(VComplex(rnd(re_of(a) + re_of(b), bits), rnd(im_of(a) + im_of(b), bits))))
     if op == "-" then return Some((a, b) -> Ok(VComplex(rnd(re_of(a) - re_of(b), bits), rnd(im_of(a) - im_of(b), bits))))
     if op == "*" then return Some((a, b) -> complex_mul(re_of(a), im_of(a), re_of(b), im_of(b), bits))
     if op == "/" then return Some((a, b) -> complex_div(re_of(a), im_of(a), re_of(b), im_of(b), bits))
+    if op == "^" then return Some((a, b) -> Ok(complex_pow(re_of(a), im_of(a), re_of(b), im_of(b), bits)))
     if op == "==" then return Some((a, b) -> Ok(VBool(re_of(a) == re_of(b) && im_of(a) == im_of(b))))
     if op == "!=" then return Some((a, b) -> Ok(VBool(re_of(a) != re_of(b) || im_of(a) != im_of(b))))
 
@@ -359,6 +360,29 @@ private[nex] complex_exp(re: real, im: real, bits: int) -> Value
 
 // `log(z)`: log |z| + i arg z.
 private[nex] complex_log(re: real, im: real, bits: int) -> Value = VComplex(libm1(LIBM_LOG, complex_abs(re, im, bits), bits), complex_arg(re, im, bits))
+
+// `a ^ b`, as MLIR's lowering of `complex.pow` computes it: |a|^re(b) · e^(−im(b) arg a) times
+// cis(re(b) arg a + im(b) log |a|), with its special cases — a zero base, a zero exponent, a base of
+// 1 and a base of +inf on the real axis — chosen after, in its order.
+private[nex] complex_pow(ar: real, ai: real, br: real, bi: real, bits: int) -> Value
+    val r = complex_abs(ar, ai, bits)
+    val power = if bits == 16 then rnd(real(f32(r).pow(f32(br))), 16) elif bits == 32 then real(f32(r).pow(f32(br))) else r.pow(br)
+    val theta = complex_arg(ar, ai, bits)
+    val scale = rnd(power * libm1(LIBM_EXP, rnd(-bi * theta, bits), bits), bits)
+    val angle = rnd(rnd(br * theta, bits) + rnd(bi * libm1(LIBM_LOG, r, bits), bits), bits)
+    val general = VComplex(rnd(scale * libm1(LIBM_COS, angle, bits), bits), rnd(scale * libm1(LIBM_SIN, angle, bits), bits))
+    val one = VComplex(1.0, 0.0)
+    val zero = VComplex(0.0, 0.0)
+    val real_exponent = bi == 0.0
+    val on_axis = ai == 0.0
+    var z = if r == 0.0 && real_exponent && 0.0 <= br then (if br == 0.0 then one else zero) else general
+
+    if br == 0.0 && real_exponent then z = one
+    if ar == 1.0 && on_axis then z = one
+    if ar == INFINITY && on_axis && real_exponent && br > 0.0 then z = VComplex(INFINITY, 0.0)
+    if ar == INFINITY && on_axis && real_exponent && br < 0.0 then z = zero
+
+    z
 
 // `sin(z)` and `cos(z)`, as MLIR's lowering: from e^im's half and its reciprocal half.
 private[nex] complex_sin(re: real, im: real, bits: int) -> Value

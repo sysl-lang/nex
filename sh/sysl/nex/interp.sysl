@@ -54,7 +54,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
         kept.push(a)
 
     val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf())
+    var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf(), buf())
     val init = it.program(test)
 
     if it.diags.len() > 0
@@ -70,7 +70,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
 // Nothing is run.
 interpretable(p: TProgram) -> Buf[Diagnostic]
     val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf())
+    var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf(), buf())
 
     it.program(None)
     shut(m)
@@ -231,6 +231,8 @@ private[nex] struct Interp
     global_names: Buf[string]
     // By local, whether a lambda captures it, which puts it in a cell its slot holds a `VRef` to.
     captured: Buf[bool]
+    // The reductions of the `parallel for` bodies being compiled, innermost last.
+    par_accs: Buf[ParAcc]
 
 impl Interp
     // A construct not interpreted yet, reported once per function.
@@ -629,7 +631,7 @@ impl Interp
                     None -> return (c) -> Err(Stopped(0))
             TMatch(s, arms) -> return self.match_expr(e.span, s, arms)
             TArray(a) -> return self.array(e, *a)
-            TParallel(_) -> return self.later(e.span, "a `parallel` construct")
+            TParallel(op) -> return self.parallel(e, *op)
             TRescale(v, factor) -> return self.rescale(e.span, v, e.ty, factor)
             TUnitAs(v) -> return self.ex(v)
             TTuple(elems) -> return self.aggregate(0, elems)
@@ -998,6 +1000,10 @@ impl Interp
                 val pow = self.op2(span, "^", at).unwrap()
 
                 Some((a, b) -> pow(a, VReal(int_to_real(int_of(b), n_signed, bits))))
+            Complex(bits) ->
+                val pow = self.op2(span, "^", at).unwrap()
+
+                Some((a, b) -> pow(a, VComplex(int_to_real(int_of(b), n_signed, bits), 0.0)))
             _ -> None
 
     // The operation of `l op r`, or of `x op= r`, `l` being of the left's type.

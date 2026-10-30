@@ -1,0 +1,437 @@
+module sh.sysl.nex
+
+// `parallel`, interpreted (DESIGN §9): every construct runs sequentially, in the order one thread of
+// the compiled program runs it, and reduces in the compiled program's blocks and tree, so the result
+// has the same bits at any thread count (§9.2.1).
+//
+// **A `parallel for`** numbers its iterations with the first clause's index varying fastest and runs
+// them in that order. A reduction cuts them into blocks of 4096, reduces each block from the
+// operator's identity (for a user operator, the variable's starting value), combines the block
+// partials in the fixed pairwise tree and the result once with the starting value. A trap ends the
+// loop where it happens and leaves the variable as it was, which is what one thread does; with
+// several, the iterations other threads had begun also finish, and only what is deterministic —
+// the trap's message, and the lines printed before the loop — is the same.
+//
+// **A `parallel` expression** is computed from the fused scalar form both engines share
+// (`fused_scalar`): an element-wise expression element by element, each element whole before the
+// next, and a reduction's operand element by element as its block reduces it.
+
+import nex_runtime.sh.sysl.nex_runtime.{SHAPE_MISMATCH, ZERO_STEP}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The iterations a reduction's block holds (DESIGN §9.2.1).
+private val PAR_BLOCK: i128 = 4096
+
+// Two partial results of a reduction combined, the first the earlier.
+private[nex] type Combine = &Fn(&Cells, Value, Value) -> Answer
+
+// A reduction of a `parallel for` being compiled: its variable, the slot its block's accumulator is
+// kept in, and how a contribution joins it.
+private[nex] struct ParAcc
+    target: TExpr
+    slot: usize
+    combine: Combine
+
+// A clause's header, worked out before the first iteration: its first value, step and trip count.
+private struct Trip
+    lo: i128
+    step: i128
+    count: i128
+
+impl Interp
+    parallel(*self, e: TExpr, p: TPar) -> Code = p match
+        TParFor(id, clauses, reds, body) -> self.par_for(e.span, id, clauses, reds, body)
+        TContribute(target, value, index) -> self.contribution(e.span, target, value, index)
+        TParExpr(v) -> self.par_expr(v)
+
+    // -- `parallel for` ---------------------------------------------------------------------------
+
+    par_for(*self, span: Span, loop_id: usize, clauses: Buf[TParClause], reds: Buf[TReduce], body: TExpr) -> Code
+        var headers: Buf[(Code, Code, Option[Code], bool, bool)] = buf()
+        var binds: Buf[Binder] = buf()
+
+        for cl in clauses
+            val signed = is_signed(base_of(self.prog.locals[cl.var_id].ty))
+            val step = cl.step.map(s -> self.ex(s))
+
+            headers.push((self.ex(cl.lo), self.ex(cl.hi), step, cl.inclusive, signed))
+            binds.push(self.local_binder(cl.var_id))
+
+        // By reduction: its starting value, its block's identity, how two partials combine, and what
+        // stores the result.
+        var starts: Buf[Code] = buf()
+        var identities: Buf[Option[Value]] = buf()
+        var combines: Buf[Combine] = buf()
+        var stores: Buf[Code] = buf()
+        var acc_slots: Buf[usize] = buf()
+        var from_slots: Buf[usize] = buf()
+        val outer = self.par_accs.len()
+
+        for r in reds
+            val t = r.target.ty
+            val combine = self.red_combine(span, r.op, t)
+            val slot = self.next
+
+            self.next += 1
+            starts.push(self.ex(r.target))
+            identities.push(self.red_identity(r.op, t))
+            combines.push(combine)
+            self.par_accs.push(ParAcc(r.target, slot, combine))
+            acc_slots.push(slot)
+
+            // The result is stored from a slot of its own, as `v = result`.
+            val from = self.next
+
+            self.next += 1
+            from_slots.push(from)
+            self.chains.push(from)
+            stores.push(self.assign(span, "=", r.target, texpr(span, t, TChainOperand(0))))
+            self.chains.pop()
+
+        val b = self.ex(body)
+
+        while self.par_accs.len() > outer
+            self.par_accs.pop()
+
+        (c) ->
+            var trips: Buf[Trip] = buf()
+            var total: i128 = 1
+
+            for (lo_c, hi_c, step_c, inclusive, signed) in headers
+                val first = wide(int_of(lo_c(c)?), signed)
+                val last = wide(int_of(hi_c(c)?), signed)
+                val by = step_c match
+                    Some(s) -> wide(int_of(s(c)?), signed)
+                    None -> 1
+
+                if step_c.is_some() && by == 0 then return trapped(ZERO_STEP)
+
+                val n = trip_count(first, last, by, inclusive)
+
+                trips.push(Trip(first, by, n))
+                total *= n
+
+            val ts = trips
+
+            // The iterations `lo` to `hi − 1`, each binding the indices from its number and running
+            // the body; a `cycle` ends only its own iteration.
+            val run: &Fn(i128, i128) -> Answer = (lo, hi) ->
+                for n in lo..<hi
+                    var rest = n
+
+                    for k in 0..<ts.len()
+                        val tr = ts[k]
+                        val idx = if k + 1 == ts.len() then rest else rest % tr.count
+
+                        if k + 1 < ts.len() then rest = rest / tr.count
+
+                        val bind = binds[k]
+
+                        bind(c, VInt(long.wrap(tr.lo + idx * tr.step)))
+
+                    b(c) match
+                        Ok(_) -> ()
+                        Err(sig) -> if landed(sig, loop_id) == 0 then return Err(sig)
+
+                Ok(VVoid)
+
+            if reds.len() == 0
+                run(0, total)?
+                return Ok(VVoid)
+
+            var begun: Buf[Value] = buf()
+
+            for s in starts
+                begun.push(s(c)?)
+
+            var parts: Buf[Buf[Value]] = buf()
+
+            for _ in 0..<reds.len()
+                parts.push(buf())
+
+            var lo: i128 = 0
+
+            while lo < total
+                val hi = if lo + PAR_BLOCK < total then lo + PAR_BLOCK else total
+
+                for k in 0..<reds.len()
+                    c.v.set(acc_slots[k], identities[k].unwrap_or(begun[k]))
+
+                run(lo, hi)?
+
+                for k in 0..<reds.len()
+                    parts[k].push(c.v[acc_slots[k]])
+
+                lo = hi
+
+            for k in 0..<reds.len()
+                if parts[k].len() == 0 then continue
+
+                val combine = combines[k]
+                val tree = pairwise(c, combine, parts[k])?
+                val result = combine(c, begun[k], tree)?
+                val store = stores[k]
+
+                c.v.set(from_slots[k], result)
+                store(c)?
+
+            Ok(VVoid)
+    end par_for
+
+    // One iteration's contribution: `value`, or the pair of `value` and `index`, combined into the
+    // block's accumulator of the reduction `target` names.
+    contribution(*self, span: Span, target: TExpr, value: TExpr, index: Option[TExpr]) -> Code
+        var found: Option[ParAcc] = None
+
+        for a in self.par_accs
+            if same_place(a.target, target) then found = Some(a)
+
+        val a = found match
+            Some(a) -> a
+            None -> return self.later(span, "a contribution outside its loop")
+        val v = self.ex(value)
+        val i = index.map(x -> self.ex(x))
+        val combine = a.combine
+        val slot = a.slot
+
+        (c) ->
+            val x = v(c)?
+            val y = i match
+                Some(f) ->
+                    var pair: Buf[Value] = buf()
+
+                    pair.push(x)
+                    pair.push(f(c)?)
+                    VAgg(0, pair)
+                None -> x
+
+            c.v.set(slot, combine(c, c.v[slot], y)?)
+            Ok(VVoid)
+
+    // The value a block starts from: the operator's identity, or `None` for a user operator, whose
+    // blocks start from the variable's value before the loop.
+    red_identity(*self, op: TRedOp, t: Ty) -> Option[Value] = op match
+        RBuiltin(name) ->
+            if name == "+" then Some(one_or_zero(t, false))
+            elif name == "*" then Some(one_or_zero(t, true))
+            elif name == "min" then Some(extreme_identity(false, t))
+            elif name == "max" then Some(extreme_identity(true, t))
+            elif name == "and" then Some(VBool(true))
+            elif name == "or" then Some(VBool(false))
+            else
+                // A location: the worst value at the largest index, which every candidate beats.
+                val (vt, it) = pair_types(t)
+                var pair: Buf[Value] = buf()
+
+                pair.push(extreme_identity(name == "maxloc", vt))
+                pair.push(extreme_identity(false, it))
+                Some(VAgg(0, pair))
+        RUser(_) -> None
+
+    // How two partial results of a reduction of type `t` combine, the first the earlier.
+    red_combine(*self, span: Span, op: TRedOp, t: Ty) -> Combine = op match
+        RBuiltin(name) ->
+            if name == "and" then return (c, a, b) -> Ok(VBool(bool_of(a) && bool_of(b)))
+            if name == "or" then return (c, a, b) -> Ok(VBool(bool_of(a) || bool_of(b)))
+
+            if name == "min" || name == "max"
+                val low = name == "min"
+
+                return base_of(t) match
+                    Int(_, signed) -> (c, a, b) -> Ok(if (wide(int_of(a), signed) < wide(int_of(b), signed)) == low then a else b)
+                    _ -> (c, a, b) -> Ok(VReal(if low then minimum(real_of(a), real_of(b)) else maximum(real_of(a), real_of(b))))
+
+            if name == "minloc" || name == "maxloc"
+                // Of two (value, index) pairs, the better value, and on a tie the lower index.
+                val (vt, it) = pair_types(t)
+                val better = self.op2(span, if name == "minloc" then "<" else ">", vt).unwrap()
+                val same = self.op2(span, "==", vt).unwrap()
+                val lower = self.op2(span, "<", it).unwrap()
+
+                return (c, a, b) ->
+                    val av = field_at(a, 0)
+                    val bv = field_at(b, 0)
+                    val pick = bool_of(better(bv, av)?) || bool_of(same(bv, av)?) && bool_of(lower(field_at(b, 1), field_at(a, 1))?)
+
+                    Ok(if pick then b else a)
+
+            val f = self.op2(span, name, t).unwrap()
+
+            (c, a, b) -> f(a, b)
+        RUser(f) ->
+            // `f(a, b)`, its arguments read from two slots of the frame.
+            val base = self.next
+
+            self.next += 2
+            self.chains.push(base)
+
+            var args: Buf[TExpr] = buf()
+
+            args.push(texpr(span, t, TChainOperand(0)))
+            args.push(texpr(span, t, TChainOperand(1)))
+
+            val call = self.ex(texpr(span, t, TCall(f, args)))
+
+            self.chains.pop()
+
+            (c, a, b) ->
+                c.v.set(base, a)
+                c.v.set(base + 1, b)
+                call(c)
+
+    // -- `parallel` expressions -------------------------------------------------------------------
+
+    par_expr(*self, v: TExpr) -> Code
+        if fusible(v)
+            var leaves: Buf[TExpr] = buf()
+            val scalar = fused_scalar(v, &leaves)
+
+            return self.mapped(v.ty, leaves, scalar)
+
+        *v.kind match
+            TArray(op) -> *op match
+                TReduction(name, args, dim) ->
+                    if dim.is_none() && (name == "sum" || name == "product" || name == "minval" || name == "maxval" || name == "dot")
+                        return self.par_reduction(v, name, args)
+                _ -> ()
+            _ -> ()
+
+        self.ex(v)
+
+    // A whole-array reduction under `parallel`: its operand fused, each element computed as its
+    // block reduces it, the blocks combined in the tree the sequential reduction uses.
+    par_reduction(*self, e: TExpr, name: string, args: Buf[TExpr]) -> Code
+        var leaves: Buf[TExpr] = buf()
+        var scalar = fused_scalar(args[0], &leaves)
+        var reduced = name
+        var et = elem_of(args[0].ty)
+
+        if name == "dot"
+            // `dot` conjugates its first operand, then sums the products.
+            if is_complex(base_of(et)) then scalar = texpr(e.span, scalar.ty, TBuiltin("conj", single_expr(scalar)))
+
+            scalar = texpr(e.span, elem_of(e.ty), TBinary("*", scalar, fused_scalar(args[1], &leaves)))
+            et = elem_of(e.ty)
+            reduced = "sum"
+
+        val r = self.reducer(e.span, reduced, et, e.ty) match
+            Some(r) -> r
+            None -> return self.later(e.span, s"`parallel $name` of ${show_ty(args[0].ty)}")
+        val codes = self.operands(leaves)
+        var arrays: Buf[bool] = buf()
+
+        for l in leaves
+            arrays.push(is_array(l.ty))
+
+        val base = self.next
+
+        self.next += leaves.len()
+        self.chains.push(base)
+
+        val element = self.ex(scalar)
+
+        self.chains.pop()
+
+        (c) ->
+            var vals: Buf[Value] = buf()
+
+            for k in 0..<codes.len()
+                val f = codes[k]
+
+                vals.push(f(c)?)
+
+            var shape: Option[&Arr] = None
+
+            for k in 0..<vals.len()
+                if !arrays[k] then continue
+
+                val a = arr_of(vals[k])
+
+                shape match
+                    Some(s) -> if !same_shape(s, a) then return trapped(SHAPE_MISMATCH)
+                    None -> shape = Some(a)
+
+            var lists: Buf[Buf[Value]] = buf()
+
+            for k in 0..<vals.len()
+                lists.push(if arrays[k] then elements(arr_of(vals[k])) else buf())
+
+            val n = i128(count_of(shape.unwrap()))
+            val step = r.step
+            var parts: Buf[Value] = buf()
+            var lo: i128 = 0
+
+            while lo < n
+                val hi = if lo + PAR_BLOCK < n then lo + PAR_BLOCK else n
+                var acc = r.identity
+
+                for j in lo..<hi
+                    for k in 0..<vals.len()
+                        c.v.set(base + k, if arrays[k] then lists[k][usize(j)] else vals[k])
+
+                    acc = step(acc, element(c)?)?
+
+                parts.push(acc)
+                lo = hi
+
+            val finish = r.finish
+
+            if parts.len() == 0 then return finish(r.identity)
+
+            val combine = r.combine
+
+            finish(pairwise(c, (c2, a, b) -> combine(a, b), parts)?)
+    end par_reduction
+end Interp
+
+// The trips of `first..last` (or `..<`) by `by`, as a `for` header works them out.
+private trip_count(first: i128, last: i128, by: i128, inclusive: bool) -> i128
+    val up = by > 0
+    val empty = if up then (if inclusive then last < first else last <= first)
+                else (if inclusive then first < last else first <= last)
+
+    if empty then return 0
+
+    val distance = (if up then last - first else first - last) - (if inclusive then 0 else 1)
+
+    distance / (if up then by else -by) + 1
+
+// Partials combined in the fixed pairwise tree (DESIGN §9.2.1): in rounds, each pairing neighbours,
+// an odd last one carried up as it is, until one is left.
+private pairwise(c: &Cells, combine: Combine, partials: Buf[Value]) -> Answer
+    var ps = partials
+
+    while ps.len() > 1
+        var next: Buf[Value] = buf()
+        var k: usize = 0
+
+        while k + 1 < ps.len()
+            next.push(combine(c, ps[k], ps[k + 1])?)
+            k += 2
+
+        if k < ps.len() then next.push(ps[k])
+
+        ps = next
+
+    Ok(ps[0])
+
+// The value and index types of a (value, index) pair.
+private pair_types(t: Ty) -> (Ty, Ty) = t match
+    Tuple(es) -> (es[0], es[1])
+    _ -> (t, t)
+
+private same_place(a: TExpr, b: TExpr) -> bool = *a.kind match
+    TLocal(x) -> *b.kind match
+        TLocal(y) -> x == y
+        _ -> false
+    TGlobalRef(x) -> *b.kind match
+        TGlobalRef(y) -> x == y
+        _ -> false
+    _ -> false
+
+private single_expr(x: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    out.push(x)
+    out
