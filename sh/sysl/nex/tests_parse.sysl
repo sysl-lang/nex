@@ -232,6 +232,12 @@ parallel_for()
     assert_eq(parsed("def f() =\n  parallel for j in 1..cols(m)\n    m[:, j] = m[:, j] / norm(m[:, j])\n"), "(def f () _ (parallel-for (j (.. 1 (call cols m))) (= (index m : j) (/ (index m : j) (call norm (index m : j))))))")
     assert_eq(parsed("def f() =\n  parallel for i in 1..rows(c), j in 1..cols(c)\n    c[i, j] = 0\n  end for\n"), "(def f () _ (parallel-for (i (.. 1 (call rows c))) (j (.. 1 (call cols c))) (= (index c i j) 0)))")
 
+@test("`exchange` before an indented block is the `mpi` module's block, closed by `end exchange` or by the layout; anywhere else `exchange` is a name")
+exchange_block()
+    assert_eq(parsed("def f() =\n  exchange\n    send(u[2..2], to = left)\n    recv(u[1..1], from = left)\n  end exchange\n"), "(def f () _ (exchange (block (call send (index u (.. 2 2)) (named to left)) (call recv (index u (.. 1 1)) (named from left)))))")
+    assert_eq(parsed("def f() =\n  exchange\n    g()\n"), "(def f () _ (exchange (call g)))")
+    assert_eq(parsed("def f() =\n  val exchange = 3\n  exchange + exchange(1)\n"), "(def f () _ (block (val exchange 3) (+ exchange (call exchange 1))))")
+
 @test("a `parallel for` names its reductions: built-in operators, minloc and maxloc, or a function")
 parallel_reductions()
     assert_eq(parsed("def f() =\n  parallel for i in 1..n reduce total: +, peak: max\n    total += x[i]\n"), "(def f () _ (parallel-for (i (.. 1 n)) (reduce (total +) (peak max)) (+= total (index x i))))")

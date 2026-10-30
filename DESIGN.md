@@ -1362,14 +1362,17 @@ def main() =
   val p = num_ranks()
   val n = 1000
   var u: [real] = zeros(n + 2)          // one ghost cell at each end
+  var ghost: [real] = zeros(2)          // the ghost cells as they arrive
   val left = if me > 0 then me - 1 else no_rank
   val right = if me < p - 1 then me + 1 else no_rank
   for step in 1..100
     exchange
       send(u[2..2], to = left)
       send(u[n + 1..n + 1], to = right)
-      recv(u[1..1], from = left)
-      recv(u[n + 2..n + 2], from = right)
+      recv(ghost[1..1], from = left)
+      recv(ghost[2..2], from = right)
+    u[1] = ghost[1]
+    u[n + 2] = ghost[2]
     u[2..n + 1] = 0.5 * (u[1..n] + u[3..n + 2])
   val total = allreduce(sum(u[2..n + 1]), +)
   if me == 0 then print(total)
@@ -1423,23 +1426,45 @@ not the message's traps: *"recv: the message from rank 2 holds 12 values; the ar
 **Nonblocking: the `exchange` block.** A nonblocking send or receive must keep its buffer where it
 lies until it completes, which a call cannot promise (§9.6.1). nex makes that a scope: inside an
 `exchange` block, `send` and `recv` are `MPI_Isend` and `MPI_Irecv`, and the block's end is
-`MPI_Waitall` on all of them. A place named by a `recv` in the block is borrowed by it until the
-end, under §8.3's exclusivity rule — reading or writing it inside the block is a compile error —
-and a sent array is held by the request (its buffer reference counted, so a later write copies
-rather than changing what is in flight, value semantics for free). Code in the block that touches
-neither runs while the messages move, which is the overlap of computation and communication a halo
-exchange wants:
+the completion of all of them. A variable a `recv` in the block names is borrowed by it from the
+post to the end, under §8.3's exclusivity rule — reading or writing it inside the block, by name,
+through a `val` sharing it, or through a function that reaches it (§8.3 rule 3's summaries), is a
+compile error — and a variable a `send` names may be read in the block but not written. A sent
+value no variable holds (`send(u * 2.0, to = r)`) is kept in a hidden local until the end. Code in
+the block that touches neither runs while the messages move, which is the overlap of computation
+and communication a halo exchange wants:
 
 ```nex
 exchange
   send(u[:, 2], to = west)
   recv(u[:, 1], from = west)
-  interior(u)                // error: `u` is borrowed by the `recv` above until the block ends
+  interior(u)                // error: `u` is borrowed by the `recv` of `u[:, 1]` above until the
+                             // `exchange` block ends: a place received into is neither read nor
+                             // written inside the block
 ```
 
-The overlap is written by computing on another array (or another part, once the checker proves
-windows disjoint as §9.4 does). There is no `Request` value and no `wait`: a request that is never
-waited on is not expressible.
+Two places of one array posted in one block — two received into, or one sent and one received
+into — must be disjoint by §8.3 rule 1's forms, as two `inout` arguments of one call must:
+`u[:, 2]` and `u[:, 1]` above are, `u[2..2]` and `u[n + 2..n + 2]` are not (`n` may be 0), which
+is why the halo above receives its ghost cells into an array of their own. Every place is fixed
+where it is posted, so a split base counts as written when anything in the block writes it. The
+overlap is written by computing on another array. There is no `Request` value and no `wait`: a
+request that is never waited on is not expressible. So that the end always comes, a `send` or
+`recv` is posted only as a statement of the block itself — one in an `if`, a loop or a function
+inside it, or used as a value, is refused (inside the block a `recv` answers no `Status`) — and a
+`return`, `exit` or `cycle` that would leave the block is refused. A trap inside the block that
+nothing catches ends the job (§9.6.2's `MPI_Abort`); one an `assert_traps` around the block
+catches first cancels every request the block posted and completes them (`MPI_Cancel`, then
+`MPI_Wait`), before the trap frees the arrays they use. A receive's count is checked at the end,
+with the blocking `recv`'s words, and a message longer than its array traps: *"recv: the message
+from rank 0 holds more values than the array's 4"*.
+
+The block is spelled `exchange` and an indented block (an `end exchange` may close it); the word
+is contextual (§11), so `exchange` stays free as a name. It compiles to calls of the shim: one
+that opens the block, `MPI_Isend` or `MPI_Irecv` for each post, and one that waits for every
+request the block posted; after it, each variable received into is passed `inout` and each sent
+array read by a call that does nothing, so the program reads a received array only after the wait
+and no sent one is freed before it.
 
 **Collectives** take the value and answer the result, as nex's own reductions do. Each takes
 `comm = world()` last; its other arguments go by position or by name.
@@ -1507,19 +1532,24 @@ rank. A string is refused with its type.
 **A view is an MPI datatype, never a copy.** Where §10.3 copies a strided view because C takes a
 bare pointer, MPI takes a pointer *and* a description, so every window crosses where it lies:
 
-- rank 1 with stride `s` (negative included): `MPI_Type_create_hvector(n, 1, s * bytes, elem)`;
-- rank 2, a window of a column-major root with leading dimension `ld`: `MPI_Type_vector(columns,
-  rows, ld, elem)`, and the hvector of a hvector when the first axis is strided too;
-- rank k: one `hvector` per axis, innermost first; a box of a dense root is
-  `MPI_Type_create_subarray` with `MPI_ORDER_FORTRAN`, which is nex's order.
+- the element is `MPI_Type_contiguous(bytes, MPI_BYTE)`, and the leading axes that are one dense
+  run (each stride the run so far, or an extent of 1) fold into it;
+- each remaining axis, innermost first, is `MPI_Type_create_hvector(extent, 1, stride, inner)`
+  with the axis's own byte stride, negative where the view is reversed along it: a row of a
+  column-major matrix is one hvector over the element, a box of a rank-3 array two over a dense
+  column, a column window of a strided view its hvector of a hvector.
 
-The module's externs take every buffer as `[*; ..]` (§10.7), so one `send` written in nex covers
-every element type and rank, and one entry point of the shim serves each collective; the shim reads
-the element type, the extents and the byte strides from the descriptor. The pointer is the window's
-first element, as in §10.3. Until D3 builds the datatypes, the shim packs a view that is not one
-dense block into a buffer of its own and unpacks a received one, which is correct for a blocking
-call. A committed datatype is cached by (element, extents, strides), so a halo exchange in a loop
-commits once. A dense array is the element type and a count.
+The descriptor gives the window's extents and byte strides but not its root's shape, so the
+`hvector` chain, which describes any of them exactly, is the one form; a box of a dense root is the
+same typemap `MPI_Type_create_subarray` would build. The module's externs take every buffer as
+`[*; ..]` (§10.7), so one `send` written in nex covers every element type and rank, and one entry
+point of the shim serves each collective; the shim reads the element type, the extents and the
+byte strides from the descriptor. The pointer is the window's first element, as in §10.3, and the
+datatype is one element of the message. A committed datatype is cached by (element size, extents,
+strides), so a halo exchange in a loop commits each layout once (the cache keeps 64, the oldest
+freed first, which MPI defers until a request using it completes). A dense array is `MPI_BYTE`s and
+a count. `send`, `recv`, `sendrecv` and the `exchange` block's posts move views this way; a
+collective packs its operand, which its combining or arranging reads whole anyway.
 
 **Units cross as their numbers.** A unit is a static fact of the program and a message carries
 none; each end's types are checked locally, against its own declarations, as in any SPMD program.
@@ -2199,8 +2229,8 @@ descriptor built inside it over the subview of the root's buffer; nothing is gat
 
 **Keywords** (ref §2.3) gain `inout`, `parallel`, `extern`, `enum`, and the loop and program
 controls `exit`, `cycle` and `stop` (§11.1). `mut` stays reserved and means nothing. `by` (the step
-of a range) and `reduce` (the `parallel for` clause) are contextual, so `reduce` remains a prelude
-name. `unit` is a keyword: it declares a unit of measure (§13.1) and is no type, so `def f(): unit`
+of a range), `reduce` (the `parallel for` clause) and `exchange` (a word only before an indented
+block, §9.6.2) are contextual, so `reduce` remains a prelude name and `exchange` a free one. `unit` is a keyword: it declares a unit of measure (§13.1) and is no type, so `def f(): unit`
 is an error that suggests `void`. The type names of
 §2.1 are prelude type names, not keywords.
 

@@ -58,8 +58,14 @@ note_trap(message: string)
 // The trap raised: what the frames between here and the catch hold given back while they are still
 // on the stack, then the return to the catch.
 raise_trap() -> never
+    unwind_job()
     abandon()
     longjmp(&catch_env[0], 1)
+
+// How deep the catches around the caller are nested: 0 outside every one. An MPI program's shim
+// notes it as an `exchange` block opens, so a trap knows which blocks it leaves.
+@export("nex_catch_depth")
+catch_depth() -> i32 = i32(depth)
 
 // The one entry generated code traps through, with the message the compiler wrote for the check
 // that failed.
@@ -121,7 +127,9 @@ finish()
 //
 // A program importing `mpi` (DESIGN §9.6) starts in its module's shim, which initialises MPI and
 // tells the runtime which rank it is and how to end the job: `job_abort` is `MPI_Abort` on the world,
-// `job_finalize` is `MPI_Finalize`. The runtime never names MPI, so a program without it links none.
+// `job_finalize` is `MPI_Finalize`; `job_unwind` is what a caught trap calls first, which cancels and
+// completes the requests of the `exchange` blocks it leaves before their arrays are freed. The
+// runtime never names MPI, so a program without it links none.
 
 // The status the job ends with after a trap nothing caught: what a process ended by `abort` reports.
 private val TRAP_STATUS = 134
@@ -129,13 +137,21 @@ private val TRAP_STATUS = 134
 private var job_rank: i32 = -1
 private var job_abort: Option[*extern(i32) -> unit] = None
 private var job_finalize: Option[*extern() -> unit] = None
+private var job_unwinder: Option[*extern(i32) -> unit] = None
 
 // The shim's call once MPI is initialised: this process is rank `rank` of the world.
 @export("nex_mpi_joined")
-joined(rank: i32, abort_fn: *extern(i32) -> unit, finalize_fn: *extern() -> unit)
+joined(rank: i32, abort_fn: *extern(i32) -> unit, finalize_fn: *extern() -> unit, unwind_fn: *extern(i32) -> unit)
     job_rank = rank
     job_abort = Some(abort_fn)
     job_finalize = Some(finalize_fn)
+    job_unwinder = Some(unwind_fn)
+
+// A trap about to leave the innermost catch: the shim's requests in what it leaves, settled.
+private unwind_job()
+    job_unwinder match
+        Some(f) -> f(i32(depth))
+        None -> ()
 
 // What a message about this process starts with: its rank in an MPI job, nothing otherwise.
 private job_prefix() -> string = if job_rank >= 0 then s"rank $job_rank: " else ""

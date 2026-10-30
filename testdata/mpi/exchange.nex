@@ -1,0 +1,148 @@
+// The `exchange` block and views crossing as MPI datatypes (DESIGN §9.6.2, §9.6.3). Every window
+// here — a strided one, a reversed one, rows of a column-major matrix, boxes of a rank-3 array —
+// is sent from and received into where it lies, and every rank checks what arrived against what
+// its neighbour must have sent, computed locally. A rank prints a line only for a check that
+// fails, then the number of checks it made.
+
+import mpi.*
+
+extern def nex_mpi_datatypes(): integer
+
+// The failed checks of `oks` printed under `name`; how many checks there were.
+def report(name: string, oks: [bool]): integer =
+  for k in 1..size(oks)
+    if not oks[k] then print(s"BAD rank ${this_rank()}: ${name} ${k}")
+  size(oks)
+
+// Rank r's interior of the matrix halo: element (i, j) of an m-by-n block.
+def cell(r: integer, i: integer, j: integer): real = 1000.0 * r + 10.0 * i + j
+
+// One step of a 2-D halo exchange on a matrix of m + 2 rows and n + 2 columns. Its first and last
+// interior rows (strided, the matrix being column-major) go to the ranks above and below, arriving
+// in the rows of `edges` (strided too); its first and last interior columns (dense) go to this rank
+// itself, each received into the same matrix, into the ghost column beside it: one side per block,
+// since `1` and `n + 1`, or `2` and `n + 2`, are no two places the checker can tell apart (DESIGN
+// §8.3).
+def halo2(u: inout [real; :, :], edges: inout [real; :, :], m: integer, n: integer, up: integer, down: integer) =
+  exchange
+    send(u[2, 2..n + 1], to = up, tag = 1)
+    send(u[m + 1, 2..n + 1], to = down, tag = 2)
+    recv(edges[2, :], from = down, tag = 1)
+    recv(edges[1, :], from = up, tag = 2)
+    send(u[2..m + 1, 2], to = this_rank(), tag = 3)
+    recv(u[2..m + 1, 1], from = this_rank(), tag = 3)
+  exchange
+    send(u[2..m + 1, n + 1], to = this_rank(), tag = 4)
+    recv(u[2..m + 1, n + 2], from = this_rank(), tag = 4)
+
+def main() =
+  val me = this_rank()
+  val p = num_ranks()
+  val right = (me + 1) % p
+  val left = (me + p - 1) % p
+  var checks = 0
+
+  // -- the strided receive of DESIGN §9.6.1, posted before the message is sent --------------------
+  // Rank 0 posts the receive, every rank meets in a barrier, and only then does the last rank post
+  // the send: the message lands in the view where it lies after the call that posted it returned.
+  var strided: [real] = zeros(10)
+  exchange
+    recv(strided[1..10 by 3], from = if me == 0 then p - 1 else no_rank)
+    barrier()
+    send([3.0, 0.0, 0.0, 4.0], to = if me == p - 1 then 0 else no_rank)
+  val want: [real] = if me == 0 then [3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0] else zeros(10)
+  checks += report("strided receive", [all(strided == want)])
+
+  // -- a 1-D halo exchange, the ends of the chain sending to and receiving from no rank -----------
+  // The ghost cells are an array of their own: `u[1]` and `u[n + 2]` beside `u[2]` and `u[n + 1]`
+  // are places the checker cannot tell apart, `n` being unknown to it (DESIGN §8.3).
+  val n = 6
+  var u: [real] = zeros(n)
+  var ghost: [real] = zeros(2)
+  for k in 1..n
+    u[k] = 100.0 * me + k
+  val below = if me > 0 then me - 1 else no_rank
+  val above = if me < p - 1 then me + 1 else no_rank
+  exchange
+    send(u[1..1], to = below)
+    send(u[n..n], to = above)
+    recv(ghost[1..1], from = below)
+    recv(ghost[2..2], from = above)
+  checks += report("1-D halo", [ghost[1] == (if me > 0 then 100.0 * (me - 1) + n else 0.0), ghost[2] == (if me < p - 1 then 100.0 * (me + 1) + 1 else 0.0), u[1] == 100.0 * me + 1])
+
+  // -- a 2-D halo exchange, repeated: rows are strided views, columns dense ------------------------
+  val m = 4
+  val w = 5
+  var g: [real; :, :] = zeros((m + 2, w + 2))
+  var edges: [real; :, :] = zeros((2, w))
+  for i in 2..m + 1
+    for j in 2..w + 1
+      g[i, j] = cell(me, i, j)
+  halo2(g, edges, m, w, left, right)
+  val types = nex_mpi_datatypes()
+  for step in 1..5
+    halo2(g, edges, m, w, left, right)
+  var rows = true
+  for j in 2..w + 1
+    rows = rows and edges[1, j - 1] == cell(left, m + 1, j) and edges[2, j - 1] == cell(right, 2, j)
+  var cols = true
+  for i in 2..m + 1
+    cols = cols and g[i, 1] == cell(me, i, 2) and g[i, w + 2] == cell(me, i, w + 1)
+  checks += report("2-D halo", [rows, cols, g[1, 1] == 0.0, g[1, 2] == 0.0, nex_mpi_datatypes() == types, types >= 1])
+
+  // -- reversed views, on either end ------------------------------------------------------------
+  val x = [1.0 * me, 2.0 * me, 3.0 * me, 4.0 * me, 5.0 * me]
+  var once: [real] = zeros(5)
+  var twice: [real] = zeros(5)
+  var both: [real] = zeros(9)
+  var tail: [real] = zeros(5)
+  exchange
+    send(x[5..1 by -1], to = right, tag = 5)
+    send(x[5..1 by -1], to = right, tag = 12)
+    send(x, to = right, tag = 6)
+    send(x[5..1 by -2], to = right, tag = 7)
+    recv(once, from = left, tag = 5)
+    recv(twice[5..1 by -1], from = left, tag = 12)
+    recv(both[9..1 by -3], from = left, tag = 7)
+    recv(tail[5..1 by -1], from = left, tag = 6)
+  val lx = [1.0 * left, 2.0 * left, 3.0 * left, 4.0 * left, 5.0 * left]
+  checks += report("reversed views", [all(once == reverse(lx)), all(twice == lx), both[9] == 5.0 * left, both[6] == 3.0 * left, both[3] == 1.0 * left, both[1] == 0.0, all(tail == reverse(lx))])
+
+  // -- windows of rank 3, with a stride and a reversed axis ---------------------------------------
+  var a: [real; :, :, :] = zeros((4, 5, 6))
+  for i in 1..4
+    for j in 1..5
+      for k in 1..6
+        a[i, j, k] = 100.0 * i + 10.0 * j + k + 1000.0 * me
+  var b: [real; :, :, :] = zeros((3, 4, 5))
+  var c: [real; :, :] = zeros((4, 6))
+  exchange
+    send(a[2..3, 1..5 by 2, 4..6], to = right, tag = 8)
+    send(a[1..4, 2, 6..1 by -1], to = right, tag = 9)
+    recv(b[1..2, 2..4, 3..5], from = left, tag = 8)
+    recv(c, from = left, tag = 9)
+  var box = true
+  for i in 1..2
+    for j in 1..3
+      for k in 1..3
+        box = box and b[i, j + 1, k + 2] == 100.0 * (i + 1) + 10.0 * (2 * j - 1) + (k + 3) + 1000.0 * left
+  checks += report("rank 3", [box, b[3, 1, 1] == 0.0, c[1, 1] == 126.0 + 1000.0 * left, c[2, 1] == 226.0 + 1000.0 * left, c[1, 2] == 125.0 + 1000.0 * left, c[4, 6] == 421.0 + 1000.0 * left])
+
+  // -- a value no variable holds, sent: held until the block's end -------------------------------
+  var doubled: [real] = zeros(5)
+  exchange
+    send(x * 2.0, to = right, tag = 10)
+    recv(doubled, from = left, tag = 10)
+  checks += report("sent value", [all(doubled == lx * 2.0)])
+
+  // -- computation that touches neither array runs while the messages move -----------------------
+  var other = 0.0
+  var into: [real] = zeros(5)
+  exchange
+    recv(into, from = left, tag = 11)
+    send(x, to = right, tag = 11)
+    for k in 1..1000
+      other = other + 1.0
+  checks += report("overlap", [other == 1000.0, all(into == lx)])
+
+  print(s"rank ${me}: ${checks} checks")

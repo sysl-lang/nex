@@ -478,6 +478,38 @@ and answers a `Status` with the message's `source`, `tag` and `count`; `sendrecv
 sends and receives at once, so a ring of them never deadlocks. They are ordinary nex functions,
 generic over `[T; R]`, so they take arrays of numbers without a unit.
 
+**A view crosses where it lies.** A window, a strided view or a reversed one is sent from and
+received into in place, never copied: the module describes it to MPI as a datatype built from its
+extents and strides, and keeps each one it builds, so a halo exchange in a loop builds each layout
+once.
+
+**Nonblocking: the `exchange` block.** Inside `exchange` and an indented block, each `send` and
+`recv` that is one of its statements is posted where it stands (`MPI_Isend`, `MPI_Irecv`) and the
+block's end waits for all of them; code between them runs while the messages move.
+
+```nex
+exchange
+  send(u[2, 2..n + 1], to = up)          // a row: a strided view, sent where it lies
+  send(u[m + 1, 2..n + 1], to = down)
+  recv(edges[1, :], from = up)
+  recv(edges[2, :], from = down)
+  interior(v)                            // runs while the rows move
+```
+
+A variable received into is borrowed by its `recv` until the block ends: reading or writing it in
+the block, by name, through a `val` sharing it, or through a function that reaches it, is a compile
+error (`` `edges` is borrowed by the `recv` of `edges[1, :]` above until the `exchange` block ends``).
+A variable sent from may be read in the block but not written. Two places of one array posted in
+one block — two received into, or one sent and one received into — must be disjoint by the rules
+for two `inout` arguments of one call ([Functions](/spec/06-functions/)): `u[2..m + 1, 2]` and
+`u[2..m + 1, 1]` may be sent and received in one block, `u[2]` and `u[n + 2]` may not, since `n`
+could be 0. A `send` or `recv` in an `if`, a loop or a function inside the block, or used as a
+value, is refused, and so is a `return`, `exit` or `cycle` that would leave the block. A receive's
+message count is checked at the block's end (`recv: the message from rank 0 holds 1 values; the
+array holds 2`). A trap inside the block that nothing catches ends the job as any trap does; one
+an `assert_traps` catches cancels the block's requests and completes them before going on.
+`exchange` is a word only before an indented block, so it stays free as a name.
+
 **Collectives** take the value and answer the result, as nex's own reductions do. `x` is any number
 or `bool`, or an array of them at any rank — whole, a window, a strided view — of any element type
 including the complexes, and its unit is kept. Every one takes `comm = world()` last.

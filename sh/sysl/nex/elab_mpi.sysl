@@ -688,7 +688,275 @@ impl Elab
             return self.invalid(e.span)
 
         v
+
+    // -- the `exchange` block (DESIGN §9.6.2) ------------------------------------------------------
+    //
+    // `exchange` and an indented block: each `send` and `recv` that is a statement of the block is
+    // posted where it stands, as `MPI_Isend` or `MPI_Irecv` of the array where it lies, and the
+    // block's end waits for all of them. The block becomes, in the IR, the shim's
+    // `nex_mpi_exchange_begin`, the statements with each post a call of `nex_mpi_isend` or
+    // `nex_mpi_irecv`, `nex_mpi_exchange_end`, and then one call per array the requests used:
+    // `nex_mpi_landed` takes each variable received into `inout`, so everything after the block
+    // reads it as the end left it, and `nex_mpi_held` reads each variable sent from, and each sent
+    // value that is no variable's (held in a hidden local), so its storage outlives the requests.
+    // What the statements between may touch is `check_exchanges`'s (`inout_check.sysl`).
+
+    // A `send` or `recv` anywhere in an `exchange` block but as one of its statements.
+    misplaced_post(*self, span: Span, q: string) -> TExpr
+        val n = q[MPI_MODULE.len + 1..]
+
+        self.fail(span, s"inside an `exchange` block, `$n` is one of the block's statements, posted where it stands and completed at the block's end: it answers nothing, and stands in no `if`, loop or function of the block")
+        self.invalid(span)
+
+    exchange_block(*self, span: Span, body: Expr) -> TExpr
+        if self.find_top(s"$MPI_MODULE.nex_mpi_exchange_begin").is_none()
+            self.fail(span, "`exchange` is the `mpi` module's block of nonblocking sends and receives: the program imports `mpi`")
+            return self.invalid(span)
+
+        var stmts: Buf[BlockItem] = buf()
+
+        *body.kind match
+            Block(items, result) ->
+                stmts.extend(items.view())
+
+                *result.kind match
+                    UnitLit -> ()
+                    _ -> stmts.push(BlockItem.Stmt(result))
+            _ -> stmts.push(BlockItem.Stmt(body))
+
+        var items: Buf[TExpr] = buf()
+        // The arrays the requests use: each received-into variable, and each sent one or hidden
+        // local holding a sent value.
+        var landed: Buf[TExpr] = buf()
+        var held: Buf[TExpr] = buf()
+
+        self.open()
+        items.push(self.shim(span, "nex_mpi_exchange_begin", buf()))
+        self.fx.xch.push(XOpen(self.fx.frames.len() - 1, self.fx.loops.len()))
+
+        for it in stmts
+            it match
+                BlockItem.Item(d) -> items.push(self.local_decl(d))
+                BlockItem.Stmt(e) ->
+                    self.post_of(e) match
+                        Some(q) -> items.push(self.post(e, q, &items, &landed, &held))
+                        None -> items.push(self.elab(e, Some(Void)))
+
+        self.fx.xch.pop()
+        items.push(self.shim(span, "nex_mpi_exchange_end", buf()))
+
+        for r in landed
+            items.push(self.shim_of(span, "nex_mpi_landed", one_of_t(texpr(r.span, r.ty, TBorrow(r)))))
+
+        for h in held
+            if !holds_root(landed, h) then items.push(self.shim_of(span, "nex_mpi_held", one_of_t(h)))
+
+        self.close()
+        texpr(span, Void, TBlock(items, texpr(span, Void, TLiteral(VoidVal, false))))
+    end exchange_block
+
+    // The function `e` calls where it is a call of `mpi`'s `send` or `recv`: `mpi.send` or `mpi.recv`.
+    private post_of(self, e: Expr) -> Option[string]
+        *self.qualified(e).kind match
+            Call(callee, _) -> *self.qualified(callee).kind match
+                ExprKind.Name(n) ->
+                    if self.lookup_local(n).is_some() then return None
+
+                    val q = self.global(callee.span, n)
+
+                    if is_posted(q) then Some(q) else None
+                _ -> None
+            _ -> None
+
+    // The post of `send` or `recv`, `q`, written as the statement `e`.
+    private post(*self, e: Expr, q: string, items: *Buf[TExpr], landed: *Buf[TExpr], held: *Buf[TExpr]) -> TExpr
+        val span = e.span
+        val c = q[MPI_MODULE.len + 1..]
+        val sends = c == "send"
+        val args = *self.qualified(e).kind match
+            Call(_, a) -> a
+            _ -> buf()
+        var ps: Buf[string] = buf()
+
+        ps.push("x")
+        ps.push(if sends then "to" else "from")
+        ps.push("tag")
+        ps.push("comm")
+
+        val required: usize = if sends then 2 else 1
+        val wants = if sends then "`x`, `to`, `tag =`, `comm =`" else "`x`, `from =`, `tag =`, `comm =`"
+        var bound: Buf[Option[Expr]] = buf()
+        var positional = true
+        var next: usize = 0
+
+        for _ in 0..<ps.len()
+            bound.push(None)
+
+        for a in args
+            *a.kind match
+                NamedArg(n, v) ->
+                    positional = false
+
+                    val k = index_in(n, ps.view())
+
+                    if k == ps.len() || k == 0
+                        self.fail(a.span, s"`$c` takes $wants, and no `$n =`")
+                        return self.invalid(span)
+
+                    if bound[k].is_some()
+                        self.fail(a.span, s"`$c`'s `$n` is given twice")
+                        return self.invalid(span)
+
+                    bound.set(k, Some(v))
+                _ ->
+                    if !positional
+                        self.fail(a.span, s"`$c`'s arguments by position come before the named ones")
+                        return self.invalid(span)
+
+                    if next == ps.len()
+                        self.fail(span, s"`$c` takes $wants")
+                        return self.invalid(span)
+
+                    bound.set(next, Some(a))
+                    next += 1
+
+        for k in 0..<required
+            if bound[k].is_none()
+                self.fail(span, s"`$c` takes $wants")
+                return self.invalid(span)
+
+        val xe = bound[0].unwrap()
+        var x = if sends then self.elab(xe, None) else self.borrow(xe, Ty.Assumed, "")
+
+        if is_wild(x.ty) then return self.invalid(span)
+
+        val place = if sends then x else *x.kind match
+            TBorrow(p) -> p
+            _ -> x
+        val et = base_of(elem_of(x.ty))
+        val generic = et match
+            Param(_, _, _) -> true
+            _ -> false
+
+        if !is_array(x.ty) || !(generic || is_int(et) || is_real(et) || is_complex(et))
+            self.fail(xe.span, s"`$c` in an `exchange` block ${if sends then "sends" else "receives into"} an array of numbers — a whole array, a window or a strided view, which crosses where it lies; this is ${self.shown(place)}")
+            return self.invalid(span)
+
+        val root = array_root(place)
+
+        if sends
+            root match
+                Some(r) -> add_root(held, r)
+                None ->
+                    // A value no variable holds: kept in a hidden local until the requests complete.
+                    val b = self.hold(span, s"sent${items.len()}", x, false)
+
+                    items.push(b)
+                    x = *b.kind match
+                        TLet(id, _) -> self.local_ref(span, id, None)
+                        _ -> x
+                    held.push(x)
+        else
+            root match
+                Some(r) -> add_root(landed, r)
+                None ->
+                    self.fail(xe.span, s"`recv` in an `exchange` block receives into a variable or a window of one, which stays where it lies until the block's end")
+                    return self.invalid(span)
+
+        val peer = bound[1] match
+            Some(v) -> self.check(v, INTEGER, if sends then "`to`" else "`from`")
+            None -> self.shim(span, "nex_mpi_any_source", buf())
+        val tag = bound[2] match
+            Some(v) -> self.check(v, INTEGER, "`tag`")
+            None -> if sends then int_lit(span, 0) else self.shim(span, "nex_mpi_any_tag", buf())
+        val comm = bound[3] match
+            Some(v) -> self.check(v, Nominal(s"$MPI_MODULE.Comm", buf()), "`comm`")
+            None -> self.world(span)
+
+        if is_error(peer.ty) || is_error(tag.ty) || is_error(comm.ty) then return self.invalid(span)
+
+        var call: Buf[TExpr] = buf()
+
+        call.push(x)
+        call.push(peer)
+        call.push(tag)
+        call.push(texpr(span, Int(32, true), TField(comm, "handle", 0)))
+        self.shim_of(span, if sends then "nex_mpi_isend" else "nex_mpi_irecv", call)
+    end post
+
+    // A call of the module's shim `name` with the arguments `args`, already elaborated in the types
+    // of its parameters.
+    private shim_of(*self, span: Span, name: string, args: Buf[TExpr]) -> TExpr = self.find_top(s"$MPI_MODULE.$name") match
+        Some(TopExtern(k)) ->
+            val x = self.xout[k]
+
+            texpr(span, x.ret, TCall(texpr(span, fn_type(x.params, x.modes, x.ret), TFnRef(x.name)), args))
+        _ ->
+            self.fail(span, s"the `mpi` module has no `$name`")
+            self.invalid(span)
 end Elab
+
+// Whether `internal` is one of the functions an `exchange` block posts rather than calls.
+is_posted(internal: string) -> bool = internal == s"$MPI_MODULE.send" || internal == s"$MPI_MODULE.recv"
+
+private one_of_t(e: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    out.push(e)
+    out
+
+// The variable whose storage the array `e` lies in — a local, a module-level binding, or a field of
+// one — reached through its windows and views; `None` for a value no variable holds.
+private array_root(e: TExpr) -> Option[TExpr] = *e.kind match
+    TLocal(_) -> Some(e)
+    TGlobalRef(_) -> Some(e)
+    TField(v, _, _) -> if is_field_path(v) then Some(e) else None
+    TTupleField(v, _) -> if is_field_path(v) then Some(e) else None
+    TBorrow(v) -> array_root(v)
+    TPromote(v) -> if ty_eq(elem_of(e.ty), elem_of(v.ty)) then array_root(v) else None
+    TArray(op) -> *op match
+        TIndex(t, _) -> if is_array(t.ty) then array_root(t) else None
+        TView(t, _) -> array_root(t)
+        TOrigin(source, _) -> array_root(source)
+        TShapeCheck(v) -> array_root(v)
+        _ -> None
+    _ -> None
+
+// Whether `e` is a variable or a field of one, through fields only.
+private is_field_path(e: TExpr) -> bool = *e.kind match
+    TLocal(_) -> true
+    TGlobalRef(_) -> true
+    TField(v, _, _) -> is_field_path(v)
+    TTupleField(v, _) -> is_field_path(v)
+    _ -> false
+
+// Whether two roots `array_root` gave are the same variable or field.
+private same_place(a: TExpr, b: TExpr) -> bool = *a.kind match
+    TLocal(x) -> *b.kind match
+        TLocal(y) -> x == y
+        _ -> false
+    TGlobalRef(x) -> *b.kind match
+        TGlobalRef(y) -> x == y
+        _ -> false
+    TField(u, _, j) -> *b.kind match
+        TField(v, _, k) -> j == k && same_place(u, v)
+        _ -> false
+    TTupleField(u, j) -> *b.kind match
+        TTupleField(v, k) -> j == k && same_place(u, v)
+        _ -> false
+    _ -> false
+
+private add_root(roots: *Buf[TExpr], r: TExpr)
+    for x in roots.view()
+        if same_place(x, r) then return
+
+    roots.push(r)
+
+private holds_root(roots: Buf[TExpr], r: TExpr) -> bool
+    for x in roots
+        if same_place(x, r) then return true
+
+    false
 
 private two(t: Ty) -> Buf[Ty]
     var out: Buf[Ty] = buf()

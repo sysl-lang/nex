@@ -117,8 +117,16 @@ struct Fx
     params: Buf[string]
     // The parameter whose default is elaborated; `""` for a field's.
     owner: string
+    // The `exchange` blocks around the cursor, innermost last (`elab_mpi.sysl`).
+    xch: Buf[XOpen]
 
-empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None, buf(), "")
+// An open `exchange` block: the frame it is in and how many loops were around it, which a `return`,
+// `exit` or `cycle` inside it may not leave.
+struct XOpen
+    frame: usize
+    loops: usize
+
+empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None, buf(), "", buf())
 
 // A lambda bound by `val f = x -> ...` whose parameter types are not written: it is elaborated at
 // the first use that fixes them, inside the copy of the scope it was written in.

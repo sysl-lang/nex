@@ -395,3 +395,278 @@ mpi_collective_refusals()
 
     for want in ["`@intrinsic` marks a function the compiler types itself, which only the `mpi` module nex ships declares", "`allreduce` takes its operand as a number or a `bool`, or an array of them; a tuple or a struct waits for structs by value (DESIGN §15), and this is (real64, real64)", "`allreduce` takes its operand as an integer, a real, a complex or a `bool`, or an array of them; this is string", "`allreduce` with `+` combines numbers; this operand is bool", "`allreduce` with `max` combines integers and reals, which are ordered; this operand is complex[real64]", "`allreduce` with `and` combines `bool`s; this operand is real64", "`allreduce` with `*` of [real64<m>] is in m to the power of the number of ranks, which is not static", "`allreduce`'s operator is `+`, `*`, `min`, `max`, `and`, `or`, `minloc`, `maxloc` or a function `(int64, int64) -> int64` of the operand's elements", "`allreduce` takes `x`, `op`, `fast =`, `comm =`, and no `root =`", "`allreduce` takes `x`, `op`, `fast =`, `comm =`\n", "`fast = true` hands a built-in operator to MPI's own", "`scatter` cuts its operand along the last axis, one part per rank, and a scalar has no axis; this is int64", "`global_norm2` works in reals and complexes; this is [int64]", "`global_sum` takes its operand as a rank's piece of a distributed vector: a vector of numbers; this is [real64; :, :]", "`allreduce` is a collective of `mpi`, typed at each call from its operand, so it is only called", "`+` stands alone only as the operator of one of `mpi`'s reductions, `allreduce(x, +)`", "`comm` must be mpi.Comm, but this is int64", "`global_dot` takes two vectors of one number type; these are [real64] and [complex[real64]]", "`alltoall` sends part k of its operand's last axis to rank k, and a scalar has no axis; this is real64", "`reduce_to` takes `x`, `op`, `root =`, `fast =`, `comm =`"]
         assert(err.contains(want), s"missing: $want\n$err")
+
+// -- views as datatypes and the `exchange` block (DESIGN §9.6.2, §9.6.3) ----------------------------
+
+// The strided receive of DESIGN §9.6.1, written with `exchange`: rank 0 posts the receive into every
+// third element, the ranks meet in a barrier inside the block, and only then does rank 1 send.
+private val STRIDED_PROBE = raw"""
+    import mpi.*
+
+    def main() =
+      val me = this_rank()
+      var strided: [real] = zeros(10)
+      exchange
+        recv(strided[1..10 by 3], from = if me == 0 then 1 else no_rank)
+        barrier()
+      if me == 1 then send([3.0, 0.0, 0.0, 4.0], to = 0)
+      barrier()
+      if me == 0 then print(strided[1..10 by 3])
+      if me == 0 then print(strided)
+    """
+
+// A halo exchange of strided rows, a reversed row and dense columns of one matrix, in a loop.
+private val HALO = raw"""
+    import mpi.*
+
+    def main() =
+      val me = this_rank()
+      val p = num_ranks()
+      var u: [real; :, :] = zeros((6, 7))
+      var e: [real; :, :] = zeros((2, 5))
+      for step in 1..3
+        exchange
+          send(u[2, 2..6], to = (me + 1) % p, tag = 1)
+          send(u[5, 2..6], to = (me + p - 1) % p, tag = 2)
+          recv(e[1, :], from = (me + p - 1) % p, tag = 1)
+          recv(e[2, 5..1 by -1], from = (me + 1) % p, tag = 2)
+          send(u[2..5, 2], to = me, tag = 3)
+          recv(u[2..5, 1], from = me, tag = 3)
+        u[3, 3] = u[3, 3] + e[1, 1] + u[2, 1] + 1.0
+      print(u[3, 3])
+    """
+
+@test("the strided irecv probe of DESIGN §9.6.1 written with `exchange` receives [3.0, 0.0, 0.0, 4.0] where the view lies, at -np 2 and 4")
+mpi_exchange_strided_probe()
+    val b = mpi_bench()
+    val exe = built(b, STRIDED_PROBE, "strided_probe")
+    val two = job(exe, 2)
+    val four = job(exe, 4)
+
+    finish(b)
+
+    for out in [two, four]
+        assert(out.status.ok(), out.err.unwrap_or(""))
+        assert_eq(out.text, "[3.0, 0.0, 0.0, 4.0]\n[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0]\n")
+
+@test("a view crosses where it lies: the emitted module gathers and scatters nothing, and the halo loop's optimized code copies no array; the posts are the shim's isend and irecv over descriptors")
+mpi_exchange_copies_nothing()
+    val b = mpi_bench()
+    val src = s"${b.work}/halo.nex"
+
+    write_text(src, HALO).unwrap()
+
+    val m = mlir_of(src, false) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+    val ir = optimized_ir(m, b.work, b.tc) match
+        Ok(ir) -> ir
+        Err(e) -> fail_with(e)
+    val exe = built(b, HALO, "halo")
+    val one = job(exe, 1)
+    val three = job(exe, 3)
+
+    finish(b)
+    assert(!m.contains("nex_c_gather") && !m.contains("nex_c_scatter"), m)
+    assert(m.contains("@\"nex_mpi_isend\"") && m.contains("@\"nex_mpi_irecv\"") && m.contains("@\"nex_mpi_exchange_end\""), m)
+
+    // The whole optimized module, `main` inlined or not: the posts are there and no copy is.
+    assert(ir.contains("@nex_mpi_irecv(") && ir.contains("@nex_mpi_isend("), ir)
+    assert(!ir.contains("llvm.memcpy") && !ir.contains("memrefCopy"), ir)
+    assert(one.status.ok(), one.err.unwrap_or(""))
+    assert_eq(one.text, "3.0\n")
+    assert(three.status.ok(), three.err.unwrap_or(""))
+    assert_eq(three.text, "3.0\n3.0\n3.0\n")
+
+@test("the exchange corpus — the strided receive, 1-D and 2-D halos with strided rows, reversed views on either end, rank-3 boxes, a sent value no variable holds, overlap with computation, and a datatype cache that builds each layout once — passes every check at -np 1, 2, 4 and 7")
+mpi_exchange_corpus()
+    val b = mpi_bench()
+    val exe = built_corpus(b, "exchange")
+    var outs: Buf[(int, Output)] = buf()
+
+    for np in [1, 2, 4, 7]
+        outs.push((np, job(exe, np)))
+
+    finish(b)
+
+    for (np, out) in outs
+        var want: Buf[string] = buf()
+
+        for r in 0..<np
+            want.push(s"rank $r: 26 checks")
+
+        sort(want.view())
+        assert(out.status.ok(), s"-np $np: ${out.status}\n${out.err.unwrap_or("")}")
+        assert_eq(sorted_lines(out.text), join(want.view(), "\n"))
+
+// A program whose `exchange` block traps on one rank, and one that catches the trap and goes on.
+private val TRAPPED_BLOCK = "import mpi.*\n\ndef main() =\n  val me = this_rank()\n  val p = num_ranks()\n  var x: [real] = zeros(3)\n  exchange\n    recv(x, from = (me + p - 1) % p)\n    send([1.0, 2.0, 3.0], to = (me + 1) % p)\n    if me == 2 then print([1, 2][me + 5])\n  barrier()\n  print(\"after\")\n"
+
+private val CAUGHT_BLOCK = raw"""
+    import mpi.*
+
+    def failing(x: inout [real], bad: integer) =
+      exchange
+        recv(x, from = this_rank(), tag = 1)
+        send([1.0, 2.0, 3.0], to = this_rank(), tag = 2)
+        print([1, 2][bad])
+
+    def main() =
+      var x: [real] = zeros(2)
+      for round in 1..3
+        assert_traps(() -> failing(x, 5), "out of bounds")
+      exchange
+        send([3.0, 4.0], to = this_rank(), tag = 3)
+        recv(x, from = this_rank(), tag = 3)
+      print(x)
+    """
+
+@test("a trap inside an `exchange` block nothing catches ends the job with the rank in front, no hang; one `assert_traps` catches cancels and completes the block's requests before the arrays are freed, and later blocks run")
+mpi_exchange_trap()
+    val b = mpi_bench()
+    val out = job(built(b, TRAPPED_BLOCK, "trapped_block"), 4)
+    val caught = job(built(b, CAUGHT_BLOCK, "caught_block"), 2)
+
+    finish(b)
+
+    val err = out.err.unwrap_or("")
+
+    assert(out.status != Status.TimedOut, "the job hung")
+    assert(!out.status.ok(), s"${out.status}")
+    assert(err.contains("rank 2: trap: index out of bounds\n"), err)
+    assert(!out.text.contains("after"), out.text)
+    assert(caught.status.ok(), caught.err.unwrap_or(""))
+    assert_eq(caught.text, "[3.0, 4.0]\n[3.0, 4.0]\n")
+
+@test("a receive in an `exchange` block whose message holds fewer values than its array, or more, traps at the block's end with the counts and the rank")
+mpi_exchange_count_traps()
+    val b = mpi_bench()
+    val short = trapped(b, "short", "  var x: [real] = zeros(2)\n  exchange\n    recv(x[1..2], from = if me == 1 then 0 else no_rank)\n    send([1.0], to = if me == 0 then 1 else no_rank)\n  barrier()\n")
+    val long = trapped(b, "long", "  var y: [real] = zeros(8)\n  exchange\n    recv(y[1..8 by 2], from = if me == 2 then 0 else no_rank)\n    send([1.0, 2.0, 3.0, 4.0, 5.0], to = if me == 0 then 2 else no_rank)\n  barrier()\n")
+
+    finish(b)
+    assert(short.contains("rank 1: trap: recv: the message from rank 0 holds 1 values; the array holds 2"), short)
+    assert(long.contains("rank 2: trap: recv: the message from rank 0 holds more values than the array's 4"), long)
+
+private val EXCHANGE_REFUSED = raw"""
+    import mpi.*
+
+    var shared: [real] = zeros(4)
+
+    def interior(a: inout [real]) = a[1] = 0.0
+    def touch_shared() = shared[1] = 1.0
+    def peek_shared(): real = shared[2]
+
+    def touched() =
+      var u: [real] = zeros(4)
+      exchange
+        send(u[2..2], to = 0)
+        recv(u[1..1], from = 0)
+        interior(u)
+
+    def read_inside() =
+      var u: [real] = zeros(4)
+      exchange
+        recv(u[1..2], from = 0)
+        print(u[3])
+
+    def write_sent() =
+      var u: [real] = zeros(4)
+      exchange
+        send(u, to = 0)
+        u[1] = 2.0
+
+    def by_name() =
+      exchange
+        recv(shared, from = 0)
+        print(peek_shared())
+      exchange
+        send(shared, to = 0)
+        touch_shared()
+
+    def overlapping(n: integer) =
+      var u: [real] = zeros(4)
+      exchange
+        recv(u[1..2], from = 0)
+        recv(u[2..3], from = 0)
+        send(u[n..n], to = 0)
+        recv(u[4..1 by -1], from = 0)
+
+    def misplaced() =
+      var u: [real] = zeros(4)
+      val k = 1
+      exchange
+        val s = recv(u, from = 0)
+        if k > 0 then send(u, to = 0)
+        for i in 1..2
+          send(u, to = 0)
+        assert_traps(() -> send(u, to = 0))
+
+    def leaving(): integer =
+      var u: [real] = zeros(4)
+      for i in 1..3
+        exchange
+          recv(u, from = 0)
+          if i == 2 then exit
+          if i == 3 then cycle
+          return 5
+      0
+
+    def wrong_things() =
+      val v: [real] = zeros(4)
+      var flags = [true, false]
+      var x = 1.0
+      exchange
+        recv(v, from = 0)
+        send(flags, to = 0)
+        send(1.0, to = 0)
+        recv(x, from = 0)
+        send(v, 0, 1, world(), 3)
+        send(v)
+        send(v, to = 0, peer = 1)
+        recv(zeros(3) + 1.0, from = 0)
+        send(v, to = 0, tag = 1, tag = 2)
+        send(to = 0, v)
+
+    def alias() =
+      var u: [real] = zeros(4)
+      val w = u[1..2]
+      exchange
+        recv(u[3..4], from = 0)
+        print(w)
+
+    def main() = ()
+    """
+
+@test("an `exchange` block refuses, each with its reason: touching a place received into, by name, through a `val` sharing it or through a function; writing a place sent from; overlapping posts on one array; a `send` or `recv` that is not one of its statements; a `return`, `exit` or `cycle` leaving it; and posts of what does not cross")
+mpi_exchange_refusals()
+    val b = bench()
+    val src = s"${b.work}/refused.nex"
+
+    write_text(src, EXCHANGE_REFUSED).unwrap()
+
+    val err = load(src).err().unwrap_or("")
+
+    finish(b)
+
+    for want in ["`u` is borrowed by the `recv` of `u[1..1]` above until the `exchange` block ends: a place received into is neither read nor written inside the block", "`u` is borrowed by the `recv` of `u[1..2]` above until the `exchange` block ends", "`u` is sent by the `send` of `u` above, which reads it until the `exchange` block ends: a place sent from is not written inside the block", "`shared` is borrowed by the `recv` of `shared` above until the `exchange` block ends", "`shared` is sent by the `send` of `shared` above", "`u[1..2]` and `u[2..3]` are both received into in one `exchange` block, and they may overlap", "`u[2..3]` is received into and `u[n..n]` sent in one `exchange` block, and they may overlap", "`u[n..n]` is sent and `u[4..1 by -1]` received into in one `exchange` block", "inside an `exchange` block, `recv` is one of the block's statements, posted where it stands and completed at the block's end: it answers nothing, and stands in no `if`, loop or function of the block", "inside an `exchange` block, `send` is one of the block's statements", "`exit` would leave the `exchange` block around it before its sends and receives complete", "`cycle` would leave the `exchange` block around it", "`return` would leave the `exchange` block around it", "`v` cannot be assigned: it is a `val`", "`send` in an `exchange` block sends an array of numbers — a whole array, a window or a strided view, which crosses where it lies; this is [bool]", "`send` in an `exchange` block sends an array of numbers — a whole array, a window or a strided view, which crosses where it lies; this is real64", "`recv` in an `exchange` block receives into an array of numbers — a whole array, a window or a strided view, which crosses where it lies; this is real64", "`send` takes `x`, `to`, `tag =`, `comm =`\n", "`send` takes `x`, `to`, `tag =`, `comm =`, and no `peer =`", "an `inout` argument is a variable the callee can write to", "`send`'s `tag` is given twice", "`send`'s arguments by position come before the named ones", "`u` is borrowed by the `recv` of `u[3..4]` above until the `exchange` block ends"]
+        assert(err.contains(want), s"missing: $want\n$err")
+
+    // Each misplaced post is refused once, the lambda's among them.
+    assert_eq(split(err, "is one of the block's statements").len, 5)
+
+@test("`exchange` with no `import mpi` is refused by the front end both engines share, and `exchange` stays free as a name")
+mpi_exchange_without_mpi()
+    val b = bench()
+    val src = s"${b.work}/plain.nex"
+    val named = s"${b.work}/named.nex"
+
+    write_text(src, "def main() =\n  var u: [real] = zeros(2)\n  exchange\n    u[1] = 1.0\n").unwrap()
+    write_text(named, "def exchange(x: integer): integer = x + 1\n\ndef main() =\n  val e = exchange(2)\n  print(e)\n").unwrap()
+
+    val err = load(src).err().unwrap_or("")
+    val ok = load(named)
+
+    finish(b)
+    assert(err.contains("`exchange` is the `mpi` module's block of nonblocking sends and receives: the program imports `mpi`"), err)
+    assert(ok.is_ok(), ok.err().unwrap_or(""))

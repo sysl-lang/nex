@@ -60,7 +60,9 @@ val any_tag: integer = nex_mpi_any_tag()
 
 private def status_of(s: [integer]): Status = Status(s[1], s[2], s[3])
 
-// Sends `x` to rank `to`, which receives it with `recv`; returns once `x` may be changed.
+// Sends `x` to rank `to`, which receives it with `recv`; returns once `x` may be changed. A window
+// or a strided view crosses where it lies, as an MPI datatype. Inside an `exchange` block, `send`
+// and `recv` are posted instead and completed at the block's end (below).
 def send[T: Numeric, R: Rank](x: [T; R], to: integer, tag: integer = 0, comm: Comm = world()) =
   nex_mpi_send(x, to, tag, comm.handle)
 
@@ -75,6 +77,23 @@ def sendrecv[T: Numeric, R: Rank, U: Numeric, Q: Rank](x: [T; R], to: integer, y
   var s: [integer] = zeros(3)
   nex_mpi_sendrecv(x, to, tag, y, from, tag, comm.handle, s)
   status_of(s)
+
+// -- the `exchange` block -----------------------------------------------------------------------
+//
+// `exchange` and an indented block: each `send` and `recv` that is a statement of the block is
+// posted where it stands (`MPI_Isend`, `MPI_Irecv`), of the array where it lies, and the block's end
+// waits for all of them (`MPI_Waitall`). A variable received into is borrowed until the end, and one
+// sent from may be read but not written, so code in the block that touches neither runs while the
+// messages move. The compiler writes the block as these calls (`elab_mpi.sysl`): `landed` and `held`
+// do nothing but take, after the wait, each array the requests used, so nothing reads one before
+// the wait or frees one under it.
+
+private extern def nex_mpi_exchange_begin()
+private extern def nex_mpi_exchange_end()
+private extern def nex_mpi_isend(x: [*; ..], to: integer, tag: integer, comm: int32)
+private extern def nex_mpi_irecv(x: inout [*; ..], from: integer, tag: integer, comm: int32)
+private extern def nex_mpi_landed(x: inout [*; ..])
+private extern def nex_mpi_held(x: [*; ..])
 
 // -- collectives --------------------------------------------------------------------------------
 //

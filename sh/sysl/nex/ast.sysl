@@ -245,6 +245,8 @@ enum ExprKind
     ParallelFor(clauses: Buf[LoopClause], reductions: Buf[Reduction], body: Expr)
     // `parallel e`: a map, a reduction or a whole-array expression computed in parallel.
     Parallel(body: Expr)
+    // `exchange` and an indented block: the `mpi` module's nonblocking block (DESIGN §9.6.2).
+    Exchange(body: Expr)
     Return(value: Option[Expr])
     // `exit [label]`: leave the innermost loop, or the one labelled.
     Exit(label: Option[string])

@@ -1367,6 +1367,16 @@ struct Parser
                 end if
 
                 self.bump()
+
+                // `exchange` is a word only where an indented block follows it (DESIGN §11), so it
+                // stays free as a name.
+                if name == "exchange" && self.at_block()
+                    val body = self.block()?
+                    val span = self.toks.span_from(m)
+
+                    self.end_marker()
+                    return Ok(ex(span, Exchange(body)))
+
                 return Ok(ex(self.toks.span_from(m), ExprKind.Name(name)))
             _ -> ()
 

@@ -488,6 +488,9 @@ show_expr(e: Expr) -> string
         Parallel(x) ->
             items.push(show_expr(x))
             return form("parallel", items)
+        Exchange(x) ->
+            items.push(show_expr(x))
+            return form("exchange", items)
         Return(v) ->
             v match
                 Some(x) -> items.push(show_expr(x))

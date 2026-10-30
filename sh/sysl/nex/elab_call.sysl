@@ -65,6 +65,7 @@ impl Elab
                 val q = self.global(callee.span, n)
 
                 if self.is_intrinsic(q) then return self.mpi_call(span, q, args)
+                if self.fx.xch.len() > 0 && is_posted(q) then return self.misplaced_post(span, q)
 
                 self.find_generic_fun(q) match
                     Some(g) -> return self.generic_call(span, callee.span, q, g, args)

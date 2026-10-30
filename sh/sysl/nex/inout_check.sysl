@@ -26,6 +26,7 @@ module sh.sysl.nex
 
 import sysl.buf.{Buf, buf}
 import sysl.text.join
+import sh.sysl.parsing.Span
 
 // One step from a variable down to a place inside it.
 private enum Step
@@ -549,6 +550,9 @@ impl Elab
         for b in bodies
             self.find_calls(p, fx, al, b)
 
+        for b in bodies
+            self.find_exchanges(p, fx, al, b)
+
     private find_calls(*self, p: TProgram, fx: Effects, al: Aliases, e: TExpr)
         *e.kind match
             TCall(callee, args) -> self.check_call(p, fx, al, Some(callee), args)
@@ -639,4 +643,152 @@ impl Elab
 
                 self.fail(arg.span, s"`${a}` is passed `inout` to ${who}, which also reads or writes the module variable `${n}` by name while the call runs; an `inout` argument must be the only access to its place")
             _ -> self.fail(arg.span, s"`${a}` is passed `inout` to a lambda that captures `${n}` itself; an `inout` argument must be the only access to its place while the call runs")
+
+    // -- the `exchange` block -----------------------------------------------------------------------
+    //
+    // An `exchange` block (DESIGN §9.6.2, `elab_mpi.sysl`) is a block whose first item is the shim's
+    // `nex_mpi_exchange_begin`. Each `recv` posted in it borrows its place, exclusively, from the post
+    // to the block's end, and each `send` borrows its place for reading: two places received into, or
+    // one sent and one received into, must be disjoint by the rules of a call's `inout` arguments; a
+    // statement after a `recv` may not touch its variable at all, and one after a `send` may not
+    // write its variable. A split base counts as written when anything in the block writes it.
+
+    private find_exchanges(*self, p: TProgram, fx: Effects, al: Aliases, e: TExpr)
+        *e.kind match
+            TBlock(items, _) -> if items.len() > 0 && calls_shim(items[0], "nex_mpi_exchange_begin") then self.check_exchange(p, fx, al, items)
+            _ -> ()
+
+        for c in children(e)
+            self.find_exchanges(p, fx, al, c)
+
+    private check_exchange(*self, p: TProgram, fx: Effects, al: Aliases, items: Buf[TExpr])
+        var last = items.len()
+
+        for k in 1..<items.len()
+            if calls_shim(items[k], "nex_mpi_exchange_end")
+                last = k
+                break
+
+        var w = Writes(buf(), buf())
+
+        for k in 1..<last
+            writes_of(fx, items[k], &w)
+
+        // The places borrowed so far, each with its text and whether a `recv` took it.
+        var held: Buf[Path] = buf()
+        var texts: Buf[string] = buf()
+        var received: Buf[bool] = buf()
+
+        for k in 1..<last
+            val s = items[k]
+            val post = if calls_shim(s, "nex_mpi_isend") then 1 elif calls_shim(s, "nex_mpi_irecv") then 2 else 0
+
+            if post == 0
+                self.touches_borrowed(p, fx, al, s, held, texts, received)
+                continue
+
+            val args = *s.kind match
+                TCall(_, a) -> a
+                _ -> buf()
+
+            for j in 1..<args.len()
+                self.touches_borrowed(p, fx, al, args[j], held, texts, received)
+
+            val mine = path_of(p, al, args[0]) match
+                Some(x) -> x
+                None -> continue
+            val a = expr_text(p, args[0])
+            val recv = post == 2
+
+            for i in 0..<held.len()
+                if !recv && !received[i] then continue
+
+                val both = if recv && received[i] then "are both received into" elif recv then s"is sent and `${a}` received into" else s"is received into and `${a}` sent"
+                val pair = if recv && received[i] then s"`${texts[i]}` and `${a}` ${both}" else s"`${texts[i]}` ${both}"
+
+                compare(held[i], mine, w) match
+                    Disjoint -> ()
+                    Overlap -> self.fail(args[0].span, s"${pair} in one `exchange` block, and they overlap; a place received into is borrowed by its `recv` until the block ends")
+                    OverlapAt(base, subs, axis, element) -> self.fail(args[0].span, s"${pair} in one `exchange` block, and they may overlap; ${split_hint(p, base, subs, axis, element)}")
+
+            held.push(mine)
+            texts.push(a)
+            received.push(recv)
+    end check_exchange
+
+    // A statement of an `exchange` block, or a post's other argument, against the places borrowed
+    // before it: it may not touch a place received into, nor write a place sent from.
+    private touches_borrowed(*self, p: TProgram, fx: Effects, al: Aliases, s: TExpr, held: Buf[Path], texts: Buf[string], received: Buf[bool])
+        if held.len() == 0 then return
+
+        var w = Writes(buf(), buf())
+
+        writes_of(fx, s, &w)
+
+        for i in 0..<held.len()
+            if !received[i] then continue
+
+            val root = held[i].root
+            val n = root_name(p, root)
+
+            self.mentions(p, fx, al, s, root, n, texts[i]) match
+                Some(at) ->
+                    self.fail(at, s"`${n}` is borrowed by the `recv` of `${texts[i]}` above until the `exchange` block ends: a place received into is neither read nor written inside the block")
+                    return
+                None -> ()
+
+        for i in 0..<held.len()
+            if received[i] then continue
+
+            val root = held[i].root
+
+            if writes_root(w, root)
+                self.fail(s.span, s"`${root_name(p, root)}` is sent by the `send` of `${texts[i]}` above, which reads it until the `exchange` block ends: a place sent from is not written inside the block")
+                return
+
+    // Where `s` reads or writes the variable `root` (named `n`): a use of it or of a `val` sharing it,
+    // or a function reaching it by name or capture.
+    private mentions(self, p: TProgram, fx: Effects, al: Aliases, s: TExpr, root: TExpr, n: string, text: string) -> Option[Span]
+        *s.kind match
+            TLocal(_) ->
+                path_of(p, al, s) match
+                    Some(x) -> if same_root(x.root, root) then return Some(s.span)
+                    None -> ()
+            TGlobalRef(_) ->
+                path_of(p, al, s) match
+                    Some(x) -> if same_root(x.root, root) then return Some(s.span)
+                    None -> ()
+            _ -> ()
+
+        val f = *s.kind match
+            TFnRef(_) -> reached(fx, s)
+            TLambdaRef(_) -> reached(fx, s)
+            _ -> None
+
+        f match
+            Some(x) -> if touches(x, root) then return Some(s.span)
+            None -> ()
+
+        for c in children(s)
+            self.mentions(p, fx, al, c, root, n, text) match
+                Some(at) -> return Some(at)
+                None -> ()
+
+        None
 end Elab
+
+// Whether `e` is a call of the `mpi` module's shim function `name`.
+private calls_shim(e: TExpr, name: string) -> bool = *e.kind match
+    TCall(callee, _) -> *callee.kind match
+        TFnRef(f) -> f == s"$MPI_MODULE.$name"
+        _ -> false
+    _ -> false
+
+private writes_root(w: Writes, root: TExpr) -> bool = *root.kind match
+    TGlobalRef(n) -> contains(w.globals, n)
+    TLocal(id) ->
+        for x in w.locals
+            if x == id then return true
+
+        false
+    _ -> false

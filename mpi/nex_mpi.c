@@ -12,8 +12,11 @@
  * with `MPI_Finalize` when `main` returns or `stop 0` runs.
  *
  * Every buffer arrives as a `nex_desc` (`nex_desc.h`, DESIGN §10.7): any element type, any rank, a
- * window or a strided view. A buffer moves as its bytes, packed in nex's element order where it is
- * not one dense block. The collectives the compiler types (`elab_mpi.sysl`) check that the ranks'
+ * window or a strided view. A point-to-point buffer moves where it lies: a dense block as its bytes,
+ * any other view as an MPI datatype built from the descriptor's extents and byte strides and cached
+ * (`buffer_of`), so nothing is copied; a collective packs its operand in nex's element order. The
+ * `exchange` block's requests are kept per open block until its end waits for them, or a trap
+ * leaving it cancels them. The collectives the compiler types (`elab_mpi.sysl`) check that the ranks'
  * shapes agree before any data moves, every rank seeing every rank's shape, so a mismatch traps on
  * all of them with the same message. A reduction with a built-in operator combines the ranks'
  * contributions here, in DESIGN §9.2.1's pairwise tree over the rank numbers, so its bits do not
@@ -23,6 +26,7 @@
 #include <mpi.h>
 #include <limits.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -34,8 +38,14 @@
 /* Each product and sum rounded on its own, as nex computes them: never fused into one. */
 #pragma STDC FP_CONTRACT OFF
 
-/* The runtime's: this process is rank `rank`, and the two ways its part in the job ends. */
-extern void nex_mpi_joined(int32_t rank, void (*abort_job)(int32_t), void (*finalize_job)(void));
+/* The runtime's: this process is rank `rank`, the two ways its part in the job ends, and what a
+ * caught trap calls before it frees the arrays of the frames it leaves (`unwound`, below). */
+extern void nex_mpi_joined(int32_t rank, void (*abort_job)(int32_t), void (*finalize_job)(void), void (*unwind)(int32_t));
+
+static void unwound(int32_t depth);
+
+/* The thread that joined the job, the only one that calls MPI. */
+static pthread_t joining_thread;
 
 /* The runtime's trap, which writes the message with the rank in front and ends the job, or returns
  * to an `assert_traps` that catches it. */
@@ -64,7 +74,8 @@ void nex_mpi_init(void) {
     }
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    nex_mpi_joined(rank, abort_job, finalize_job);
+    joining_thread = pthread_self();
+    nex_mpi_joined(rank, abort_job, finalize_job, unwound);
 }
 
 static MPI_Comm comm_of(int32_t comm) { return MPI_Comm_f2c((MPI_Fint) comm); }
@@ -196,6 +207,108 @@ static char *packed(const nex_desc *d) {
     copy_out(d, out);
     return out;
 }
+
+/* -- datatypes -------------------------------------------------------------------------------- */
+
+/* A buffer as a point-to-point call takes it: an address, a count and a datatype. */
+typedef struct buffer {
+    void *base;
+    int count;
+    MPI_Datatype type;
+} buffer;
+
+/* A committed datatype and the layout it describes. */
+typedef struct layout {
+    int64_t elem_size;
+    int32_t rank;
+    int64_t extent[AXES];
+    int64_t stride[AXES];
+    MPI_Datatype type;
+} layout;
+
+/* The datatypes built so far, the oldest replaced once every slot holds one. A datatype replaced
+ * while a request still uses it is freed when the request completes (MPI_Type_free). */
+#define CACHED 64
+
+static layout cache[CACHED];
+static int cached = 0;
+static int replaced = 0;
+
+static bool lays_out(const layout *l, const nex_desc *d) {
+    if (l->elem_size != d->elem_size || l->rank != d->rank) return false;
+
+    for (int32_t a = 0; a < d->rank; a++)
+        if (l->extent[a] != d->dim[a].extent || l->stride[a] != d->dim[a].stride) return false;
+
+    return true;
+}
+
+/* The datatype of `d`'s elements from its first: one element's bytes, the leading axes that are
+ * one dense run folded into them, then one `hvector` per remaining axis, innermost first, each with
+ * the axis's own byte stride — negative where the view is reversed along it. */
+static MPI_Datatype built(const char *name, const nex_desc *d) {
+    MPI_Datatype t;
+    MPI_Datatype next;
+    int64_t run = d->elem_size;
+    int32_t a = 0;
+
+    while (a < d->rank && (d->dim[a].stride == run || d->dim[a].extent == 1)) {
+        run *= d->dim[a].extent;
+        a++;
+    }
+
+    MPI_Type_contiguous(counted(name, run), MPI_BYTE, &t);
+
+    for (; a < d->rank; a++) {
+        if (d->dim[a].extent == 1) continue;
+
+        MPI_Type_create_hvector(counted(name, d->dim[a].extent), 1, (MPI_Aint) d->dim[a].stride, t, &next);
+        MPI_Type_free(&t);
+        t = next;
+    }
+
+    MPI_Type_commit(&t);
+    return t;
+}
+
+/* `d` as MPI takes it, where it lies (DESIGN §9.6.3): a dense block as its bytes, any other view
+ * as one element of a datatype describing it, from the cache where one was built before. */
+static buffer buffer_of(const char *name, const nex_desc *d) {
+    int64_t n = nex_desc_count(d);
+    int bytes = counted(name, n * d->elem_size);
+
+    if (n == 0 || d->rank == 0 || d->contiguous) return (buffer){d->base, bytes, MPI_BYTE};
+
+    for (int k = 0; k < cached; k++)
+        if (lays_out(&cache[k], d)) return (buffer){d->base, 1, cache[k].type};
+
+    MPI_Datatype t = built(name, d);
+    int slot = cached;
+
+    if (cached < CACHED) {
+        cached++;
+    } else {
+        slot = replaced;
+        replaced = (replaced + 1) % CACHED;
+        MPI_Type_free(&cache[slot].type);
+    }
+
+    layout *l = &cache[slot];
+
+    l->elem_size = d->elem_size;
+    l->rank = d->rank;
+
+    for (int32_t a = 0; a < d->rank; a++) {
+        l->extent[a] = d->dim[a].extent;
+        l->stride[a] = d->dim[a].stride;
+    }
+
+    l->type = t;
+    return (buffer){d->base, 1, t};
+}
+
+/* How many datatypes the cache holds: what a test reads to see a loop build each once. */
+int64_t nex_mpi_datatypes(void) { return cached; }
 
 /* -- shapes ----------------------------------------------------------------------------------- */
 
@@ -819,11 +932,11 @@ void nex_mpi_alltoall(const nex_desc *x, const nex_desc *into, int32_t comm) {
 /* -- point to point --------------------------------------------------------------------------- */
 
 void nex_mpi_send(const nex_desc *x, int64_t to, int64_t tag, int32_t comm) {
-    char *mine = packed(x);
-
     axes_checked("send", x);
-    MPI_Send(mine, counted("send", nex_desc_count(x) * x->elem_size), MPI_BYTE, (int) to, (int) tag, comm_of(comm));
-    free(mine);
+
+    buffer b = buffer_of("send", x);
+
+    MPI_Send(b.base, b.count, b.type, (int) to, (int) tag, comm_of(comm));
 }
 
 /* The message matched by `from` and `tag` into `x`, whose element count must be the message's;
@@ -847,11 +960,9 @@ static void received(const char *name, const nex_desc *x, int64_t from, int64_t 
     if (bytes != n * x->elem_size)
         TRAP("%s: the message from rank %d holds %lld values; the array holds %lld", name, st.MPI_SOURCE, (long long) (bytes / x->elem_size), (long long) n);
 
-    char *in = allocated(bytes);
+    buffer b = buffer_of(name, x);
 
-    MPI_Recv(in, bytes, MPI_BYTE, st.MPI_SOURCE, st.MPI_TAG, c, MPI_STATUS_IGNORE);
-    copy_in(x, in);
-    free(in);
+    MPI_Recv(b.base, b.count, b.type, st.MPI_SOURCE, st.MPI_TAG, c, MPI_STATUS_IGNORE);
     out[0] = st.MPI_SOURCE;
     out[1] = st.MPI_TAG;
     out[2] = n;
@@ -866,13 +977,186 @@ void nex_mpi_recv(const nex_desc *x, int64_t from, int64_t tag, int32_t comm, co
 void nex_mpi_sendrecv(const nex_desc *x, int64_t to, int64_t send_tag, const nex_desc *y, int64_t from, int64_t recv_tag, int32_t comm, const nex_desc *status) {
     MPI_Comm c = comm_of(comm);
     MPI_Request request;
-    char *mine = packed(x);
 
     axes_checked("sendrecv", x);
-    MPI_Isend(mine, counted("sendrecv", nex_desc_count(x) * x->elem_size), MPI_BYTE, (int) to, (int) send_tag, c, &request);
+
+    buffer b = buffer_of("sendrecv", x);
+
+    MPI_Isend(b.base, b.count, b.type, (int) to, (int) send_tag, c, &request);
     received("sendrecv", y, from, recv_tag, c, status);
     MPI_Wait(&request, MPI_STATUS_IGNORE);
-    free(mine);
+}
+
+/* -- the exchange block ----------------------------------------------------------------------- */
+
+/* The runtime's: how deep the catches around the caller are nested (0 outside every one). */
+extern int32_t nex_catch_depth(void);
+
+/* One request an `exchange` block posted: for a receive, the element count its array holds. */
+typedef struct posted {
+    MPI_Request request;
+    MPI_Comm comm;
+    bool receives;
+    int64_t values;
+    int64_t elem_size;
+} posted;
+
+/* An open `exchange` block: the catch depth it was opened at, and its requests. */
+typedef struct block {
+    int32_t depth;
+    int count;
+    int cap;
+    posted *posts;
+} block;
+
+static block *blocks = NULL;
+static int blocks_open = 0;
+static int blocks_cap = 0;
+
+void nex_mpi_exchange_begin(void) {
+    if (blocks_open == blocks_cap) {
+        blocks_cap = blocks_cap == 0 ? 4 : 2 * blocks_cap;
+        blocks = realloc(blocks, (size_t) blocks_cap * sizeof *blocks);
+
+        if (blocks == NULL) TRAP("mpi: out of memory for %d exchange blocks", blocks_cap);
+    }
+
+    blocks[blocks_open++] = (block){nex_catch_depth(), 0, 0, NULL};
+}
+
+/* A new request's slot in the innermost open block. */
+static posted *posting(void) {
+    block *k = &blocks[blocks_open - 1];
+
+    if (k->count == k->cap) {
+        k->cap = k->cap == 0 ? 8 : 2 * k->cap;
+        k->posts = realloc(k->posts, (size_t) k->cap * sizeof *k->posts);
+
+        if (k->posts == NULL) TRAP("mpi: out of memory for %d requests", k->cap);
+    }
+
+    return &k->posts[k->count++];
+}
+
+/* `send` in an `exchange` block: `MPI_Isend` of `x` where it lies, which the block's end waits for. */
+void nex_mpi_isend(const nex_desc *x, int64_t to, int64_t tag, int32_t comm) {
+    axes_checked("send", x);
+
+    buffer b = buffer_of("send", x);
+    posted *p = posting();
+
+    *p = (posted){MPI_REQUEST_NULL, comm_of(comm), false, nex_desc_count(x), x->elem_size};
+    MPI_Isend(b.base, b.count, b.type, (int) to, (int) tag, p->comm, &p->request);
+}
+
+/* `recv` in an `exchange` block: `MPI_Irecv` into `x` where it lies; the end checks the count. */
+void nex_mpi_irecv(const nex_desc *x, int64_t from, int64_t tag, int32_t comm) {
+    axes_checked("recv", x);
+
+    buffer b = buffer_of("recv", x);
+    posted *p = posting();
+
+    *p = (posted){MPI_REQUEST_NULL, comm_of(comm), true, nex_desc_count(x), x->elem_size};
+    MPI_Irecv(b.base, b.count, b.type, (int) from, (int) tag, p->comm, &p->request);
+}
+
+/* Every request of block `k` completed, each communicator's errors returned rather than fatal for
+ * the wait, so a receive the message overflows traps with nex's words: `statuses` gets each one's
+ * status and `codes` its error code. Each request is waited for on its own, which completes them
+ * all as `MPI_Waitall` would, since all are posted, and says which failed and how. */
+static void waited(block *k, MPI_Status *statuses, int *codes) {
+    MPI_Errhandler *handlers = allocated((int64_t) k->count * (int64_t) sizeof *handlers);
+
+    for (int i = 0; i < k->count; i++) {
+        MPI_Comm_get_errhandler(k->posts[i].comm, &handlers[i]);
+        MPI_Comm_set_errhandler(k->posts[i].comm, MPI_ERRORS_RETURN);
+    }
+
+    for (int i = 0; i < k->count; i++)
+        codes[i] = MPI_Wait(&k->posts[i].request, &statuses[i]);
+
+    for (int i = k->count - 1; i >= 0; i--) {
+        MPI_Comm_set_errhandler(k->posts[i].comm, handlers[i]);
+        MPI_Errhandler_free(&handlers[i]);
+    }
+
+    free(handlers);
+}
+
+/* The end of an `exchange` block: every request it posted completed, and each receive's message
+ * checked against its array's element count. */
+void nex_mpi_exchange_end(void) {
+    block k = blocks[--blocks_open];
+    MPI_Status *statuses = allocated((int64_t) k.count * (int64_t) sizeof *statuses);
+    int *codes = allocated((int64_t) k.count * (int64_t) sizeof *codes);
+
+    waited(&k, statuses, codes);
+
+    for (int i = 0; i < k.count; i++) {
+        posted p = k.posts[i];
+        MPI_Status st = statuses[i];
+        int code = codes[i];
+        int bytes = 0;
+
+        if (code != MPI_SUCCESS) {
+            int class = 0;
+            char text[MPI_MAX_ERROR_STRING];
+            int len = 0;
+
+            MPI_Error_class(code, &class);
+            MPI_Error_string(code, text, &len);
+            free(statuses);
+            free(codes);
+            free(k.posts);
+
+            if (p.receives && class == MPI_ERR_TRUNCATE)
+                TRAP("recv: the message from rank %d holds more values than the array's %lld", st.MPI_SOURCE, (long long) p.values);
+
+            TRAP("%s: %s", p.receives ? "recv" : "send", text);
+        }
+
+        if (!p.receives || st.MPI_SOURCE == MPI_PROC_NULL) continue;
+
+        MPI_Get_count(&st, MPI_BYTE, &bytes);
+
+        if (bytes != p.values * p.elem_size) {
+            free(statuses);
+            free(codes);
+            free(k.posts);
+            TRAP("recv: the message from rank %d holds %lld values; the array holds %lld", st.MPI_SOURCE, (long long) (bytes / p.elem_size), (long long) p.values);
+        }
+    }
+
+    free(statuses);
+    free(codes);
+    free(k.posts);
+}
+
+/* After the wait, the arrays the requests used: nothing to do but be called, so that the program
+ * reads a received array only after the wait and frees a sent one only after it. */
+void nex_mpi_landed(const nex_desc *x) { (void) x; }
+
+void nex_mpi_held(const nex_desc *x) { (void) x; }
+
+/* A trap leaving the catch at depth `depth`: every block opened inside it has its requests
+ * cancelled and completed before the trap frees the arrays they use. */
+static void unwound(int32_t depth) {
+    /* A trap inside a `parallel` region is caught by its own thread, whose catches are its own. */
+    if (!pthread_equal(pthread_self(), joining_thread)) return;
+
+    while (blocks_open > 0 && blocks[blocks_open - 1].depth >= depth) {
+        block k = blocks[--blocks_open];
+        MPI_Status *statuses = allocated((int64_t) k.count * (int64_t) sizeof *statuses);
+        int *codes = allocated((int64_t) k.count * (int64_t) sizeof *codes);
+
+        for (int i = 0; i < k.count; i++)
+            MPI_Cancel(&k.posts[i].request);
+
+        waited(&k, statuses, codes);
+        free(statuses);
+        free(codes);
+        free(k.posts);
+    }
 }
 
 /* -- the reductions of a distributed vector --------------------------------------------------- */

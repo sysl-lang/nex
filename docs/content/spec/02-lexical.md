@@ -192,6 +192,8 @@ pub       trait     type      where     yield
 - `reduce` introduces the reduction clause of a `parallel for`
   ([chapter 10](/spec/10-parallelism/)). Everywhere else `reduce` is the prelude function of that
   name.
+- `exchange` followed by an indented block is the `mpi` module's nonblocking block
+  ([chapter 10](/spec/10-parallelism/)); anywhere else it is a name.
 - `unit` is a keyword that declares a unit of measure at the top level
   (`unit ft = 12 in`, [chapter 13](/spec/13-units/)). It is not a type: the empty type is `void`.
 
