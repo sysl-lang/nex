@@ -223,7 +223,7 @@ impl Elab
 
         for j in 0..<slots.len()
             slots[j] match
-                Some(a) -> out.push(self.argument(a, sig.tys[j], sig.modes[j], s"`${sig.names[j]}`"))
+                Some(a) -> out.push(self.argument(a, sig.tys[j], sig.modes[j], s"argument `${sig.names[j]}`"))
                 None ->
                     sig.defaults[j] match
                         Some(d) -> out.push(d)

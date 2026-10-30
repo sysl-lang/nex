@@ -32,6 +32,43 @@ corpus_lexes()
 
     assert_eq(count, 433)
 
+// The categories whose programs are scalar: they use no struct, enum, generic or unit. Some of them
+// still reach for an array or a tuple, which the elaborator does not handle yet.
+private val SCALAR_CATEGORIES = ["top-level bindings + print", "scalar arithmetic", "comparison + logical", "chained comparison", "chained comparisons", "control flow", "blocks + scoping", "top-level initialization", "compound assignment", "functions", "string interpolation", "const fn calls", "inout by-ref"]
+
+private scalar_names() -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for line in split(INDEX, "\n")
+        if line.len == 0 || line.starts_with("file\t") then continue
+
+        val cols = split(line, "\t")
+
+        for c in SCALAR_CATEGORIES
+            if cols[1] == c then out.push(cols[0])
+
+    out
+
+@test("every scalar corpus program elaborates, or waits only on arrays or tuples")
+corpus_scalar_programs_elaborate()
+    var clean = 0
+    var waiting = 0
+
+    for name in scalar_names()
+        val src = source_of(name, read_text(s"testdata/corpus/${name}.nex").unwrap())
+        val p = parse_program(src).unwrap()
+
+        elaborate(p) match
+            Ok(_) -> clean += 1
+            Err(ds) ->
+                for d in ds
+                    assert(d.message.ends_with("is not elaborated yet"), s"${name}: ${d.message} @${src.locate(d.span.start)}")
+
+                waiting += 1
+
+    assert_eq(clean, 114)
+    assert_eq(waiting, 39)
+
 @test("all 433 corpus programs parse")
 corpus_parses()
     var count = 0

@@ -116,6 +116,27 @@ is_void(t: Ty) -> bool = t match
     Void -> true
     _ -> false
 
+// Whether `Error` stands anywhere inside a type, as a function's result whose body was refused.
+has_error(t: Ty) -> bool = t match
+    Error -> true
+    Fn(sig) ->
+        var any = has_error(sig.ret)
+
+        for p in sig.params
+            if has_error(p) then any = true
+
+        any
+    Array(elem, _) -> has_error(*elem)
+    Tuple(elems) ->
+        var any = false
+
+        for e in elems
+            if has_error(e) then any = true
+
+        any
+    Measured(base, _) -> has_error(*base)
+    _ -> false
+
 // Whether a type stands for anything at all: `Error` and `Never` agree with every other type.
 is_wild(t: Ty) -> bool = is_error(t) || is_never(t)
 
@@ -217,9 +238,9 @@ private unit_eq(a: Unit, b: Unit) -> bool
 // -- the lattice ------------------------------------------------------------------------------------
 
 // Whether a value of `from` may stand where `to` is expected: the same type, or a path along the
-// arrows of DESIGN §2.2. `Error` and `Never` go anywhere.
+// arrows of DESIGN §2.2. `Never`, and a type with `Error` anywhere in it, go anywhere.
 promotes(from: Ty, to: Ty) -> bool
-    if is_wild(from) || is_error(to) || ty_eq(from, to) then return true
+    if is_wild(from) || has_error(from) || has_error(to) || ty_eq(from, to) then return true
 
     from match
         Int(fb, fs) -> to match

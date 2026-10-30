@@ -2,6 +2,7 @@
 // test reads as the input beside the thing it must come to.
 
 import sh.sysl.parsing.source_of
+import sysl.buf.{Buf, buf}
 import sysl.text.join
 
 // The tokens of `text` on one line (`K(def) ID(x) NL`), or the lexer's refusal with its position.
@@ -19,6 +20,31 @@ parsed(text: string) -> string
     parse_program(src) match
         Ok(p) -> show_program(p)
         Err(d) -> s"error: ${d.message} @${src.locate(d.span.start)}"
+
+// The typed IR of a whole program, or every diagnostic the parser or the elaborator gives, one to a
+// line with its position.
+elaborated(text: string) -> string
+    val src = source_of("t.nex", text)
+
+    val p = parse_program(src) match
+        Ok(p) -> p
+        Err(d) -> return s"error: ${d.message} @${src.locate(d.span.start)}"
+
+    elaborate(p) match
+        Ok(t) -> show_tprogram(t)
+        Err(ds) ->
+            var out: Buf[string] = buf()
+
+            for d in ds
+                out.push(s"error: ${d.message} @${src.locate(d.span.start)}")
+
+            join(out.view(), "\n")
+
+// The diagnostics of a program the elaborator refuses, or `ok` where it accepts it.
+refused(text: string) -> string
+    val out = elaborated(text)
+
+    if out.starts_with("error: ") then out else "ok"
 
 // The tree of one expression, written as the right-hand side of a `val`.
 expr_tree(text: string) -> string

@@ -87,7 +87,8 @@ private typed(head: string, t: Ty) -> string = t match
     Never -> head
     _ -> head + ":" + show_ty(t)
 
-private show_real(x: real) -> string
+// A real always with a point or an exponent, so it never reads as an integer.
+real_text(x: real) -> string
     val text = shortest(x)
 
     for c in text.bytes
@@ -97,7 +98,7 @@ private show_real(x: real) -> string
 
 private show_lit(v: Lit) -> string = v match
     IntVal(n) -> s"${n}"
-    RealVal(x) -> show_real(x)
+    RealVal(x) -> real_text(x)
     BoolVal(b) -> if b then "true" else "false"
     StrVal(s) -> write_quoted(s, u8('"'))
     VoidVal -> "()"

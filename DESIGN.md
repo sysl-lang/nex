@@ -147,6 +147,14 @@ such as `1.0f32` would read as juxtaposition (`1.0 * f32`, ref §4.4).
   `uint32`. The same holds when the other operand is an array: `2.0 * a32` is `[real32]`.
 - **With no context:** an integer literal is `int64`, a real literal `real64` (ref §2.4).
 
+**A literal is any expression made only of literals and prelude constants** — `2`, `-0.5`, `2pi`,
+`3 + 4i` — and it adopts as a whole, so `2pi * x32` is `real32` throughout. The same adoption reaches
+every place two values meet in one type: the branches of an `if` used as a value (`if c then x32 else
+1` is `real32`; the branches meet in their common type, as the operands of `+` do), the arguments
+of `min`, `max`, `atan2` and `hypot`, and a chained comparison, whose literal operands take the
+common type of its other operands (`0 < n32 < x64` compares `0` as a `real64`). A minus written
+on a literal is part of it, so `val b: int8 = -128` holds.
+
 **The prelude constants `pi`, `e`, `inf`, `nan` and `i` are typed like literals** (**PROPOSED**):
 each adopts the width its context asks for (`pi` is `real32` beside a `real32`, `i` is `complex[real32]`
 beside a `real32`), and with no context `pi`, `e`, `inf`, `nan` are `real64` and `i` is
@@ -186,6 +194,13 @@ Every numeric type name is also its conversion function, on a scalar and element
   same value **at that width**, in the reference's spelling (`0.3` for the `real32` nearest 0.3, not
   `0.30000001192092896`) (**PROPOSED**; needs runtime entries per width). A complex prints as its two
   parts do.
+- **The prelude's real functions** (`sqrt`, `exp`, `sin`, `floor`, …, ref §10.2) compute at the
+  width of a real argument, and widen an integer argument to `real64` first (`sqrt(n32)` is a
+  `real64`). `sqrt`, `exp`, `log`, `sin`, `cos` and `tan` also take a complex and give one. `abs` and
+  `sign` keep an integer's or a real's type, and `abs` of a `complex[realN]` is a `realN`.
+- **An `f"..."` specifier is checked against its value's type at compile time**: `d x X o b` format
+  an integer, `f e g` a real, `s` anything. `f"$n%.2f"` with `n` an integer is a compile error, not
+  the reference's run-time trap, since the type is known where the literal is written.
 
 ### 2.6 Generic constraints
 
@@ -1199,13 +1214,16 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
 - **`stop`** ends the program with exit status 0; **`stop n`** with status `n`.
 - **A `for` header takes a step**: `for k in n..1 by -1`, `for k in 1..n by 2`, read in the direction
   of travel exactly as a subscript's `by` (§5.4). A stepped range is a value (`val odd = 1..n by 2`).
+- **A `for` over a range counts in integers**, as Fortran's `DO` does: the loop variable has the
+  common type of the two bounds (`for k in 1..n` with `n: int32` counts in `int32`), the step must
+  promote to it, and a range of reals is a compile error. The loop variable is read-only.
 - In a `parallel for` body, `cycle` ends that iteration and is allowed; `exit` is a compile error
   (§9.4).
 
 ### 11.2 The program
 
-- **The entry point** is `def main()` or `def main(args: [string])`; any other signature of `main`
-  is a compile error. `args` holds only the user's arguments, without the program name, 1-based:
+- **The entry point** is `def main()` or `def main(args: [string])`, returning `void`; any other
+  signature of `main` is a compile error, and so is a program without one. `args` holds only the user's arguments, without the program name, 1-based:
   `args[1]` is the first. The exit status is 0 when `main` returns, `n` after `stop n`, and non-zero
   after an uncaught trap.
 - **The top level of a file holds only declarations** (`import`, `const`, module-level `val` and
@@ -1216,6 +1234,25 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
 - **`nex test`** runs every `@test def` in the project, in any module, prints one line per failure
   and then a summary, and exits non-zero on any failure. `nex test <substring>` runs only the tests
   whose names contain it. A trap fails its own test; the others still run.
+
+### 11.3 Functions, statements and lambdas
+
+- **A function with no declared result type takes it from its first `return`**, in source order, or
+  from its body's value where it has none; every other result must promote to that type. A function
+  that calls itself before its type is known (`def fact(n: integer) = … fact(n - 1)`) is a compile
+  error asking for the type to be declared.
+- **A function that returns `void` discards the value its body ends with**, as a statement does:
+  `def main() = compute()` calls `compute` and returns nothing. A statement may be any expression,
+  and an `if` used as a statement needs no common type for its branches.
+- **A compound assignment never narrows its target**: `x op= v` computes `x op v` under §2.2, and
+  the result must be `x`'s type. `n /= 2` with `n` an integer is a compile error, since `/` gives a
+  real; `n = n div 2` is the integer division.
+- **A lambda's parameter types come from its position** — a parameter of function type, an
+  annotated binding — or are written (`(x: real) -> …`). A lambda bound by `val f = x -> …` with a
+  type left out takes it from its first call (`f(10)` makes `x` an `int64`) or from the function
+  type its first use expects, and keeps it: a later call with another type is checked against it.
+  One whose types nothing fixes is a compile error. A `def` inside a body is a named lambda; it may
+  call itself where it declares its result type.
 
 ---
 
@@ -1463,6 +1500,8 @@ is in `K` until the affine units of §15 arrive.
 | Loop control | — | §11.1 | `exit`, `cycle`, named loops, `stop n`, `by` in a `for` header |
 | Program entry | — | §11.2 | `main()` or `main(args: [string])`, 1-based `args`; declarations only at the top level; `eprint` |
 | Real division by zero | — | §2.5 | IEEE (`inf`, `nan`); traps only under `--fpe-trap` |
+| `f"..."` specifier against its value | §10.6 (run-time trap) | §2.5 | compile error |
+| Result inference, void bodies, compound assignment, lambda parameter types | §6 | §11.3 | first `return` fixes an undeclared result; a `void` function discards its body's value; `op=` never narrows; a `val`-bound lambda's types come from its first call |
 | Elemental functions | — | §7.3 | every prelude scalar math function is elemental; `@elemental` for user functions |
 | Reductions | §10 | §7.4 | Fortran names: `minval`, `maxval`, `minloc`, `maxloc`, `any`, `all`, `count`, `norm2`; `dim =` in place of the reference's `sum_axis`; `dot` conjugates |
 | Array elements | §3.3 | §3.1 | any element type but an array; structs and tuples of scalars stored inline |

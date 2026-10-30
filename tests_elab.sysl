@@ -1,0 +1,276 @@
+@tests
+
+// The typed IR the elaborator builds, in the form `nex elaborate` prints, and the diagnostics it
+// gives. A program is checked whole; the cases the reference's elaborator tests cover for scalars are
+// here in nex's own syntax.
+
+private val MAIN = "def main() = ()\n"
+
+// -- the top level and the program ------------------------------------------------------------------
+
+@test("a module-level binding is resolved and printed")
+elab_top_level_binding()
+    assert_eq(elaborated("val x = 42\ndef main() = print(x)\n"), "(val x int64 42)\n(def main () void (print x))")
+
+@test("a module-level binding may call a function declared after it")
+elab_forward_reference()
+    assert_eq(elaborated("val s = square(7)\ndef square(n: integer): integer = n * n\ndef main() =\n  print(s)\n  stop 2\n"),
+        "(val s int64 (call:int64 square 7))\n(def square ((n#0 int64)) int64 (*:int64 n#0 n#0))\n(def main () void (block (print s) (stop 2)))")
+
+@test("functions may call each other in either order")
+elab_mutual_recursion()
+    assert_eq(refused("def even(n: integer): bool = if n == 0 then true else odd(n - 1)\ndef odd(n: integer): bool = if n == 0 then false else even(n - 1)\n" + MAIN), "ok")
+
+@test("main is def main() or def main(args: [string]), returning nothing")
+elab_main_signature()
+    assert_eq(refused("def main(args: [string]) = print(1)\n"), "ok")
+    assert_eq(refused("def main(n: integer) = print(n)\n"), "error: `main` takes no parameters or `args: [string]`: `def main()` or `def main(args: [string])` @1:1")
+    assert_eq(refused("def main(args: [integer]) = ()\n"), "error: `main` takes no parameters or `args: [string]`: `def main()` or `def main(args: [string])` @1:1")
+    assert_eq(refused("def main(): integer = 1\n"), "error: `main` returns nothing, but this one returns int64 @1:1")
+    assert_eq(elaborated("def f(): integer = 1\ndef main() = f()\n"), "(def f () int64 1)\n(def main () void (block (call:int64 f) ()))")
+    assert_eq(refused("val main = 1\n"), "error: `main` must be a function: `def main()` or `def main(args: [string])` @1:1")
+    assert_eq(refused("def f() = ()\n"), "error: a program needs a `def main()` or a `def main(args: [string])` @1:1")
+
+@test("the top level holds only declarations")
+elab_top_level_statement()
+    assert_eq(refused("print(1)\n" + MAIN), "error: expected a declaration, found 'print' @1:1")
+
+@test("a name is declared once at the top level, once per block and once per parameter list")
+elab_redeclaration()
+    assert_eq(refused("val x = 1\nval x = 2\n" + MAIN), "error: redeclaration of `x` @2:1")
+    assert_eq(refused("def f() = 1\ndef f() = 2\n" + MAIN), "error: redeclaration of `f` @2:1")
+    assert_eq(refused("def f(a: integer, a: integer) = a\n" + MAIN), "error: redeclaration of `a` @1:1")
+    assert_eq(refused("def main() =\n  val a = 1\n  val a = 2\n"), "error: redeclaration of `a` @3:7")
+
+// -- names and scopes -------------------------------------------------------------------------------
+
+@test("an unknown name is reported, with the nearest name in scope")
+elab_unknown_name()
+    assert_eq(refused("def main() =\n  val count = 1\n  print(cuont)\n"), "error: unknown name `cuont`; did you mean `count`? @3:9")
+    assert_eq(refused("def main() = print(zzz)\n"), "error: unknown name `zzz` @1:20")
+
+@test("a parameter is not in scope outside its function, nor a loop variable outside its loop")
+elab_scopes_end()
+    assert_eq(refused("def f(width: integer) = width\nval y = width\n" + MAIN), "error: unknown name `width` @2:9")
+    assert_eq(refused("def main() =\n  for k in 1..3 do print(k)\n  print(k)\n"), "error: unknown name `k` @3:9")
+
+@test("a binding's initializer sees the outer binding of the same name, and an inner one shadows")
+elab_shadowing()
+    assert_eq(elaborated("val x = 1\ndef f() =\n  val x = x + 1\n  x\n" + MAIN),
+        "(val x int64 1)\n(def f () int64 (block:int64 (val x#0:int64 (+:int64 x 1)) x#0))\n(def main () void ())")
+    assert_eq(elaborated("def f(x: integer) =\n  val x = x + 100\n  x\n" + MAIN),
+        "(def f ((x#0 int64)) int64 (block:int64 (val x#1:int64 (+:int64 x#0 100)) x#1))\n(def main () void ())")
+
+@test("i is the imaginary unit until a binding named i shadows it")
+elab_imaginary_unit_shadowed()
+    assert_eq(elaborated("def main() =\n  val z = 3 + 2i\n  for i in 1..3\n    print(2i)\n  print(2i + z)\n"),
+        "(def main () void (block (val z#0:complex[real64] (+:complex[real64] (adopt:complex[real64] 3) (*:complex[real64] (adopt:complex[real64] 2) i))) (for L0 i#1:int64 (1 .. 3) (print (*:int64 2 i#1))) (print (+:complex[real64] (*:complex[real64] (adopt:complex[real64] 2) i) z#0))))")
+
+@test("a module-level binding that reaches itself is reported")
+elab_initializer_cycle()
+    assert_eq(refused("val a = b\nval b = a\n" + MAIN), "error: `a` is used in its own initializer @2:9")
+
+@test("a const cannot read a module-level var")
+elab_const_reads_var()
+    assert_eq(refused("var counter = 0\nconst C = counter + 1\n" + MAIN), "error: a `const` cannot read the `var` `counter` @2:11")
+    assert_eq(refused("def square(x: real) = x * x\nconst NINE = square(3.0)\n" + MAIN), "ok")
+
+// -- literals and the lattice -----------------------------------------------------------------------
+
+@test("a literal takes the type its context gives")
+elab_literal_adoption()
+    assert_eq(elaborated("def main() =\n  val x: real32 = 1\n  print(x * 2.0)\n"),
+        "(def main () void (block (val x#0:real32 (adopt:real32 1)) (print (*:real32 x#0 (adopt:real32 2.0)))))")
+    assert_eq(elaborated("def f(x: real32) = 2pi * x\n" + MAIN),
+        "(def f ((x#0 real32)) real32 (*:real32 (*:real32 (adopt:real32 2) (adopt:real32 pi)) x#0))\n(def main () void ())")
+    assert_eq(elaborated("def f(u: uint32) = u + 1\n" + MAIN), "(def f ((u#0 uint32)) uint32 (+:uint32 u#0 (adopt:uint32 1)))\n(def main () void ())")
+    assert_eq(elaborated("def f(n: integer) = n + 0.5\n" + MAIN), "(def f ((n#0 int64)) real64 (+:real64 (promote:real64 n#0) 0.5))\n(def main () void ())")
+    assert_eq(elaborated("def main() = print(3 + 4i)\n"),
+        "(def main () void (print (+:complex[real64] (adopt:complex[real64] 3) (*:complex[real64] (adopt:complex[real64] 4) i))))")
+
+@test("a literal outside its type's range is refused, and a minus belongs to the literal")
+elab_literal_range()
+    assert_eq(refused("def main() =\n  val b: int8 = 300\n"), "error: 300 does not fit in int8 @2:17")
+    assert_eq(refused("def main() =\n  val u: uint8 = -1\n"), "error: -1 does not fit in uint8 @2:18")
+    assert_eq(refused("def main() =\n  val h: real16 = 70000.0\n"), "error: 70000.0 is too large for real16: it would round to infinity @2:19")
+    assert_eq(refused("def main() =\n  val b: int8 = -128\n  val c: int8 = 127\n  val u: uint8 = 255\n"), "ok")
+    assert_eq(refused("def f(x8: int8) = x8 + 300\n" + MAIN), "error: 300 does not fit in int8 @1:24")
+
+@test("the type of a binary operation follows the lattice")
+elab_promotion()
+    assert_eq(elaborated("def f(n: integer, x: real32) = n * x\n" + MAIN),
+        "(def f ((n#0 int64) (x#1 real32)) real32 (*:real32 (promote:real32 n#0) x#1))\n(def main () void ())")
+    assert_eq(elaborated("def f(u: uint8, n: int16, x: real64, z: complex[real32]) =\n  print(u + n)\n  print(x + z)\n" + MAIN),
+        "(def f ((u#0 uint8) (n#1 int16) (x#2 real64) (z#3 complex[real32])) void (block (print (+:int16 (promote:int16 u#0) n#1)) (print (+:complex[real64] (promote:complex[real64] x#2) (promote:complex[real64] z#3)))))\n(def main () void ())")
+
+@test("a signed and an unsigned integer of the same width do not mix")
+elab_signed_unsigned()
+    assert_eq(refused("def f(a: int32, b: uint32) = a + b\n" + MAIN), "error: `+` mixes int32 and uint32, and neither holds the other's range; convert one: `int32(u) + n` @1:30")
+    assert_eq(refused("def f(a: int16, b: uint16) = a < b\n" + MAIN), "error: `<` mixes int16 and uint16, and neither holds the other's range; convert one: `int16(u) < n` @1:30")
+    assert_eq(refused("def f(a: int8, b: uint64) = a * b\n" + MAIN), "error: `*` mixes int8 and uint64, and neither holds the other's range; convert one: `int8(u) * n` @1:29")
+
+@test("a value is not narrowed where it is stored")
+elab_narrowing_store()
+    assert_eq(refused("def main() =\n  var x: real32 = 1.0\n  val y = 2.0\n  x = y\n"), "error: the value must be real32, but this is real64: that would narrow it; convert it explicitly, `real32(...)` @4:7")
+    assert_eq(refused("def f(x: real64): real32 = x\n" + MAIN), "error: the result must be real32, but this is real64: that would narrow it; convert it explicitly, `real32(...)` @1:28")
+    assert_eq(refused("def f(n: int64) = n\ndef g(): int32 = f(1)\n" + MAIN), "error: the result must be int32, but this is int64: that would narrow it; convert it explicitly, `int32(...)` @2:18")
+    assert_eq(refused("def f(x: int32) = x\ndef main() =\n  val n = 5\n  f(n)\n"), "error: argument `x` must be int32, but this is int64: that would narrow it; convert it explicitly, `int32(...)` @4:5")
+    assert_eq(refused("def main() =\n  var n = 1\n  n /= 2\n"), "error: `/=` computes real64, which `n` (int64) cannot hold without narrowing; `div` divides integers @3:3")
+    assert_eq(refused("def main() =\n  var n = 1\n  n += 0.5\n"), "error: `+=` computes real64, which `n` (int64) cannot hold without narrowing @3:3")
+
+@test("division, div, % and ^ type as DESIGN 2.2 says")
+elab_division_and_power()
+    assert_eq(elaborated("def f(a: int32, b: int64) =\n  print(a / b)\n  print(a div b)\n  print(b % a)\n" + MAIN),
+        "(def f ((a#0 int32) (b#1 int64)) void (block (print (/:real64 (promote:real64 a#0) (promote:real64 b#1))) (print (div:int64 (promote:int64 a#0) b#1)) (print (%:int64 b#1 (promote:int64 a#0)))))\n(def main () void ())")
+    assert_eq(elaborated("def f(x: real32, k: int8, n: integer) =\n  print(x ^ n)\n  print(k ^ 2)\n  print(x ^ 0.5)\n  print(-x^2)\n" + MAIN),
+        "(def f ((x#0 real32) (k#1 int8) (n#2 int64)) void (block (print (^:real32 x#0 n#2)) (print (^:int8 k#1 2)) (print (^:real32 x#0 (adopt:real32 0.5))) (print (-:real32 (^:real32 x#0 2)))))\n(def main () void ())")
+    assert_eq(refused("def f(x: real) = x div 2\n" + MAIN), "error: `div` needs two integers; found real64 and real64 @1:18")
+
+@test("comparisons, and, or and not take what DESIGN 2.6 says they take")
+elab_comparison_and_logic()
+    assert_eq(elaborated("def main() =\n  print(\"a\" + \"b\" == \"ab\")\n  print(not true or 1 < 2)\n"),
+        "(def main () void (block (print (==:bool (+:string \"a\" \"b\") \"ab\")) (print (or (not:bool true) (<:bool 1 2)))))")
+    assert_eq(refused("def main() =\n  val z = 1 + 2i\n  print(z < z)\n"), "error: `<` orders integers and reals; complex numbers have no order @3:9")
+    assert_eq(refused("def main() = print(\"a\" < \"b\")\n"), "error: `<` orders integers and reals; string values are only equal or not @1:20")
+    assert_eq(refused("def main() = print(true + 1)\n"), "error: `+` needs numbers; found bool and int64 @1:20")
+    assert_eq(refused("def main() = print(1 and true)\n"), "error: an operand of `and` must be bool, but this is int64 @1:20")
+
+@test("a chained comparison stays one node, each operand once, a literal operand adopting")
+elab_chain()
+    assert_eq(elaborated("def main() =\n  val x = 0.5\n  print(0 < x <= 1)\n"),
+        "(def main () void (block (val x#0:real64 0.5) (print (chain (operands (adopt:real64 0) x#0 (adopt:real64 1)) (< $1 $2) (<= $2 $3)))))")
+    assert_eq(elaborated("def g(): integer = 5\ndef main() = print(0 < g() < 10)\n"),
+        "(def g () int64 5)\n(def main () void (print (chain (operands 0 (call:int64 g) 10) (< $1 $2) (< $2 $3))))")
+    assert_eq(elaborated("def f(n: int32, x: real64) = 0 < n < x\n" + MAIN),
+        "(def f ((n#0 int32) (x#1 real64)) bool (chain (operands (adopt:real64 0) n#0 x#1) (< $1 (promote:real64 $2)) (< (promote:real64 $2) $3)))\n(def main () void ())")
+
+// -- conversions ------------------------------------------------------------------------------------
+
+@test("a type name converts, and says where the conversion can trap")
+elab_conversions()
+    assert_eq(elaborated("def f(n: int64, x: real64, y: real32) =\n  print(int8(n))\n  print(uint32(n))\n  print(real32(x))\n  print(real64(y))\n  print(complex[real32](1, y))\n  print(int16(x))\n  print(to_integer(x))\n" + MAIN),
+        "(def f ((n#0 int64) (x#1 real64) (y#2 real32)) void (block (print (convert-trap:int8 n#0)) (print (convert-trap:uint32 n#0)) (print (convert:real32 x#1)) (print (promote:real64 y#2)) (print (complex:complex[real32] (adopt:real32 1) y#2)) (print (convert-trap:int16 x#1)) (print (convert-trap:int64 x#1))))\n(def main () void ())")
+    assert_eq(refused("def main() =\n  val z = 1 + 2i\n  print(int32(z))\n"), "error: a complex number does not convert to int32: take `.re` (or `abs`, `arg`) first @3:15")
+    assert_eq(refused("def main() = print(real(true))\n"), "error: `real(...)` converts a number, and this is bool @1:25")
+    assert_eq(refused("def main() = print(int8(300))\n"), "error: 300 does not fit in int8 @1:25")
+
+@test("a complex value has its parts and the complex prelude functions")
+elab_complex_parts()
+    assert_eq(elaborated("def main() =\n  val z = complex(1.0, 2.0)\n  print(z.re + z.im)\n  print(z.conj())\n  print(abs(z))\n"),
+        "(def main () void (block (val z#0:complex[real64] (complex:complex[real64] 1.0 2.0)) (print (+:real64 (.re:real64 z#0) (.im:real64 z#0))) (print (conj:complex[real64] z#0)) (print (abs:real64 z#0))))")
+
+@test("a prelude real function widens an integer argument to real64")
+elab_prelude_math()
+    assert_eq(elaborated("def f(x: real32, n: int32) =\n  print(sqrt(x))\n  print(sqrt(n))\n  print(abs(n))\n  print(max(x, 1, 2.5))\n" + MAIN),
+        "(def f ((x#0 real32) (n#1 int32)) void (block (print (sqrt:real32 x#0)) (print (sqrt:real64 (promote:real64 n#1))) (print (abs:int32 n#1)) (print (max:real32 x#0 (adopt:real32 1) (adopt:real32 2.5)))))\n(def main () void ())")
+    assert_eq(refused("def main() = print(log2(1 + 2i))\n"), "error: `log2` does not take complex[real64] @1:20")
+
+// -- functions and calls ----------------------------------------------------------------------------
+
+@test("named arguments and defaults resolve to parameter order")
+elab_named_and_default_arguments()
+    assert_eq(elaborated("def greet(name: string, greeting: string = \"Hello\") = print(s\"${greeting}, ${name}!\")\ndef main() =\n  greet(\"World\")\n  greet(greeting = \"Hi\", name = \"Foo\")\n"),
+        "(def greet ((name#0 string) (greeting#1 string \"Hello\")) void (print (s greeting#1 \", \" name#0 \"!\")))\n(def main () void (block (call greet \"World\" \"Hello\") (call greet \"Foo\" \"Hi\")))")
+    assert_eq(refused("def f(x: integer) = x\ndef main() = print(f(y = 1))\n"), "error: `f` has no parameter `y` @2:22\nerror: `f` needs its argument `x` @2:20")
+    assert_eq(refused("def f(x: integer) = x\ndef main() = print(f(1, 2))\n"), "error: `f` takes 1 argument @2:25")
+    assert_eq(refused("def f(x: integer, y: integer) = x\ndef main() = print(f(x = 1, 2))\n"), "error: a positional argument cannot follow a named one @2:29\nerror: `f` needs its argument `y` @2:20")
+
+@test("an inout parameter borrows a var of exactly its type")
+elab_inout()
+    assert_eq(elaborated("def bump(x: inout integer) = x += 1\ndef main() =\n  var n = 41\n  bump(n)\n"),
+        "(def bump ((x#0 inout int64)) void (+= x#0 1))\n(def main () void (block (var n#1:int64 41) (call bump (inout n#1))))")
+    assert_eq(refused("def inner(x: inout integer) = x = x + 100\ndef outer(y: inout integer) = inner(y)\n" + MAIN), "ok")
+    assert_eq(refused("def bump(x: inout integer) = x += 1\ndef main() =\n  val v = 1\n  bump(v)\n"), "error: `v` cannot be assigned: it is a `val` @4:8")
+    assert_eq(refused("def bump(x: inout integer) = x += 1\ndef main() =\n  var r = 1.0\n  bump(r)\n"), "error: an `inout` argument must be exactly int64, since it is borrowed and not converted; this is real64 @4:8")
+    assert_eq(refused("def bump(x: inout integer) = x += 1\ndef main() = bump(3)\n"), "error: an `inout` argument is a variable the callee can write to @2:19")
+    assert_eq(refused("def f(x: integer) = x = 2\n" + MAIN), "error: `x` cannot be assigned: a parameter is read-only unless it is `inout` @1:21")
+
+@test("a function's result type comes from its first return, or from its body")
+elab_result_inference()
+    assert_eq(elaborated("def f(x: integer) =\n  if x < 0 then return -1\n  x * 2\n" + MAIN),
+        "(def f ((x#0 int64)) int64 (block:int64 (if (<:bool x#0 0) (return -1)) (*:int64 x#0 2)))\n(def main () void ())")
+    assert_eq(refused("def f(x: real) =\n  if x < 0.0 then return 0\n  x\n" + MAIN), "error: the result must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @3:3")
+    assert_eq(refused("def fact(n: integer) = if n <= 1 then 1 else n * fact(n - 1)\n" + MAIN), "error: `fact` is used before its result type is known; declare it: `def fact(...): T` @1:50")
+
+@test("a lambda takes its parameter types from its position, or from its first call")
+elab_lambdas()
+    assert_eq(elaborated("def main() =\n  var k = 1\n  val f = x -> x + k\n  print(f(10))\n"),
+        "(def main () void (block (var k#0:int64 1) (val f#1:(int64) -> int64 (lambda 0)) (print (call:int64 f#1 10))))\n(lambda 0 _ ((x#2 int64)) int64 (captures k#0) (+:int64 x#2 k#0))")
+    assert_eq(elaborated("def apply(f: (integer) -> integer, x: integer) = f(x)\ndef main() = print(apply(x -> x * 2, 3))\n"),
+        "(def apply ((f#0 (int64) -> int64) (x#1 int64)) int64 (call:int64 f#0 x#1))\n(def main () void (print (call:int64 apply (lambda 0) 3)))\n(lambda 0 _ ((x#2 int64)) int64 (captures) (*:int64 x#2 2))")
+    assert_eq(refused("def apply(f: (integer) -> integer, x: integer) = f(x)\ndef main() =\n  val f = x -> x * 2\n  print(apply(f, 3))\n"), "ok")
+    assert_eq(refused("def main() =\n  val g = x -> x\n"), "error: the parameter types of `g` are never fixed: call it, or write them (`(x: real) -> ...`) @2:3")
+    assert_eq(refused("val f = x -> x + 1\n" + MAIN), "error: the type of `x` is not known here; write it: `(x: real) -> ...` @1:9")
+    assert_eq(refused("def main() =\n  val f = (x: integer) -> x\n  print(f(1, 2))\n"), "error: this function takes 1 argument, and 2 are given @3:9")
+
+@test("a local def may call itself where it declares its result type")
+elab_local_def()
+    assert_eq(elaborated("def main() =\n  def fib(n: integer): integer = if n < 2 then n else fib(n - 1) + fib(n - 2)\n  print(fib(10))\n"),
+        "(def main () void (block (val fib#0:(int64) -> int64 (lambda 0)) (print (call:int64 fib#0 10))))\n(lambda 0 fib ((n#1 int64)) int64 (captures fib#0) (if:int64 (<:bool n#1 2) n#1 (+:int64 (call:int64 fib#0 (-:int64 n#1 1)) (call:int64 fib#0 (-:int64 n#1 2)))))")
+
+@test("a program's own binding wins over a prelude function or constant of the same name")
+elab_prelude_shadowed()
+    assert_eq(elaborated("def sqrt(x: real) = x\nval pi = 3\ndef main() =\n  print(sqrt(2.0) + pi)\n  print()\n"),
+        "(def sqrt ((x#0 real64)) real64 x#0)\n(val pi int64 3)\n(def main () void (block (print (+:real64 (call:real64 sqrt 2.0) (promote:real64 pi))) (print)))")
+
+@test("a lambda's parameter types, once fixed by its first call, stay fixed")
+elab_lambda_fixed_once()
+    assert_eq(refused("def main() =\n  val f = x -> x + 1\n  print(f(10))\n  print(f(2.5))\n"), "error: argument 1 must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @4:11")
+    assert_eq(refused("def main() =\n  val x = 1\n  x(2)\n"), "error: this is int64 and cannot be called @3:3")
+
+@test("a bare return gives void, and a function that returns a value needs one")
+elab_bare_return()
+    assert_eq(refused("def f() =\n  if true then return\n  print(1)\n" + MAIN), "ok")
+    assert_eq(refused("def g(): integer =\n  return\n" + MAIN), "error: this function returns int64; `return` needs a value @2:3")
+    assert_eq(refused("def main() =\n  val h = (n: integer) -> if n > 0 then return n else 0\n  print(h(1))\n"), "ok")
+    assert_eq(refused("def main() =\n  val x = if true then 1\n"), "error: `x` would hold nothing: this is void @2:11")
+    assert_eq(refused("def main() = stop 1.5\n"), "error: an exit status must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @1:19")
+
+// -- control flow -----------------------------------------------------------------------------------
+
+@test("an if as a value meets its branches in their common type; as a statement it need not")
+elab_if()
+    assert_eq(elaborated("def f(c: bool, x: real32) = if c then x else 1\n" + MAIN),
+        "(def f ((c#0 bool) (x#1 real32)) real32 (if:real32 c#0 x#1 (adopt:real32 1)))\n(def main () void ())")
+    assert_eq(refused("def main() =\n  val q = if true then \"s\" else 2\n"), "error: the branches of this `if` differ: string and int64 @2:11")
+    assert_eq(refused("def main() =\n  if true then print(1) else 2\n"), "ok")
+    assert_eq(refused("def main() = if 1 then print(1)\n"), "error: the condition of `if` must be bool, but this is int64 @1:17")
+
+@test("loops, their labels, exit, cycle and a stepped range")
+elab_loops()
+    assert_eq(elaborated("def main() =\n  outer: for j in 1..10 by 2\n    for k in 10..<1 by -1\n      if k == j then cycle outer\n      if k > 5 then exit\n  var n = 0\n  while n < 3 do n += 1\n"),
+        "(def main () void (block (for outer:L0 j#0:int64 (1 .. 10 by 2) (for L1 k#1:int64 (10 ..< 1 by -1) (block (if (==:bool k#1 j#0) (cycle outer:L0)) (if (>:bool k#1 5) (exit L1))))) (var n#2:int64 0) (while L2 (<:bool n#2 3) (+= n#2 1))))")
+    assert_eq(elaborated("def f(n: int32) =\n  for k in 1..n do print(k)\n" + MAIN),
+        "(def f ((n#0 int32)) void (for L0 k#1:int32 ((adopt:int32 1) .. n#0) (print k#1)))\n(def main () void ())")
+    assert_eq(refused("def main() =\n  for x in 0.0..1.0 do print(x)\n"), "error: a `for` range counts in integers; this one is real64 @2:12")
+
+@test("exit and cycle stand only in a loop, and name only a loop around them")
+elab_loop_control_misplaced()
+    assert_eq(refused("def main() = exit\n"), "error: `exit` stands only inside a loop @1:14")
+    assert_eq(refused("def main() =\n  for k in 1..3 do cycle inner\n"), "error: no loop around this `cycle` is named `inner` @2:20")
+    assert_eq(refused("def main() =\n  for k in 1..3\n    val f = (x: integer) -> exit\n"), "error: `exit` stands only inside a loop @3:29")
+    assert_eq(refused("def main() =\n  a: for j in 1..3\n    b: for k in 1..3 do exit a\n"), "ok")
+
+// -- strings ----------------------------------------------------------------------------------------
+
+@test("an interpolated string holds typed values, and a format checks its value's type")
+elab_interpolation()
+    assert_eq(elaborated("def main() =\n  val n = 255\n  val x = 2.5\n  print(s\"n = $n, x = ${x * 2}\")\n  print(f\"$n%x and $x%.2f\")\n"),
+        "(def main () void (block (val n#0:int64 255) (val x#1:real64 2.5) (print (s \"n = \" n#0 \", x = \" (*:real64 x#1 (adopt:real64 2)))) (print (f (n#0 %x) \" and \" (x#1 %.2f)))))")
+    assert_eq(refused("def main() =\n  val n = 3\n  print(f\"$n%.2f\")\n"), "error: `%.2f` formats a real, and this is int64 @3:12")
+    assert_eq(refused("def main() =\n  val x = 2.5\n  print(f\"$x%d\")\n"), "error: `%d` formats an integer, and this is real64 @3:12")
+
+// -- types ------------------------------------------------------------------------------------------
+
+@test("a type name is resolved, and the names nex does not have are explained")
+elab_type_names()
+    assert_eq(refused("def f(x: integer, y: real, z: complex, w: complex[real32], b: bool, s: string) = ()\n" + MAIN), "ok")
+    assert_eq(refused("def f(x: foo) = ()\n" + MAIN), "error: unknown type `foo` @1:10")
+    assert_eq(refused("def f(): unit = ()\n" + MAIN), "error: `unit` declares a physical unit; the empty type is `void` @1:10")
+    assert_eq(refused("def f(x: byte) = ()\n" + MAIN), "error: there is no `byte` type; raw bytes are `uint8` @1:10")
+
+@test("what the elaborator does not handle yet is said to be that")
+elab_not_yet()
+    assert_eq(refused("def main() = print([1, 2])\n"), "error: an array literal is not elaborated yet @1:20")
+    assert_eq(refused("struct P\n  x: real\n" + MAIN), "error: a struct is not elaborated yet @1:1")
+    assert_eq(refused("def id[T](x: T) = x\n" + MAIN), "error: a generic function is not elaborated yet @1:1")

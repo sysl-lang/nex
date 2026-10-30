@@ -186,7 +186,17 @@ struct Elab
                                 self.globals.push(GlobalSrc(d, name, kind, typ, init))
                                 self.gstate.push(Waiting)
                                 self.gty.push(Error)
-                        _ -> self.later(pat.span, "a destructuring binding")
+                        _ ->
+                            self.later(pat.span, "a destructuring binding")
+
+                            // Its names are declared, untyped and already finished, so their uses
+                            // are not reported too.
+                            for n in pattern_names(pat)
+                                if self.declare(d.span, n)
+                                    self.tops.push(Top(n, TopValue(self.globals.len())))
+                                    self.globals.push(GlobalSrc(d, n, kind, typ, init))
+                                    self.gstate.push(Finished)
+                                    self.gty.push(Error)
                 Fun(name, tparams, params, ret, body) ->
                     if tparams.len() > 0 then
                         self.later(d.span, "a generic function")
@@ -327,6 +337,7 @@ struct Elab
         val sig = self.fsig[k]
         val saved = self.fx
         val pending_base = self.pending.len()
+        val diags_base = self.diags.len()
 
         self.fx = empty_fx()
         self.fx.frames.push(Frame(None, self.fret[k], self.fret_known[k], 0))
@@ -341,7 +352,7 @@ struct Elab
         self.fret.set(k, frame.ret)
         self.fret_known.set(k, true)
         self.close()
-        self.unresolved_lambdas(pending_base)
+        self.unresolved_lambdas(pending_base, diags_base)
         self.fx = saved
         self.fout.push(TFun(f.decl.span, f.name, sig.params, sig.defaults, frame.ret, body))
         self.fstate.set(k, Finished)
@@ -368,6 +379,17 @@ struct Elab
         val top = self.fx.frames.len() - 1
         val frame = self.fx.frames[top]
 
+        // A function that returns nothing discards what its body ends with, as a statement would.
+        if frame.ret_known && is_void(frame.ret)
+            val v = self.elab(body, Some(Void))
+
+            if is_void(v.ty) || is_wild(v.ty) then return v
+
+            var items: Buf[TExpr] = buf()
+
+            items.push(v)
+            return texpr(v.span, Void, TBlock(items, texpr(v.span, Void, TLiteral(VoidVal, false))))
+
         if frame.ret_known then return self.check(body, frame.ret, "the result")
 
         val v = self.infer(body)
@@ -380,12 +402,16 @@ struct Elab
         v
     end body_of
 
-    // Lambdas still waiting for their parameter types when the body that bound them ends.
-    unresolved_lambdas(*self, base: usize)
+    // Lambdas still waiting for their parameter types when the body that bound them ends. Where the
+    // body has had a diagnostic already, the use that would have fixed them may be what it refused,
+    // so they are not reported again.
+    unresolved_lambdas(*self, base: usize, diags_base: usize)
+        val quiet = self.diags.len() > diags_base
+
         for k in base..<self.pending.len()
             val p = self.pending[k]
 
-            self.fail(p.span, s"the parameter types of `${self.locals[p.local].name}` are never fixed: call it, or write them (`(x: real) -> ...`)")
+            if !quiet then self.fail(p.span, s"the parameter types of `${self.locals[p.local].name}` are never fixed: call it, or write them (`(x: real) -> ...`)")
 
         self.pending.truncate(base)
 
@@ -468,9 +494,7 @@ struct Elab
                 scalar_named(name) match
                     Some(ty) -> ty
                     None ->
-                        if name == "unit"
-                            self.fail(t.span, "`unit` declares a unit of measure; the empty type is `void`")
-                        elif name == "byte"
+                        if name == "byte"
                             self.fail(t.span, "there is no `byte` type; raw bytes are `uint8`")
                         else
                             self.fail(t.span, s"unknown type `${name}`")

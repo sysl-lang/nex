@@ -62,7 +62,7 @@ private some_adoption(class: int, other: Ty) -> Option[Ty] = Some(adoption(class
 
 // The widening of `v` to `to`, as a node, where it is not already of that type.
 promote(v: TExpr, to: Ty) -> TExpr =
-    if ty_eq(v.ty, to) || is_wild(v.ty) || is_error(to) then v else texpr(v.span, to, TPromote(v))
+    if ty_eq(v.ty, to) || is_wild(v.ty) || has_error(v.ty) || has_error(to) then v else texpr(v.span, to, TPromote(v))
 
 // Two operands, each elaborated.
 struct Operands
@@ -106,7 +106,7 @@ impl Elab
         if is_numeric(v.ty) && is_numeric(ty)
             message = message + s": that would narrow it; convert it explicitly, `${show_ty(ty)}(...)`"
 
-        self.fail(v.span, message)
+        self.fail(value_span(v), message)
         texpr(v.span, Error, TInvalid)
     end coerce
 
@@ -170,7 +170,7 @@ impl Elab
     private real_literal(*self, span: Span, v: real, want: Option[Ty]) -> TExpr
         val ty = literal_type(REAL_LITERAL, want)
 
-        if overflows(v, ty) then self.fail(span, s"${v} is too large for ${show_ty(ty)}: it would round to infinity")
+        if overflows(v, ty) then self.fail(span, s"${real_text(v)} is too large for ${show_ty(ty)}: it would round to infinity")
 
         texpr(span, ty, TLiteral(RealVal(v), !ty_eq(ty, REAL)))
 
@@ -696,7 +696,12 @@ impl Elab
                 val name = *pat.kind match
                     Name(n) -> n
                     Wildcard -> return self.infer(init)
-                    _ -> return self.not_yet(pat.span, "a destructuring binding")
+                    _ ->
+                        // Its names are still bound, untyped, so their uses are not reported too.
+                        for n in pattern_names(pat)
+                            self.declare_local(pat.span, n, Error, lkind)
+
+                        return self.not_yet(pat.span, "a destructuring binding")
 
                 typ match
                     Some(t) ->
@@ -927,6 +932,28 @@ impl Elab
             self.fail(span, s"`${spec}` is not a format: the conversion is one of `d x X o b f e g s`")
     end check_spec
 end Elab
+
+// Every name a pattern binds, in order.
+pattern_names(p: Pattern) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    *p.kind match
+        Name(n) -> out.push(n)
+        Wildcard -> ()
+        Tuple(elems) ->
+            for e in elems
+                out.extend(pattern_names(e).view())
+        Variant(_, args) ->
+            for a in args
+                out.extend(pattern_names(a).view())
+
+    out
+end pattern_names
+
+// Where the value of `v` is written: a block's is its last line's.
+private value_span(v: TExpr) -> Span = *v.kind match
+    TBlock(_, result) -> value_span(result)
+    _ -> v.span
 
 // Whether any parameter of a lambda leaves its type out.
 private untyped_params(params: Buf[LambdaParam]) -> bool
