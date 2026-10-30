@@ -518,7 +518,7 @@ impl Elab
 
                 // Written straight as the argument, it is borrowed for the call and does not escape.
                 self.agg.passed.push(lid)
-                texpr(e.span, self.lambda_body(lid, "", e.span, names, tys, spellings(params), reads(names.len()), None, body), TLambdaRef(lid))
+                texpr(e.span, self.lambda_body(lid, "", e.span, names, tys, self.spellings(params), reads(names.len()), None, body), TLambdaRef(lid))
             _ -> self.elab(e, Some(fn_type(ptys, reads(ptys.len()), Error)))
 
         f.ty match

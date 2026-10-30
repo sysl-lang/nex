@@ -66,17 +66,6 @@ private some_adoption(class: int, other: Ty) -> Option[Ty] = Some(adoption(class
 promote(v: TExpr, to: Ty) -> TExpr =
     if ty_eq(v.ty, to) || is_wild(v.ty) || has_error(v.ty) || has_error(to) then v else texpr(v.span, to, TPromote(v))
 
-// Each lambda parameter's type as written, `""` where it was left out.
-spellings(params: Buf[LambdaParam]) -> Buf[string]
-    var out: Buf[string] = buf()
-
-    for p in params
-        out.push(p.typ match
-            Some(t) -> show_type(t)
-            None -> "")
-
-    out
-
 // Two operands, each elaborated.
 struct Operands
     lhs: TExpr
@@ -274,7 +263,11 @@ impl Elab
             Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(n))
             None -> ()
 
-        self.type_or_variant(span, n) match
+        self.find_generic_fun(n) match
+            Some(g) -> return self.generic_value(span, g, want)
+            None -> ()
+
+        self.type_or_variant(span, n, want) match
             Some(v) -> return v
             None -> ()
 
@@ -335,7 +328,7 @@ impl Elab
                 None -> tys[j])
             modes.push(Read)
 
-        val ty = self.lambda_body(p.lambda, "", p.span, names, ptys, spellings(p.params), modes, None, p.body)
+        val ty = self.lambda_body(p.lambda, "", p.span, names, ptys, self.spellings(p.params), modes, None, p.body)
 
         self.fx = current
         self.locals.set(p.local, LocalInfo(self.locals[p.local].name, ty, LVal))
@@ -800,7 +793,7 @@ impl Elab
 
             names.push(p.name)
             tys.push(self.resolve_type(p.typ))
-            written.push(show_type(p.typ))
+            written.push(self.spelling_of(p.typ))
             modes.push(p.mode)
 
         val lid = self.reserve_lambda(span)
@@ -842,10 +835,15 @@ impl Elab
 
             names.push(p.name)
 
+            // A type still holding a generic parameter is not known yet (`elab_generic.sysl`).
+            val known = expected match
+                Some(sig) -> if has_param(sig.params[k]) then None else Some(sig.params[k])
+                None -> None
+
             val ty = p.typ match
                 Some(t) -> self.resolve_type(t)
-                None -> expected match
-                    Some(sig) -> sig.params[k]
+                None -> known match
+                    Some(t) -> t
                     None ->
                         self.fail(span, s"the type of `${p.name}` is not known here; write it: `(${p.name}: real) -> ...`")
                         Error
@@ -856,7 +854,7 @@ impl Elab
                 None -> Read)
 
         expected match
-            Some(sig) -> ret = Some(sig.ret)
+            Some(sig) -> if !has_param(sig.ret) then ret = Some(sig.ret)
             None -> ()
 
         val lid = self.reserve_lambda(span)
@@ -865,12 +863,23 @@ impl Elab
             self.agg.passing = false
             self.agg.passed.push(lid)
 
-        val ty = self.lambda_body(lid, "", span, names, tys, spellings(params), modes, ret, body)
+        val ty = self.lambda_body(lid, "", span, names, tys, self.spellings(params), modes, ret, body)
 
         texpr(span, ty, TLambdaRef(lid))
     end lambda
 
     // Elaborates a lambda's body into its slot, in a frame of its own, and gives its function type.
+    // Each lambda parameter's type as written, `""` where it was left out.
+    spellings(self, params: Buf[LambdaParam]) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for p in params
+            out.push(p.typ match
+                Some(t) -> self.spelling_of(t)
+                None -> "")
+
+        out
+
     // `written` holds each parameter's type as written, `""` where it was left out.
     lambda_body(*self, lid: usize, name: string, span: Span, names: Buf[string], tys: Buf[Ty], written: Buf[string], modes: Buf[Mode], ret: Option[Ty], body: Expr) -> Ty
         self.fx.frames.push(Frame(Some(lid), ret.unwrap_or(Error), ret.is_some(), self.fx.loops.len()))
@@ -1069,4 +1078,4 @@ copy_fx(fx: Fx) -> Fx
     var reds: Buf[RedVar] = buf()
 
     reds.extend(fx.reds.view())
-    Fx(scope, marks, loops, frames, fx.in_const, reds)
+    Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance)

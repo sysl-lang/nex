@@ -1,0 +1,155 @@
+@tests
+
+// Generic functions, structs and enums: the instances the elaborator makes of them, which are all the
+// typed IR holds, and the diagnostics it gives where an instance cannot be made.
+
+private val MAIN = "def main() = ()\n"
+
+private val ID = "def id[T](x: T): T = x\n"
+
+private val BOX = "struct Box[T]\n  value: T\n"
+
+private val PAIR = "struct Pair[A, B]\n  fst: A\n  snd: B\n"
+
+private val OPT = "enum Opt[T] =\n  Some(value: T)\n  None\n"
+
+private val RESULT = "enum Result[T, E] =\n  Ok(value: T)\n  Err(error: E)\n"
+
+private val MIN2 = "def min2[T: Ord](a: T, b: T): T = if a < b then a else b\n"
+
+// -- functions --------------------------------------------------------------------------------------
+
+@test("a generic function is elaborated once for each instance it is called at, and only those")
+elab_generic_instances()
+    assert_eq(elaborated(ID + "def main() =\n  print(id(42))\n  print(id(3.5))\n  print(id(\"hi\"))\n  print(id(7))\n"),
+        "(def main () void (block (print (call:int64 id[int64] 42)) (print (call:real64 id[real64] 3.5)) (print (call:string id[string] \"hi\")) (print (call:int64 id[int64] 7))))\n(def id[int64] ((x#0 int64)) int64 x#0)\n(def id[real64] ((x#1 real64)) real64 x#1)\n(def id[string] ((x#2 string)) string x#2)")
+    assert_eq(elaborated(ID + MAIN), "(def main () void ())")
+    assert_eq(elaborated(ID + "def main() = print(id(x = 2))\n"), "(def main () void (print (call:int64 id[int64] 2)))\n(def id[int64] ((x#0 int64)) int64 x#0)")
+
+@test("a constraint admits the types of DESIGN 2.6 at each use, and the body is checked at each instance")
+elab_generic_constraints()
+    assert_eq(elaborated("def twice[T: Numeric](x: T): T = x + x\ndef main() =\n  print(twice(21))\n  print(twice(1.5))\n"),
+        "(def main () void (block (print (call:int64 twice[int64] 21)) (print (call:real64 twice[real64] 1.5))))\n(def twice[int64] ((x#0 int64)) int64 (+:int64 x#0 x#0))\n(def twice[real64] ((x#1 real64)) real64 (+:real64 x#1 x#1))")
+    assert_eq(elaborated("def same[T: Eq](a: T, b: T): bool = a == b\ndef main() =\n  print(same(1.0 + 2.0i, 3.0 + 4.0i))\n  print(same(true, false))\n  print(same(\"a\", \"b\"))\n"),
+        "(def main () void (block (print (call:bool same[complex[real64]] (+:complex[real64] (adopt:complex[real64] 1.0) (*:complex[real64] (adopt:complex[real64] 2.0) i)) (+:complex[real64] (adopt:complex[real64] 3.0) (*:complex[real64] (adopt:complex[real64] 4.0) i)))) (print (call:bool same[bool] true false)) (print (call:bool same[string] \"a\" \"b\"))))\n(def same[complex[real64]] ((a#0 complex[real64]) (b#1 complex[real64])) bool (==:bool a#0 b#1))\n(def same[bool] ((a#2 bool) (b#3 bool)) bool (==:bool a#2 b#3))\n(def same[string] ((a#4 string) (b#5 string)) bool (==:bool a#4 b#5))")
+    assert_eq(refused(MIN2 + "def main() = print(min2(\"a\", \"b\"))\n"), "error: `min2` needs `T: Ord`, and string is not Ord: Ord admits the integer and real types @2:20")
+    assert_eq(refused(MIN2 + "def main() = print(min2(1.0 + 2.0i, 1.0))\n"), "error: `min2` needs `T: Ord`, and complex[real64] is not Ord: Ord admits the integer and real types @2:20")
+    assert_eq(refused("def half[T: Float](x: T): T = x / 2\ndef main() = print(half(3))\n"), "error: `half` needs `T: Float`, and int64 is not Float: Float admits the real types @2:20")
+    assert_eq(refused("def n[T: Integral](x: T): T = x\ndef main() = print(n(3.0))\n"), "error: `n` needs `T: Integral`, and real64 is not Integral: Integral admits the integer types @2:20")
+    assert_eq(refused("def bad[T](x: T) = x + 1\ndef main() =\n  print(bad(1))\n  print(bad(\"s\"))\n"), "error: `+` needs numbers; found string and int64 (in `bad[string]`) @1:20")
+    // A type written with a type parameter names the instance's argument, not the parameter.
+    assert_eq(refused("def bad[T](x: T) =\n  val y: T = x\n  print(y + 1)\ndef main() = bad(\"s\")\n"), "error: `+` needs numbers; found string and int64 (in `bad[string]`) @3:9")
+    assert_eq(refused("def bad[T](x: [T]) =\n  val f = (z: (T, integer)) -> z + 1\ndef main() = bad([\"s\"])\n"), "error: `+` needs numbers; found (string, int64) and int64 (in `bad[string]`) @2:32")
+    assert_eq(refused("def bad[T](x: T, n: integer) = n + \"s\"\ndef main() = bad(1.5, 2)\n"), "error: `+` needs numbers; found integer and string (in `bad[real64]`) @1:32")
+    assert_eq(refused("def f[T: Foo](x: T) = x\n" + MAIN), "error: unknown constraint `Foo`; the constraints are Any, Numeric, Integral, Real, Float, Complex, Ord, Eq, Rank and Unit @1:1")
+    assert_eq(refused("def f[T, T](x: T) = x\n" + MAIN), "error: redeclaration of `T` @1:1")
+
+@test("one type parameter given several numeric types takes their common type; a literal adopts it")
+elab_generic_widening()
+    assert_eq(elaborated("def add[T: Numeric](a: T, b: T): T = a + b\ndef main() =\n  val x: real32 = 1.5\n  print(add(1, 2.5))\n  print(add(x, 2))\n  print(add(2, x))\n"),
+        "(def main () void (block (val x#0:real32 (adopt:real32 1.5)) (print (call:real64 add[real64] (adopt:real64 1) 2.5)) (print (call:real32 add[real32] x#0 (adopt:real32 2))) (print (call:real32 add[real32] (adopt:real32 2) x#0))))\n(def add[real64] ((a#1 real64) (b#2 real64)) real64 (+:real64 a#1 b#2))\n(def add[real32] ((a#3 real32) (b#4 real32)) real32 (+:real32 a#3 b#4))")
+    assert_eq(refused("def same[T](a: T, b: T): bool = true\ndef main() = print(same(1, \"x\"))\n"), "error: argument `a` must be string, but this is int64 @2:25")
+    assert_eq(refused("def same[T](a: T, b: T): bool = true\ndef main() = print(same(\"x\", 1))\n"), "error: argument `b` must be string, but this is int64 @2:30")
+
+@test("several type parameters, a lambda argument, a generic calling a generic, a generic as a value")
+elab_generic_lambdas()
+    assert_eq(elaborated("def first[T, U](a: T, b: U): T = a\ndef main() = print(first(1, \"hi\"))\n"),
+        "(def main () void (print (call:int64 first[int64, string] 1 \"hi\")))\n(def first[int64, string] ((a#0 int64) (b#1 string)) int64 a#0)")
+    assert_eq(elaborated("def apply1[T, U](x: T, f: T -> U): U = f(x)\ndef main() = print(apply1(5, x -> x * 2.5))\n"),
+        "(def main () void (print (call:real64 apply1[int64, real64] 5 (lambda 0))))\n(def apply1[int64, real64] ((x#1 int64) (f#2 (int64) -> real64)) real64 (call:real64 f#2 x#1))\n(lambda 0 _ ((x#0 int64)) real64 (captures) passed (*:real64 (promote:real64 x#0) 2.5))")
+    assert_eq(elaborated(ID + "def twice[T](x: T, f: T -> T): T = f(f(x))\ndef main() = print(twice(\"a\", s -> id(s)))\n"),
+        "(def main () void (print (call:string twice[string] \"a\" (lambda 0))))\n(def id[string] ((x#1 string)) string x#1)\n(def twice[string] ((x#2 string) (f#3 (string) -> string)) string (call:string f#3 (call:string f#3 x#2)))\n(lambda 0 _ ((s#0 string)) string (captures) passed (call:string id[string] s#0))")
+    assert_eq(elaborated(ID + "def call(f: (integer) -> integer) = f(1)\ndef main() = print(call(id))\n"),
+        "(def call ((f#0 (int64) -> int64)) int64 (call:int64 f#0 1))\n(def main () void (print (call:int64 call id[int64])))\n(def id[int64] ((x#1 int64)) int64 x#1)")
+    assert_eq(refused(ID + "def main() =\n  val f = id\n"), "error: `id` is generic: call it, or pass it where its function type is known @3:11")
+
+@test("a concrete def beside a generic one is called wherever it takes the arguments")
+elab_generic_overloads()
+    assert_eq(elaborated("def f(x: real): integer = 1\ndef f[T](x: T): integer = 2\ndef main() =\n  print(f(3.14))\n  print(f(42))\n  print(f(\"x\"))\n"),
+        "(def f ((x#0 real64)) int64 1)\n(def main () void (block (print (call:int64 f 3.14)) (print (call:int64 f (adopt:real64 42))) (print (call:int64 f[string] \"x\"))))\n(def f[string] ((x#1 string)) int64 2)")
+    assert_eq(refused("def f(x: real): integer = 1\ndef f[T](x: T): integer = 2\ndef main() = print(f(x = 1.0))\n"), "error: `f` is declared both as a concrete and as a generic `def`, so its arguments are passed by position @3:22")
+    assert_eq(refused("def f[T](x: T): integer = 1\ndef f[U](x: U): integer = 2\n" + MAIN), "error: redeclaration of `f` @2:1")
+    assert_eq(refused("val f = 1\ndef f[T](x: T): integer = 2\n" + MAIN), "error: redeclaration of `f` @2:1")
+    assert_eq(refused("def f[T](x: T): integer = 2\nval f = 1\n" + MAIN), "error: redeclaration of `f` @2:1")
+
+@test("a type argument nothing fixes, or an argument that cannot match its parameter, is refused")
+elab_generic_uninferable()
+    assert_eq(refused("def make[T](): integer = 0\ndef main() = print(make())\n"), "error: cannot infer `T` of `make` here: no argument fixes it @2:20")
+    assert_eq(refused(BOX + "def unbox[T](b: Box[T]): T = b.value\ndef main() = print(unbox(5))\n"), "error: argument `b` must be Box[T], but this is int64 @4:26")
+    assert_eq(refused(ID + "def main() = print(id())\n"), "error: cannot infer `T` of `id` here: no argument fixes it @2:20")
+    assert_eq(refused(ID + "def main() = print(id(1, 2))\n"), "error: `id` takes 1 argument @2:26")
+
+@test("a generic that would need ever larger instances of itself is refused, plain recursion is not")
+elab_generic_nontermination()
+    assert_eq(refused(BOX + "def f[T](x: T, n: integer): integer = if n == 0 then 0 else f(Box(x), n - 1)\ndef main() = print(f(1, 3))\n"),
+        "error: `f` would need ever larger instances of itself, f[Box[int64]] inside f[int64], and they would never end (in `f[int64]`) @3:61")
+    assert_eq(refused(BOX + "def f[T](x: T, n: integer): integer = if n == 0 then 0 else g(Box(x), n - 1)\ndef g[T](x: T, n: integer): integer = f(x, n)\ndef main() = print(f(1, 3))\n"),
+        "error: `f` would need ever larger instances of itself, f[Box[int64]] inside f[int64], and they would never end (in `g[Box[int64]]`) @4:39")
+    assert_eq(refused(BOX + "struct Grow[T]\n  next: [Grow[Box[T]]]\ndef main() =\n  val g: Grow[integer] = Grow([])\n"),
+        "error: `Grow` would hold ever larger instances of itself, Grow[Box[int64]] inside Grow[int64], and has no size @4:10")
+    assert_eq(elaborated("def fact[T: Numeric](n: T): T = if n <= 1 then n else n * fact(n - 1)\ndef main() = print(fact(5))\n"),
+        "(def main () void (print (call:int64 fact[int64] 5)))\n(def fact[int64] ((n#0 int64)) int64 (if:int64 (<=:bool n#0 1) n#0 (*:int64 n#0 (call:int64 fact[int64] (-:int64 n#0 1)))))")
+
+// -- ranks ------------------------------------------------------------------------------------------
+
+@test("a rank-generic function has one instance for each rank it is called at")
+elab_generic_ranks()
+    assert_eq(elaborated("def total[T: Numeric, R: Rank](a: [T; R]): T = sum(a)\ndef main() =\n  print(total([1, 2, 3]))\n  print(total([[1, 2], [3, 4]]))\n  print(total([[[1]]]))\n  print(total([4, 5]))\n"),
+        "(def main () void (block (print (call:int64 total[int64, 1] (array:[int64] 1 2 3))) (print (call:int64 total[int64, 2] (array:[int64; :, :] (array:[int64] 1 2) (array:[int64] 3 4)))) (print (call:int64 total[int64, 3] (array:[int64; :, :, :] (array:[int64; :, :] (array:[int64] 1))))) (print (call:int64 total[int64, 1] (array:[int64] 4 5)))))\n(def total[int64, 1] ((a#0 [int64])) int64 (sum:int64 a#0))\n(def total[int64, 2] ((a#1 [int64; :, :])) int64 (sum:int64 a#1))\n(def total[int64, 3] ((a#2 [int64; :, :, :])) int64 (sum:int64 a#2))")
+    assert_eq(elaborated("def r[T, R: Rank](a: [T; R]): integer = rank(a)\ndef main() = print(r([[true]]))\n"),
+        "(def main () void (print (call:int64 r[bool, 2] (array:[bool; :, :] (array:[bool] true)))))\n(def r[bool, 2] ((a#0 [bool; :, :])) int64 (rank:int64 a#0))")
+    assert_eq(elaborated("def axpy[T: Float, R: Rank](alpha: T, x: [T; R], y: inout [T; R]) =\n  y = alpha * x + y\ndef main() =\n  var y = [1.0, 2.0]\n  axpy(2.0, [3.0, 4.0], y)\n"),
+        "(def main () void (block (var y#0:[real64] (array:[real64] 1.0 2.0)) (call axpy[real64, 1] 2.0 (array:[real64] 3.0 4.0) (inout y#0))))\n(def axpy[real64, 1] ((alpha#1 real64) (x#2 [real64]) (y#3 inout [real64])) void (= y#3 (.+:[real64] (.*:[real64] alpha#1 x#2) y#3)))")
+
+@test("a rank parameter is the whole shape of an array, of one rank at each call, and only a function's")
+elab_generic_rank_errors()
+    assert_eq(refused("def f[R: Rank](a: [real; R], b: [real; R]) = ()\ndef main() = f([1.0], [[1.0]])\n"), "error: the arguments of `f` disagree on `R`: rank 1 and rank 2 @2:16")
+    assert_eq(refused("def f[R: Rank](a: [real; R, :]) = ()\n" + MAIN), "error: a rank parameter is the whole shape of an array: `[T; R]` @1:19")
+    assert_eq(refused("def f[R: Rank](a: R) = ()\n" + MAIN), "error: `R` is a rank, not a type; it is the shape of an array: `[T; R]` @1:19")
+    assert_eq(refused("def f[R: Rank](a: [real; R]) = ()\ndef main() = f(1.0)\n"), "error: argument `a` must be [real64; R], but this is real64 @2:16")
+    assert_eq(refused("struct S[R: Rank]\n  a: [real; R]\n" + MAIN), "error: `R: Rank` stands for an array's rank, which only a function may take; a struct's or an enum's parameters are types @1:1")
+
+@test("a unit parameter is the units' to elaborate")
+elab_generic_unit_parameter()
+    assert_eq(refused("def sqr[U: Unit](x: real) = x * x\n" + MAIN), "error: a unit parameter (`U: Unit`) is not elaborated yet @1:1")
+
+// -- structs and enums ------------------------------------------------------------------------------
+
+@test("a generic struct has one instance for each set of arguments, inferred from its fields")
+elab_generic_structs()
+    assert_eq(elaborated(PAIR + "def main() =\n  val p = Pair(Pair(1, 2), Pair(3, 4))\n  val q = Pair(1, \"hi\")\n  val r = Pair(snd = 1, fst = \"a\")\n  print(p.fst.snd + q.fst)\n"),
+        "(struct Pair[int64, int64] (fst int64) (snd int64))\n(struct Pair[Pair[int64, int64], Pair[int64, int64]] (fst Pair[int64, int64]) (snd Pair[int64, int64]))\n(struct Pair[int64, string] (fst int64) (snd string))\n(struct Pair[string, int64] (fst string) (snd int64))\n(def main () void (block (val p#0:Pair[Pair[int64, int64], Pair[int64, int64]] (new:Pair[Pair[int64, int64], Pair[int64, int64]] (new:Pair[int64, int64] 1 2) (new:Pair[int64, int64] 3 4))) (val q#1:Pair[int64, string] (new:Pair[int64, string] 1 \"hi\")) (val r#2:Pair[string, int64] (new:Pair[string, int64] \"a\" 1)) (print (+:int64 (.snd:int64 (.fst:Pair[int64, int64] p#0)) (.fst:int64 q#1)))))")
+    assert_eq(elaborated(PAIR + "def main() =\n  val p: Pair[real, string] = Pair(1, \"hi\")\n  var b = Pair(1, 2)\n  b.fst = 99\n"),
+        "(struct Pair[real64, string] (fst real64) (snd string))\n(struct Pair[int64, int64] (fst int64) (snd int64))\n(def main () void (block (val p#0:Pair[real64, string] (new:Pair[real64, string] (adopt:real64 1) \"hi\")) (var b#1:Pair[int64, int64] (new:Pair[int64, int64] 1 2)) (= (.fst:int64 b#1) 99)))")
+    assert_eq(elaborated(BOX + "def unbox[T](b: Box[T]): T = b.value\ndef pack[T](x: T): Box[T] = Box(x)\ndef main() =\n  print(unbox(Box(7)))\n  print(unbox(pack(\"hi\")))\n"),
+        "(struct Box[int64] (value int64))\n(struct Box[string] (value string))\n(def main () void (block (print (call:int64 unbox[int64] (new:Box[int64] 7))) (print (call:string unbox[string] (call:Box[string] pack[string] \"hi\")))))\n(def unbox[int64] ((b#0 Box[int64])) int64 (.value:int64 b#0))\n(def pack[string] ((x#1 string)) Box[string] (new:Box[string] x#1))\n(def unbox[string] ((b#2 Box[string])) string (.value:string b#2))")
+
+@test("a generic struct's type names its arguments, as many as it has, each admitted")
+elab_generic_struct_errors()
+    assert_eq(refused(PAIR + "def f(p: Pair[integer]) = ()\n" + MAIN), "error: `Pair` takes 2 type arguments, and 1 is given @4:10")
+    assert_eq(refused(PAIR + "def f(p: Pair) = ()\n" + MAIN), "error: `Pair` takes 2 type arguments: `Pair[...]` @4:10")
+    assert_eq(refused("struct P\n  x: real\ndef f(p: P[integer]) = ()\n" + MAIN), "error: `P` takes no type arguments @3:10")
+    assert_eq(refused("def f(p: Q[integer]) = ()\n" + MAIN), "error: unknown type `Q` @1:10")
+    assert_eq(refused("struct OrdBox[T: Ord]\n  value: T\ndef main() = print(OrdBox(\"x\").value)\n"), "error: `OrdBox` needs `T: Ord`, and string is not Ord: Ord admits the integer and real types @3:20")
+    assert_eq(refused("struct OrdBox[T: Ord]\n  value: T\ndef f(b: OrdBox[bool]) = ()\n" + MAIN), "error: `OrdBox` needs `T: Ord`, and bool is not Ord: Ord admits the integer and real types @3:10")
+    assert_eq(refused(BOX + "def main() =\n  val b: Box[integer] = Box(\"x\")\n"), "error: the field `value` must be int64, but this is string @4:29")
+    assert_eq(refused(BOX + "def main() =\n  val b = Box(print(1))\n"), "error: `T` of `Box` would be void, which holds no value @4:11")
+    assert_eq(refused("struct Node[T]\n  next: Node[T]\ndef f(n: Node[integer]) = ()\n" + MAIN), "error: `Node[int64]` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1")
+    assert_eq(refused(BOX + "def main() =\n  val b = Box(1)\n  val c: Box[real] = b\n"), "error: `c` must be Box[real], but this is Box[int64] @5:22")
+
+@test("a generic enum's instance comes from its variant's fields or from the type expected")
+elab_generic_enums()
+    assert_eq(elaborated(OPT + "def main() =\n  val x = Some(7)\n  val v: integer = x match\n    Some(n) -> n\n    None -> 0\n  val y: Opt[string] = None\n  print(v)\n"),
+        "(enum Opt[int64] (Some (value int64)) None)\n(enum Opt[string] (Some (value string)) None)\n(def main () void (block (val x#0:Opt[int64] (variant:Opt[int64] Some 7)) (val v#2:int64 (match:int64 x#0 ((Some n#1) n#1) (None 0))) (val y#3:Opt[string] (variant:Opt[string] None)) (print v#2)))")
+    assert_eq(elaborated(RESULT + "def main() =\n  val r: Result[integer, string] = Err(\"oops\")\n  val s: string = r match\n    Ok(_) -> \"ok\"\n    Err(m) -> m\n  print(s)\n"),
+        "(enum Result[int64, string] (Ok (value int64)) (Err (error string)))\n(def main () void (block (val r#0:Result[int64, string] (variant:Result[int64, string] Err \"oops\")) (val s#2:string (match:string r#0 ((Ok _) \"ok\") ((Err m#1) m#1))) (print s#2)))")
+    assert_eq(elaborated(OPT + "def unwrap_or[T](o: Opt[T], d: T): T =\n  o match\n    Some(v) -> v\n    None -> d\ndef main() = print(unwrap_or(Some(7), 0))\n"),
+        "(enum Opt[int64] (Some (value int64)) None)\n(def main () void (print (call:int64 unwrap_or[int64] (variant:Opt[int64] Some 7) 0)))\n(def unwrap_or[int64] ((o#0 Opt[int64]) (d#1 int64)) int64 (match:int64 o#0 ((Some v#2) v#2) (None d#1)))")
+
+@test("a generic enum's arguments that nothing fixes are asked for")
+elab_generic_enum_errors()
+    assert_eq(refused(RESULT + "def main() =\n  val r = Ok(7)\n"), "error: cannot infer `E` of `Result` here: write the type where it is bound, `val x: Result[...] = Ok(...)` @5:11")
+    assert_eq(refused(OPT + "def main() =\n  val n = None\n"), "error: cannot infer `T` of `Opt` here: give it a type, `val x: Opt[...] = None` @5:11")
+    assert_eq(refused(OPT + "def main() =\n  val n: Opt[integer] = Some\n"), "error: `Some` carries 1 field; build it with `Some(...)` @5:25")
+    assert_eq(refused(OPT + "def main() =\n  val n: Opt[integer] = None(1)\n"), "error: `None` carries no fields; write it without parentheses @5:25")
+    assert_eq(refused(OPT + "def main() =\n  val n: Opt[integer] = Some(\"x\")\n"), "error: the field `value` must be int64, but this is string @5:30")

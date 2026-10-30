@@ -143,6 +143,33 @@ corpus_view_programs_elaborate()
 
     assert_eq(clean, 49)
 
+// The categories of generic functions, structs and enums.
+private val GENERIC_CATEGORIES = ["user generics", "user generic structs", "user generic enums"]
+
+@test("every generic function, struct and enum corpus program elaborates")
+corpus_generic_programs_elaborate()
+    var clean = 0
+
+    for line in split(INDEX, "\n")
+        if line.len == 0 || line.starts_with("file\t") then continue
+
+        val cols = split(line, "\t")
+        var wanted = false
+
+        for c in GENERIC_CATEGORIES
+            if cols[1] == c then wanted = true
+
+        if !wanted then continue
+
+        val src = source_of(cols[0], read_text(s"testdata/corpus/${cols[0]}.nex").unwrap())
+
+        elaborate(parse_program(src).unwrap()) match
+            Ok(_) -> clean += 1
+            Err(ds) -> assert(false, s"${cols[0]}: ${ds[0].message} @${src.locate(ds[0].span.start)}")
+
+    assert_eq(clean, 36)
+end corpus_generic_programs_elaborate
+
 @test("all 433 corpus programs parse")
 corpus_parses()
     var count = 0

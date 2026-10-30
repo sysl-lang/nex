@@ -227,6 +227,38 @@ The closed constraint set of ref §6.10 widens to the sized types:
 Unifying one type parameter against several numeric actuals widens along §2.2, as ref §6.10 widens
 through the old tower.
 
+Generic functions, structs and enums (ref §3.6, §3.8, §6.10) stand, with these rules (**PROPOSED**).
+
+- **A generic is checked at each instance it is used at**, as a Fortran parameterized module
+  procedure or a C++ template is, not once against its constraints: `def twice[T: Numeric](x: T) =
+  x + x` is checked as `twice[int64]` where `twice(21)` is written, and a mistake in its body is
+  reported at the body, naming the instance, `bad[string]`. A generic that is never used is
+  never elaborated. The constraint is checked at every use: `min2("a", "b")` with `T: Ord` is a
+  compile error.
+- **The type arguments are inferred, never written at a call.** The arguments that are not literals
+  fix them first; a literal fixes a parameter only where nothing else does and otherwise adopts it
+  (`add(x32, 2)` is `add[real32]`); a lambda argument comes last, its parameter types filled in from
+  what is known, and its result fixes the parameters there (`apply1(5, x -> x * 2.5)` is
+  `apply1[int64, real64]`). A parameter nothing fixes is a compile error.
+- **An expected type gives a generic struct's or enum's arguments**, before its fields are looked
+  at, and an argument that disagrees with them is converted or refused against its field:
+  `val n: Opt[integer] = None`, `val r: Result[integer, string] = Ok(7)`. A type names all of a
+  generic's arguments (`Pair[integer, string]`); `Pair` alone or `Pair[integer]` is a compile error.
+- **A type argument holds a value**: `void` and `never` are not type arguments.
+- **A name holds at most one generic `def` and one concrete `def`.** The concrete one is called
+  wherever it takes the arguments, each as it is or widened, a literal adopting its parameter's
+  type; the generic one otherwise. The arguments to such a name are passed by position.
+- **A generic function as a value** takes its instance from the function type its position
+  expects: `call(id)` with `call(f: (integer) -> integer)` passes `id[int64]`. With no function type
+  expected it is a compile error.
+- **A `Rank` parameter is the whole shape of an array**, `[T; R]`, never one axis among others, and
+  only a function takes one; a struct's or an enum's parameters are types.
+- **An instance that needs a larger instance of the same generic is a compile error**: `f[T]`
+  calling `f[Box[T]]`, or `struct Grow[T]` with a field of `[Grow[Box[T]]]`, would never finish.
+- **An instance is named by its generic and its arguments**: `id[int64]`, `Pair[int64, string]`,
+  `total[real64, 2]` (a rank argument is its number). The typed IR holds only instances, each a
+  separate declaration, and two instances of one generic are unrelated types.
+
 ---
 
 ## 3. Array types
@@ -771,6 +803,18 @@ the checker rejects:
    Every other pair of places on one root is a compile error, and the message suggests the split
    form: *"`a[1..k]` and `a[j..n]` may overlap; borrow `a[1..e]` and `a[e+1..]` at one split point
    `e`"*. No run-time disjointness check is made.
+
+   The three forms are one rule: on one axis, two subscripts are disjoint when the last index one
+   reaches and the first the other reaches are **the same base plus two constants, the first
+   constant the smaller** — no base for constant windows (`a[1..4]`, `a[5..end]`), `e` for a split
+   (`..e` / `e+1..`, `..<e` / `e..`, also `a[e]` / `a[e+1]` and `a[..e-1]` / `a[e..]`). An index is a
+   window of one element; an open start is 1 and an open end is unknown; a window whose stride is
+   not a positive constant reaches nowhere the checker can name. The base is the same only when it
+   is written alike on both sides from literals, variables, `end`, arithmetic and `length`/`size`/
+   `rank`, and mentions no variable another argument of the call can write (`f(a[..e], g(), a[e+1..])`
+   with `g` changing `e` is refused). Past a step where two places agree exactly (the same field, the
+   same index list written alike), the comparison goes on to the next step: `swap(a[k].x, a[k].y)`
+   is accepted.
 2. **An `inout` argument plus any other argument that reads an overlapping place of the same root
    while the call runs**: `f(a, a)` with the first parameter `inout`, or `f(a, a[1..3])`, since a
    read-mode array argument is borrowed, not copied (ref §8.4). An `inout` window and a read-mode
@@ -781,10 +825,20 @@ the checker rejects:
    parameter is legal. Any other pair is a compile error. An argument that is fully evaluated to a
    scalar before the call starts does not conflict: `scale(a, a[1])` and `resize(a, length(a))` are
    legal. Arguments are evaluated left to right, and the exclusive access begins after the last one.
+   A read-mode argument is borrowed when it is a place or a view of one and its type is an array, a
+   tuple or a struct; any other argument is a value computed before the call (`a + 1`, `sum(a)`, a
+   widened `[real32]` passed as `[real64]`). A `val` bound to a `var` array, or an `origin` view of
+   one, is the place it shares: `val v = a[1..5]` then `axpy(2.0, v, a[5..8])` is refused. A
+   function passed beside an `inout` argument — a lambda, a local `def` or a top-level function —
+   that reads or writes the borrowed variable, directly or through what it calls, is a conflict
+   too: `app(n, () -> n + 1)` with the first parameter `inout`.
 3. **Access by another route inside the callee.** Passing a module-level `var` as `inout` to a
    function that reads or writes that `var` by name, directly or through anything it calls, is
    rejected. The checker computes for each function the module-level `var`s it reads and writes,
-   transitively; the same summary serves §9 (**PROPOSED** mechanism).
+   transitively; the same summary serves §9. A local passed `inout` to a local `def` or lambda that
+   captures it is rejected the same way. A call through a function value the checker cannot follow
+   (a parameter of function type) is judged by what the call itself is given: the function values
+   passed beside the `inout` argument, under rule 2.
 4. **Escaping captures.** An `inout` parameter may be captured by a non-escaping lambda (one passed
    straight as an argument, such as `assert_traps(() -> f(v), "…")`) but never by an escaping one.
 
@@ -1603,6 +1657,7 @@ is in `K` until the affine units of §15 arrive.
 | Literal typing | §2.4 | §2.3 | literals and `pi`/`e`/`inf`/`nan`/`i` take their context's width |
 | Conversions | §10.7 | §2.4 | a conversion function per type name |
 | Generic constraints | §6.10 | §2.6 | widened to sized types; `Integral`, `Rank` added |
+| Checking a generic | §6.10 (once, against its constraints) | §2.6 | at each instance; one name holds one generic `def` beside at most one concrete one |
 | Array types | §3.3, §3.10, §11.2 | §3 | `[T; axes]`, any rank, static extents; `[T]` is sugar; `[[T]]` is gone |
 | Rank-generic code | §6.10 | §3.4 | `R: Rank` parameters |
 | Literals of rank ≥ 3; jagged literals | §4.13 | §4.1 | nesting to any depth; a visibly jagged literal is a compile error |
