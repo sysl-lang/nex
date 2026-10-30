@@ -6,7 +6,8 @@ module sh.sysl.nex
 // **An array is a window onto storage.** A `Store` holds elements; an `Arr` reads them from an
 // offset, with an extent and a stride per nex axis, axis 1 first. So a slice, a reversed axis and an
 // `origin` view share their source's storage and copy nothing, as the compiled program's views do.
-// An array made here is dense: column-major, axis 1 fastest (DESIGN §3.2).
+// An array made here is dense: column-major, axis 1 fastest (DESIGN §3.2). The storage holds machine
+// numbers for a numeric or `bool` element type (`interp_store.sysl`).
 //
 // **Storage is copied when a place writes it while it is shared** (DESIGN §6.2 rules 2 and 4). An
 // array read out of a place into anything that can keep it — a binding, a field, a view, a capture —
@@ -22,7 +23,7 @@ import sysl.text.{StrBuilder, str_builder}
 
 // Elements, shared by every array value taken of them until a place writes them.
 private[nex] struct Store
-    v: Buf[Value]
+    d: Data
     shared: bool
 
 private[nex] struct Arr
@@ -54,15 +55,21 @@ private[nex] struct Cut
 
 // -- making and reading arrays ----------------------------------------------------------------------
 
-// `v`, in storage order, as an array of extents `ext`.
-private[nex] dense(v: Buf[Value], ext: Buf[long]) -> Value = VArr(Arr(Store(v, false), 0, ext, strides_of(ext), buf()))
+// The storage `d`, in storage order, as an array of extents `ext`.
+private[nex] dense_data(d: Data, ext: Buf[long]) -> Value = VArr(Arr(Store(d, false), 0, ext, strides_of(ext), buf()))
 
-// `v` as a rank-1 array.
-private[nex] vector(v: Buf[Value]) -> Value
+// `v`, elements of type `t` in storage order, as an array of extents `ext`.
+private[nex] dense(t: Ty, v: Buf[Value], ext: Buf[long]) -> Value = dense_data(packed(t, v), ext)
+
+// The storage `d` as a rank-1 array.
+private[nex] vector_data(d: Data) -> Value
     var ext: Buf[long] = buf()
 
-    ext.push(long(v.len()))
-    dense(v, ext)
+    ext.push(long(data_len(d)))
+    dense_data(d, ext)
+
+// `v`, elements of type `t`, as a rank-1 array.
+private[nex] vector(t: Ty, v: Buf[Value]) -> Value = vector_data(packed(t, v))
 
 // The strides of a dense array of extents `ext`.
 private[nex] strides_of(ext: Buf[long]) -> Buf[long]
@@ -77,7 +84,7 @@ private[nex] strides_of(ext: Buf[long]) -> Buf[long]
 
 private[nex] arr_of(v: Value) -> &Arr = v match
     VArr(a) -> a
-    _ -> Arr(Store(buf(), false), 0, buf(), buf(), buf())
+    _ -> Arr(Store(DValues(buf()), false), 0, buf(), buf(), buf())
 
 private[nex] count_of(a: &Arr) -> long
     var n: long = 1
@@ -96,7 +103,7 @@ private[nex] same_shape(a: &Arr, b: &Arr) -> bool
     true
 
 // Whether `a` reads its storage from its offset on, one element after another.
-private contiguous(a: &Arr) -> bool
+private[nex] contiguous(a: &Arr) -> bool
     var s: long = 1
 
     for k in 0..<a.ext.len()
@@ -145,14 +152,14 @@ private[nex] positions(a: &Arr) -> Buf[long]
 
     out
 
-// `a`'s elements in storage order, a new list. Elements that hold arrays are shared with `a`'s,
-// whose storage is then marked shared too.
+// `a`'s elements in storage order, a new list of values: for an operation that runs a value through
+// each one. Elements that hold arrays are shared with `a`'s, whose storage is then marked shared too.
 private[nex] elements(a: &Arr) -> Buf[Value]
     var out: Buf[Value] = buf()
-    val s = a.store.v
+    val s = a.store.d
 
     for p in positions(a)
-        out.push(s[usize(p)])
+        out.push(data_get(s, usize(p)))
 
     if out.len() > 0 && holds_parts(out[0])
         for x in out
@@ -169,10 +176,20 @@ private[nex] element_at(a: &Arr, k: long) -> Value
         p += (rest % a.ext[j]) * a.str[j]
         rest /= a.ext[j]
 
-    a.store.v[usize(p)]
+    data_get(a.store.d, usize(p))
+
+// The element at storage position `p` of `a`'s storage.
+private[nex] stored(a: &Arr, p: long) -> Value = data_get(a.store.d, usize(p))
+
+// `a`'s elements in storage order as new storage of their type, what they hold shared with `a`'s.
+private[nex] gathered_of(a: &Arr) -> Data
+    val d = data_gather(a)
+
+    parts_shared(d)
+    d
 
 // A dense copy of `a`, 1-based.
-private[nex] copy_of(a: &Arr) -> Value = dense(elements(a), a.ext)
+private[nex] copy_of(a: &Arr) -> Value = dense_data(gathered_of(a), a.ext)
 
 // -- sharing ------------------------------------------------------------------------------------------
 
@@ -195,6 +212,16 @@ private[nex] share(v: Value)
                 share(f)
         _ -> ()
 
+// What the elements of `d` hold marked shared, where they are aggregates that may hold arrays: `d` is
+// a copy of storage that still holds them.
+private parts_shared(d: Data)
+    d match
+        DValues(v) ->
+            if v.len() > 0 && holds_parts(v[0])
+                for x in v
+                    share(x)
+        _ -> ()
+
 // The array the place `r` holds, its storage the place's own: copied first where it is shared, the
 // copy keeping the layout so that every window taken of the place stays one of the copy.
 private[nex] owned(r: Value) -> &Arr
@@ -212,16 +239,11 @@ private[nex] owned(r: Value) -> &Arr
 
     if !a.store.shared then return a
 
-    var v: Buf[Value] = buf()
+    val d = data_copy(a.store.d)
 
-    for x in a.store.v
-        v.push(x)
+    parts_shared(d)
 
-    if v.len() > 0 && holds_parts(v[0])
-        for x in v
-            share(x)
-
-    val b: &Arr = Arr(Store(v, false), a.offset, a.ext, a.str, a.shifts)
+    val b: &Arr = Arr(Store(d, false), a.offset, a.ext, a.str, a.shifts)
 
     // A whole array stored at a place that is not a window, which cannot trap.
     _ = store_through(r, VArr(b))
@@ -234,7 +256,7 @@ private[nex] owned(r: Value) -> &Arr
 private[nex] sub_value(w: &Win, path: Buf[usize]) -> Value
     val s = arr_of(deref(w.base)).store
 
-    if w.ext.len() == 0 then return at_path(s.v[usize(w.offset)], path, 0)
+    if w.ext.len() == 0 then return at_path(data_get(s.d, usize(w.offset)), path, 0)
 
     VArr(Arr(s, w.offset, w.ext, w.str, buf()))
 
@@ -245,14 +267,14 @@ private[nex] sub_store(w: &Win, path: Buf[usize], v: Value) -> Answer
         val s = owned(w.base).store
         val k = usize(w.offset)
 
-        s.v.set(k, if path.len() == 0 then v else put_path(s.v[k], path, 0, v))
+        data_set(s.d, k, if path.len() == 0 then v else put_path(data_get(s.d, k), path, 0, v))
         return Ok(VVoid)
 
     val src = arr_of(v)
 
     if !same_ext(w.ext, src.ext) then return trapped(SHAPE_MISMATCH)
 
-    write_window(owned(w.base).store, w.offset, w.ext, w.str, elements(src))
+    write_window(owned(w.base).store, w.offset, w.ext, w.str, gathered_of(src))
     Ok(VVoid)
 
 private same_ext(a: Buf[long], b: Buf[long]) -> bool
@@ -263,13 +285,9 @@ private same_ext(a: Buf[long], b: Buf[long]) -> bool
 
     true
 
-// `xs`, in storage order, written over the window of `s` at `offset` with extents `ext` and strides
-// `str`.
-private[nex] write_window(s: &Store, offset: long, ext: Buf[long], str: Buf[long], xs: Buf[Value])
-    val ps = positions(Arr(s, offset, ext, str, buf()))
-
-    for j in 0..<ps.len()
-        s.v.set(usize(ps[j]), xs[j])
+// `xs`, in storage order and of the storage's element type, written over the window of `s` at
+// `offset` with extents `ext` and strides `str`.
+private[nex] write_window(s: &Store, offset: long, ext: Buf[long], str: Buf[long], xs: Data) = data_scatter(s.d, Arr(s, offset, ext, str, buf()), xs)
 
 // -- windows ----------------------------------------------------------------------------------------
 
@@ -337,20 +355,21 @@ private[nex] view_of(a: &Arr, axes: Buf[Cut]) -> &Arr
 
 // -- element by element -----------------------------------------------------------------------------
 
-// `f` of every element of the array `x`.
-private[nex] map1(f: Op1, x: Value) -> Answer
+// `f` of every element of the array `x`, giving elements of type `t`: for an operation that has no
+// loop over machine numbers (`interp_kernels.sysl`).
+private[nex] map1(f: Op1, x: Value, t: Ty) -> Answer
     val a = arr_of(x)
-    var out: Buf[Value] = buf()
+    val out = data_for(t)
 
     for v in elements(a)
-        out.push(f(v)?)
+        data_push(out, f(v)?)
 
-    Ok(dense(out, a.ext))
+    Ok(dense_data(out, a.ext))
 
 // `f` between the elements of two arrays of one shape, or of an array and a scalar, `xa` and `ya`
-// saying which is an array.
-private[nex] zip_with(f: Op2, x: Value, y: Value, xa: bool, ya: bool) -> Answer
-    var out: Buf[Value] = buf()
+// saying which is an array, giving elements of type `t`.
+private[nex] zip_with(f: Op2, x: Value, y: Value, xa: bool, ya: bool, t: Ty) -> Answer
+    val out = data_for(t)
 
     if xa && ya
         val a = arr_of(x)
@@ -362,62 +381,16 @@ private[nex] zip_with(f: Op2, x: Value, y: Value, xa: bool, ya: bool) -> Answer
         val ys = elements(b)
 
         for k in 0..<xs.len()
-            out.push(f(xs[k], ys[k])?)
+            data_push(out, f(xs[k], ys[k])?)
 
-        return Ok(dense(out, a.ext))
+        return Ok(dense_data(out, a.ext))
 
     val a = arr_of(if xa then x else y)
 
     for v in elements(a)
-        out.push(if xa then f(v, y)? else f(x, v)?)
+        data_push(out, if xa then f(v, y)? else f(x, v)?)
 
-    Ok(dense(out, a.ext))
-
-// `+`, `-`, `*` and `/` on `real64` elements where nothing traps: the operation's number for
-// `real_zip`, which loops over the numbers themselves.
-private[nex] fast_op(op: string, lt: Ty, rt: Ty, fpe: bool) -> Option[int]
-    if fpe then return None
-
-    lt match
-        Real(64) -> ()
-        _ -> return None
-
-    rt match
-        Real(64) -> ()
-        _ -> return None
-
-    if op == "+" then Some(0) elif op == "-" then Some(1) elif op == "*" then Some(2) elif op == "/" then Some(3) else None
-
-private[nex] real_zip(k: int, x: Value, y: Value, xa: bool, ya: bool) -> Answer
-    val a = arr_of(if xa then x else y)
-
-    if xa && ya && !same_shape(a, arr_of(y)) then return trapped(SHAPE_MISMATCH)
-
-    val ps = positions(a)
-    val s = a.store.v
-    var out: Buf[Value] = buf()
-
-    if xa && ya
-        val b = arr_of(y)
-        val qs = positions(b)
-        val t = b.store.v
-
-        for j in 0..<ps.len()
-            out.push(VReal(real_of2(k, real_of(s[usize(ps[j])]), real_of(t[usize(qs[j])]))))
-    elif xa
-        val w = real_of(y)
-
-        for p in ps
-            out.push(VReal(real_of2(k, real_of(s[usize(p)]), w)))
-    else
-        val w = real_of(x)
-
-        for p in ps
-            out.push(VReal(real_of2(k, w, real_of(s[usize(p)]))))
-
-    Ok(dense(out, a.ext))
-
-private real_of2(k: int, a: real, b: real) -> real = if k == 0 then a + b elif k == 1 then a - b elif k == 2 then a * b else a / b
+    Ok(dense_data(out, a.ext))
 
 // -- printing ---------------------------------------------------------------------------------------
 
@@ -438,6 +411,6 @@ private put_level(out: *StrBuilder, a: &Arr, axis: usize, at: long, each: &Fn(Va
 
         val p = at + i * a.str[axis]
 
-        if axis + 1 == a.ext.len() then out.push(each(a.store.v[usize(p)])) else put_level(out, a, axis + 1, p, each)
+        if axis + 1 == a.ext.len() then out.push(each(stored(a, p))) else put_level(out, a, axis + 1, p, each)
 
     out.push(ARRAY_CLOSE)

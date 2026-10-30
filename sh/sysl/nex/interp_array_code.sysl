@@ -159,7 +159,10 @@ impl Interp
                 val a = self.lent(v)
 
                 self.conversion(e.span, elem_or(v.ty), elem_or(e.ty), traps) match
-                    Some(f) -> (c) -> map1(f, a(c)?)
+                    Some(f) ->
+                        val to = elem_or(e.ty)
+
+                        (c) -> map1(f, a(c)?, to)
                     None -> self.later(e.span, s"a conversion from ${show_ty(v.ty)} to ${show_ty(e.ty)}")
             TElementalCall(callee, args) ->
                 var leaves: Buf[TExpr] = buf()
@@ -244,7 +247,7 @@ impl Interp
             for k in 0..<axes.len()
                 p += axes[k].first * a.str[k]
 
-            val x = a.store.v[usize(p)]
+            val x = stored(a, p)
 
             Ok(if keep then shared(x) else x)
 
@@ -310,6 +313,12 @@ impl Interp
                         else self.operator(span, op[0..<op.len - 1], et, vt) match
                             Some(f) -> f
                             None -> return self.later(span, s"`$op` on ${show_ty(et)}")
+        // `op=` over a window: the operation between the window's elements and the value, as an
+        // element-wise expression computes it.
+        val over: Op2 = if op == "=" then (old, x) -> Ok(x)
+                        else self.lifted(span, op[0..<op.len - 1], target.ty, if scalar then vt else value.ty) match
+                            Some(f) -> f
+                            None -> return self.later(span, s"`$op` on ${show_ty(et)}")
         var whole = true
 
         for s in subs
@@ -327,35 +336,29 @@ impl Interp
                 for k in 0..<axes.len()
                     p += axes[k].first * a.str[k]
 
-                val y = step(a.store.v[usize(p)], x)?
+                val y = step(stored(a, p), x)?
 
-                owned(r).store.v.set(usize(p), y)
+                data_set(owned(r).store.d, usize(p), y)
                 Ok(VVoid)
+
+        val assigns = op == "="
 
         (c) ->
             val x = v(c)?
             val r = base(c)?
             val (a, axes) = take(c, deref(r))?
             val w = view_of(a, axes)
-            val n = count_of(w)
-            var xs: Buf[Value] = buf()
 
-            if scalar
-                for _ in 0..<n
-                    xs.push(x)
-            else
+            if !scalar
                 val src = arr_of(x)
 
                 for k in 0..<w.ext.len()
                     if src.ext[k] != w.ext[k] then return trapped(SLICE_LENGTH_MISMATCH)
 
-                xs = elements(src)
-
-            if op != "="
-                val old = elements(w)
-
-                for k in 0..<old.len()
-                    xs.set(k, step(old[k], xs[k])?)
+            // The new elements in storage order: the value's, or the operation's dense result.
+            val xs = if !assigns then arr_of(over(VArr(w), x)?).store.d
+                     elif scalar then data_repeated(et, x, count_of(w))
+                     else gathered_of(arr_of(x))
 
             write_window(owned(r).store, w.offset, w.ext, w.str, xs)
             Ok(VVoid)
@@ -392,7 +395,9 @@ impl Interp
             for _ in 0..<rank_of(e.ty)
                 zero.push(0)
 
-            return (c) -> Ok(dense(buf(), zero))
+            val et = elem_of(e.ty)
+
+            return (c) -> Ok(dense(et, buf(), zero))
 
         // Source order runs the last nex axis fastest; storage order the first.
         val r = ext.len()
@@ -416,6 +421,8 @@ impl Interp
 
             order.push(usize(source))
 
+        val et = elem_of(e.ty)
+
         (c) ->
             var vals: Buf[Value] = buf()
 
@@ -424,17 +431,18 @@ impl Interp
 
                 vals.push(f(c)?)
 
-            var out: Buf[Value] = buf()
+            val out = data_for(et)
 
             for k in order
-                out.push(vals[k])
+                data_push(out, vals[k])
 
-            Ok(dense(out, ext))
+            Ok(dense_data(out, ext))
     end literal_array
 
     // A literal whose items are arrays of rank R − 1, every one of the first one's shape.
     stacked(*self, e: TExpr, items: Buf[TExpr]) -> Code
         val codes = self.operands(items)
+        val et = elem_of(e.ty)
 
         (c) ->
             var parts: Buf[&Arr] = buf()
@@ -469,7 +477,7 @@ impl Interp
             for x in first.ext
                 ext.push(x)
 
-            Ok(dense(out, ext))
+            Ok(dense(et, out, ext))
 
     // `lo..hi by step` as a value: the integers it counts, each `lo + k · step` cut to the width.
     range_value(*self, e: TExpr, lo_e: TExpr, hi_e: TExpr, inclusive: bool, step_e: Option[TExpr]) -> Code
@@ -479,7 +487,8 @@ impl Interp
             Some(s) -> self.ex(s)
             None -> (c) -> Ok(VInt(1))
         val checked = step_e.is_some()
-        val (bits, signed) = base_of(elem_of(e.ty)) match
+        val et = elem_of(e.ty)
+        val (bits, signed) = base_of(et) match
             Int(b, s) -> (b, s)
             _ -> (64, true)
 
@@ -491,30 +500,37 @@ impl Interp
             if checked && s == 0 then return trapped(ZERO_RANGE_STEP)
 
             val n = range_count(a, b, s, inclusive, bits, signed)
-            var out: Buf[Value] = buf()
+            val out = data_for(et)
 
             for k in 0..<n
-                out.push(VInt(wrapped(a + i128(k) * s, bits, signed)))
+                data_push(out, VInt(wrapped(a + i128(k) * s, bits, signed)))
 
-            Ok(vector(out))
+            Ok(vector_data(out))
 
     // -- element-wise ------------------------------------------------------------------------------
 
-    // `op` between two arrays of one shape, or an array and a scalar, element by element: the
-    // scalar operation chosen for the element types.
+    // `op` between two arrays of one shape, or an array and a scalar, element by element: a loop over
+    // the machine numbers where the operands have one element type and one computes `op`
+    // (`interp_kernels.sysl`), else the scalar operation chosen for the element types, value by value.
     lifted(*self, span: Span, op: string, lt: Ty, rt: Ty) -> Option[Op2]
         val la = is_array(lt)
         val ra = is_array(rt)
+        val et = elem_or(lt)
+
+        if ty_eq(et, elem_or(rt))
+            zip_kernel(op, et, self.m.fpe, la, ra) match
+                Some(f) -> return Some(f)
+                None -> ()
 
         val f: Op2 = if op == "and" then (a, b) -> Ok(VBool(bool_of(a) && bool_of(b)))
                      elif op == "or" then (a, b) -> Ok(VBool(bool_of(a) || bool_of(b)))
                      else self.operator(span, op, elem_of(lt), elem_of(rt)) match
                          Some(f) -> f
                          None -> return None
+        // A comparison gives `bool`s; any other operation keeps the left operand's element type.
+        val out = if op == "and" || op == "or" || op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" then Bool else et
 
-        fast_op(op, base_of(elem_of(lt)), base_of(elem_of(rt)), self.m.fpe) match
-            Some(k) -> Some((x, y) -> real_zip(k, x, y, la, ra))
-            None -> Some((x, y) -> zip_with(f, x, y, la, ra))
+        Some((x, y) -> zip_with(f, x, y, la, ra, out))
 
     elementwise(*self, span: Span, op: string, l: TExpr, r: TExpr) -> Code
         val f = self.lifted(span, op, l.ty, r.ty) match
@@ -532,14 +548,11 @@ impl Interp
     elementwise_unary(*self, span: Span, op: string, v: TExpr, t: Ty) -> Code
         val a = self.lent(v)
 
-        val f: Op1 = if op == "not" then (x) -> Ok(VBool(!bool_of(x)))
-                     else base_of(elem_of(v.ty)) match
-                         Int(bits, signed) -> (x) -> int_result(-wide(int_of(x), signed), bits, signed)
-                         Real(_) -> (x) -> Ok(VReal(-real_of(x)))
-                         Complex(_) -> (x) -> Ok(VComplex(-re_of(x), -im_of(x)))
-                         _ -> return self.later(span, s"`$op` on ${show_ty(v.ty)}")
+        val f = unary_kernel(op, elem_or(v.ty)) match
+            Some(f) -> f
+            None -> return self.later(span, s"`$op` on ${show_ty(v.ty)}")
 
-        (c) -> map1(f, a(c)?)
+        (c) -> f(a(c)?)
 
     // The array of type `out` whose every element is `scalar` over the elements of `operands`: each
     // an array of one shape, or a scalar broadcast. `scalar` reads operand `k` as `TChainOperand(k)`,
@@ -557,6 +570,7 @@ impl Interp
         self.chains.push(base)
 
         val body = self.ex(scalar)
+        val et = elem_of(out)
 
         self.chains.pop()
 
@@ -585,15 +599,15 @@ impl Interp
             for k in 0..<vals.len()
                 lists.push(if arrays[k] then elements(arr_of(vals[k])) else buf())
 
-            var res: Buf[Value] = buf()
+            val res = data_for(et)
 
             for j in 0..<count_of(s)
                 for k in 0..<vals.len()
                     c.v.set(base + k, if arrays[k] then lists[k][usize(j)] else vals[k])
 
-                res.push(body(c)?)
+                data_push(res, body(c)?)
 
-            Ok(dense(res, s.ext))
+            Ok(dense_data(res, s.ext))
     end mapped
 
     // An array widened element by element, or seen with other static extents.
@@ -602,9 +616,11 @@ impl Interp
 
         self.conversion(span, elem_or(v.ty), elem_or(to), traps) match
             Some(f) ->
-                if ty_eq(elem_or(v.ty), elem_or(to)) then return a
+                val et = elem_or(to)
 
-                (c) -> map1(f, a(c)?)
+                if ty_eq(elem_or(v.ty), et) then return a
+
+                (c) -> map1(f, a(c)?, et)
             None -> self.later(span, s"a conversion from ${show_ty(v.ty)} to ${show_ty(to)}")
 
     // An array given the static shape of `t`, trapping `shape mismatch` where it has another.

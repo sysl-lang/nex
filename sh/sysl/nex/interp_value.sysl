@@ -295,7 +295,7 @@ private[nex] complex_op(op: string, bits: int) -> Option[Op2]
     None
 
 // (ac - bd) + (ad + bc)i, as nex writes the product.
-private complex_mul(ar: real, ai: real, br: real, bi: real, bits: int) -> Answer
+private[nex] complex_mul(ar: real, ai: real, br: real, bi: real, bits: int) -> Answer
     val rr = rnd(ar * br, bits)
     val ii = rnd(ai * bi, bits)
     val ri = rnd(ar * bi, bits)
@@ -304,7 +304,7 @@ private complex_mul(ar: real, ai: real, br: real, bi: real, bits: int) -> Answer
     Ok(VComplex(rnd(rr - ii, bits), rnd(ri + ir, bits)))
 
 // ((ac + bd) + (bc - ad)i) / (c² + d²), the denominator zero a trap.
-private complex_div(ar: real, ai: real, br: real, bi: real, bits: int) -> Answer
+private[nex] complex_div(ar: real, ai: real, br: real, bi: real, bits: int) -> Answer
     val cc = rnd(br * br, bits)
     val dd = rnd(bi * bi, bits)
     val denom = rnd(cc + dd, bits)

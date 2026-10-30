@@ -28,8 +28,9 @@ impl Interp
 
         if is_array(t)
             val a = self.lent(v)
+            val et = elem_or(t)
 
-            return (c) -> map1(f, a(c)?)
+            return (c) -> map1(f, a(c)?, et)
 
         val a = self.ex(v)
 

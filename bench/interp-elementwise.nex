@@ -1,0 +1,20 @@
+// The interpreter's element-wise kernel (PLAN.md M13): 200 000 `real64` elements, 50 passes of two
+// element-wise statements and a `sum`, then an element loop. Timed from outside, on either engine.
+
+def main() =
+  val n = 200000
+  var x: [real; :] = zeros(n)
+  var y: [real; :] = zeros(n)
+  for i in 1..n
+    x[i] = 1.0 / i
+    y[i] = 0.5 * i
+  var s = 0.0
+  for k in 1..50
+    x = x * 0.999 + y * 0.001
+    y = y - x / 3.0
+    s = s + sum(x)
+  var t = 0.0
+  for i in 1..n
+    t = t + x[i] * y[i]
+  print(s)
+  print(t)

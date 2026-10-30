@@ -1,0 +1,149 @@
+module sh.sysl.nex
+@tests
+
+// The interpreter's typed array storage (`interp_store.sysl`, `interp_kernels.sysl`): every element
+// type through one set of operations — element-wise arithmetic, comparisons, slices, copy-on-write,
+// window writes, reductions whole and along an axis, reshaping — each run over its machine numbers,
+// with the compiled program's answers; and the linear algebra handed the storage where it lies.
+
+import sysl.buf.{Buf, buf}
+
+// The statements every numeric element type `t` runs, on `a = [1, 2, 3, 4]` and `b = [4, 3, 2, 1]`.
+private shared_body(t: string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for line in [s"val a: [$t] = [1, 2, 3, 4]", s"val b: [$t] = [4, 3, 2, 1]", "print(a + b)", "print(a * b - a)", "print(a[2..3])", "print(a[.. by -2])",
+                 "var c = a", "c[1] = 9", "c[2..3] += b[1..2]", "print(c)", "print(a)", "print(a < b)", "print(a == b)", "print(b >= a)", "print(sum(a))",
+                 "print(product(a))", "print(minval(a))", "print(maxval(b))", "val m = reshape(a, (2, 2))", "print(transpose(m))", "print(sum(m, dim = 2))",
+                 "print(maxval(m, dim = 1))"]
+        out.push(line)
+
+    out
+
+private program(lines: Buf[string]) -> string = main_of(lines.view())
+
+@test("every integer width runs element-wise operators, comparisons, slices, copy-on-write, window writes and reductions over its own storage, and traps at its width")
+itp_typed_integers()
+    val shared = "[5, 5, 5, 5]\n[3, 4, 3, 0]\n[2, 3]\n[4, 2]\n[9, 6, 6, 4]\n[1, 2, 3, 4]\n[true, true, false, false]\n[false, false, false, false]\n" +
+                 "[true, true, false, false]\n10\n24\n1\n4\n[[1, 2], [3, 4]]\n[4, 6]\n[2, 4]\n[0, 1, 2, 1]\n20\n"
+
+    for t in ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"]
+        var lines = shared_body(t)
+
+        lines.push("print(b % a)")
+        lines.push("print(dot(a, b))")
+        lines.push("print(b - a)")
+
+        val ending = if t.starts_with("u") then s"trap: $t overflow" else "[3, 1, -1, -3]\nexit 0"
+
+        assert_eq(interpreted(program(lines)), shared + ending)
+
+@test("every real width rounds each element-wise result, sum, dot and norm2 at its width")
+itp_typed_reals()
+    val shared = "[5.0, 5.0, 5.0, 5.0]\n[3.0, 4.0, 3.0, 0.0]\n[2.0, 3.0]\n[4.0, 2.0]\n[9.0, 6.0, 6.0, 4.0]\n[1.0, 2.0, 3.0, 4.0]\n[true, true, false, false]\n" +
+                 "[false, false, false, false]\n[true, true, false, false]\n10.0\n24.0\n1.0\n4.0\n[[1.0, 2.0], [3.0, 4.0]]\n[4.0, 6.0]\n[2.0, 4.0]\n"
+    val widths = ["real16", "real32", "real64"]
+    val thirds = ["0.6665", "0.6666667", "0.6666666666666666"]
+    val norms = ["5.477", "5.477226", "5.477225575051661"]
+
+    for k in 0..<widths.len
+        var lines = shared_body(widths[k])
+
+        for line in ["print(b / a)", "print(dot(a, b))", "print(norm2(a))", "print(-a)", "print(b - a)"]
+            lines.push(line)
+
+        assert_eq(interpreted(program(lines)),
+                  shared + s"[4.0, 1.5, ${thirds[k]}, 0.25]\n20.0\n${norms[k]}\n[-1.0, -2.0, -3.0, -4.0]\n[3.0, 1.0, -1.0, -3.0]\nexit 0")
+
+@test("both complex widths add, multiply, divide, negate, compare, sum, slice and write windows over their storage, and trap a division by zero")
+itp_typed_complex()
+    for (t, third) in [("complex[real32]", "0.33333334"), ("complex[real64]", "0.3333333333333333")]
+        val text = main_of([s"val a: [$t] = [1 + 1i, 2 - 1i, 0.5 + 0i]", s"val b: [$t] = [3 + 0i, 1 + 2i, 0 - 1i]", "print(a + b)", "print(a - b)", "print(a * b)",
+                            "print(a / b)", "print(-a)", "print(a == b)", "print(a != a)", "print(sum(a))", "print(a[3..1 by -1])", "var c = a", "c[1] = 0 + 0i",
+                            "c[2..3] += b[1..2]", "print(a)", "print(c)", "print(dot(a, b))", "print(a / (b - b))"])
+
+        assert_eq(interpreted(text),
+                  "[4.0+1.0i, 3.0+1.0i, 0.5-1.0i]\n[-2.0+1.0i, 1.0-3.0i, 0.5+1.0i]\n[3.0+3.0i, 4.0+3.0i, 0.0-0.5i]\n" +
+                  s"[$third+${third}i, 0.0-1.0i, 0.0+0.5i]\n[-1.0-1.0i, -2.0+1.0i, -0.5+0.0i]\n[false, false, false]\n[false, false, false]\n3.5+0.0i\n" +
+                  "[0.5+0.0i, 2.0-1.0i, 1.0+1.0i]\n[1.0+1.0i, 2.0-1.0i, 0.5+0.0i]\n[0.0+0.0i, 5.0-1.0i, 1.5+2.0i]\n3.0+1.5i\ntrap: complex division by zero")
+
+@test("bool arrays combine, negate, compare, count along an axis and write windows over their storage")
+itp_typed_bools()
+    assert_eq(interpreted(main_of(["val p = [true, false, true]", "val q = [true, true, false]", "print(p and q)", "print(p or q)", "print(not p)", "print(p == q)",
+                                   "print(p != q)", "print(count(p))", "print(any(q))", "print(all(q))", "var r = p", "r[2..3] = [true, true]", "print(p)", "print(r)",
+                                   "print(all(r))", "print(count(reshape([p, q], (3, 2)), dim = 1))"])),
+              "[true, false, false]\n[true, true, true]\n[false, true, false]\n[true, false, false]\n[false, true, true]\n2\ntrue\nfalse\n[true, false, true]\n" +
+              "[true, true, true]\ntrue\n[2, 2]\nexit 0")
+
+@test("the typed loops trap under --fpe-trap as the value-by-value operations do: a division by zero, an overflow at the width, and a sum that overflows")
+itp_typed_fpe()
+    assert_eq(interpreted(main_of(["val a = [1.0, 2.0]", "assert_traps(() -> print(a / (a - a)), \"division by zero\")",
+                                   "val f: [real32] = [3.0e38, 1.0]", "assert_traps(() -> print(f * 10.0), \"overflow\")",
+                                   "assert_traps(() -> print(sum(f + f)), \"overflow\")", "print(f - f)"]), fpe = true),
+              "[0.0, 0.0]\nexit 0")
+
+@test("an integer reduction traps on overflow at its width, whole and along an axis")
+itp_typed_integer_overflow()
+    assert_eq(interpreted(main_of(["val a: [int8] = [100, 27, 1]", "assert_traps(() -> print(sum(a)), \"int8 overflow\")", "print(sum(a[1..2]))",
+                                   "val m: [uint16; :, :] = [[60000, 1], [6000, 1]]", "assert_traps(() -> print(sum(m, dim = 1)), \"uint16 overflow\")", "print(sum(m, dim = 2))",
+                                   "assert_traps(() -> print(product(m)), \"uint16 overflow\")"])),
+              "127\n[60001, 6001]\nexit 0")
+
+// An array of extents `ext` over the `real64` storage `xs`, from `offset` with strides `str`.
+private over(xs: Buf[real], offset: long, ext: []const long, str: []const long) -> &Arr
+    var e: Buf[long] = buf()
+    var s: Buf[long] = buf()
+
+    for x in ext
+        e.push(x)
+
+    for x in str
+        s.push(x)
+
+    Arr(Store(DR64(xs), false), offset, e, s, buf())
+
+@test("an array whose first axis is at unit stride crosses to the runtime as its own storage, with its own leading dimension; any other is copied dense")
+itp_typed_no_copy()
+    var xs: Buf[real] = buf()
+
+    for k in 0..<12
+        xs.push(real(k))
+
+    // The address of storage position `p`: the whole storage crosses in place.
+    val base = usize(crossing[real](over(xs, 0, [12], [1])).ptr())
+    val at: &Fn(usize) -> usize = (p) -> base + p * 8
+
+    // Rows 2–3 and columns 2–3 of a 4 × 3 matrix: in place, leading dimension 4.
+    val window = crossing[real](over(xs, 5, [2, 2], [1, 4]))
+
+    assert_eq(window.ld, 4)
+    assert_eq(usize(window.ptr()), at(5))
+    window.set(1, 1, -1.0)
+    assert_eq(xs[10], -1.0)
+
+    // Two arrays of one storage are two views of one buffer: the same address for the same array.
+    val again = crossing[real](over(xs, 5, [2, 2], [1, 4]))
+
+    assert_eq(usize(again.ptr()), usize(window.ptr()))
+
+    // A transposed window is gathered: writing the copy leaves the storage as it was.
+    val turned = crossing[real](over(xs, 5, [2, 2], [4, 1]))
+
+    assert_eq(turned.ld, 2)
+    assert_eq(turned.at(0, 1), 6.0)
+    turned.set(0, 0, 100.0)
+    assert_eq(xs[5], 5.0)
+
+    // A vector at unit stride is in place, a strided one copied.
+    assert_eq(usize(crossing[real](over(xs, 2, [3], [1])).ptr()), at(2))
+    assert(usize(crossing[real](over(xs, 2, [3], [2])).ptr()) != at(2))
+
+@test("an inout factorization of a window at unit stride writes where the window lies, and one of a transposed window writes back through its copy")
+itp_typed_in_place()
+    assert_eq(interpreted(main_of(["var big: [real; :, :] = zeros((3, 3))", "big[2, 2] = 4.0", "big[3, 3] = 9.0", "big[2, 3] = 2.0", "big[3, 2] = 2.0",
+                                   "print(chol_inplace(big[2..3, 2..3]))", "print(big)", "var t: [real; :, :] = zeros((3, 3))", "t[1, 1] = 4.0", "t[3, 3] = 9.0",
+                                   "t[1, 3] = 1.0", "t[3, 1] = 1.0", "print(chol_inplace(t[1..3 by 2, 1..3 by 2]))", "print(t)", "var ipiv: [int32] = [0, 0]",
+                                   "var a: [real32; :, :] = [[0.0, 1.0], [2.0, 0.0]]", "print(lu_inplace(a, ipiv))", "print(ipiv)", "print(a)",
+                                   "var p2: [int32] = [0, 0, 0, 0]", "var b: [real; :, :] = [[0.0, 1.0], [2.0, 0.0]]", "print(lu_inplace(b, p2[.. by 2]))", "print(p2)"])),
+              "0\n[[0.0, 0.0, 0.0], [0.0, 2.0, 2.0], [0.0, 1.0, 2.8284271247461903]]\n0\n[[2.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.5, 0.0, 2.958039891549808]]\n" +
+              "0\n[2, 2]\n[[2.0, 0.0], [0.0, 1.0]]\n0\n[2, 0, 2, 0]\nexit 0")
