@@ -100,9 +100,7 @@ mod_run_prelude()
 mod_nex_test()
     val b = bench()
 
-    for e in ENGINES
-        val r = nex_test_on(e, b, repo("testdata/nex_test/main.nex"), "").unwrap()
-
+    for r in nex_tests(b, repo("testdata/nex_test/main.nex"), "")
         assert_eq(join(r.lines.view(), "\n"), "FAIL test_fails: assert_eq failed\nFAIL test_traps: index out of bounds\nFAIL test_stops: stopped with status 3\n6 passed, 3 failed")
         assert_eq(r.failed, 3)
 
@@ -112,14 +110,11 @@ mod_nex_test()
 mod_nex_test_filter()
     val b = bench()
 
-    for e in ENGINES
-        val stats = nex_test_on(e, b, repo("testdata/nex_test/main.nex"), "stats").unwrap()
-
+    for stats in nex_tests(b, repo("testdata/nex_test/main.nex"), "stats")
         assert_eq(join(stats.lines.view(), "\n"), "3 passed, 0 failed, 6 filtered out")
         assert_eq(stats.failed, 0)
 
-        val fails = nex_test_on(e, b, repo("testdata/nex_test/main.nex"), "fails").unwrap()
-
+    for fails in nex_tests(b, repo("testdata/nex_test/main.nex"), "fails")
         assert_eq(join(fails.lines.view(), "\n"), "FAIL test_fails: assert_eq failed\n0 passed, 1 failed, 8 filtered out")
 
     finish(b)
@@ -128,9 +123,7 @@ mod_nex_test_filter()
 mod_nex_test_qualified()
     val b = bench()
 
-    for e in ENGINES
-        val r = nex_test_on(e, b, repo("testdata/nex_test_qualified/main.nex"), "").unwrap()
-
+    for r in nex_tests(b, repo("testdata/nex_test_qualified/main.nex"), "")
         assert_eq(join(r.lines.view(), "\n"), "7 passed, 0 failed")
         assert_eq(r.failed, 0)
 

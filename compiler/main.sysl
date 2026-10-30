@@ -2,7 +2,8 @@
 // `elaborate` the typed IR, or every diagnostic the elaborator gives; `emit` the MLIR module.
 // `build` (or `compile`) makes a native program, beside the source or at `-o`, and `run` makes one in
 // a temporary directory, runs it with the
-// arguments after `--` and exits with its status. `test` runs the project's `@test` functions, those
+// arguments after `--` and exits with its status; `run --interp` and `test --interp` interpret it
+// instead (`interp.sysl` of the library), with no toolchain. `test` runs the project's `@test` functions, those
 // whose names contain the substring after the file where one is given (`test_runner.sysl`).
 // `--fpe-trap` makes real division by zero, invalid operations and overflow trap (DESIGN §2.5);
 // `--prelude-path <dir>` names the source prelude's directory (`modules.sysl`); `-L dir` and
@@ -10,12 +11,13 @@
 // stand anywhere before `--`.
 
 import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.uncaught_text
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, read_bytes, remove_dir_all}
 import sysl.process.run
 import sh.sysl.parsing.source
 
-private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run | test> [--fpe-trap] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
+private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run | test> [--fpe-trap] [--interp] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
 
 main(args: []string)
     if args.len < 3
@@ -24,6 +26,7 @@ main(args: []string)
 
     val command = args[1]
     var fpe_trap = false
+    var interp = false
     var prelude_flag: Option[string] = None
     var file = ""
     // The substring `test` selects by.
@@ -42,6 +45,8 @@ main(args: []string)
             break
         elif a == "--fpe-trap"
             fpe_trap = true
+        elif a == "--interp" && (command == "run" || command == "test")
+            interp = true
         elif a == "-o" || a == "-L" || a == "-l" || a == "--prelude-path"
             if k + 1 >= args.len then fail(s"nex: `$a` needs a value\n$usage")
 
@@ -78,11 +83,12 @@ main(args: []string)
         return
 
     if command == "test"
-        val tc = find_toolchain(args[0]) match
-            Ok(t) -> t
-            Err(m) -> fail(m)
+        val ran = if interp then run_tests_interpreted(file, prelude, filter, fpe_trap)
+                  else find_toolchain(args[0]) match
+                      Ok(tc) -> run_tests(file, prelude, filter, tc, fpe_trap)
+                      Err(m) -> fail(m)
 
-        val r = run_tests(file, prelude, filter, tc, fpe_trap) match
+        val r = ran match
             Ok(r) -> r
             Err(m) -> fail(m)
 
@@ -92,6 +98,8 @@ main(args: []string)
         exit(if r.failed > 0 then 1 else 0)
 
     val build = command == "build" || command == "compile"
+
+    if command == "run" && interp then interpret_file(file, opts, program_args.view(), fpe_trap)
 
     if build || command == "run"
         val tc = find_toolchain(args[0]) match
@@ -164,6 +172,24 @@ private compile_file_here(file: string, out: string, tc: Toolchain, fpe_trap: bo
     done match
         Ok(_) -> ()
         Err(m) -> fail(m)
+
+// `nex run --interp`: the program interpreted in this process, no toolchain needed, ending as the
+// compiled one would — with its `stop` status, or after a trap nothing caught with its message on
+// standard error and the status of an abort.
+private interpret_file(file: string, opts: LoadOptions, program_args: []const string, fpe_trap: bool) -> never
+    val l = load(file, opts) match
+        Ok(l) -> l
+        Err(m) -> fail(m)
+
+    interpret(l.program, program_args, (s, text) -> if s == StdOut then prints(text) else eprints(text), fpe_trap) match
+        Ok(Exit(status)) ->
+            flush()
+            exit(status)
+        Ok(Trap(message)) ->
+            flush()
+            eprints(uncaught_text(message))
+            exit(134)
+        Err(ds) -> fail(l.project.render(ds))
 
 private fail(text: string) -> never
     eprints(text)

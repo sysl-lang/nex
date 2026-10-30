@@ -4,7 +4,8 @@
 // **A test is run in a process of its own**, the program given the test's number: each test starts
 // from the module-level bindings' initial values, and a trap ends only the test that trapped, which
 // is reported and the next run. A test passes when its process ends with status 0. What a passing
-// test prints is not shown; a failing one is reported by its trap's message.
+// test prints is not shown; a failing one is reported by its trap's message. Interpreted, each test is
+// a run of its own the same way, with nothing built.
 
 import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
@@ -37,6 +38,33 @@ run_tests(file: string, prelude: Option[string], filter: string, tc: Toolchain, 
             _ = remove_dir_all(work)
             return Err(m)
 
+    val r = tally(t, filter, (k) -> capture(exe, [s"$k"], stderr = true) match
+        Ok(out) -> if out.status.ok() then None else Some(failure(out))
+        Err(e) -> Some(s"the test program could not be run: $e")
+    )
+
+    _ = remove_dir_all(work)
+    Ok(r)
+
+// The same tests interpreted (`interp.sysl` of the library), each from the module-level bindings'
+// initial values; or why they cannot be.
+run_tests_interpreted(file: string, prelude: Option[string], filter: string, fpe_trap: bool) -> Result[TestRun, string]
+    val l = load(file, LoadOptions(prelude, true))?
+    val t = l.program
+    val refused = interpretable(t)
+
+    if refused.len() > 0 then return Err(l.project.render(refused))
+
+    Ok(tally(t, filter, (k) -> interpret(t, [], (s, text) -> (), fpe_trap, Some(k)) match
+        Ok(Exit(0)) -> None
+        Ok(Exit(code)) -> Some(s"stopped with status $code")
+        Ok(Trap(message)) -> Some(message)
+        Err(ds) -> Some(l.project.render(ds))
+    ))
+
+// Each test whose name holds `filter` run by `one`, which answers why it failed or `None`: a line per
+// failure and the summary.
+private tally(t: TProgram, filter: string, one: &Fn(usize) -> Option[string]) -> TestRun
     var r = TestRun(buf(), 0, 0)
     var skipped = 0
 
@@ -47,25 +75,18 @@ run_tests(file: string, prelude: Option[string], filter: string, tc: Toolchain, 
             skipped += 1
             continue
 
-        capture(exe, [s"$k"], stderr = true) match
-            Ok(out) ->
-                if out.status.ok()
-                    r.passed += 1
-                else
-                    r.failed += 1
-                    r.lines.push(s"FAIL ${name}: ${failure(out)}")
-            Err(e) ->
+        one(k) match
+            None -> r.passed += 1
+            Some(why) ->
                 r.failed += 1
-                r.lines.push(s"FAIL ${name}: the test program could not be run: $e")
-
-    _ = remove_dir_all(work)
+                r.lines.push(s"FAIL ${name}: $why")
 
     var summary = s"${r.passed} passed, ${r.failed} failed"
 
     if skipped > 0 then summary += s", ${skipped} filtered out"
 
     r.lines.push(summary)
-    Ok(r)
+    r
 
 // Why a test's process did not end with status 0: its trap's message, or how it ended.
 private failure(out: Output) -> string

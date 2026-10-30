@@ -1,0 +1,282 @@
+module sh.sysl.nex
+
+// The prelude's scalar functions, printing and interpolation, as the interpreter compiles them: each
+// as `compiler/emit_builtin.sysl` computes it, its text spelled by the runtime's functions.
+
+import nex_runtime.sh.sysl.nex_runtime.{ASSERTION_FAILED, ASSERT_EQ_FAILED, DID_NOT_TRAP, NOT_MENTIONED, assertion_message, overflow_message}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// Code that computes text.
+private[nex] type TextCode = &Fn(&Cells) -> Result[string, Signal]
+
+// The prelude's complex functions the interpreter computes.
+private val COMPLEX_FNS = ["conj", "arg", "sqrt", "exp", "log", "sin", "cos"]
+
+private among(name: string, names: []const string) -> bool
+    for n in names
+        if n == name then return true
+
+    false
+
+private position(name: string, names: []const string) -> Option[usize]
+    for k in 0..<names.len
+        if names[k] == name then return Some(k)
+
+    None
+
+impl Interp
+    builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> Code
+        val m = self.m
+
+        if name == "print" || name == "eprint"
+            val stream = if name == "print" then StdOut else StdErr
+            val text = self.text_of(args[0])
+
+            return (c) ->
+                emit(m, stream, text(c)? + "\n")
+                Ok(VVoid)
+
+        if name == "length" || name == "size" || name == "rank"
+            if !self.is_args(args[0]) then return self.later(span, s"`$name` of an array")
+            if name == "rank" then return self.constant_code(VInt(1))
+
+            return (c) -> Ok(VInt(long(m.args.len())))
+
+        if name == "assert" then return self.assertion(args)
+        if name == "assert_approx" then return self.approx(args)
+        if name == "assert_traps" then return self.traps_asserted(span, args)
+
+        if name == "assert_eq"
+            val a = self.ex(args[0])
+            val b = self.ex(args[1])
+
+            return self.op2(span, "==", args[0].ty) match
+                Some(eq) -> (c) ->
+                    val x = a(c)?
+
+                    if bool_of(eq(x, b(c)?)?) then Ok(VVoid) else trapped(ASSERT_EQ_FAILED)
+                None -> self.later(span, s"`assert_eq` on ${show_ty(args[0].ty)}")
+
+        var codes: Buf[Code] = buf()
+
+        for a in args
+            codes.push(self.ex(a))
+
+        if name == "min" || name == "max" then return self.extreme(span, name, codes, t)
+
+        val x = codes[0]
+        val at = base_of(args[0].ty)
+
+        if name == "abs" then return self.abs(span, x, at)
+        if name == "sign" then return self.sign(span, x, at)
+
+        if is_complex(at)
+            val bits = bits_of(at)
+
+            if !among(name, COMPLEX_FNS[..]) then return self.later(span, s"`$name` of a complex")
+
+            return (c) ->
+                val z = x(c)?
+                val re = re_of(z)
+                val im = im_of(z)
+
+                Ok(if name == "conj" then VComplex(re, -im)
+                   elif name == "arg" then VReal(complex_arg(re, im, bits))
+                   elif name == "sqrt" then complex_sqrt(re, im, bits)
+                   elif name == "exp" then complex_exp(re, im, bits)
+                   elif name == "log" then complex_log(re, im, bits)
+                   elif name == "sin" then complex_sin(re, im, bits)
+                   else complex_cos(re, im, bits))
+
+        val bits = bits_of(base_of(t))
+        val fpe = m.fpe
+
+        if name == "sqrt" || name == "floor" || name == "ceil" || name == "trunc" || name == "round"
+            return (c) ->
+                val v = real_of(x(c)?)
+                val r = real_math(name, v, bits)
+
+                if name == "sqrt" then fpe_checked(r, v, v, fpe) else Ok(VReal(r))
+
+        position(name, PRELUDE_LIBM[..]) match
+            Some(k) ->
+                if codes.len() == 1
+                    return (c) ->
+                        val v = real_of(x(c)?)
+
+                        fpe_checked(libm1(k, v, bits), v, v, fpe)
+
+                val y = codes[1]
+
+                return (c) ->
+                    val v = real_of(x(c)?)
+                    val w = real_of(y(c)?)
+
+                    fpe_checked(libm2(k, v, w, bits), v, w, fpe)
+            None -> ()
+
+        self.later(span, s"`$name`")
+    end builtin
+
+    // `assert(c)` and `assert(c, text)`: the text is computed whether or not the assertion holds.
+    assertion(*self, args: Buf[TExpr]) -> Code
+        val ok = self.ex(args[0])
+
+        if args.len() == 1 then return (c) -> if bool_of(ok(c)?) then Ok(VVoid) else trapped(ASSERTION_FAILED)
+
+        val message = self.ex(args[1])
+
+        (c) ->
+            val holds = bool_of(ok(c)?)
+            val text = str_of(message(c)?)
+
+            if holds then Ok(VVoid) else trapped(assertion_message(text))
+
+    // `assert_approx(a, b, tol)` on two numbers: no further apart than `tol` (a `real64`), the distance
+    // computed at their width; a `nan` is never close to anything. Otherwise a trap that says by how
+    // much.
+    approx(*self, args: Buf[TExpr]) -> Code
+        val a = self.ex(args[0])
+        val b = self.ex(args[1])
+        val tol = self.ex(args[2])
+        val t = base_of(args[0].ty)
+        val bits = bits_of(t)
+        val complex = is_complex(t)
+
+        (c) ->
+            val x = a(c)?
+            val y = b(c)?
+            val limit = real_of(tol(c)?)
+            val d = if complex then complex_abs(rnd(re_of(x) - re_of(y), bits), rnd(im_of(x) - im_of(y), bits), bits)
+                    else real_abs(rnd(real_of(x) - real_of(y), bits))
+
+            if d <= limit then return Ok(VVoid)
+
+            trapped(s"assert_approx: |${scalar_text(x, t)} - ${scalar_text(y, t)}| = ${scalar_text(VReal(d), Ty.Real(64))} > ${scalar_text(VReal(limit), Ty.Real(64))}")
+
+    // `assert_traps(f)` and `assert_traps(f, text)`: `f` must trap, with a message containing `text`
+    // where one is given; otherwise the assertion traps. A lambda written as the argument is run in
+    // the frame it was written in, which holds what it captures.
+    traps_asserted(*self, span: Span, args: Buf[TExpr]) -> Code
+        val m = self.m
+
+        val body: Code = *args[0].kind match
+            TLambdaRef(id) ->
+                val l = self.prog.lambdas[id]
+
+                if l.params.len() > 0 then return self.later(span, "a lambda taking parameters")
+
+                self.ex(l.body)
+            _ ->
+                val f = self.ex(args[0])
+                var none: Buf[Code] = buf()
+
+                (c) -> call_value(m, f(c)?, none, c)
+
+        val expected: Option[Code] = if args.len() == 2 then Some(self.ex(args[1])) else None
+
+        (c) ->
+            val text = expected match
+                Some(e) -> Some(str_of(e(c)?))
+                None -> None
+
+            body(c) match
+                Ok(_) -> trapped(DID_NOT_TRAP)
+                Err(s) -> s match
+                    Trapped(message) ->
+                        text match
+                            Some(t) -> if message.contains(t) then Ok(VVoid) else trapped(NOT_MENTIONED)
+                            None -> Ok(VVoid)
+                    Returning(_) -> trapped(DID_NOT_TRAP)
+                    _ -> Err(s)
+
+    // `min` and `max` of any number of arguments, left to right.
+    extreme(*self, span: Span, name: string, codes: Buf[Code], t: Ty) -> Code
+        val low = name == "min"
+
+        val pick: Op2 = base_of(t) match
+            Int(_, signed) -> (a, b) ->
+                val x = wide(int_of(a), signed)
+                val y = wide(int_of(b), signed)
+
+                Ok(if (x < y) == low then a else b)
+            Real(_) -> (a, b) -> Ok(VReal(if low then minimum(real_of(a), real_of(b)) else maximum(real_of(a), real_of(b))))
+            _ -> return self.later(span, s"`$name` of ${show_ty(t)}")
+
+        (c) ->
+            val first = codes[0]
+            var v = first(c)?
+
+            for k in 1..<codes.len()
+                val next = codes[k]
+
+                v = pick(v, next(c)?)?
+
+            Ok(v)
+
+    abs(*self, span: Span, x: Code, t: Ty) -> Code = t match
+        Int(bits, signed) ->
+            if !signed then return x
+
+            (c) ->
+                val n = wide(int_of(x(c)?), true)
+
+                if n == -(i128(1) << (bits - 1)) then trapped(overflow_message(bits, true)) else Ok(VInt(long.wrap(if n < 0 then -n else n)))
+        Real(_) -> (c) -> Ok(VReal(real_abs(real_of(x(c)?))))
+        Complex(bits) -> (c) ->
+            val z = x(c)?
+
+            Ok(VReal(complex_abs(re_of(z), im_of(z), bits)))
+        _ -> self.later(span, s"`abs` of ${show_ty(t)}")
+
+    // -1, 0 or 1 in the argument's type; a real's zero and NaN are their own sign.
+    sign(*self, span: Span, x: Code, t: Ty) -> Code = t match
+        Int(_, signed) -> (c) ->
+            val n = wide(int_of(x(c)?), signed)
+
+            Ok(VInt(if n > 0 then 1 elif n < 0 then -1 else 0))
+        Real(_) -> (c) -> Ok(VReal(real_sign(real_of(x(c)?))))
+        _ -> self.later(span, s"`sign` of ${show_ty(t)}")
+
+    // -- text --------------------------------------------------------------------------------------
+
+    // What `print` writes of `e`: an interpolation's pieces, or a value in nex's spelling.
+    text_of(*self, e: TExpr) -> TextCode
+        *e.kind match
+            TInterp(parts, _) -> return self.interp(parts)
+            _ -> ()
+
+        self.value_text(e, "")
+
+    interp(*self, parts: Buf[TPart]) -> TextCode
+        var pieces: Buf[TextCode] = buf()
+
+        for part in parts
+            part match
+                TText(text) -> pieces.push((c) -> Ok(text))
+                TValue(v, spec) -> pieces.push(self.value_text(v, if spec == "" || spec.starts_with("%") then spec else "%" + spec))
+
+        (c) ->
+            var out = ""
+
+            for k in 0..<pieces.len()
+                val p = pieces[k]
+
+                out += p(c)?
+
+            Ok(out)
+
+    // A value's text, under the `f"..."` specifier `spec` where it is not `""`.
+    value_text(*self, e: TExpr, spec: string) -> TextCode
+        val a = self.ex(e)
+        val t = base_of(e.ty)
+
+        t match
+            Fn(_) ->
+                self.later(e.span, "a function printed")
+                return (c) -> Ok("")
+            _ -> ()
+
+        if spec == "" then (c) -> Ok(scalar_text(a(c)?, t)) else (c) -> Ok(formatted_text(a(c)?, t, spec))
+end Interp

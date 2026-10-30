@@ -1647,6 +1647,11 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
   type its first use expects, and keeps it: a later call with another type is checked against it.
   One whose types nothing fixes is a compile error. A `def` inside a body is a named lambda; it may
   call itself where it declares its result type.
+- **How deep calls may nest is the engine's.** Interpreted, a call that would make more than 10,000
+  calls nested at once — `main` among them — traps with `calls nested more than 10000 deep`, a trap
+  like any other, which `assert_traps` catches. Compiled, the limit is the machine stack's, and running
+  past it ends the program as the system ends a stack overflow. A program that recurses deeper than
+  10,000 calls writes the recursion as a loop.
 
 ### 11.4 Structs, tuples, enums and `match`
 

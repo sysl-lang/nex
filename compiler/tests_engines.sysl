@@ -13,21 +13,29 @@
 //
 // What only a compiled program has — its MLIR, its LLVM IR, its link line, Guard Malloc and `leaks`
 // on its executable — is checked on the executable the compiled engine leaves at `<work>/<case>`.
+//
+// **The interpreter is built in stages** (PLAN.md M13), so `NOT_INTERPRETED` names what it refuses
+// yet, each with the stage that brings it, and is exact the same way: a program the interpreter
+// refuses that is not there fails, an entry naming a `testdata/` program the interpreter runs fails,
+// a test whose every program it runs fails as the test finishes, and so does an entry naming nothing.
+// A test listed there whose programs the interpreter partly runs runs those on both engines.
 
-import nex.sh.sysl.nex.LoadOptions
+import nex.sh.sysl.nex.{Ending, LoadOptions, Stream, TProgram, interpret, interpretable, load, load_source}
+import nex_runtime.sh.sysl.nex_runtime.uncaught_text
+import sh.sysl.parsing.{Diagnostic, source_of}
 import sysl.buf.{Buf, buf}
 import sysl.fs.{entries, exists, read_text}
 import sysl.path.{join_all, normalize, parent}
-import sysl.process.{Output, Var, capture}
-import sysl.text.{from_utf8, split}
+import sysl.process.{Output, Status, Var, capture}
+import sysl.text.{StrBuilder, from_utf8, split, str_builder}
 
 // Where a program runs: compiled through MLIR to a native program, or interpreted from its typed IR.
 enum Engine
     Compiled
     Interpreted
 
-// The engines every program test runs on. The interpreter is not built, so it is not one of them.
-val ENGINES = [Engine.Compiled]
+// The engines every program test runs on.
+val ENGINES = [Engine.Compiled, Engine.Interpreted]
 
 engine_name(e: Engine) -> string = e match
     Compiled -> "compiled"
@@ -101,9 +109,82 @@ runs(b: Bench, case: string, text: string, entry: string = "", args: []const str
             Compiled ->
                 for r in compiled_runs(b, case, text, entry, args, fpe_trap, links, prelude, threads)
                     out.push(r)
-            Interpreted -> if !only then out.push(Run("interpreted", Err("the interpreter is not built")))
+            Interpreted ->
+                if !only
+                    interpreted_run(b, case, text, entry, args, fpe_trap, prelude) match
+                        Some(r) -> out.push(r)
+                        None -> ()
 
     out
+
+// `text`, or the project whose root module is `entry`, interpreted: what it wrote and how it ended as
+// a compiled program's would read — a trap nothing caught written to standard error and the status
+// an abort gives. `None` where the interpreter refuses a program `NOT_INTERPRETED` lists.
+private interpreted_run(b: Bench, case: string, text: string, entry: string, args: []const string, fpe_trap: bool, prelude: Option[string]) -> Option[Run]
+    if entry == ""
+        val src = source_of("t.nex", text)
+
+        return load_source(src) match
+            Ok(p) -> interpreted_outcome(b, case, p, args, fpe_trap, (ds) -> lines(ds, src))
+            Err(ds) -> Some(Run("interpreted", Err(lines(ds, src))))
+
+    load(entry, LoadOptions(prelude, false)) match
+        Ok(l) -> interpreted_outcome(b, case, l.program, args, fpe_trap, (ds) -> l.project.render(ds))
+        Err(m) -> Some(Run("interpreted", Err(m)))
+
+// What the interpreter's run wrote, as it wrote it.
+private struct Gathered
+    text: StrBuilder
+    err: StrBuilder
+
+private interpreted_outcome(b: Bench, case: string, p: TProgram, args: []const string, fpe_trap: bool, render: &Fn(Buf[Diagnostic]) -> string) -> Option[Run]
+    val g: &Gathered = Gathered(str_builder(), str_builder())
+
+    interpret(p, args, (s, t) -> if s == Stream.StdOut then g.text.push(t) else g.err.push(t), fpe_trap) match
+        Ok(ending) ->
+            b.seen.note(case, false)
+
+            val status = ending match
+                Exit(code) -> Status.Exited(code & 255)
+                Trap(message) ->
+                    g.err.push(uncaught_text(message))
+                    Status.Signalled(6)
+
+            Some(Run("interpreted", Ok(Output(status, g.text.finish(), Some(g.err.finish())))))
+        Err(ds) ->
+            if not_interpreted(case)
+                b.seen.note(case, true)
+                return None
+
+            Some(Run("interpreted", Err(s"${render(ds)}\nNOT_INTERPRETED? $case")))
+
+// Whether `NOT_INTERPRETED` (`tests_not_interpreted.sysl`) lists `case`.
+private not_interpreted(case: string) -> bool
+    for (c, _) in NOT_INTERPRETED
+        if c == case then return true
+
+    false
+
+// Which cases of a test reached the interpreter, and whether it refused any program of each.
+struct Seen
+    cases: Buf[string]
+    refused: Buf[bool]
+
+    note(*self, case: string, refused: bool)
+        for k in 0..<self.cases.len()
+            if self.cases[k] == case
+                if refused then self.refused.set(k, true)
+                return
+
+        self.cases.push(case)
+        self.refused.push(refused)
+
+// A test `NOT_INTERPRETED` lists must have had a program the interpreter refused.
+still_refused(b: Bench)
+    for k in 0..<b.seen.cases.len()
+        val c = b.seen.cases[k]
+
+        if not_interpreted(c) && !b.seen.refused[k] then fail_with(s"`$c` is in NOT_INTERPRETED, but the interpreter runs every program of it: take it out")
 
 private compiled_runs(b: Bench, case: string, text: string, entry: string, args: []const string, fpe_trap: bool, links: []const string,
                       prelude: Option[string], threads: []const string) -> Buf[Run]
@@ -198,7 +279,23 @@ private only_later(diagnostics: string) -> bool
 // `filter`.
 nex_test_on(e: Engine, b: Bench, entry: string, filter: string) -> Result[TestRun, string] = e match
     Compiled -> run_tests(entry, None, filter, b.tc, false)
-    Interpreted -> Err("the interpreter is not built")
+    Interpreted -> run_tests_interpreted(entry, None, filter, false)
+
+// `nex test` on every engine, each of which must run it: what each reported. The interpreter's run is
+// left out where it refuses a project of a test `NOT_INTERPRETED` lists.
+nex_tests(b: Bench, entry: string, filter: string, case: string = __FUNCTION__) -> Buf[TestRun]
+    var out: Buf[TestRun] = buf()
+
+    for e in ENGINES
+        nex_test_on(e, b, entry, filter) match
+            Ok(r) ->
+                if e == Engine.Interpreted then b.seen.note(case, false)
+                out.push(r)
+            Err(m) ->
+                if e == Engine.Interpreted && not_interpreted(case) && m.contains("is not interpreted yet") then b.seen.note(case, true)
+                else fail_with(s"${engine_name(e)}: $m")
+
+    out
 
 // The stems of the `.nex` programs of `testdata/<dir>/`.
 private stems(dir: string) -> Buf[string]
@@ -236,3 +333,28 @@ compiled_only_is_exact()
         assert(found, s"`$c` in COMPILED_ONLY names no testdata program calling C and no test")
 
     assert_eq(calling.len(), 10)
+
+@test("NOT_INTERPRETED names testdata programs the interpreter refuses and tests of this project, each with its stage")
+not_interpreted_is_exact()
+    var sources = ""
+
+    for f in entries(repo("compiler")).unwrap()
+        if f.starts_with("tests_") && f.ends_with(".sysl") && f != "tests_not_interpreted.sysl" then sources += read_text(repo(s"compiler/$f")).unwrap()
+
+    for (c, stage) in NOT_INTERPRETED
+        assert(stage == "I2" || stage == "I3" || stage == "I4" || stage == "I5", s"`$c`: `$stage` is no stage of the interpreter")
+        assert(!listed(c), s"`$c` is in COMPILED_ONLY too, which already keeps it from the interpreter")
+
+        var found = sources.contains(s"\n$c()\n") || sources.contains(s"\"$c\"")
+
+        for dir in ["corpus", "v2", "leaks"]
+            val file = repo(s"testdata/$dir/$c.nex")
+
+            if exists(file)
+                found = true
+
+                load_source(source_of(file, read_text(file).unwrap())) match
+                    Ok(p) -> assert(interpretable(p).len() > 0, s"`$c` is in NOT_INTERPRETED, but the interpreter runs it: take it out")
+                    Err(_) -> ()
+
+        assert(found, s"`$c` in NOT_INTERPRETED names no testdata program and no test")

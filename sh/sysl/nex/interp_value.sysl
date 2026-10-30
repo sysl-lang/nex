@@ -1,0 +1,423 @@
+module sh.sysl.nex
+
+// The interpreter's values and the arithmetic on them: each operator, conversion and prelude function
+// computed as the compiled program computes it (`compiler/emit_expr.sysl`,
+// `compiler/emit_builtin.sysl`), its traps worded by the runtime both engines share.
+//
+// **A value carries no type.** The typed IR knows every type before the program runs, so the
+// interpreter picks the operation for a node's type once, when it compiles the node (`interp.sysl`),
+// and a value is only what that operation needs: an integer of any width is a `long` holding the
+// value widened by its own signedness (a `uint64` above `int64`'s range is its bit pattern), and a real
+// of any width is the `real64` it widens to exactly.
+//
+// **A real of 32 or 16 bits is rounded to its width after every operation.** Its operands widen to
+// `real64` exactly, the operation there rounds once, and `rnd` rounds again to the width. For `+`,
+// `-`, `*`, `/` and `sqrt` that second rounding never changes the answer — `real64` has more than
+// twice the bits plus two (Figueroa's bound) — so the result is the one the narrower operation gives.
+// A function of the C library is called at the width the compiled program calls it at: `real64`'s
+// `exp`, `real32`'s `expf`, and `real16` through `expf` and rounded.
+//
+// **Nothing here fuses a multiply into an add.** Every product is bound to a `val` or passed through
+// `rnd` before it is added, which keeps sysl from contracting it, as the compiled program does not.
+
+import nex_runtime.sh.sysl.nex_runtime.{COMPLEX_DIVISION_BY_ZERO, INT_DIVISION_BY_ZERO, REAL_DIVISION_BY_ZERO, REAL_INVALID, REAL_OVERFLOW,
+                                        REMAINDER_BY_ZERO, bool_text, complex_text, format_real_nex, int_spec_text, int_text, ipow_checked, out_of_range_message,
+                                        overflow_message, real_spec_text, str_spec_text, uint_text}
+import sysl.buf.{Buf, buf}
+
+// The storage of a frame: a function call's locals, or the program's module-level bindings.
+private[nex] struct Cells
+    v: Buf[Value]
+
+private[nex] enum Value
+    VInt(v: long)
+    VReal(v: real)
+    VComplex(re: real, im: real)
+    VBool(v: bool)
+    VStr(v: string)
+    // A top-level function, by its number among the program's functions.
+    VFn(k: usize)
+    // An `inout` parameter's place: slot `k` of a frame, or of the module-level bindings.
+    VRef(cells: &Cells, k: usize)
+    VVoid
+
+// How a computation stopped other than by giving its value: a trap, `stop`, or a `return`, `exit` or
+// `cycle` on its way to what it leaves.
+private[nex] enum Signal
+    Trapped(message: string)
+    Stopped(code: int)
+    Returning(value: Value)
+    Exiting(loop_id: usize)
+    Cycling(loop_id: usize)
+
+private[nex] type Answer = Result[Value, Signal]
+
+// An operator on two values, and a conversion or a function of one, each chosen for its types.
+private[nex] type Op2 = &Fn(Value, Value) -> Answer
+private[nex] type Op1 = &Fn(Value) -> Answer
+
+private[nex] trapped(message: string) -> Answer = Err(Trapped(message))
+
+private[nex] int_of(v: Value) -> long = v match
+    VInt(n) -> n
+    _ -> 0
+
+private[nex] real_of(v: Value) -> real = v match
+    VReal(x) -> x
+    _ -> 0.0
+
+private[nex] re_of(v: Value) -> real = v match
+    VComplex(re, _) -> re
+    _ -> 0.0
+
+private[nex] im_of(v: Value) -> real = v match
+    VComplex(_, im) -> im
+    _ -> 0.0
+
+private[nex] bool_of(v: Value) -> bool = v match
+    VBool(b) -> b
+    _ -> false
+
+private[nex] str_of(v: Value) -> string = v match
+    VStr(s) -> s
+    _ -> ""
+
+// -- integers ---------------------------------------------------------------------------------------
+
+// An integer's value, from the `long` it is held in.
+private[nex] wide(v: long, signed: bool) -> i128 = if signed then i128(v) else i128(ulong.wrap(v))
+
+private lowest(bits: int, signed: bool) -> i128 = if signed then -(i128(1) << (bits - 1)) else i128(0)
+
+private highest(bits: int, signed: bool) -> i128 = if signed then (i128(1) << (bits - 1)) - 1 else (i128(1) << bits) - 1
+
+private[nex] fits(r: i128, bits: int, signed: bool) -> bool = r >= lowest(bits, signed) && r <= highest(bits, signed)
+
+// `r` as an integer of `bits` bits, or the overflow it is.
+private[nex] int_result(r: i128, bits: int, signed: bool) -> Answer =
+    if fits(r, bits, signed) then Ok(VInt(long.wrap(r))) else trapped(overflow_message(bits, signed))
+
+// `r` cut to its low `bits` bits, held as that type holds it: what a narrowing that cannot trap does.
+private[nex] wrapped(r: i128, bits: int, signed: bool) -> long
+    val low = r & ((i128(1) << bits) - 1)
+
+    if signed && low > highest(bits, true) then long.wrap(low - (i128(1) << bits)) else long.wrap(low)
+
+// `a op b` on integers of `bits` bits.
+private[nex] int_op(op: string, bits: int, signed: bool) -> Option[Op2]
+    if op == "+" then return Some((a, b) -> int_result(wide(int_of(a), signed) + wide(int_of(b), signed), bits, signed))
+    if op == "-" then return Some((a, b) -> int_result(wide(int_of(a), signed) - wide(int_of(b), signed), bits, signed))
+    if op == "*" then return Some((a, b) -> int_result(wide(int_of(a), signed) * wide(int_of(b), signed), bits, signed))
+    if op == "div" then return Some((a, b) -> int_div(wide(int_of(a), signed), wide(int_of(b), signed), bits, signed))
+    if op == "%" then return Some((a, b) -> int_rem(wide(int_of(a), signed), wide(int_of(b), signed)))
+    if op == "^" then return Some((a, b) -> int_pow(int_of(a), int_of(b), bits, signed, signed))
+    if op == "==" then return Some((a, b) -> Ok(VBool(int_of(a) == int_of(b))))
+    if op == "!=" then return Some((a, b) -> Ok(VBool(int_of(a) != int_of(b))))
+    if op == "<" then return Some((a, b) -> Ok(VBool(wide(int_of(a), signed) < wide(int_of(b), signed))))
+    if op == "<=" then return Some((a, b) -> Ok(VBool(wide(int_of(a), signed) <= wide(int_of(b), signed))))
+    if op == ">" then return Some((a, b) -> Ok(VBool(wide(int_of(a), signed) > wide(int_of(b), signed))))
+    if op == ">=" then return Some((a, b) -> Ok(VBool(wide(int_of(a), signed) >= wide(int_of(b), signed))))
+
+    None
+
+// `div` truncates toward zero; the most negative value divided by -1 overflows.
+private int_div(x: i128, y: i128, bits: int, signed: bool) -> Answer
+    if y == 0 then return trapped(INT_DIVISION_BY_ZERO)
+
+    int_result(x / y, bits, signed)
+
+// `%` takes the dividend's sign; the most negative value `% -1` is 0.
+private int_rem(x: i128, y: i128) -> Answer
+    if y == 0 then return trapped(REMAINDER_BY_ZERO)
+
+    Ok(VInt(long.wrap(x % y)))
+
+// `base ^ n`, the base's type kept, through the runtime's power (DESIGN §2.2).
+private[nex] int_pow(base: long, n: long, bits: int, signed: bool, n_signed: bool) -> Answer = ipow_checked(base, n, bits, signed, n_signed) match
+    Ok(v) -> Ok(VInt(wrapped(i128(v), bits, signed)))
+    Err(m) -> trapped(m)
+
+// -- reals ------------------------------------------------------------------------------------------
+
+// `x` rounded to a real of `bits` bits, held widened.
+private[nex] rnd(x: real, bits: int) -> real = if bits == 64 then x elif bits == 32 then real(f32(x)) else real(f16(x))
+
+private is_nan(x: real) -> bool = x != x
+
+private magnitude(x: real) -> real = x.copysign(1.0)
+
+private val INFINITY = 1.0 / 0.0
+
+// Under `--fpe-trap`, a NaN made from operands that were not, and an infinity made from finite ones,
+// trap as gfortran's `invalid` and `overflow` do.
+private[nex] fpe_checked(r: real, a: real, b: real, fpe: bool) -> Answer
+    if fpe
+        if is_nan(r) && !is_nan(a) && !is_nan(b) then return trapped(REAL_INVALID)
+        if magnitude(r) == INFINITY && magnitude(a) < INFINITY && magnitude(b) < INFINITY then return trapped(REAL_OVERFLOW)
+
+    Ok(VReal(r))
+
+// `a op b` on reals of `bits` bits.
+private[nex] real_op(op: string, bits: int, fpe: bool) -> Option[Op2]
+    if op == "+" then return Some((a, b) -> real_arith(real_of(a), real_of(b), 0, bits, fpe))
+    if op == "-" then return Some((a, b) -> real_arith(real_of(a), real_of(b), 1, bits, fpe))
+    if op == "*" then return Some((a, b) -> real_arith(real_of(a), real_of(b), 2, bits, fpe))
+    if op == "/" then return Some((a, b) -> real_arith(real_of(a), real_of(b), 3, bits, fpe))
+    if op == "^" then return Some((a, b) -> real_pow(real_of(a), real_of(b), bits, fpe))
+    if op == "==" then return Some((a, b) -> Ok(VBool(real_of(a) == real_of(b))))
+    if op == "!=" then return Some((a, b) -> Ok(VBool(real_of(a) != real_of(b))))
+    if op == "<" then return Some((a, b) -> Ok(VBool(real_of(a) < real_of(b))))
+    if op == "<=" then return Some((a, b) -> Ok(VBool(real_of(a) <= real_of(b))))
+    if op == ">" then return Some((a, b) -> Ok(VBool(real_of(a) > real_of(b))))
+    if op == ">=" then return Some((a, b) -> Ok(VBool(real_of(a) >= real_of(b))))
+
+    None
+
+// `+`, `-`, `*` or `/` by number, one rounding at the width.
+private real_arith(x: real, y: real, k: int, bits: int, fpe: bool) -> Answer
+    if k == 3 && fpe && y == 0.0 then return trapped(REAL_DIVISION_BY_ZERO)
+
+    val r = if k == 0 then x + y elif k == 1 then x - y elif k == 2 then x * y else x / y
+
+    fpe_checked(rnd(r, bits), x, y, fpe)
+
+// C's `pow` at the width; a `real16` computes in `real32` and rounds, unchecked as the compiled one is.
+private real_pow(x: real, y: real, bits: int, fpe: bool) -> Answer
+    if bits == 16 then return Ok(VReal(rnd(real(f32(x).pow(f32(y))), 16)))
+
+    fpe_checked(if bits == 32 then real(f32(x).pow(f32(y))) else x.pow(y), x, y, fpe)
+
+// -- complex numbers --------------------------------------------------------------------------------
+
+// `a op b` on complex numbers whose parts have `bits` bits; `^` is not among them.
+private[nex] complex_op(op: string, bits: int) -> Option[Op2]
+    if op == "+" then return Some((a, b) -> Ok(VComplex(rnd(re_of(a) + re_of(b), bits), rnd(im_of(a) + im_of(b), bits))))
+    if op == "-" then return Some((a, b) -> Ok(VComplex(rnd(re_of(a) - re_of(b), bits), rnd(im_of(a) - im_of(b), bits))))
+    if op == "*" then return Some((a, b) -> complex_mul(re_of(a), im_of(a), re_of(b), im_of(b), bits))
+    if op == "/" then return Some((a, b) -> complex_div(re_of(a), im_of(a), re_of(b), im_of(b), bits))
+    if op == "==" then return Some((a, b) -> Ok(VBool(re_of(a) == re_of(b) && im_of(a) == im_of(b))))
+    if op == "!=" then return Some((a, b) -> Ok(VBool(re_of(a) != re_of(b) || im_of(a) != im_of(b))))
+
+    None
+
+// (ac - bd) + (ad + bc)i, as nex writes the product.
+private complex_mul(ar: real, ai: real, br: real, bi: real, bits: int) -> Answer
+    val rr = rnd(ar * br, bits)
+    val ii = rnd(ai * bi, bits)
+    val ri = rnd(ar * bi, bits)
+    val ir = rnd(ai * br, bits)
+
+    Ok(VComplex(rnd(rr - ii, bits), rnd(ri + ir, bits)))
+
+// ((ac + bd) + (bc - ad)i) / (c² + d²), the denominator zero a trap.
+private complex_div(ar: real, ai: real, br: real, bi: real, bits: int) -> Answer
+    val cc = rnd(br * br, bits)
+    val dd = rnd(bi * bi, bits)
+    val denom = rnd(cc + dd, bits)
+
+    if denom == 0.0 then return trapped(COMPLEX_DIVISION_BY_ZERO)
+
+    val rr = rnd(ar * br, bits)
+    val ii = rnd(ai * bi, bits)
+    val ir = rnd(ai * br, bits)
+    val ri = rnd(ar * bi, bits)
+    val re = rnd(rr + ii, bits)
+    val im = rnd(ir - ri, bits)
+
+    Ok(VComplex(rnd(re / denom, bits), rnd(im / denom, bits)))
+
+// `|z|` as MLIR's complex lowering computes it: max · sqrt(1 + (min / max)²), the smaller part where
+// that is NaN.
+private[nex] complex_abs(re: real, im: real, bits: int) -> real
+    val a = magnitude(re)
+    val b = magnitude(im)
+    val big = maximum(a, b)
+    val small = minimum(a, b)
+    val q = rnd(small / big, bits)
+    val qq = rnd(q * q, bits)
+    val r = rnd(big * rnd(rnd(qq + 1.0, bits).sqrt(), bits), bits)
+
+    if is_nan(r) then small else r
+
+// `arg(z)`: C's `atan2` at the width.
+private[nex] complex_arg(re: real, im: real, bits: int) -> real = libm2(LIBM_ATAN2, im, re, bits)
+
+// The principal square root, as the compiled program writes it out (Kahan): t = sqrt((|re| + |z|) /
+// 2); for re >= 0 the root is (t, im / 2t), else (|im| / 2t, ±t) with the sign of im. At z = 0 it is z.
+private[nex] complex_sqrt(re: real, im: real, bits: int) -> Value
+    val modulus = complex_abs(re, im, bits)
+    val half = rnd(rnd(magnitude(re) + modulus, bits) / 2.0, bits)
+    val t = rnd(half.sqrt(), bits)
+    val two_t = rnd(2.0 * t, bits)
+    val other = rnd(magnitude(im) / two_t, bits)
+    val right = re >= 0.0
+    val out_re = if right then t else other
+    val out_im = if right then rnd(im / two_t, bits) else t.copysign(im)
+
+    if modulus == 0.0 then VComplex(re, im) else VComplex(out_re, out_im)
+
+// `exp(z)`, as MLIR's lowering: e^re (cos im + i sin im), through e^(re / 2) twice where e^re alone
+// overflows, and a zero imaginary part kept zero.
+private[nex] complex_exp(re: real, im: real, bits: int) -> Value
+    val e = libm1(LIBM_EXP, re, bits)
+    val half = libm1(LIBM_EXP, rnd(re * 0.5, bits), bits)
+    val c = libm1(LIBM_COS, im, bits)
+    val s = libm1(LIBM_SIN, im, bits)
+    val huge = e == INFINITY
+    val r = if huge then rnd(rnd(half * c, bits) * half, bits) else rnd(e * c, bits)
+    val i = if huge then rnd(rnd(half * s, bits) * half, bits) else rnd(e * s, bits)
+
+    VComplex(r, if im == 0.0 then 0.0 else i)
+
+// `log(z)`: log |z| + i arg z.
+private[nex] complex_log(re: real, im: real, bits: int) -> Value = VComplex(libm1(LIBM_LOG, complex_abs(re, im, bits), bits), complex_arg(re, im, bits))
+
+// `sin(z)` and `cos(z)`, as MLIR's lowering: from e^im's half and its reciprocal half.
+private[nex] complex_sin(re: real, im: real, bits: int) -> Value
+    val e = libm1(LIBM_EXP, im, bits)
+    val p = rnd(0.5 * e, bits)
+    val q = rnd(0.5 / e, bits)
+
+    VComplex(rnd(rnd(p + q, bits) * libm1(LIBM_SIN, re, bits), bits), rnd(rnd(p - q, bits) * libm1(LIBM_COS, re, bits), bits))
+
+private[nex] complex_cos(re: real, im: real, bits: int) -> Value
+    val e = libm1(LIBM_EXP, im, bits)
+    val p = rnd(0.5 * e, bits)
+    val q = rnd(0.5 / e, bits)
+
+    VComplex(rnd(rnd(q + p, bits) * libm1(LIBM_COS, re, bits), bits), rnd(rnd(q - p, bits) * libm1(LIBM_SIN, re, bits), bits))
+
+// -- the prelude's real functions -------------------------------------------------------------------
+
+// `minimum` and `maximum` as `arith.minimumf` and `arith.maximumf`: a NaN wins, and -0 is below +0.
+private[nex] minimum(x: real, y: real) -> real
+    if is_nan(x) then return x
+    if is_nan(y) then return y
+    if x == y then return if x.bits() >> 63 != 0 then x else y
+
+    if x < y then x else y
+
+private[nex] maximum(x: real, y: real) -> real
+    if is_nan(x) then return x
+    if is_nan(y) then return y
+    if x == y then return if x.bits() >> 63 != 0 then y else x
+
+    if x > y then x else y
+
+// The functions of the C library the prelude names, by their `real64` names; `real32` adds `f`.
+private[nex] val PRELUDE_LIBM = ["cbrt", "exp", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "atan2", "hypot"]
+
+private val LIBM_EXP: usize = 1
+private val LIBM_LOG: usize = 2
+private val LIBM_SIN: usize = 5
+private val LIBM_COS: usize = 6
+private val LIBM_ATAN2: usize = 17
+
+// Function `k` of `LIBM` of one argument at the width: a `real16` through `real32` and rounded.
+private[nex] libm1(k: usize, x: real, bits: int) -> real
+    if bits == 64 then return libm64(k, x)
+
+    rnd(real(libm32(k, f32(x))), bits)
+
+// The same for `atan2` and `hypot`.
+private[nex] libm2(k: usize, x: real, y: real, bits: int) -> real
+    if bits == 64 then return if k == LIBM_ATAN2 then x.atan2(y) else x.hypot(y)
+
+    val a = f32(x)
+    val b = f32(y)
+
+    rnd(real(if k == LIBM_ATAN2 then a.atan2(b) else a.hypot(b)), bits)
+
+private libm64(k: usize, x: real) -> real = k match
+    0 -> x.cbrt()
+    1 -> x.exp()
+    2 -> x.ln()
+    3 -> x.log2()
+    4 -> x.log10()
+    5 -> x.sin()
+    6 -> x.cos()
+    7 -> x.tan()
+    8 -> x.asin()
+    9 -> x.acos()
+    10 -> x.atan()
+    11 -> x.sinh()
+    12 -> x.cosh()
+    13 -> x.tanh()
+    14 -> x.asinh()
+    15 -> x.acosh()
+    _ -> x.atanh()
+
+private libm32(k: usize, x: f32) -> f32 = k match
+    0 -> x.cbrt()
+    1 -> x.exp()
+    2 -> x.ln()
+    3 -> x.log2()
+    4 -> x.log10()
+    5 -> x.sin()
+    6 -> x.cos()
+    7 -> x.tan()
+    8 -> x.asin()
+    9 -> x.acos()
+    10 -> x.atan()
+    11 -> x.sinh()
+    12 -> x.cosh()
+    13 -> x.tanh()
+    14 -> x.asinh()
+    15 -> x.acosh()
+    _ -> x.atanh()
+
+// `sqrt`, `floor`, `ceil`, `trunc` and `round` (half away from zero) at the width.
+private[nex] real_math(name: string, x: real, bits: int) -> real =
+    if name == "sqrt" then rnd(x.sqrt(), bits)
+    elif name == "floor" then x.floor()
+    elif name == "ceil" then x.ceil()
+    elif name == "trunc" then x.trunc()
+    else x.round()
+
+private[nex] real_abs(x: real) -> real = magnitude(x)
+
+// -1, 0 or 1; a zero and a NaN are their own sign.
+private[nex] real_sign(x: real) -> real = if x > 0.0 then 1.0 elif x < 0.0 then -1.0 else x
+
+// -- conversions ------------------------------------------------------------------------------------
+
+// An integer to a real of `bits` bits, rounded once.
+private[nex] int_to_real(v: long, signed: bool, bits: int) -> real
+    if signed then return if bits == 64 then real(v) elif bits == 32 then real(f32(v)) else real(f16(v))
+
+    val u = ulong.wrap(v)
+
+    if bits == 64 then real(u) elif bits == 32 then real(f32(u)) else real(f16(u))
+
+// A real to an integer, truncated toward zero; NaN, an infinity and a value out of range trap.
+private[nex] real_to_int(x: real, tb: int, ts: bool, from: string, to: string) -> Answer
+    // The open interval of reals that truncate into range, its ends exact in `real64`.
+    val lo = if !ts then -1.0 elif tb == 64 then -9223372036854775808.0 else -real(i128(1) << (tb - 1)) - 1.0
+    val hi = if ts then real(i128(1) << (tb - 1)) else real(i128(1) << tb)
+    val above = if ts && tb == 64 then x >= lo else x > lo
+
+    if !(above && x < hi) then return trapped(out_of_range_message(from, to))
+
+    val t = x.trunc()
+
+    Ok(VInt(if !ts && t >= 9223372036854775808.0 then long.wrap(ulong(t)) else long(t)))
+
+// -- text -------------------------------------------------------------------------------------------
+
+// A scalar in nex's spelling, as `print` writes it.
+private[nex] scalar_text(v: Value, t: Ty) -> string = t match
+    Int(bits, signed) -> if bits == 64 && !signed then uint_text(ulong.wrap(int_of(v))) else int_text(int_of(v))
+    Real(bits) -> format_real_nex(real_of(v), bits)
+    Complex(bits) -> complex_text(re_of(v), im_of(v), bits)
+    Bool -> bool_text(bool_of(v))
+    _ -> str_of(v)
+
+// A scalar under an `f"..."` specifier, which the elaborator has checked against its type.
+private[nex] formatted_text(v: Value, t: Ty, spec: string) -> string
+    if spec.ends_with("s") then return str_spec_text(scalar_text(v, t), spec)
+
+    base_of(t) match
+        Int(bits, signed) -> int_spec_text(int_of(v), bits, signed, spec)
+        Real(_) -> real_spec_text(real_of(v), spec)
+        _ -> scalar_text(v, t)
+

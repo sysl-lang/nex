@@ -1,0 +1,871 @@
+module sh.sysl.nex
+
+// The interpreter: the second engine, which runs the typed IR the compiler lowers (PLAN.md M13), so
+// one front end serves both and a sysl program runs nex with no toolchain at all.
+//
+// **The program is compiled once into sysl closures, and the closures run.** Each node of the typed
+// IR becomes a closure that computes it, built when the program is loaded: the operation is chosen for
+// the node's type then (`interp_value.sysl`), a local is a slot number of its function's frame, a
+// function a number into the machine's table, a loop's `exit` and `cycle` the loop's number. So a
+// node's kind, its type and every name are decided once rather than on every pass of a loop, and a
+// closure is nothing but the work. A tree walker would decide them again each time, and an instruction
+// form would cost a second compiler and a dispatch loop for the same effect.
+//
+// **A trap is a value.** Every closure answers `Result[Value, Signal]`, and a trap, `stop`, `return`,
+// `exit` and `cycle` travel outward as a `Signal` to whatever takes them: the loop its `exit` names, the
+// call a `return` ends, the `assert_traps` around a trap, or the program's end. Nothing jumps, so
+// nothing the frames between hold is lost.
+//
+// **It never calls C** (PLAN.md): a program declaring an `extern` is refused, and runs on the
+// compiled engine alone. Printing, formatting and the words of every trap are the runtime's sysl
+// functions, which the compiled program calls through C, so the two engines write the same bytes.
+//
+// What the interpreter does not run yet it refuses before running anything: every construct it meets
+// is checked as the program is compiled, and each one it lacks is a diagnostic `… is not interpreted
+// yet`, as the compiler's is `… is not compiled yet`.
+
+import nex_runtime.sh.sysl.nex_runtime.{ZERO_STEP, arg_index_message, int_name, out_of_range_message}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.{Diagnostic, Span, error}
+
+// Where a program's text goes: what `print` writes, and what `eprint` does.
+enum Stream
+    StdOut
+    StdErr
+
+// How an interpreted program ended: with the status its `main` returning (0) or `stop` gave, or by a
+// trap nothing caught, with its message — which a compiled program writes to standard error after
+// `trap: ` before it aborts (`uncaught_text`).
+enum Ending
+    Exit(status: int)
+    Trap(message: string)
+
+// How deep calls may nest before the interpreter traps (DESIGN §11.3).
+val MAX_CALL_DEPTH = 10000
+
+// `p` run: its `main` called with `args` as the program's arguments, after every module-level binding
+// is initialized, what it prints handed to `write` as it is printed. Or, before anything runs, why it
+// cannot be interpreted. In `nex test`'s build (`TProgram.test_build`), `test` numbers the test run
+// instead of `main`, from 0 in `TProgram.tests`.
+interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit, fpe_trap: bool = false, test: Option[usize] = None) -> Result[Ending, Buf[Diagnostic]]
+    var kept: Buf[string] = buf()
+
+    for a in args
+        kept.push(a)
+
+    val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), 0)
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), None, false, buf(), buf())
+    val init = it.program(test)
+
+    if it.diags.len() > 0 then return Err(it.diags)
+
+    Ok(run_program(m, init))
+
+// What of `p` the interpreter does not run yet, each a diagnostic; empty where it runs all of it.
+// Nothing is run.
+interpretable(p: TProgram) -> Buf[Diagnostic]
+    val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), 0)
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), None, false, buf(), buf())
+
+    it.program(None)
+    it.diags
+
+// The initializers run in order, then `main`; the first signal that leaves one ends the program.
+private run_program(m: &Machine, init: Buf[Compiled]) -> Ending
+    for g in init
+        val code = g.code
+
+        code(frame_of(g.slots)) match
+            Ok(_) -> ()
+            Err(s) -> return ended(s)
+
+    Exit(0)
+
+private ended(s: Signal) -> Ending = s match
+    Trapped(message) -> Trap(message)
+    Stopped(code) -> Exit(code)
+    _ -> Exit(0)
+
+// -- the running program --------------------------------------------------------------------------
+
+private[nex] type Code = &Fn(&Cells) -> Answer
+
+// A function compiled: its code, and how many slots its frame holds.
+private[nex] struct Compiled
+    code: Code
+    slots: usize
+
+// What every closure of a running program shares: its arguments, where its text goes, whether real
+// arithmetic traps, the module-level bindings, the functions by number, and how deep the calls are.
+private[nex] struct Machine
+    args: Buf[string]
+    write: &Fn(Stream, string) -> unit
+    fpe: bool
+    globals: &Cells
+    funs: Buf[Compiled]
+    depth: int
+
+private frame_of(slots: usize) -> &Cells
+    var v: Buf[Value] = buf()
+
+    for _ in 0..<slots
+        v.push(VVoid)
+
+    Cells(v)
+
+private[nex] emit(m: &Machine, s: Stream, text: string)
+    val w = m.write
+
+    w(s, text)
+
+// What a `while`, a `for` or a `for a in args` does with the signal its body gave: 0 to pass it on, 1
+// for the loop's own `exit`, 2 for its own `cycle`.
+private landed(s: Signal, loop_id: usize) -> int = s match
+    Exiting(id) -> if id == loop_id then 1 else 0
+    Cycling(id) -> if id == loop_id then 2 else 0
+    _ -> 0
+
+private deref(v: Value) -> Value = v match
+    VRef(cells, k) -> cells.v[k]
+    _ -> v
+
+private store_through(r: Value, v: Value) = r match
+    VRef(cells, k) -> cells.v.set(k, v)
+    _ -> ()
+
+// A call of function `k`: its frame made, the arguments stored in its first slots, its body run, a
+// `return` taken as its value.
+private call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answer
+    val f = m.funs[k]
+    val frame = frame_of(f.slots)
+
+    for j in 0..<args.len()
+        val a = args[j]
+
+        frame.v.set(j, a(c)?)
+
+    if m.depth >= MAX_CALL_DEPTH then return trapped(call_depth_message())
+
+    m.depth += 1
+
+    val code = f.code
+    val r = code(frame)
+
+    m.depth -= 1
+
+    r match
+        Err(s) -> s match
+            Returning(v) -> Ok(v)
+            _ -> Err(s)
+        _ -> r
+
+private[nex] call_depth_message() -> string = s"calls nested more than $MAX_CALL_DEPTH deep"
+
+// -- compiling --------------------------------------------------------------------------------------
+
+// The compiler from typed IR to closures, and the diagnostics of what it does not interpret.
+private[nex] struct Interp
+    prog: TProgram
+    m: &Machine
+    diags: Buf[Diagnostic]
+    // By local, its slot in the frame of the function being compiled, -1 for none yet.
+    slot: Buf[long]
+    // The locals given slots in that function, to clear when it is done.
+    used: Buf[usize]
+    next: usize
+    // The first slot of each chain being compiled, innermost last.
+    chains: Buf[usize]
+    // `main`'s parameter, the program's arguments.
+    args_local: Option[usize]
+    // Whether the function being compiled has reported what it lacks; one diagnostic is enough.
+    reported: bool
+    fun_names: Buf[string]
+    global_names: Buf[string]
+
+impl Interp
+    // A construct not interpreted yet, reported once per function.
+    later(*self, span: Span, what: string) -> Code
+        if !self.reported
+            self.reported = true
+            self.diags.push(error(span, s"$what is not interpreted yet"))
+
+        (c) -> Ok(VVoid)
+
+    // Every function compiled into the machine; the module-level initializers, in the order they run,
+    // and the call of `main` — or of test `test` — after them.
+    program(*self, test: Option[usize]) -> Buf[Compiled]
+        var globals: Buf[TGlobal] = buf()
+        var tuples: Buf[TGlobalTuple] = buf()
+        var funs: Buf[TFun] = buf()
+
+        for _ in 0..<self.prog.locals.len()
+            self.slot.push(-1)
+
+        for d in self.prog.decls
+            d match
+                FunDecl(f) ->
+                    funs.push(f)
+                    self.fun_names.push(f.name)
+                GlobalDecl(g) ->
+                    globals.push(g)
+                    self.global_names.push(g.name)
+                    self.m.globals.v.push(VVoid)
+                TupleGlobalDecl(g) ->
+                    tuples.push(g)
+                    self.reported = false
+                    self.later(g.span, "a tuple taken apart")
+                ExternDecl(x) -> self.diags.push(error(x.span, "a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled"))
+                _ -> ()
+
+        for f in funs
+            val c = self.fun(f)
+
+            self.m.funs.push(c)
+
+        var out: Buf[Compiled] = buf()
+
+        for k in init_order(self.prog, globals, tuples)
+            if k < globals.len() then out.push(self.global(globals[k], k))
+
+        out.push(self.entry(test match
+            Some(k) -> self.prog.tests[k]
+            None -> "main"
+        ))
+        out
+
+    // A fresh frame layout for a function.
+    begin(*self)
+        for id in self.used
+            self.slot.set(id, -1)
+
+        self.used = buf()
+        self.next = 0
+        self.reported = false
+        self.args_local = None
+
+    // The slot of local `id` in the frame being compiled, given one where it has none.
+    slot_of(*self, id: usize) -> usize
+        if self.slot[id] >= 0 then return usize(self.slot[id])
+
+        self.slot.set(id, long(self.next))
+        self.used.push(id)
+        self.next += 1
+        self.next - 1
+
+    fun(*self, f: TFun) -> Compiled
+        self.begin()
+
+        for p in f.params
+            self.slot_of(p)
+
+        if f.name == "main" && f.params.len() == 1 then self.args_local = Some(f.params[0])
+
+        val body = self.ex(f.body)
+
+        Compiled(body, self.next)
+
+    // A module-level binding's initializer, run in a frame of its own, its value stored.
+    global(*self, g: TGlobal, k: usize) -> Compiled
+        self.begin()
+
+        val init = self.ex(g.init)
+        val m = self.m
+
+        Compiled((c) ->
+            m.globals.v.set(k, init(c)?)
+            Ok(VVoid)
+        , self.next)
+
+    // The call of the function `name` the program starts at.
+    entry(*self, name: string) -> Compiled
+        val m = self.m
+        val k = self.fun_number(name)
+        var none: Buf[Code] = buf()
+
+        k match
+            Some(n) -> Compiled((c) -> call_fun(m, n, none, c), 0)
+            None -> Compiled((c) -> Ok(VVoid), 0)
+
+    fun_number(*self, name: string) -> Option[usize]
+        for k in 0..<self.fun_names.len()
+            if self.fun_names[k] == name then return Some(k)
+
+        None
+
+    is_extern(*self, name: string) -> bool
+        for d in self.prog.decls
+            d match
+                ExternDecl(x) -> if x.name == name then return true
+                _ -> ()
+
+        false
+
+    global_number(*self, name: string) -> usize
+        for k in 0..<self.global_names.len()
+            if self.global_names[k] == name then return k
+
+        0
+
+    // Whether a value of `t` is one the interpreter holds, or what it is that it does not.
+    unheld(*self, t: Ty) -> Option[string] = t match
+        Array(_, _) -> Some("an array")
+        Tuple(_) -> Some("a tuple")
+        Nominal(_, _) -> Some("a struct or an enum")
+        Measured(_, _) -> Some("a value with a unit of measure")
+        CPtr -> Some("a C pointer")
+        _ -> None
+
+    is_args(*self, e: TExpr) -> bool = *e.kind match
+        TLocal(id) -> self.args_local == Some(id)
+        _ -> false
+
+    // -- expressions -------------------------------------------------------------------------------
+
+    ex(*self, e: TExpr) -> Code
+        self.unheld(e.ty) match
+            Some(what) -> return self.later(e.span, what)
+            None -> ()
+
+        self.ex_kind(e)
+
+    ex_kind(*self, e: TExpr) -> Code
+        val m = self.m
+
+        *e.kind match
+            TLiteral(v, _) -> return self.constant_code(self.literal(e.span, v, e.ty))
+            TConstant(name, _) -> return self.constant_code(self.named_constant(e.span, name, e.ty))
+            TLocal(id) ->
+                if self.args_local == Some(id) then return self.later(e.span, "`args` other than `args[k]`, `length(args)` and `for a in args`")
+
+                val s = self.slot_of(id)
+
+                if self.is_inout(id) then return (c) -> Ok(deref(c.v[s]))
+
+                return (c) -> Ok(c.v[s])
+            TGlobalRef(name) ->
+                val g = self.global_number(name)
+
+                return (c) -> Ok(m.globals.v[g])
+            TFnRef(name) ->
+                self.fun_number(name) match
+                    Some(k) -> return (c) -> Ok(VFn(k))
+                    None -> return self.later(e.span, s"`$name` as a value")
+            TPromote(v) -> return self.converted(e.span, v, e.ty, false)
+            TConvert(v, traps) -> return self.converted(e.span, v, e.ty, traps)
+            TMakeComplex(re, im) ->
+                val r = self.ex(re)
+                val i = self.ex(im)
+
+                return (c) ->
+                    val x = real_of(r(c)?)
+
+                    Ok(VComplex(x, real_of(i(c)?)))
+            TComplexPart(v, imag) ->
+                val z = self.ex(v)
+
+                return (c) ->
+                    val w = z(c)?
+
+                    Ok(VReal(if imag then im_of(w) else re_of(w)))
+            TBinary(op, l, r) -> return self.binary(e.span, op, l, r)
+            TLogical(op, l, r) ->
+                val a = self.ex(l)
+                val b = self.ex(r)
+                val and = op == "and"
+
+                return (c) ->
+                    val x = bool_of(a(c)?)
+
+                    if x != and then Ok(VBool(x)) else b(c)
+            TUnary(op, v) -> return self.unary(e.span, op, v)
+            TChain(operands, links) -> return self.chain(operands, links)
+            TChainOperand(k) ->
+                val s = self.chains[self.chains.len() - 1] + k
+
+                return (c) -> Ok(c.v[s])
+            TCall(callee, args) -> return self.call(e.span, callee, args)
+            TBuiltin(name, args) -> return self.builtin(e.span, name, args, e.ty)
+            TBorrow(_) -> return self.later(e.span, "a place passed `inout` other than as an argument")
+            TLambdaRef(_) -> return self.later(e.span, "a lambda")
+            TInterp(parts, _) ->
+                val text = self.interp(parts)
+
+                return (c) -> Ok(VStr(text(c)?))
+            TIf(cond, a, b) ->
+                val k = self.ex(cond)
+                val t = self.ex(a)
+
+                b match
+                    Some(x) ->
+                        val f = self.ex(x)
+
+                        return (c) -> if bool_of(k(c)?) then t(c) else f(c)
+                    None ->
+                        return (c) ->
+                            if bool_of(k(c)?) then t(c)?
+
+                            Ok(VVoid)
+            TWhile(id, cond, body) -> return self.while_loop(id, cond, body)
+            TFor(id, v, lo, hi, inclusive, step, body) -> return self.for_loop(e.span, id, v, lo, hi, inclusive, step, body)
+            TBlock(items, result) ->
+                var codes: Buf[Code] = buf()
+
+                for it in items
+                    codes.push(self.ex(it))
+
+                val r = self.ex(result)
+
+                return (c) ->
+                    for k in 0..<codes.len()
+                        val f = codes[k]
+
+                        f(c)?
+
+                    r(c)
+            TLet(id, init) ->
+                self.unheld(self.prog.locals[id].ty) match
+                    Some(what) -> return self.later(e.span, what)
+                    None -> ()
+
+                val s = self.slot_of(id)
+                val v = self.ex(init)
+
+                return (c) ->
+                    c.v.set(s, v(c)?)
+                    Ok(VVoid)
+            TAssign(op, target, value) -> return self.assign(e.span, op, target, value)
+            TReturn(v) ->
+                v match
+                    Some(x) ->
+                        val r = self.ex(x)
+
+                        return (c) -> Err(Returning(r(c)?))
+                    None -> return (c) -> Err(Returning(VVoid))
+            TExit(id) -> return (c) -> Err(Exiting(id))
+            TCycle(id) -> return (c) -> Err(Cycling(id))
+            TStop(code) ->
+                code match
+                    Some(x) ->
+                        val r = self.ex(x)
+                        val signed = is_signed(base_of(x.ty))
+
+                        return (c) -> Err(Stopped(int(wrapped(wide(int_of(r(c)?), signed), 32, true))))
+                    None -> return (c) -> Err(Stopped(0))
+            TMatch(s, arms) -> return self.match_expr(e.span, s, arms)
+            TArray(a) -> return self.array(e.span, *a)
+            TParallel(_) -> return self.later(e.span, "a `parallel` construct")
+            TRescale(_, _) -> return self.later(e.span, "a value with a unit of measure")
+            TUnitAs(_) -> return self.later(e.span, "a value with a unit of measure")
+            TTuple(_) -> return self.later(e.span, "a tuple")
+            TTupleField(_, _) -> return self.later(e.span, "a tuple")
+            TNew(_) -> return self.later(e.span, "a struct")
+            TField(_, _, _) -> return self.later(e.span, "a struct")
+            TVariant(_, _, _) -> return self.later(e.span, "an enum")
+            TDestructure(_, _, _) -> return self.later(e.span, "a tuple taken apart")
+            TAssignTuple(_, _) -> return self.later(e.span, "a tuple taken apart")
+            TInvalid -> return self.later(e.span, "an invalid expression")
+    end ex_kind
+
+    is_inout(*self, id: usize) -> bool = self.prog.locals[id].kind match
+        LParam(mode) -> mode == Inout
+        _ -> false
+
+    constant_code(*self, v: Value) -> Code = (c) -> Ok(v)
+
+    literal(*self, span: Span, v: Lit, t: Ty) -> Value = v match
+        IntVal(n) -> base_of(t) match
+            Int(_, _) -> VInt(long.wrap(n))
+            Real(b) -> VReal(rnd(real(n), b))
+            Complex(b) -> VComplex(rnd(real(n), b), 0.0)
+            _ -> VVoid
+        RealVal(x) -> base_of(t) match
+            Real(b) -> VReal(rnd(x, b))
+            Complex(b) -> VComplex(rnd(x, b), 0.0)
+            _ -> VVoid
+        BoolVal(b) -> VBool(b)
+        StrVal(text) -> VStr(text)
+        VoidVal -> VVoid
+
+    // `pi`, `e`, `inf`, `nan` or `i` at the type it took.
+    named_constant(*self, span: Span, name: string, t: Ty) -> Value
+        val b = base_of(t)
+        val bits = bits_of(b)
+
+        if name == "i" then return VComplex(0.0, 1.0)
+
+        val x = if name == "nan" then 0.0 / 0.0 elif name == "pi" then 3.141592653589793 elif name == "e" then 2.718281828459045 else 1.0 / 0.0
+        val r = rnd(x, bits)
+
+        if is_complex(b) then VComplex(r, 0.0) else VReal(r)
+
+    // -- operators ---------------------------------------------------------------------------------
+
+    // The operation `op` on two values of type `t`.
+    op2(*self, span: Span, op: string, t: Ty) -> Option[Op2] = base_of(t) match
+        Int(bits, signed) -> int_op(op, bits, signed)
+        Real(bits) -> real_op(op, bits, self.m.fpe)
+        Complex(bits) -> complex_op(op, bits)
+        Bool ->
+            if op == "==" then Some((a, b) -> Ok(VBool(bool_of(a) == bool_of(b))))
+            elif op == "!=" then Some((a, b) -> Ok(VBool(bool_of(a) != bool_of(b))))
+            else None
+        Str ->
+            if op == "+" then Some((a, b) -> Ok(VStr(str_of(a) + str_of(b))))
+            elif op == "==" then Some((a, b) -> Ok(VBool(str_of(a) == str_of(b))))
+            elif op == "!=" then Some((a, b) -> Ok(VBool(str_of(a) != str_of(b))))
+            else None
+        _ -> None
+
+    // `base ^ n` with an integer `n` of its own type, the base keeping its type (DESIGN §2.2).
+    power(*self, span: Span, at: Ty, nt: Ty) -> Option[Op2]
+        val n_signed = is_signed(base_of(nt))
+
+        base_of(at) match
+            Int(bits, signed) -> Some((a, b) -> int_pow(int_of(a), int_of(b), bits, signed, n_signed))
+            Real(bits) ->
+                val pow = self.op2(span, "^", at).unwrap()
+
+                Some((a, b) -> pow(a, VReal(int_to_real(int_of(b), n_signed, bits))))
+            _ -> None
+
+    // The operation of `l op r`, or of `x op= r`, `l` being of the left's type.
+    operator(*self, span: Span, op: string, lt: Ty, rt: Ty) -> Option[Op2] =
+        if op == "^" && !ty_eq(lt, rt) then self.power(span, lt, rt) else self.op2(span, op, lt)
+
+    binary(*self, span: Span, op: string, l: TExpr, r: TExpr) -> Code
+        val a = self.ex(l)
+        val b = self.ex(r)
+
+        self.operator(span, op, l.ty, r.ty) match
+            Some(f) -> (c) ->
+                val x = a(c)?
+
+                f(x, b(c)?)
+            None -> self.later(span, s"`$op` on ${show_ty(l.ty)}")
+
+    unary(*self, span: Span, op: string, v: TExpr) -> Code
+        val a = self.ex(v)
+
+        if op == "not" then return (c) -> Ok(VBool(!bool_of(a(c)?)))
+
+        base_of(v.ty) match
+            Int(bits, signed) -> (c) -> int_result(-wide(int_of(a(c)?), signed), bits, signed)
+            Real(_) -> (c) -> Ok(VReal(-real_of(a(c)?)))
+            Complex(_) -> (c) ->
+                val z = a(c)?
+
+                Ok(VComplex(-re_of(z), -im_of(z)))
+            _ -> self.later(span, s"`$op` on ${show_ty(v.ty)}")
+
+    // `a < b <= c`: each operand once, left to right, the rest skipped at the first false link. The
+    // operands are kept in slots of the frame, where the links read them.
+    chain(*self, operands: Buf[TExpr], links: Buf[Link]) -> Code
+        val base = self.next
+
+        self.next += operands.len()
+        self.chains.push(base)
+
+        var ops: Buf[Code] = buf()
+        var tests: Buf[Code] = buf()
+
+        for o in operands
+            ops.push(self.ex(o))
+
+        for l in links
+            tests.push(self.binary(l.lhs.span, l.op, l.lhs, l.rhs))
+
+        self.chains.pop()
+
+        (c) ->
+            val first = ops[0]
+
+            c.v.set(base, first(c)?)
+
+            for k in 0..<tests.len()
+                val next = ops[k + 1]
+                val test = tests[k]
+
+                c.v.set(base + k + 1, next(c)?)
+
+                if !bool_of(test(c)?) then return Ok(VBool(false))
+
+            Ok(VBool(true))
+
+    // -- conversions -------------------------------------------------------------------------------
+
+    converted(*self, span: Span, v: TExpr, to: Ty, traps: bool) -> Code
+        val a = self.ex(v)
+
+        self.conversion(span, base_of(v.ty), base_of(to), traps) match
+            Some(f) -> (c) -> f(a(c)?)
+            None -> self.later(span, s"a conversion from ${show_ty(v.ty)} to ${show_ty(to)}")
+
+    // `v` of type `from` as a `to`: a widening, or a conversion that traps where `traps` says the value
+    // can be out of the target's range (DESIGN §2.4).
+    conversion(*self, span: Span, from: Ty, to: Ty, traps: bool) -> Option[Op1]
+        if ty_eq(from, to) then return Some((x) -> Ok(x))
+
+        val fpe = self.m.fpe
+
+        from match
+            Int(fb, fs) -> to match
+                Int(tb, ts) ->
+                    val message = out_of_range_message(int_name(fb, fs), int_name(tb, ts))
+
+                    return Some((x) ->
+                        val n = wide(int_of(x), fs)
+
+                        if traps && !fits(n, tb, ts) then trapped(message) else Ok(VInt(wrapped(n, tb, ts)))
+                    )
+                Real(tb) -> return Some((x) -> Ok(VReal(int_to_real(int_of(x), fs, tb))))
+                Complex(tb) -> return Some((x) -> Ok(VComplex(int_to_real(int_of(x), fs, tb), 0.0)))
+                _ -> ()
+            Real(fb) -> to match
+                Real(tb) -> return Some((x) -> narrowed(real_of(x), fb, tb, fpe))
+                Int(tb, ts) ->
+                    val f = show_ty(from)
+                    val t = show_ty(to)
+
+                    return Some((x) -> real_to_int(real_of(x), tb, ts, f, t))
+                Complex(tb) -> return Some((x) ->
+                    val r = narrowed(real_of(x), fb, tb, fpe)?
+
+                    Ok(VComplex(real_of(r), 0.0))
+                )
+                _ -> ()
+            Complex(fb) -> to match
+                Complex(tb) -> return Some((x) ->
+                    val re = narrowed(re_of(x), fb, tb, fpe)?
+                    val im = narrowed(im_of(x), fb, tb, fpe)?
+
+                    Ok(VComplex(real_of(re), real_of(im)))
+                )
+                _ -> ()
+            _ -> ()
+
+        None
+    end conversion
+
+    // -- calls -------------------------------------------------------------------------------------
+
+    call(*self, span: Span, callee: TExpr, args: Buf[TExpr]) -> Code
+        var codes: Buf[Code] = buf()
+
+        for a in args
+            codes.push(self.argument(a))
+
+        val m = self.m
+
+        *callee.kind match
+            TFnRef(name) ->
+                self.fun_number(name) match
+                    Some(k) -> return (c) -> call_fun(m, k, codes, c)
+                    // An `extern`, refused where it is declared.
+                    None -> return if self.is_extern(name) then (c) -> Ok(VVoid) else self.later(span, s"a call of `$name`")
+            _ -> ()
+
+        val f = self.ex(callee)
+
+        (c) -> call_value(m, f(c)?, codes, c)
+
+    // An argument: its value, or for an `inout` parameter the place it names.
+    argument(*self, a: TExpr) -> Code
+        *a.kind match
+            TBorrow(place) ->
+                val m = self.m
+
+                *place.kind match
+                    TLocal(id) ->
+                        val s = self.slot_of(id)
+
+                        if self.is_inout(id) then return (c) -> Ok(c.v[s])
+
+                        return (c) -> Ok(VRef(c, s))
+                    TGlobalRef(name) ->
+                        val g = self.global_number(name)
+
+                        return (c) -> Ok(VRef(m.globals, g))
+                    _ -> return self.later(a.span, "an element or a field passed `inout`")
+            _ -> self.ex(a)
+
+    // -- statements --------------------------------------------------------------------------------
+
+    assign(*self, span: Span, op: string, target: TExpr, value: TExpr) -> Code
+        val v = self.ex(value)
+        val read = self.ex(target)
+        val m = self.m
+
+        val step: Op2 = if op == "=" then (old, x) -> Ok(x)
+                        else self.operator(span, op[0..<op.len - 1], target.ty, value.ty) match
+                            Some(f) -> f
+                            None -> return self.later(span, s"`$op` on ${show_ty(target.ty)}")
+
+        *target.kind match
+            TLocal(id) ->
+                val s = self.slot_of(id)
+
+                if self.is_inout(id)
+                    return (c) ->
+                        val x = v(c)?
+
+                        store_through(c.v[s], step(deref(c.v[s]), x)?)
+                        Ok(VVoid)
+
+                return (c) ->
+                    val x = v(c)?
+
+                    c.v.set(s, step(c.v[s], x)?)
+                    Ok(VVoid)
+            TGlobalRef(name) ->
+                val g = self.global_number(name)
+
+                return (c) ->
+                    val x = v(c)?
+
+                    m.globals.v.set(g, step(m.globals.v[g], x)?)
+                    Ok(VVoid)
+            _ -> self.later(span, "an assignment to an element or a field")
+
+    while_loop(*self, id: usize, cond: TExpr, body: TExpr) -> Code
+        val k = self.ex(cond)
+        val b = self.ex(body)
+
+        (c) ->
+            loop
+                if !bool_of(k(c)?) then break
+
+                b(c) match
+                    Ok(_) -> ()
+                    Err(s) ->
+                        val l = landed(s, id)
+
+                        if l == 0 then return Err(s)
+                        if l == 1 then break
+
+            Ok(VVoid)
+
+    // `for v in lo..hi by step`: the trip worked out before the first pass, as Fortran's `DO` does and
+    // the compiled loop does, so the counter never steps past `hi`.
+    for_loop(*self, span: Span, id: usize, var_id: usize, lo_e: TExpr, hi_e: TExpr, inclusive: bool, step_e: Option[TExpr], body: TExpr) -> Code
+        val vt = base_of(self.prog.locals[var_id].ty)
+        val signed = is_signed(vt)
+        val lo = self.ex(lo_e)
+        val hi = self.ex(hi_e)
+        val stepped = step_e.is_some()
+        val step = step_e match
+            Some(s) -> self.ex(s)
+            None -> self.constant_code(VInt(1))
+        val s = self.slot_of(var_id)
+        val b = self.ex(body)
+
+        (c) ->
+            val first = wide(int_of(lo(c)?), signed)
+            val last_bound = wide(int_of(hi(c)?), signed)
+            val by = wide(int_of(step(c)?), signed)
+
+            if stepped && by == 0 then return trapped(ZERO_STEP)
+
+            val up = by > 0
+            val empty = if up then (if inclusive then last_bound < first else last_bound <= first)
+                        else (if inclusive then first < last_bound else first <= last_bound)
+
+            if empty then return Ok(VVoid)
+
+            val distance = (if up then last_bound - first else first - last_bound) - (if inclusive then 0 else 1)
+            val last = first + distance / (if up then by else -by) * by
+            var k = first
+
+            loop
+                c.v.set(s, VInt(long.wrap(k)))
+
+                b(c) match
+                    Ok(_) -> ()
+                    Err(sig) ->
+                        val l = landed(sig, id)
+
+                        if l == 0 then return Err(sig)
+                        if l == 1 then break
+
+                if k == last then break
+
+                k += by
+
+            Ok(VVoid)
+    end for_loop
+
+    // `s match ...` over a scalar: its one arm binds the value, or ignores it.
+    match_expr(*self, span: Span, s: TExpr, arms: Buf[TArm]) -> Code
+        val v = self.ex(s)
+
+        arms[0].pat match
+            PAny(bind) ->
+                val body = self.ex(arms[0].body)
+
+                bind match
+                    Some(id) ->
+                        val k = self.slot_of(id)
+
+                        (c) ->
+                            c.v.set(k, v(c)?)
+                            body(c)
+                    None -> (c) ->
+                        v(c)?
+                        body(c)
+            PVariant(_, _, _) -> self.later(span, "a `match` on an enum")
+
+    // -- the program's arguments -------------------------------------------------------------------
+
+    array(*self, span: Span, a: TArr) -> Code
+        val m = self.m
+
+        a match
+            TIndex(target, subs) ->
+                if self.is_args(target) && subs.len() == 1
+                    subs[0] match
+                        TSubAt(i) ->
+                            val k = self.ex(i)
+                            val signed = is_signed(base_of(i.ty))
+
+                            return (c) -> arg_at(m, long.wrap(wide(int_of(k(c)?), signed)))
+                        _ -> ()
+            TForEach(id, var_id, xs, body) ->
+                if self.is_args(xs)
+                    val s = self.slot_of(var_id)
+                    val b = self.ex(body)
+
+                    return (c) ->
+                        for k in 0..<m.args.len()
+                            c.v.set(s, VStr(m.args[k]))
+
+                            b(c) match
+                                Ok(_) -> ()
+                                Err(sig) ->
+                                    val l = landed(sig, id)
+
+                                    if l == 0 then return Err(sig)
+                                    if l == 1 then break
+
+                        Ok(VVoid)
+            _ -> ()
+
+        self.later(span, "an array")
+end Interp
+
+private arg_at(m: &Machine, k: long) -> Answer
+    val count = long(m.args.len())
+
+    if k < 1 || k > count then return trapped(arg_index_message(k, count))
+
+    Ok(VStr(m.args[usize(k - 1)]))
+
+// A call through a function value.
+private[nex] call_value(m: &Machine, f: Value, args: Buf[Code], c: &Cells) -> Answer = f match
+    VFn(k) -> call_fun(m, k, args, c)
+    _ -> trapped("a call of a value that is not a function")
+
+// A real of `fb` bits as one of `tb`: a widening, or a rounding that traps an overflow under
+// `--fpe-trap`.
+private narrowed(x: real, fb: int, tb: int, fpe: bool) -> Answer
+    if tb >= fb then return Ok(VReal(x))
+
+    fpe_checked(rnd(x, tb), x, x, fpe)

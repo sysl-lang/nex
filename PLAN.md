@@ -476,6 +476,16 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     §9.2.1) lets a sequential run match a parallel one bit for bit. In stages, each its own item:
     - **I1 — scalars and control flow**: numbers at every width with their traps, strings,
       `if`/`match`/loops/`exit`/`cycle`/`return`/`stop`, functions, module-level bindings, `print`.
+      Built (`sh/sysl/nex/interp*.sysl`): the typed IR is compiled once into sysl closures, each
+      node's operation chosen for its type then, a local a slot of its function's frame; a trap,
+      `stop`, `return`, `exit` and `cycle` travel outward as values to what takes them. A real of 32
+      or 16 bits computes in `real64` and rounds after every operation, which gives the narrower
+      operation's answer (Figueroa's bound); C's library is called at the compiled program's width.
+      A lambda written as `assert_traps`'s argument runs in the frame it was written in. Calls nest
+      at most 10,000 deep (DESIGN §11.3), which needs a few MB of the host thread's stack — the main
+      thread's 8 MB is enough. `nex run --interp` and `nex test --interp` use it; the API is
+      `interpret(program, args, write, fpe_trap, test)`, and `interpretable(program)` lists what it
+      refuses without running anything.
     - **I2 — aggregates and closures**: structs, tuples, enums, `match` on them, generic instances,
       lambdas and local `def`s with their captures.
     - **I3 — arrays, views and the prelude**: rank-N arrays, slices as views, `inout` windows,

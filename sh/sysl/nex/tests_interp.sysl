@@ -1,0 +1,227 @@
+module sh.sysl.nex
+@tests
+
+// The interpreter on its own, with no toolchain: what a program printed, what it wrote to standard
+// error and how it ended. Every program the compiled engine runs is also run interpreted through
+// `compiler/tests_engines.sysl`, where the two must agree byte for byte; these are the cases about the
+// interpreter itself — traps as values, the call depth, the refusals, the program's arguments — and
+// the arithmetic at each width, checked against what the language says.
+
+import nex_runtime.sh.sysl.nex_runtime.uncaught_text
+import sh.sysl.parsing.source_of
+import sysl.buf.{Buf, buf}
+import sysl.text.{StrBuilder, join, str_builder}
+
+private struct Written
+    out: StrBuilder
+    err: StrBuilder
+
+// What `text` did interpreted: its standard output, then `err: ` and its standard error where it
+// wrote any, then how it ended — `exit N`, or the line a compiled program writes for a trap nothing
+// caught. A program refused is its diagnostics, one to a line.
+private interpreted(text: string, args: []const string = [], fpe: bool = false) -> string
+    val src = source_of("t.nex", text)
+
+    val p = load_source(src) match
+        Ok(p) -> p
+        Err(ds) -> return s"elaboration: ${ds[0].message}"
+
+    val w: &Written = Written(str_builder(), str_builder())
+
+    val ending = interpret(p, args, (s, t) -> if s == StdOut then w.out.push(t) else w.err.push(t), fpe) match
+        Ok(Exit(code)) -> s"exit $code"
+        Ok(Trap(m)) -> uncaught_text(m).trim()
+        Err(ds) ->
+            var lines: Buf[string] = buf()
+
+            for d in ds
+                lines.push(s"refused: ${d.message} @${src.locate(d.span.start)}")
+
+            return join(lines.view(), "\n")
+
+    val err = w.err.finish()
+
+    w.out.finish() + (if err == "" then "" else s"err: $err") + ending
+
+// The program `body` is the `main` of, its lines indented under it.
+private main_of(body: []const string) -> string
+    var out = "def main() =\n"
+
+    for line in body
+        out += s"  $line\n"
+
+    out
+
+// -- integers at every width ------------------------------------------------------------------------
+
+// Each integer type with its largest and smallest values.
+private val WIDTHS = [("int8", "127", "-128"), ("int16", "32767", "-32768"), ("int32", "2147483647", "-2147483648"),
+                      ("int64", "9223372036854775807", "-9223372036854775807 - 1"), ("uint8", "255", "0"), ("uint16", "65535", "0"),
+                      ("uint32", "4294967295", "0"), ("uint64", "18446744073709551615", "0")]
+
+@test("+, - and * trap past each integer type's ends, signed and unsigned, and stop short of them")
+itp_int_overflow_every_width()
+    for (t, hi, lo) in WIDTHS
+        val shown_lo = if lo.contains(" ") then "-9223372036854775808" else lo
+
+        assert_eq(interpreted(main_of([s"val hi: $t = $hi", s"val lo: $t = $lo", "print(hi)", "print(lo)", "print(hi - 1 + 1)",
+                                       s"assert_traps(() -> print(hi + 1), \"$t overflow\")", s"assert_traps(() -> print(lo - 1), \"$t overflow\")",
+                                       s"assert_traps(() -> print(hi * 2), \"$t overflow\")", "print(\"ok\")"])),
+                  s"$hi\n$shown_lo\n$hi\nok\nexit 0")
+
+@test("an integer overflow nothing catches ends the program after what was printed, with the type's name")
+itp_int_overflow_uncaught()
+    assert_eq(interpreted(main_of(["print(\"before\")", "val a: int8 = 127", "print(a + 1)", "print(\"after\")"])), "before\ntrap: int8 overflow")
+    assert_eq(interpreted(main_of(["val z: uint16 = 0", "print(z - 1)"])), "trap: uint16 overflow")
+
+@test("div and % trap on zero; the most negative value div -1 overflows, and % -1 is 0")
+itp_int_division()
+    assert_eq(interpreted(main_of(["val n = 7", "val z = 0", "print(-7 div 2)", "print(-7 % 2)", "assert_traps(() -> print(n div z), \"integer division by zero\")",
+                                   "assert_traps(() -> print(n % z), \"`%` by zero\")", "val m: int8 = -128", "assert_traps(() -> print(m div -1), \"int8 overflow\")",
+                                   "print(m % -1)", "assert_traps(() -> print(abs(m)), \"int8 overflow\")", "print(abs(m + 1))"])),
+              "-3\n-1\n0\n127\nexit 0")
+
+@test("an integer power keeps the base's type, traps past it, and divides on a negative exponent")
+itp_int_power()
+    assert_eq(interpreted(main_of(["val two: int8 = 2", "print(two ^ 6)", "assert_traps(() -> print(two ^ 7), \"int8 overflow\")", "print(2 ^ -1)",
+                                   "print((-1) ^ -3)", "val z = 0", "assert_traps(() -> print(z ^ -1), \"integer division by zero\")"])),
+              "64\n0\n-1\nexit 0")
+
+@test("a conversion out of the target's range traps with both types named; one in range is exact")
+itp_conversions()
+    assert_eq(interpreted(main_of(["val big: integer = 200", "print(uint8(big))", "assert_traps(() -> print(int8(big)), \"int64 value out of range for int8\")",
+                                   "val neg = -1", "assert_traps(() -> print(uint32(neg)), \"int64 value out of range for uint32\")",
+                                   "print(int32(-2.9))", "assert_traps(() -> print(int32(1.0e10)), \"real64 value out of range for int32\")",
+                                   "assert_traps(() -> print(int64(nan)), \"real64 value out of range for int64\")", "print(uint64(1.8e19))"])),
+              "200\n-2\n18000000000000000000\nexit 0")
+
+// -- reals at every width ---------------------------------------------------------------------------
+
+@test("a real16 rounds each result to its width, ties to even, and overflows to inf")
+itp_real16_rounding()
+    assert_eq(interpreted(main_of(["val a: real16 = 2048.0", "val b: real16 = 2050.0", "print(a + 1.0)", "print(b + 1.0)", "val m: real16 = 65504.0",
+                                   "print(m * 2.0)", "val t: real16 = 0.1", "print(t)", "print(real64(t))"])),
+              "2048.0\n2052.0\ninf\n0.1\n0.0999755859375\nexit 0")
+
+@test("a real32 rounds each result to its width, and prints the shortest decimal at its width")
+itp_real32_rounding()
+    assert_eq(interpreted(main_of(["val x: real32 = 16777216.0", "print(x + 1.0)", "print(x + 2.0)", "val t: real32 = 0.1", "print(t)", "print(t * 3.0)"])),
+              "16777216.0\n16777218.0\n0.1\n0.3\nexit 0")
+
+@test("real division and overflow are IEEE, and trap under --fpe-trap with the compiler's words")
+itp_fpe_trap()
+    val program = main_of(["val z = 0.0", "print(1.0 / z)", "print(sqrt(-1.0))", "print(1.0e308 * 10.0)"])
+
+    assert_eq(interpreted(program), "inf\nnan\ninf\nexit 0")
+    assert_eq(interpreted(program, fpe = true), "trap: floating-point division by zero")
+    assert_eq(interpreted(main_of(["print(sqrt(-1.0))"]), fpe = true), "trap: floating-point invalid operation")
+    assert_eq(interpreted(main_of(["print(1.0e308 * 10.0)"]), fpe = true), "trap: floating-point overflow")
+
+// -- complex numbers --------------------------------------------------------------------------------
+
+@test("complex arithmetic writes the product and quotient out, and a zero divisor traps")
+itp_complex()
+    assert_eq(interpreted(main_of(["val z = 1 + 2i", "print(z * z)", "print(z / (3 - 4i))", "print(abs(3 + 4i))", "print(conj(z))", "print(sqrt(-4 + 0i))",
+                                   "val zero = 0 + 0i", "assert_traps(() -> print(z / zero), \"complex division by zero\")", "print((1 + 1i) / zero)"])),
+              "-3.0+4.0i\n-0.2+0.4i\n5.0\n1.0-2.0i\n0.0+2.0i\ntrap: complex division by zero")
+
+// -- traps as values --------------------------------------------------------------------------------
+
+@test("a trap leaves every call between it and assert_traps, keeps what was done, and the program goes on")
+itp_trap_through_calls()
+    assert_eq(interpreted("var count = 0\ndef inner(n: integer): integer =\n  count += 1\n  10 div n\ndef outer(n: integer): integer = 1 + inner(n)\n" +
+                          main_of(["assert_traps(() -> print(outer(0)), \"division by zero\")", "print(count)", "print(outer(5))", "print(count)"])),
+              "1\n3\n2\nexit 0")
+
+@test("assert_traps traps where its function returns, or where the message lacks the text")
+itp_assert_traps_fails()
+    assert_eq(interpreted(main_of(["assert_traps(() -> print(1))"])), "1\ntrap: assert_traps: the function did not trap")
+    assert_eq(interpreted(main_of(["val z = 0", "assert_traps(() -> print(1 div z), \"overflow\")"])), "trap: assert_traps: expected substring not present in trap")
+    assert_eq(interpreted("def boom() =\n  val z = 0\n  print(1 div z)\n" + main_of(["assert_traps(boom)", "print(\"caught\")"])), "caught\nexit 0")
+
+@test("assert and assert_eq trap with their messages; the message text is computed either way")
+itp_assertions()
+    assert_eq(interpreted(main_of(["val n = 3", "assert(n == 3, s\"n is $n\")", "assert_eq(n, 3)", "assert(n == 4, s\"n is $n\")"])), "trap: assertion failed: n is 3")
+    assert_eq(interpreted(main_of(["assert(1 > 2)"])), "trap: assertion failed")
+    assert_eq(interpreted(main_of(["assert_eq(1 + 1, 3)"])), "trap: assert_eq failed")
+
+@test("assert_approx on two numbers holds within the tolerance, never for a nan, and otherwise says by how much")
+itp_assert_approx()
+    assert_eq(interpreted(main_of(["assert_approx(1.0, 1.05, 0.1)", "assert_approx(1 + 1i, 1 + 1.05i, 0.1)", "assert_traps(() -> assert_approx(nan, nan, 1.0))",
+                                   "assert_approx(1.0, 1.5, 0.1)"])),
+              "trap: assert_approx: |1.0 - 1.5| = 0.5 > 0.1")
+    assert_eq(interpreted(main_of(["assert_approx(1 + 1i, 4 + 5i, 1.0)"])), "trap: assert_approx: |1.0+1.0i - 4.0+5.0i| = 5.0 > 1.0")
+
+// -- stop -------------------------------------------------------------------------------------------
+
+@test("stop ends the program from any depth with its code, cut to 32 bits; a bare stop is 0")
+itp_stop_codes()
+    assert_eq(interpreted("def f(k: integer) =\n  for i in 1..10\n    if i == k then stop i\n" + main_of(["print(1)", "f(3)", "print(2)"])), "1\nexit 3")
+    assert_eq(interpreted(main_of(["print(1)", "stop", "print(2)"])), "1\nexit 0")
+    assert_eq(interpreted(main_of(["val c: integer = 4294967299", "stop c"])), "exit 3")
+    assert_eq(interpreted(main_of(["stop -1"])), "exit -1")
+    assert_eq(interpreted(main_of(["assert_traps(() -> f())", "print(2)"]) + "def f() = stop 4\n"), "exit 4")
+
+// -- calls ------------------------------------------------------------------------------------------
+
+@test("calls may nest MAX_CALL_DEPTH deep, main among them; one more traps, and assert_traps catches it")
+itp_call_depth()
+    val down = "def down(n: integer): integer = if n == 0 then 0 else 1 + down(n - 1)\n"
+    val limit = MAX_CALL_DEPTH - 2
+
+    assert_eq(interpreted(down + main_of([s"print(down($limit))"])), s"$limit\nexit 0")
+    assert_eq(interpreted(down + main_of([s"print(down(${limit + 1}))"])), s"trap: ${call_depth_message()}")
+    assert_eq(interpreted(down + main_of([s"assert_traps(() -> print(down(${limit + 1})), \"nested\")", "print(down(3))"])), "3\nexit 0")
+
+@test("an inout scalar is the caller's local or module-level var, forwarded through another inout")
+itp_inout()
+    assert_eq(interpreted("var total = 0\ndef bump(x: inout integer, by: integer) = x += by\ndef twice(x: inout integer) =\n  bump(x, 1)\n  bump(x, 1)\n" +
+                          main_of(["var n = 1", "bump(n, 41)", "twice(n)", "bump(total, 5)", "twice(total)", "print(n)", "print(total)"])),
+              "44\n7\nexit 0")
+
+@test("module-level bindings are initialized before anything reads them, through the functions they call")
+itp_init_order()
+    assert_eq(interpreted("val b = a + 1\nval a = twice(c)\nval c = 3\ndef twice(n: integer): integer = 2 * n\n" + main_of(["print(b)"])), "7\nexit 0")
+
+@test("a function value calls the function it names")
+itp_function_values()
+    assert_eq(interpreted("def sq(n: integer): integer = n * n\ndef apply(f: (integer -> integer), k: integer): integer = f(k)\n" + main_of(["print(apply(sq, 7))", "val g = sq", "print(g(3))"])),
+              "49\n9\nexit 0")
+
+// -- control flow -----------------------------------------------------------------------------------
+
+@test("exit and cycle reach the loop their label names, and a stepped for never steps past its type's end")
+itp_loops()
+    assert_eq(interpreted(main_of(["outer: for i in 1..3", "  for j in 1..3", "    if j == 2 then cycle outer", "    if i == 3 then exit outer", "    print(i * 10 + j)",
+                                   "val lo: uint8 = 250", "val hi: uint8 = 255", "for k in lo..hi by 2", "  print(k)", "for k in 10..1 by -3", "  print(k)"])),
+              "11\n21\n250\n252\n254\n10\n7\n4\n1\nexit 0")
+    assert_eq(interpreted(main_of(["val s = 0", "for k in 1..3 by s", "  print(k)"])), "trap: a `for` step of 0")
+
+@test("a chain evaluates each operand once, left to right, stopping at the first false link")
+itp_chain_short_circuit()
+    assert_eq(interpreted("def t(n: integer): integer =\n  print(n)\n  n\n" + main_of(["print(t(1) < t(0) < t(5))", "print(t(1) < t(2) <= t(2))", "print(false and t(9) > 0)"])),
+              "1\n0\nfalse\n1\n2\n2\ntrue\nfalse\nexit 0")
+
+// -- text -------------------------------------------------------------------------------------------
+
+@test("print and eprint write to their streams, and f-string specifiers format as the runtime does")
+itp_text()
+    assert_eq(interpreted(main_of(["eprint(\"warn\")", "val x = 3.14159", "val n = 42", "val s = \"ab\"", "val big: uint64 = 18446744073709551615",
+                                   "print(f\"$x%.2f|$n%5d|$s%-4s|\")", "print(s\"${1 + 1i} ${true} $big\")"])),
+              "3.14|   42|ab  |\n1.0+1.0i true 18446744073709551615\nerr: warn\nexit 0")
+
+// -- the program's arguments ------------------------------------------------------------------------
+
+@test("main(args) reads its arguments by index from 1, by length and by for, and an index past them traps")
+itp_args()
+    assert_eq(interpreted("def main(args: [string]) =\n  print(length(args))\n  for a in args\n    print(a)\n  print(args[2])\n  print(args[3])\n", ["x", "y"]),
+              "2\nx\ny\ny\ntrap: index 3 out of bounds 1..2")
+
+// -- refusals ---------------------------------------------------------------------------------------
+
+@test("what the interpreter does not run yet is refused before anything runs, at the construct")
+itp_refusals()
+    assert_eq(interpreted(main_of(["print(1)", "val xs = [1, 2, 3]", "print(xs)"])), "refused: an array is not interpreted yet @3:3")
+    assert_eq(interpreted(main_of(["val f = (x: integer) -> x + 1", "print(f(2))"])), "refused: a lambda is not interpreted yet @2:11")
+    assert_eq(interpreted("extern def cos(x: real): real\n" + main_of(["print(cos(0.0))"])),
+              "refused: a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled @1:1")
