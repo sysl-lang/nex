@@ -521,7 +521,18 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       element-wise statements dominate, each a pass over boxed values.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
-      message and `assert_traps`.
+      message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel
+      for` runs its iterations in the compiled numbering (first clause fastest), as one thread of the
+      compiled program does — a reduction in blocks of 4096 from the identity (a user operator's from
+      the starting value), the partials in the pairwise tree, then once with the start; a trap ends
+      the loop where it happens and leaves the variable as it was. A `parallel` element-wise
+      expression and a reduction's operand run from the fused scalar form the emitter uses
+      (`tir_fuse.sysl`), so a trap is the same one. Units: the program is erased of units before it
+      is compiled into closures (`tir_erase.sysl`), but for what printing reads — a printed value's
+      type and the struct and enum declarations — so a unit inside a tuple or a struct is printed
+      after its number; a `TRescale` multiplies by the compiler's `factor_at`, now in the library.
+      Complex `^` follows MLIR's `complex.pow` lowering step for step. Complex `tan` stays refused:
+      MLIR lowers it through `expm1`, which sysl's `Float` does not have (reported upstream).
     - **I5 — the embedding API**: load a program and get its diagnostics as values, call a function
       by name with values, give the program host functions, redirect its output, and turn a trap
       into an `Err` instead of an abort.
