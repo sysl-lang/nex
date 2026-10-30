@@ -267,7 +267,7 @@ run_fpe_trap()
 
 @test("a program needing what the emitter does not compile yet is refused with a diagnostic naming it")
 emit_refuses_what_waits()
-    assert_eq(emitted("extern def cbrt(x: real): real\ndef main() =\n  val f = cbrt\n  print(f(8.0))\n").err().unwrap_or(""), "error: `cbrt` as a value is not compiled yet @3:11")
+    assert_eq(emitted("def main(args: [string]) =\n  val a = args\n  print(a)\n").err().unwrap_or(""), "error: `args` other than `args[k]`, `length(args)` and `for a in args` is not compiled yet @2:11")
 
 @test("the module names every symbol with a prefix no C name has, and makes main the only public function")
 emit_symbols()
@@ -344,7 +344,7 @@ run_command()
     val run = capture(nex, ["run", src, "--", "there", "again"], env = env, stderr = true).unwrap()
     val waiting = s"${b.work}/waiting.nex"
 
-    write_text(waiting, "extern def cbrt(x: real): real\ndef main() =\n  val f = cbrt\n  print(f(8.0))\n").unwrap()
+    write_text(waiting, "def main(args: [string]) =\n  val a = args\n  print(a)\n").unwrap()
 
     val refused = capture(nex, ["run", waiting], env = env, stderr = true).unwrap()
 
@@ -355,7 +355,7 @@ run_command()
     assert_eq(run.text, "hello there\n")
     assert(run.status == Status.Exited(2), s"${run.status}")
     assert(refused.status == Status.Exited(1), s"${refused.status}")
-    assert(refused.err.unwrap_or("").contains("`cbrt` as a value is not compiled yet"), refused.err.unwrap_or(""))
+    assert(refused.err.unwrap_or("").contains("`args` other than `args[k]`, `length(args)` and `for a in args` is not compiled yet"), refused.err.unwrap_or(""))
 
 @test("a chained comparison evaluates each operand once, left to right, and stops at the first false link")
 run_chain_once()
