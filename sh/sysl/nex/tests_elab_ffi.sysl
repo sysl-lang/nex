@@ -98,7 +98,7 @@ c_structs()
     assert_eq(refused("struct In\n  a: int8\n@c\nstruct Out\n  i: In\n" + M), "error: a `@c` struct holds numbers, `bool` and `@c` structs, as C lays them out, and its field `i` is In @3:1")
     assert_eq(refused("@c\nstruct P\n  v: [real]\n" + M), "error: a `@c` struct holds numbers, `bool` and `@c` structs, as C lays them out, and its field `v` is [real64] @1:1")
     assert_eq(refused("@c\nstruct P[T]\n  x: T\n" + M), "error: a `@c` struct is laid out as C lays it out, so `P` cannot be generic @1:1")
-    assert_eq(refused("@packed\nstruct P\n  x: real\n" + M), "error: `@packed` is not an attribute of a struct, which takes `@c` @1:1")
+    assert_eq(refused("@packed\nstruct P\n  x: real\n" + M), "error: `@packed` is not an attribute of a struct, which takes `@c` and `@host` @1:1")
     assert_eq(refused("@c(\"x\")\nstruct P\n  x: real\n" + M), "error: `@c` takes no arguments @1:1")
 
 @test("a parallel body and an @elemental function call only @pure externs, directly or through a function")

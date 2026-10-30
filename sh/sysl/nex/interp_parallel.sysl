@@ -94,6 +94,8 @@ impl Interp
         while self.par_accs.len() > outer
             self.par_accs.pop()
 
+        val m = self.m
+
         (c) ->
             var trips: Buf[Trip] = buf()
             var total: i128 = 1
@@ -129,6 +131,10 @@ impl Interp
                         val bind = binds[k]
 
                         bind(c, VInt(long.wrap(tr.lo + idx * tr.step)))
+
+                    tick(m) match
+                        Some(s) -> return Err(s)
+                        None -> ()
 
                     b(c) match
                         Ok(_) -> ()

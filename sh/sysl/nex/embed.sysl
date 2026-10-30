@@ -1,0 +1,990 @@
+module sh.sysl.nex
+
+// The embedding API (DESIGN §16): what a sysl program uses to host nex scripts on the interpreter.
+//
+//     var host = new_host()
+//     val solid = host.give_type("Solid", (id) -> kernel.release(id))
+//
+//     host.give("box", (args) -> Ok(solid.handle(kernel.make_box(args[0]))))
+//
+//     val script = load_script(text, "model.nex", host)?
+//
+//     script.call("build", [real_value(2.0)]) match
+//         Ok(v) -> ...
+//         Err(e) -> eprint(e.text())
+//
+// **A script is loaded once and called many times.** `load_script` and `load_script_file` elaborate
+// it and compile it into the interpreter's closures; its module-level bindings are initialized on the
+// first `run`, `call`, `get` or `set`, and keep their values from one call to the next. Dropping the
+// script lets go of everything it holds — its closures, its bindings and the host's objects in them —
+// so a host that reloads an edited script after every keystroke holds one script's worth at a time.
+//
+// **Nothing is printed.** A load's diagnostics come back as values, each with its file, line,
+// column and rendered text; what the script prints goes to the host's `write`; a trap is an `Err`
+// carrying its message and the nex frames it left.
+//
+// **A value crosses as a `NexValue`**, checked against the declared type it meets: a function's
+// parameter, a host function's result, a module-level binding. An array crosses as its extents and
+// its elements in one typed buffer, column-major, rather than a value per element.
+
+import sysl.buf.{Buf, buf}
+import sysl.sync.{Atomic, Relaxed}
+import sh.sysl.parsing.{Diagnostic, Source, Span, source, source_of}
+
+// -- values ------------------------------------------------------------------------------------------
+
+// A nex value as the host holds it. An integer is a `long` holding the value widened by its own
+// signedness (a `uint64` above `int64`'s range is its bit pattern), with its width; a real is the
+// `real64` it widens to exactly, with its width; a number with a unit is the number in the unit its
+// declared type names. A struct names its fields; a variant of an enum is named, its fields in order.
+enum NexValue
+    NInt(v: long, bits: int, signed: bool)
+    NReal(v: real, bits: int)
+    NComplex(re: real, im: real, bits: int)
+    NBool(v: bool)
+    NStr(v: string)
+    NArray(a: &NexArray)
+    NTuple(elems: Buf[NexValue])
+    NStruct(name: string, fields: Buf[NexField])
+    NVariant(name: string, fields: Buf[NexValue])
+    // A value of a host type: the host's own object, which nex holds and passes back.
+    NHandle(h: &HostHandle)
+    // What a function returning nothing answers.
+    NNothing
+
+struct NexField
+    name: string
+    value: NexValue
+
+// An array: its extent on each axis, axis 1 first, and its elements in storage order — column-major,
+// axis 1 fastest (DESIGN §3.2).
+struct NexArray
+    ext: Buf[long]
+    elems: Elements
+
+// An array's elements, one buffer of the element type's numbers: a complex's real and imaginary parts
+// alternate. Elements that are not numbers or `bool` — strings, tuples, structs, enums, host objects,
+// arrays — are values each.
+enum Elements
+    Ints(v: Buf[long], bits: int, signed: bool)
+    Reals(v: Buf[real], bits: int)
+    Complexes(v: Buf[real], bits: int)
+    Bools(v: Buf[bool])
+    Others(v: Buf[NexValue])
+
+int_value(n: long, bits: int = 64, signed: bool = true) -> NexValue = NInt(n, bits, signed)
+real_value(x: real, bits: int = 64) -> NexValue = NReal(x, bits)
+complex_value(re: real, im: real, bits: int = 64) -> NexValue = NComplex(re, im, bits)
+bool_value(b: bool) -> NexValue = NBool(b)
+string_value(s: string) -> NexValue = NStr(s)
+
+// An array of reals of extents `ext` from `v`, column-major.
+real_array(v: Buf[real], ext: Buf[long], bits: int = 64) -> NexValue = NArray(NexArray(ext, Reals(v, bits)))
+
+// An array of integers of extents `ext` from `v`, column-major.
+int_array(v: Buf[long], ext: Buf[long], bits: int = 64, signed: bool = true) -> NexValue = NArray(NexArray(ext, Ints(v, bits, signed)))
+
+// A struct's field by name, `NNothing` where it has none of that name.
+field_of(v: NexValue, name: string) -> NexValue
+    v match
+        NStruct(_, fields) ->
+            for f in fields
+                if f.name == name then return f.value
+        _ -> ()
+
+    NNothing
+
+// -- the host ----------------------------------------------------------------------------------------
+
+// One of the host's objects as nex holds it: the host type's name and the host's number for the
+// object. It is shared by every value holding it, the host's included, and when the last lets go the
+// host's `release` is called with the number.
+struct HostHandle
+    type_name: string
+    id: long
+    release: &Fn(long) -> unit
+
+impl Drop for HostHandle
+    drop(self)
+        val r = self.release
+
+        r(self.id)
+
+// A function the host gives, under its nex name. It is handed the arguments as values of the declared
+// parameter types and answers a value of the declared result type, or a message, which traps.
+struct HostFn
+    name: string
+    f: &Fn(Buf[NexValue]) -> Result[NexValue, string]
+
+// A host type: its nex name, and what lets go of one of its objects.
+struct HostType
+    name: string
+    release: &Fn(long) -> unit
+
+    // The host's object `id` as a value nex holds, released through `release` when the last holder
+    // lets go.
+    handle(self, id: long) -> NexValue = NHandle(HostHandle(self.name, id, self.release))
+
+// What the host gives the scripts it loads: functions and types, each under the name a script
+// declares it by (`@host extern def`, `@host struct`).
+struct Host
+    functions: Buf[HostFn]
+    types: Buf[HostType]
+
+    give(*self, name: string, f: &Fn(Buf[NexValue]) -> Result[NexValue, string])
+        self.functions.push(HostFn(name, f))
+
+    // The host type `name`, its objects released through `release`; what it answers makes them.
+    // A host function makes its objects through the `HostType` rather than the `Host`, which holds
+    // the function, so that the two do not hold each other.
+    give_type(*self, name: string, release: &Fn(long) -> unit) -> HostType
+        val t = HostType(name, release)
+
+        self.types.push(t)
+        t
+
+new_host() -> Host = Host(buf(), buf())
+
+// -- loading -----------------------------------------------------------------------------------------
+
+// How a script is loaded and run. `write` takes what it prints, standard output and standard error;
+// `sandbox` refuses what a script from an untrusted source may not do (DESIGN §16.6); `budget` is how
+// many steps — a call's entry, a loop's pass — one `run` or `call` may take, 0 for no limit;
+// `fpe_trap` is `--fpe-trap`; `prelude` is the source prelude's directory for a script loaded from a
+// file.
+struct ScriptOptions
+    write: &Fn(Stream, string) -> unit
+    sandbox: bool
+    budget: long
+    fpe_trap: bool
+    prelude: Option[string]
+
+script_options() -> ScriptOptions = ScriptOptions((s, text) -> if s == StdOut then prints(text) else eprints(text), false, 0, false, None)
+
+// A diagnostic as a value: the file it is in, its line and column there (from 1), its span in that
+// file's text, its message, and the whole of it rendered as `nex` prints it.
+struct NexDiagnostic
+    file: string
+    line: usize
+    col: usize
+    span: Span
+    message: string
+    text: string
+
+// The script `text`, read as the file `file` — which names it in diagnostics and is read from nowhere
+// — elaborated and compiled for the interpreter with the host's functions and types; or every
+// diagnostic that refuses it. A script loaded from text is one module and imports nothing.
+load_script(text: string, file: string, host: Host, opts: ScriptOptions = script_options()) -> Result[&Script, Buf[NexDiagnostic]]
+    var bytes: Buf[u8] = buf()
+
+    bytes.extend(text.bytes)
+
+    var names: Buf[string] = buf()
+    var ranges: Buf[FileRange] = buf()
+
+    names.push(file)
+    ranges.push(FileRange(0, bytes.len(), 0))
+
+    val texts = Texts(names, ranges, bytes)
+
+    val parsed = parse_program(source_of(file, text)) match
+        Ok(p) -> p
+        Err(d) ->
+            var one: Buf[Diagnostic] = buf()
+
+            one.push(d)
+            return Err(texts.values(one))
+
+    var mods = single_module()
+
+    mods.script = true
+
+    elaborate_modules(parsed, mods) match
+        Ok(p) -> compiled(p, texts, host, opts)
+        Err(ds) -> Err(texts.values(ds))
+
+// The script whose root module is the file `entry`, with every module it imports, as `load_script`
+// loads one.
+load_script_file(entry: string, host: Host, opts: ScriptOptions = script_options()) -> Result[&Script, Buf[NexDiagnostic]]
+    val project = load_project(entry, LoadOptions(opts.prelude, false)) match
+        Ok(p) -> p
+        Err(message) ->
+            var one: Buf[NexDiagnostic] = buf()
+
+            one.push(NexDiagnostic(entry, 0, 0, Span(0, 0), message, message))
+            return Err(one)
+
+    val texts = Texts(project.file_names, project.mods.files, project.text)
+
+    if project.diags.len() > 0 then return Err(texts.values(project.diags))
+
+    var mods = project.mods
+
+    mods.script = true
+
+    elaborate_modules(project.program, mods) match
+        Ok(p) -> compiled(p, texts, host, opts)
+        Err(ds) -> Err(texts.values(ds))
+
+// The program compiled for the interpreter, its machine holding the host's functions and types.
+private compiled(p: TProgram, texts: Texts, host: Host, opts: ScriptOptions) -> Result[&Script, Buf[NexDiagnostic]]
+    val m = machine(p, buf(), opts.write, opts.fpe_trap)
+
+    m.hosts = host.functions
+    m.host_types = host.types
+    m.sandbox = opts.sandbox
+
+    var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf(), buf())
+    var init = it.program(None)
+    val defaults = it.defaults()
+
+    if it.diags.len() > 0
+        shut(m)
+        return Err(texts.values(it.diags))
+
+    // The last is the call of `main`, which `run` makes itself.
+    init.pop()
+
+    val s: &Script = Script(p, texts, m, init, defaults, it.fun_names, it.global_names, if opts.budget > 0 then opts.budget else NO_LIMIT, false, None)
+
+    Ok(s)
+
+// The argument a host's call leaves out: its default run in a frame of its own when the call
+// evaluates its arguments. A trap there leaves the function's frame, at the default.
+private defaulted(m: &Machine, d: Compiled) -> Code
+    (c) ->
+        val code = d.code
+        val r = code(frame_of(d.slots))
+
+        r match
+            Err(Trapped(_)) ->
+                m.trace.push(TraceFrame(d.name, if m.sited then m.site else d.span))
+                m.sited = false
+            _ -> ()
+
+        r
+
+// The text of every file of a script, by which a span becomes a file, a line and a column.
+private[nex] struct Texts
+    names: Buf[string]
+    ranges: Buf[FileRange]
+    bytes: Buf[u8]
+
+    file_of(self, offset: usize) -> usize
+        for k in 0..<self.ranges.len()
+            val r = self.ranges[k]
+
+            if offset >= r.start && offset <= r.end then return k
+
+        0
+
+    source_at(self, k: usize) -> Source
+        val r = self.ranges[k]
+
+        source(self.names[k], self.bytes.view()[r.start..<r.end])
+
+    // `span`, of the whole program's text, as its file and its span there.
+    local(self, span: Span) -> (usize, Span)
+        val k = self.file_of(span.start)
+        val start = self.ranges[k].start
+
+        (k, Span(span.start - start, span.end - start))
+
+    value(self, d: Diagnostic) -> NexDiagnostic
+        val (k, span) = self.local(d.span)
+        val src = self.source_at(k)
+        val at = src.locate(span.start)
+        val here = Diagnostic(d.severity, span, d.message, d.label, d.note)
+
+        NexDiagnostic(self.names[k], at.line, at.col, span, d.message, here.render(src))
+
+    values(self, ds: Buf[Diagnostic]) -> Buf[NexDiagnostic]
+        var out: Buf[NexDiagnostic] = buf()
+
+        for d in ds
+            out.push(self.value(d))
+
+        out
+
+    frame(self, f: TraceFrame) -> NexFrame
+        val (k, span) = self.local(f.span)
+        val at = self.source_at(k).locate(span.start)
+
+        NexFrame(f.name, self.names[k], at.line, at.col, span)
+end Texts
+
+// -- running -----------------------------------------------------------------------------------------
+
+// A frame of a trap's stack: the function, and where in it the trap happened — the statement, or the
+// function's declaration where the trap was not in one of its statements.
+struct NexFrame
+    function: string
+    file: string
+    line: usize
+    col: usize
+    span: Span
+
+// Why a run or a call gave no value: a trap, with its message and the frames it left, innermost
+// first; `stop`, with its code; the host's budget spent or the host cancelling; or the host's request
+// refused before anything ran — a name the script does not declare, a value of the wrong type.
+enum NexError
+    ScriptTrap(message: string, stack: Buf[NexFrame])
+    ScriptStop(code: int)
+    ScriptHalt(message: string)
+    ScriptRefused(message: string)
+
+impl NexError
+    // The error as a line or a few: a trap's message, then a line per frame.
+    text(self) -> string = self match
+        ScriptTrap(message, stack) ->
+            var out = s"trap: $message"
+
+            for f in stack
+                out += s"\n  in ${f.function} at ${f.file}:${f.line}:${f.col}"
+
+            out
+        ScriptStop(code) -> s"stop $code"
+        ScriptHalt(message) -> message
+        ScriptRefused(message) -> message
+
+// What stops a script's run in progress from any thread: a modeller's UI thread holds it while a
+// worker runs the script, and `cancel` halts the run at its next step, a call's entry or a loop's
+// pass, with `ScriptHalt`. It is one atomic word, so holding it shares nothing else of the script.
+struct CancelToken
+    flag: Atomic[int]
+
+impl CancelToken
+    cancel(*self)
+        self.flag.store(1)
+
+    cancelled(*self) -> bool = self.flag.load(Relaxed) != 0
+
+    private[nex] clear(*self)
+        self.flag.store(0)
+
+private[nex] cancel_token() -> &sync CancelToken = CancelToken(Atomic(0))
+
+// A loaded script, ready to run, call and inspect (DESIGN §16.2).
+struct Script
+    private program: TProgram
+    private texts: Texts
+    private m: &Machine
+    private init: Buf[Compiled]
+    // By function, each parameter's default compiled to run in a frame of its own, as a module-level
+    // initializer does: what a host's call leaving the argument out evaluates.
+    private defaults: Buf[Buf[Option[Compiled]]]
+    private fun_names: Buf[string]
+    private global_names: Buf[string]
+    private budget: long
+    private started: bool
+    // The trap or halt that stopped the bindings' initializing, which every later request answers.
+    private failed: Option[NexError]
+
+    // `main` run with `args` as the program's arguments: the status `main` returning (0) or `stop`
+    // gives.
+    run(*self, args: []const string = []) -> Result[int, NexError]
+        var kept: Buf[string] = buf()
+
+        for a in args
+            kept.push(a)
+
+        self.m.args = kept
+
+        val k = self.function("main")?
+        var none: Buf[Code] = buf()
+
+        self.start()?
+        self.fresh()
+
+        call_fun(self.m, k, none, Cells(buf())) match
+            Ok(_) -> Ok(0)
+            Err(s) -> s match
+                Stopped(code) -> Ok(code)
+                _ -> Err(self.failure(s))
+
+    // The top-level function `name` called with `args`, each checked against its parameter's type, and
+    // its result. The leading parameters take `args`; each one after them takes its default.
+    call(*self, name: string, args: Buf[NexValue]) -> Result[NexValue, NexError] = self.call_named(name, args, buf())
+
+    // `call` with arguments by name as well: `positional` fills the leading parameters, `named` any
+    // others by their names, and each parameter left out takes its default, evaluated afresh in
+    // parameter order as a nex call evaluates it (DESIGN §11.3).
+    call_named(*self, name: string, positional: Buf[NexValue], named: Buf[NexField]) -> Result[NexValue, NexError]
+        val k = self.function(name)?
+        val f = self.fun_decl(k)
+        val n = f.params.len()
+
+        if positional.len() > n then return Err(ScriptRefused(s"`$name` takes ${n} argument${if n == 1 then "" else "s"}, and ${positional.len()} ${if positional.len() == 1 then "is" else "are"} given"))
+
+        var given: Buf[Option[NexValue]] = buf()
+
+        for a in positional
+            given.push(Some(a))
+
+        for _ in positional.len()..<n
+            given.push(None)
+
+        for a in named
+            var found = false
+
+            for j in 0..<n
+                if self.param_name(f, j) == a.name
+                    found = true
+
+                    if given[j].is_some() then return Err(ScriptRefused(s"`${a.name}` is given twice"))
+
+                    given.set(j, Some(a.value))
+
+            if !found then return Err(ScriptRefused(s"`$name` has no parameter `${a.name}`"))
+
+        var codes: Buf[Code] = buf()
+
+        for j in 0..<n
+            val l = self.program.locals[f.params[j]]
+            val what = self.param_name(f, j)
+
+            l.kind match
+                LParam(mode) -> if mode == Inout then return Err(ScriptRefused(s"`$name` takes `$what` inout, and a host's call passes values"))
+                _ -> ()
+
+            given[j] match
+                Some(a) ->
+                    val v = from_host(self.program, a, l.ty, s"argument ${j + 1} of `$name`, `$what`,") match
+                        Ok(v) -> v
+                        Err(message) -> return Err(ScriptRefused(message))
+
+                    codes.push((c) -> Ok(v))
+                None -> self.defaults[k][j] match
+                    Some(d) -> codes.push(defaulted(self.m, d))
+                    None -> return Err(ScriptRefused(s"`$name` needs its argument `$what`"))
+
+        self.start()?
+        self.fresh()
+
+        call_fun(self.m, k, codes, Cells(buf())) match
+            Ok(v) -> Ok(to_host(self.program, v, f.ret))
+            Err(s) -> Err(self.failure(s))
+
+    // The module-level binding `name`'s value.
+    get(*self, name: string) -> Result[NexValue, NexError]
+        val (k, t, _) = self.global(name)?
+
+        self.start()?
+        Ok(to_host(self.program, deref(self.m.globals.v[k]), t))
+
+    // The module-level `var` `name` given `v`, checked against its type.
+    set(*self, name: string, v: NexValue) -> Result[unit, NexError]
+        val (k, t, kind) = self.global(name)?
+
+        if kind != Var then return Err(ScriptRefused(s"`$name` is not a `var`, so the host does not change it"))
+
+        val x = from_host(self.program, v, t, s"`$name`") match
+            Ok(x) -> x
+            Err(message) -> return Err(ScriptRefused(message))
+
+        self.start()?
+        self.m.globals.v.set(k, x)
+        Ok(())
+
+    // Stops the run in progress at its next step, with `ScriptHalt`: a host function or `write` may
+    // call it. The next `run` or `call` starts uncancelled.
+    cancel(*self)
+        self.m.cancel.cancel()
+
+    // What another thread holds to cancel this script's runs: the token `cancel` sets.
+    cancel_token(self) -> &sync CancelToken = self.m.cancel
+
+    // The module-level bindings initialized, once, in the order they run.
+    private start(*self) -> Result[unit, NexError]
+        if self.started then return self.failed match
+            Some(e) -> Err(e)
+            None -> Ok(())
+
+        self.started = true
+        self.fresh()
+
+        for g in self.init
+            val code = g.code
+
+            code(frame_of(g.slots)) match
+                Ok(_) -> ()
+                Err(s) ->
+                    s match
+                        Trapped(_) ->
+                            self.m.trace.push(TraceFrame(g.name, if self.m.sited then self.m.site else g.span))
+                            self.m.sited = false
+                        _ -> ()
+
+                    val e = self.failure(s)
+
+                    self.failed = Some(e)
+                    return Err(e)
+
+        Ok(())
+
+    // A run or a call begun: no steps taken, not cancelled, no stack.
+    private fresh(*self)
+        self.m.steps = 0
+        self.m.limit = self.budget
+        self.m.cancel.clear()
+        self.m.depth = 0
+        self.m.trace = buf()
+        self.m.sited = false
+
+    private failure(self, s: Signal) -> NexError = s match
+        Trapped(message) ->
+            var stack: Buf[NexFrame] = buf()
+
+            for f in self.m.trace
+                stack.push(self.texts.frame(f))
+
+            ScriptTrap(message, stack)
+        Stopped(code) -> ScriptStop(code)
+        Halted(message) -> ScriptHalt(message)
+        _ -> ScriptRefused("the run ended with nothing to say why")
+
+    // The number of the top-level function `name`.
+    private function(self, name: string) -> Result[usize, NexError]
+        for k in 0..<self.fun_names.len()
+            if display_name(self.fun_names[k]) == name then return Ok(k)
+
+        Err(ScriptRefused(s"the script declares no function `$name`"))
+
+    private param_name(self, f: TFun, j: usize) -> string = self.program.locals[f.params[j]].name
+
+    private fun_decl(self, k: usize) -> TFun
+        var n: usize = 0
+
+        for d in self.program.decls
+            d match
+                FunDecl(f) ->
+                    if n == k then return f
+
+                    n += 1
+                _ -> ()
+
+        panic("no such function")
+
+    // The module-level binding `name`: its number, its type and how it is bound.
+    private global(self, name: string) -> Result[(usize, Ty, BindKind), NexError]
+        for d in self.program.decls
+            d match
+                GlobalDecl(g) -> if display_name(g.name) == name then return Ok((self.global_number(g.name), g.ty, g.kind))
+                TupleGlobalDecl(g) ->
+                    internal_in(g.pat, name) match
+                        Some(n) -> return Ok((self.global_number(n), bound_type(g.pat, g.ty, n).unwrap(), g.kind))
+                        None -> ()
+                _ -> ()
+
+        Err(ScriptRefused(s"the script declares no module-level binding `$name`"))
+
+    private global_number(self, internal: string) -> usize
+        for k in 0..<self.global_names.len()
+            if self.global_names[k] == internal then return k
+
+        0
+end Script
+
+impl Drop for Script
+    drop(self)
+        shut(self.m)
+
+// The type of the module-level binding `name` in a destructuring binding's pattern, matched against the
+// tuple type `t` it takes apart.
+private bound_type(pat: TBind, t: Ty, name: string) -> Option[Ty]
+    pat match
+        BGlobal(n) -> if n == name then return Some(t)
+        BTuple(elems) ->
+            base_of(t) match
+                Tuple(ts) ->
+                    for k in 0..<elems.len()
+                        bound_type(elems[k], ts[k], name) match
+                            Some(x) -> return Some(x)
+                            None -> ()
+                _ -> ()
+        _ -> ()
+
+    None
+
+// The internal name of the binding the host calls `name`, among a destructuring binding's.
+private internal_in(pat: TBind, name: string) -> Option[string]
+    pat match
+        BGlobal(n) -> if display_name(n) == name then return Some(n)
+        BTuple(elems) ->
+            for e in elems
+                internal_in(e, name) match
+                    Some(n) -> return Some(n)
+                    None -> ()
+        _ -> ()
+
+    None
+
+// -- host functions in the interpreter --------------------------------------------------------------
+
+private[nex] host_named(m: &Machine, name: string) -> Option[HostFn]
+    for f in m.hosts
+        if f.name == name then return Some(f)
+
+    None
+
+private[nex] host_type_named(m: &Machine, name: string) -> bool
+    for t in m.host_types
+        if t.name == name then return true
+
+    false
+
+private[nex] same_handle(a: Value, b: Value) -> bool = a match
+    VHandle(x) -> b match
+        VHandle(y) -> x.type_name == y.type_name && x.id == y.id
+        _ -> false
+    _ -> false
+
+impl Interp
+    // A call of the host function `x`: its arguments handed over as values of its parameters' declared
+    // types, units and all, and its answer checked against its declared result; a message it answers
+    // instead traps.
+    host_call(*self, x: TExtern, codes: Buf[Code]) -> Code
+        val name = display_name(x.name)
+        val f = host_named(self.m, name).unwrap().f
+        val m = self.m
+        var params: Buf[Ty] = buf()
+        var ret = x.ret
+
+        // The declaration as elaborated, before units were erased.
+        for d in m.typed.decls
+            d match
+                ExternDecl(t) ->
+                    if t.name == x.name
+                        params = t.params
+                        ret = t.ret
+                _ -> ()
+
+        (c) ->
+            var vs: Buf[NexValue] = buf()
+
+            for k in 0..<codes.len()
+                val a = codes[k]
+
+                vs.push(to_host(m.typed, a(c)?, params[k]))
+
+            f(vs) match
+                Ok(r) -> from_host(m.typed, r, ret, s"the result of host function `$name`") match
+                    Ok(v) -> Ok(v)
+                    Err(message) -> trapped(message)
+                Err(message) -> trapped(message)
+end Interp
+
+// -- crossing ----------------------------------------------------------------------------------------
+
+private find_tstruct(p: TProgram, name: string) -> Option[TStruct]
+    for d in p.decls
+        d match
+            StructDecl(s) -> if s.name == name then return Some(s)
+            _ -> ()
+
+    None
+
+private find_tenum(p: TProgram, name: string) -> Option[TEnum]
+    for d in p.decls
+        d match
+            EnumDecl(e) -> if e.name == name then return Some(e)
+            _ -> ()
+
+    None
+
+// The interpreter's value `v` of type `t` as the host holds it.
+private[nex] to_host(p: TProgram, v: Value, t: Ty) -> NexValue = t match
+    Int(bits, signed) -> NInt(int_of(v), bits, signed)
+    Real(bits) -> NReal(real_of(v), bits)
+    Complex(bits) -> NComplex(re_of(v), im_of(v), bits)
+    Bool -> NBool(bool_of(v))
+    Str -> NStr(str_of(v))
+    Measured(b, _) -> to_host(p, v, *b)
+    Tuple(ts) ->
+        var out: Buf[NexValue] = buf()
+
+        for k in 0..<ts.len()
+            out.push(to_host(p, field_at(v, k), ts[k]))
+
+        NTuple(out)
+    Array(e, _) -> NArray(array_out(p, arr_of(v), *e))
+    Nominal(name, _) ->
+        v match
+            VHandle(h) -> return NHandle(h)
+            _ -> ()
+
+        find_tstruct(p, name) match
+            Some(s) ->
+                var out: Buf[NexField] = buf()
+
+                for k in 0..<s.fields.len()
+                    out.push(NexField(s.fields[k].name, to_host(p, field_at(v, k), s.fields[k].ty)))
+
+                return NStruct(display_name(name), out)
+            None -> ()
+
+        find_tenum(p, name) match
+            Some(e) ->
+                val x = e.variants[tag_of(v)]
+                var out: Buf[NexValue] = buf()
+
+                for k in 0..<x.fields.len()
+                    out.push(to_host(p, field_at(v, k), x.fields[k].ty))
+
+                NVariant(x.name, out)
+            None -> NNothing
+    _ -> NNothing
+
+// An array's elements in storage order, in one buffer of their type's numbers where they are numbers:
+// the interpreter's storage gathered into a new buffer, a `real64`, `int64` or `bool` array's handed
+// over as it is.
+private array_out(p: TProgram, a: &Arr, e: Ty) -> &NexArray
+    val d = data_gather(a)
+    val n = data_len(d)
+    var ext: Buf[long] = buf()
+
+    for x in a.ext
+        ext.push(x)
+
+    val elems = d match
+        DR64(v) -> Reals(v, 64)
+        DI64(v) -> Ints(v, 64, true)
+        DBool(v) -> Bools(v)
+        DValues(v) ->
+            var out: Buf[NexValue] = buf()
+
+            for x in v
+                out.push(to_host(p, x, e))
+
+            Others(out)
+        _ -> base_of(e) match
+            Int(bits, signed) ->
+                var v: Buf[long] = buf()
+
+                for k in 0..<n
+                    v.push(int_of(data_get(d, k)))
+
+                Ints(v, bits, signed)
+            Real(bits) ->
+                var v: Buf[real] = buf()
+
+                for k in 0..<n
+                    v.push(real_of(data_get(d, k)))
+
+                Reals(v, bits)
+            Complex(bits) ->
+                var v: Buf[real] = buf()
+
+                for k in 0..<n
+                    val z = data_get(d, k)
+
+                    v.push(re_of(z))
+                    v.push(im_of(z))
+
+                Complexes(v, bits)
+            _ -> Others(buf())
+
+    NexArray(ext, elems)
+
+// The host's value `v` as the interpreter's value of type `t`, or why it is not one: `what` names
+// where it is going, `argument 1 of \`f\``.
+//
+// An integer crosses into any integer type it fits, and into a real or a complex; a real crosses into
+// a real or a complex at least as wide, and a complex into a complex at least as wide. Everything else
+// crosses into its own type alone.
+private[nex] from_host(p: TProgram, v: NexValue, t: Ty, what: string) -> Result[Value, string]
+    val refused = s"$what is ${show_ty(t)}, and ${given(v)} is given"
+
+    t match
+        Measured(b, _) -> return from_host(p, v, *b, what)
+        Int(bits, signed) -> return v match
+            NInt(n, b, s) -> if fits(n, b, s, bits, signed) then Ok(VInt(n)) else Err(s"$what is ${show_ty(t)}, and the ${show_ty(Int(b, s))} given, ${int_shown(n, b, s)}, does not fit it")
+            _ -> Err(refused)
+        Real(bits) -> return v match
+            NInt(n, b, s) -> Ok(VReal(rnd(as_real(n, b, s), bits)))
+            NReal(x, b) -> if b <= bits then Ok(VReal(rnd(x, b))) else Err(refused)
+            _ -> Err(refused)
+        Complex(bits) -> return v match
+            NInt(n, b, s) -> Ok(VComplex(rnd(as_real(n, b, s), bits), 0.0))
+            NReal(x, b) -> if b <= bits then Ok(VComplex(rnd(x, b), 0.0)) else Err(refused)
+            NComplex(re, im, b) -> if b <= bits then Ok(VComplex(rnd(re, b), rnd(im, b))) else Err(refused)
+            _ -> Err(refused)
+        Bool -> return v match
+            NBool(x) -> Ok(VBool(x))
+            _ -> Err(refused)
+        Str -> return v match
+            NStr(x) -> Ok(VStr(x))
+            _ -> Err(refused)
+        Void -> return v match
+            NNothing -> Ok(VVoid)
+            _ -> Err(refused)
+        Tuple(ts) -> return v match
+            NTuple(xs) ->
+                if xs.len() != ts.len() then return Err(refused)
+
+                var out: Buf[Value] = buf()
+
+                for k in 0..<ts.len()
+                    out.push(from_host(p, xs[k], ts[k], s"element ${k + 1} of $what")?)
+
+                Ok(VAgg(0, out))
+            _ -> Err(refused)
+        Array(e, axes) -> return v match
+            NArray(a) -> array_in(p, a, *e, axes, what, refused)
+            _ -> Err(refused)
+        Nominal(name, _) ->
+            find_tstruct(p, name) match
+                Some(s) ->
+                    if s.host then return v match
+                        NHandle(h) -> if h.type_name == display_name(name) then Ok(VHandle(h)) else Err(refused)
+                        _ -> Err(refused)
+
+                    return v match
+                        NStruct(n, fields) ->
+                            if n != display_name(name) then return Err(refused)
+
+                            for f in fields
+                                if !has_field(s.fields, f.name) then return Err(s"$what is ${show_ty(t)}, which has no field `${f.name}`")
+
+                            var out: Buf[Value] = buf()
+
+                            for d in s.fields
+                                var found: Option[NexValue] = None
+
+                                for f in fields
+                                    if f.name == d.name then found = Some(f.value)
+
+                                found match
+                                    Some(x) -> out.push(from_host(p, x, d.ty, s"field `${d.name}` of $what")?)
+                                    None -> return Err(s"$what is ${show_ty(t)}, and its field `${d.name}` is not given")
+
+                            Ok(VAgg(0, out))
+                        _ -> Err(refused)
+                None -> ()
+
+            find_tenum(p, name) match
+                Some(e) -> return v match
+                    NVariant(n, xs) ->
+                        for tag in 0..<e.variants.len()
+                            val x = e.variants[tag]
+
+                            if x.name == n
+                                if xs.len() != x.fields.len() then return Err(s"$what is ${show_ty(t)}, whose `$n` has ${x.fields.len()} field${if x.fields.len() == 1 then "" else "s"}, and ${xs.len()} ${if xs.len() == 1 then "is" else "are"} given")
+
+                                var out: Buf[Value] = buf()
+
+                                for k in 0..<xs.len()
+                                    out.push(from_host(p, xs[k], x.fields[k].ty, s"field ${k + 1} of `$n` in $what")?)
+
+                                return Ok(VAgg(tag, out))
+
+                        Err(s"$what is ${show_ty(t)}, which has no variant `$n`")
+                    _ -> Err(refused)
+                None -> ()
+        _ -> ()
+
+    Err(s"$what is ${show_ty(t)}, which does not cross to the host")
+end from_host
+
+private has_field(fields: Buf[FieldInfo], name: string) -> bool
+    for f in fields
+        if f.name == name then return true
+
+    false
+
+// An array of the host's as one of the interpreter's, of element type `e` and axes `axes`.
+private array_in(p: TProgram, a: &NexArray, e: Ty, axes: Buf[Extent], what: string, refused: string) -> Result[Value, string]
+    if a.ext.len() != axes.len() then return Err(s"$what is an array of rank ${axes.len()}, and one of rank ${a.ext.len()} is given")
+
+    var count: long = 1
+
+    for k in 0..<axes.len()
+        axes[k] match
+            Fixed(n) -> if a.ext[k] != long(n) then return Err(s"$what has $n elements on axis ${k + 1}, and the array given has ${a.ext[k]}")
+            _ -> ()
+
+        if a.ext[k] < 0 then return Err(s"$what is given an extent of ${a.ext[k]} on axis ${k + 1}")
+
+        count *= a.ext[k]
+
+    val held = a.elems match
+        Ints(xs, _, _) -> xs.len()
+        Reals(xs, _) -> xs.len()
+        Complexes(xs, _) -> xs.len() / 2
+        Bools(xs) -> xs.len()
+        Others(xs) -> xs.len()
+
+    if long(held) != count then return Err(s"$what is given extents holding $count elements, and ${held} elements")
+
+    var ext: Buf[long] = buf()
+
+    for n in a.ext
+        ext.push(n)
+
+    // A buffer of the very numbers the storage holds is copied as it is, with no value per element.
+    a.elems match
+        Reals(xs, 64) -> if ty_eq(base_of(e), Real(64)) then return Ok(dense_data(DR64(xs.copy()), ext))
+        Ints(xs, 64, true) -> if ty_eq(base_of(e), Int(64, true)) then return Ok(dense_data(DI64(xs.copy()), ext))
+        Bools(xs) -> if ty_eq(base_of(e), Bool) then return Ok(dense_data(DBool(xs.copy()), ext))
+        _ -> ()
+
+    val each = s"an element of $what"
+    var v: Buf[Value] = buf()
+
+    a.elems match
+        Ints(xs, b, s) ->
+            for n in xs
+                v.push(from_host(p, NInt(n, b, s), e, each)?)
+        Reals(xs, b) ->
+            for x in xs
+                v.push(from_host(p, NReal(x, b), e, each)?)
+        Complexes(xs, b) ->
+            for k in 0..<xs.len() / 2
+                v.push(from_host(p, NComplex(xs[2 * k], xs[2 * k + 1], b), e, each)?)
+        Bools(xs) ->
+            for x in xs
+                v.push(from_host(p, NBool(x), e, each)?)
+        Others(xs) ->
+            for x in xs
+                v.push(from_host(p, x, e, each)?)
+
+    Ok(dense(e, v, ext))
+
+// Whether the integer `n`, of `from_bits` bits and `from_signed`, is a value of `bits` and `signed`.
+private fits(n: long, from_bits: int, from_signed: bool, bits: int, signed: bool) -> bool
+    // A `uint64` above `int64`'s range is held as its bit pattern, a negative `long`.
+    val big = !from_signed && from_bits == 64 && n < 0
+
+    if signed
+        if big then return false
+        if bits == 64 then return true
+
+        val half = long(1) << (bits - 1)
+
+        return n >= -half && n < half
+
+    if n < 0 && !big then return false
+    if bits == 64 then return true
+    if big then return false
+
+    n < (long(1) << bits)
+
+private as_real(n: long, bits: int, signed: bool) -> real =
+    if !signed && bits == 64 && n < 0 then real(n) + 18446744073709551616.0 else real(n)
+
+private int_shown(n: long, bits: int, signed: bool) -> string =
+    if !signed && bits == 64 && n < 0 then s"${u64.wrap(n)}" else s"$n"
+
+// What a value given is, as a refusal names it.
+private given(v: NexValue) -> string = v match
+    NInt(n, b, s) -> s"the ${show_ty(Int(b, s))} ${int_shown(n, b, s)}"
+    NReal(_, b) -> s"a ${show_ty(Real(b))}"
+    NComplex(_, _, b) -> s"a ${show_ty(Complex(b))}"
+    NBool(_) -> "a bool"
+    NStr(_) -> "a string"
+    NArray(a) -> s"an array of rank ${a.ext.len()}"
+    NTuple(xs) -> s"a tuple of ${xs.len()}"
+    NStruct(n, _) -> s"a struct `$n`"
+    NVariant(n, _) -> s"the variant `$n`"
+    NHandle(h) -> s"a host `${h.type_name}`"
+    NNothing -> "nothing"

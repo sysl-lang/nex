@@ -1,0 +1,101 @@
+// A sysl program hosting nex scripts through the embedding API (DESIGN §16): a toy geometry kernel
+// gives a script its `Solid` type and the functions that make, move and measure solids, loads the
+// script, and calls the script's `build`. Every solid the script makes is the kernel's; nex holds it,
+// and the kernel's `release` is called when the script lets go of it.
+//
+//     embed model.nex               load and build once
+//     embed model.nex --reload 100  load, build and drop the script 100 times, as an editor does
+
+import nex.sh.sysl.nex.{Host, NArray, NHandle, NReal, NexValue, Reals, int_value, load_script_file, new_host, real_value}
+import sysl.buf.{Buf, buf}
+import sysl.text.parse_int
+
+// A solid: an axis-aligned block, its size and its corner, in millimetres.
+struct Block
+    size: (real, real, real)
+    at: (real, real, real)
+
+// The kernel's solids by number, from 1, and how many are alive.
+struct Kernel
+    solids: Buf[Option[Block]]
+    live: long
+
+    make(*self, b: Block) -> long
+        self.solids.push(Some(b))
+        self.live += 1
+        long(self.solids.len())
+
+    release(*self, id: long)
+        self.solids.set(usize(id - 1), None)
+        self.live -= 1
+
+    block(self, v: NexValue) -> Block = v match
+        NHandle(h) -> self.solids[usize(h.id - 1)].unwrap()
+        _ -> panic("not a solid")
+
+private number(v: NexValue) -> real = v match
+    NReal(x, _) -> x
+    _ -> 0.0
+
+// The kernel's functions, under the names the script declares them by.
+private kernel_host(k: &Kernel) -> Host
+    var host = new_host()
+
+    val solid = host.give_type("Solid", (id) -> k.release(id))
+
+    host.give("box", (a) -> Ok(solid.handle(k.make(Block((number(a[0]), number(a[1]), number(a[2])), (0.0, 0.0, 0.0))))))
+    host.give("moved", (a) ->
+        val b = k.block(a[0])
+        val by = a[1] match
+            NArray(arr) -> arr.elems match
+                Reals(v, _) -> v
+                _ -> return Err("moved: the offset is not reals")
+            _ -> return Err("moved: the offset is not an array")
+        val (x, y, z) = b.at
+
+        Ok(solid.handle(k.make(Block(b.size, (x + by[0], y + by[1], z + by[2])))))
+    )
+    host.give("volume", (a) ->
+        val (w, h, d) = k.block(a[0]).size
+
+        Ok(real_value(w * h * d))
+    )
+    host
+
+main(args: []string)
+    if args.len < 2
+        eprints("usage: embed <script.nex> [--reload n]\n")
+        exit(2)
+
+    val rounds = if args.len > 3 && args[2] == "--reload" then parse_int(args[3]).unwrap_or(1) else 1
+    val k: &Kernel = Kernel(buf(), 0)
+    val host = kernel_host(k)
+
+    for round in 0..<rounds
+        val script = load_script_file(args[1], host) match
+            Ok(s) -> s
+            Err(ds) ->
+                for d in ds
+                    eprints(d.text + "\n")
+
+                exit(1)
+
+        var given: Buf[NexValue] = buf()
+
+        given.push(real_value(1.5))
+        given.push(int_value(3))
+
+        script.call("build", given) match
+            Ok(v) -> if round + 1 == rounds then print(s"build(1.5 in, 3) = ${number(v)} mm^3")
+            Err(e) ->
+                eprints(e.text() + "\n")
+                exit(1)
+
+        // A model that traps comes back as an error, with where it trapped.
+        given.set(1, int_value(0))
+
+        script.call("build", given) match
+            Ok(_) -> print("build(1.5 in, 0) did not trap")
+            Err(e) -> if round + 1 == rounds then print(s"build(1.5 in, 0): ${e.text()}")
+
+    print(s"$rounds load${if rounds == 1 then "" else "s"}, ${k.solids.len()} solids made, ${k.live} alive")

@@ -26,7 +26,7 @@ and six more for units of measure, and every milestone of the port is measured a
 
 ## Layout
 
-The repository is a sysl workspace of three projects:
+The repository is a sysl workspace of four projects:
 
 - **the library `nex`** at the root (`sh/sysl/nex/`, module `sh.sysl.nex`): the front end both
   engines share — lexer, parser, elaborator and its checks, typed IR, units of measure, the module
@@ -35,6 +35,7 @@ The repository is a sysl workspace of three projects:
 - **`compiler/`**, the `nex` command: the MLIR emitter, the driver that lowers and links a program,
   and `nex test`'s runner.
 - **`runtime/`**, the archive every compiled program links.
+- **`examples/embed/`**, a sysl program hosting a nex script (below).
 
 ```
 sysl build compiler -o nex
@@ -45,6 +46,41 @@ sysl test .
 `nex` finds `libnex_rt.a` beside itself, or at `NEX_RUNTIME`. Compiling needs LLVM's `mlir-opt`,
 `mlir-translate` and `clang`, found at `NEX_LLVM_HOME` or else Homebrew's `opt/llvm`; without them
 the toolchain tests skip.
+
+## Embedding
+
+A sysl program runs nex scripts on the library's interpreter, with no toolchain (DESIGN §16): it
+loads a script, calls its functions by name with values, reads and writes its module-level
+bindings, and gives it functions and types of its own. A diagnostic, a trap and a value all come
+back as values; nothing is printed but what the script prints, and that goes to the host's `write`.
+
+```sysl
+import nex.sh.sysl.nex.*
+
+var host = new_host()
+val solid = host.give_type("Solid", (id) -> kernel.release(id))
+
+host.give("box", (args) -> Ok(solid.handle(kernel.make_box(args))))
+
+load_script(text, "model.nex", host) match
+    Ok(script) -> script.call("build", given) match
+        Ok(volume) -> ...
+        Err(e) -> eprints(e.text())
+    Err(ds) -> for d in ds
+        eprints(d.text)
+```
+
+```nex
+@host struct Solid
+@host extern def box(w: real<mm>, h: real<mm>, d: real<mm>): Solid
+
+def build(width: real<in>, count: integer) = ...
+```
+
+A host function is handed its arguments in the units its declaration names, an array as one typed
+buffer, and a host type's object is reference counted, its `release` called when nex and the host
+have both let go. A step budget and `cancel()` stop a runaway script, and a sandboxed script may
+not `stop`. `examples/embed/` is a whole host; `sysl build examples/embed -o embed` builds it.
 
 ## Licence
 

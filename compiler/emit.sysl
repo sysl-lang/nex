@@ -718,10 +718,12 @@ struct Emitter
                 FunDecl(f) -> self.fun(f)
                 GlobalDecl(g) -> globals.push(g)
                 TupleGlobalDecl(g) -> tuples.push(g)
-                StructDecl(_) -> ()
+                // A host type or a host function is given by a program embedding the interpreter
+                // (DESIGN §16.3); a compiled program has no host to give it.
+                StructDecl(s) -> if s.host then self.diags.push(error(s.span, s"`${display_name(s.name)}` is a host type, which a program embedding nex gives; a compiled program has no host, so this one runs interpreted, embedded"))
                 EnumDecl(_) -> ()
                 // Declared where it is first called (`emit_extern.sysl`).
-                ExternDecl(_) -> ()
+                ExternDecl(x) -> if x.host then self.diags.push(error(x.span, s"`${display_name(x.name)}` is a host function, which a program embedding nex gives; a compiled program has no host, so this one runs interpreted, embedded"))
 
         // Each lambda and each parallel region's code is emitted after the function that makes it,
         // and may make more.

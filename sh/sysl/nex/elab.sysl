@@ -344,8 +344,9 @@ struct Elab
                 self.fail(self.externs[k].decl.span, "`main` is the program's own function, not an `extern`: `def main()` or `def main(args: [string])`")
                 return
             None ->
-                // The test build's entry runs the tests; a program being tested need not have one.
-                if !self.mods.test_build then self.fail(Span(0, 0), "a program needs a `def main()` or a `def main(args: [string])`")
+                // The test build's entry runs the tests, and a host calls a script's functions by name;
+                // neither need have one.
+                if !self.mods.test_build && !self.mods.script then self.fail(Span(0, 0), "a program needs a `def main()` or a `def main(args: [string])`")
                 return
 
         val sig = self.fsig[k]

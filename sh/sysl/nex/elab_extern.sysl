@@ -32,6 +32,9 @@ impl Elab
     // The `k`th extern's parameter and result types and what its attributes say.
     resolve_extern(*self, k: usize)
         val x = self.externs[k]
+
+        if has_attr(x.decl.attrs, "host") then return self.resolve_host(k)
+
         var tys: Buf[Ty] = buf()
         var modes: Buf[Mode] = buf()
         var names: Buf[string] = buf()
@@ -114,10 +117,53 @@ impl Elab
                 self.fail(x.decl.span, s"`@${a.name}` is not an attribute of an `extern def`, which takes `@link`, `@symbol`, `@pure` and `@fortran`")
 
         for j in 0..<k
-            if self.xout[j].symbol == symbol then self.fail(x.decl.span, s"`${display_name(x.name)}` and `${display_name(self.xout[j].name)}` both name the C symbol `${symbol}`")
+            if !self.xout[j].host && self.xout[j].symbol == symbol then self.fail(x.decl.span, s"`${display_name(x.name)}` and `${display_name(self.xout[j].name)}` both name the C symbol `${symbol}`")
 
-        self.xout.push(TExtern(x.decl.span, x.name, tys, modes, ret, symbol, links, frameworks, pure, strided, partner, fortran))
+        self.xout.push(TExtern(x.decl.span, x.name, tys, modes, ret, symbol, links, frameworks, pure, strided, partner, fortran, false))
     end resolve_extern
+
+    // A `@host extern def`: a function the embedding program gives (DESIGN §16.3). Its parameters and
+    // result are values a host holds — any but a function — with their units, and it takes its
+    // arguments by value.
+    resolve_host(*self, k: usize)
+        val x = self.externs[k]
+        var tys: Buf[Ty] = buf()
+        var modes: Buf[Mode] = buf()
+        var names: Buf[string] = buf()
+        var none: Buf[Option[usize]] = buf()
+        var flat: Buf[bool] = buf()
+        var pure = false
+
+        for a in x.decl.attrs
+            if a.name == "pure" then pure = true
+            elif a.name != "host" then self.fail(x.decl.span, s"`@${a.name}` is not an attribute of a `@host extern def`, which takes `@pure`")
+            elif a.args.len() > 0 then self.fail(x.decl.span, "`@host` takes no arguments")
+
+        for p in x.params
+            if contains(names, p.name) then self.fail(x.decl.span, s"redeclaration of `${p.name}`")
+            if p.default.is_some() then self.fail(p.typ.span, "a `@host` function's parameter has no default: the host gives the function as it is, and a default belongs to a `def` that wraps it")
+            if p.mode == Inout then self.fail(p.typ.span, s"a `@host` function takes its arguments by value, so `${p.name}` is not `inout`; return the new value instead")
+
+            val ty = self.resolve_type(p.typ)
+
+            if is_callback(ty) then self.fail(p.typ.span, s"a `@host` function's parameter is a value the host holds, and `${p.name}` is a function")
+
+            names.push(p.name)
+            tys.push(ty)
+            modes.push(p.mode)
+            none.push(None)
+            flat.push(false)
+
+        val ret = x.ret match
+            Some(t) ->
+                val r = self.resolve_type(t)
+
+                if is_callback(r) then self.fail(t.span, "a `@host` function's result is a value the host holds, and a function is not one")
+                r
+            None -> Void
+
+        self.xout.push(TExtern(x.decl.span, x.name, tys, modes, ret, display_name(x.name), buf(), buf(), pure, flat, none, false, true))
+    end resolve_host
 
     // Whether a parameter of type `ty` crosses to C as DESIGN §10.2 says, and if not, why.
     private check_crossing(*self, p: Param, ty: Ty)
@@ -242,8 +288,16 @@ impl Elab
     check_c_structs(*self)
         for s in self.agg.structs
             for a in s.decl.attrs
-                if a.name != "c" then self.fail(s.decl.span, s"`@${a.name}` is not an attribute of a struct, which takes `@c`")
-                elif a.args.len() > 0 then self.fail(s.decl.span, "`@c` takes no arguments")
+                if a.name != "c" && a.name != "host" then self.fail(s.decl.span, s"`@${a.name}` is not an attribute of a struct, which takes `@c` and `@host`")
+                elif a.args.len() > 0 then self.fail(s.decl.span, s"`@${a.name}` takes no arguments")
+
+            val host = has_attr(s.decl.attrs, "host")
+
+            if host && has_attr(s.decl.attrs, "c") then self.fail(s.decl.span, s"`${s.name}` is a host type, which the host lays out, so it is not `@c` too")
+            elif host && s.generic then self.fail(s.decl.span, s"a host type is the host's own, so `${s.name}` is not generic")
+            elif host && s.fields.len() > 0 then self.fail(s.decl.span, s"a host type has no fields: nex holds `${s.name}` and passes it back, and only the host looks inside")
+            elif !host && !s.generic && s.fields.len() == 0 then self.fail(s.decl.span, s"a struct has fields; one with none is a type the host owns, declared `@host struct ${s.name}`")
+
 
             if !has_attr(s.decl.attrs, "c") then continue
 
@@ -283,6 +337,10 @@ impl Elab
                     out.push(self.invalid(a.span))
                     continue
                 _ -> ()
+
+            if x.host
+                out.push(self.coerce(self.elab(a, Some(ty)), ty, s"argument ${i + 1}"))
+                continue
 
             if x.modes[j] == Inout
                 out.push(self.borrow(a, ty, ""))
@@ -344,6 +402,10 @@ impl Elab
     // only one whose parameters and result all cross by value.
     extern_value(*self, span: Span, k: usize, name: string) -> TExpr
         val x = self.xout[k]
+
+        if x.host
+            self.fail(span, s"`${display_name(x.name)}` is a `@host` function, which is only called; wrap the call in a `def` to pass it as a value")
+            return self.invalid(span)
 
         if x.fortran
             self.fail(span, s"`${display_name(x.name)}` is a `@fortran` extern, which takes every argument by reference, so it is only called; wrap the call in a `def` to pass it as a value")
@@ -412,7 +474,7 @@ without_c_ptr(ty: Ty) -> Ty
 
     fn_type(params, modes, sig.ret)
 
-private has_attr(attrs: Buf[Attribute], name: string) -> bool
+private[nex] has_attr(attrs: Buf[Attribute], name: string) -> bool
     for a in attrs
         if a.name == name then return true
 

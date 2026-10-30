@@ -45,7 +45,7 @@ private erased_decl(d: TDecl) -> TDecl = d match
         for t in x.params
             params.push(erase(t))
 
-        ExternDecl(TExtern(x.span, x.name, params, x.modes, erase(x.ret), x.symbol, x.links, x.frameworks, x.pure, x.strided, x.partner, x.fortran))
+        ExternDecl(TExtern(x.span, x.name, params, x.modes, erase(x.ret), x.symbol, x.links, x.frameworks, x.pure, x.strided, x.partner, x.fortran, x.host))
 
 private opt(x: Option[TExpr]) -> Option[TExpr] = x.map(v -> ex(v))
 

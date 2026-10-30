@@ -1,5 +1,5 @@
 // nex, an array-first numerical language, implemented in sysl. This repository is a workspace of
-// three projects:
+// four projects:
 //
 // - **this one, the library `nex`**: the front end every engine shares — the lexer, the parser, the
 //   elaborator and its checks, the typed IR, units of measure and the module loader — in
@@ -9,6 +9,8 @@
 //   and the test runner.
 // - **`runtime/`**, the archive every compiled program links, which this library depends on too: the
 //   interpreter (`interp*.sysl`) prints, formats and words its traps through the same functions.
+// - **`examples/embed/`**, a sysl program hosting a nex script through the embedding API
+//   (`embed.sysl`, DESIGN §16).
 //
 //     sysl build compiler -o nex
 //     sysl build-c runtime -o libnex_rt.a
@@ -25,7 +27,7 @@ package {
   sysl    = "0.7.9"
 }
 
-workspace = ["compiler", "runtime"]
+workspace = ["compiler", "runtime", "examples/embed"]
 
 // The perf oracle's kernels: nex programs and their C and Fortran twins, which no sysl build compiles.
 exclude = ["bench"]

@@ -55,6 +55,9 @@ private[nex] enum Value
     // A place inside the array another place holds: one element, with the fields `path` followed
     // into it, or a window of elements an `inout` parameter borrows (`interp_array.sysl`).
     VSub(w: &Win, path: Buf[usize])
+    // A value of a host type (DESIGN §16.3): the host's object, shared with the host and released
+    // when the last holder lets go.
+    VHandle(h: &HostHandle)
     VVoid
 
 // How a computation stopped other than by giving its value: a trap, `stop`, or a `return`, `exit` or
@@ -65,6 +68,8 @@ private[nex] enum Signal
     Returning(value: Value)
     Exiting(loop_id: usize)
     Cycling(loop_id: usize)
+    // The host's step budget spent, or the host cancelling the run: nothing in the program catches it.
+    Halted(message: string)
 
 private[nex] type Answer = Result[Value, Signal]
 

@@ -2233,3 +2233,140 @@ each has an item in PLAN.md's later list.
 
 Not in the language, and not planned: implicit parallelism (§9.3), static extents as generic
 parameters (§3.4), batched `@` on rank ≥ 3 (§7.2), a call-site marker for `inout` (§8.1).
+
+---
+
+## 16. Embedding nex
+
+A sysl program hosts nex scripts on the interpreter, the engine that needs no toolchain (PLAN.md
+M13): it loads a script, calls its functions with values, reads and writes its module-level
+bindings, and gives it functions and types of its own — a 3D modeller giving a model its geometry
+kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
+
+### 16.1 Loading
+
+- **`load_script(text, file, host, opts)`** loads a script from text, `file` naming it in
+  diagnostics; it is one module and imports nothing. **`load_script_file(entry, host, opts)`** loads
+  the project whose root module is `entry`, with every module it imports and the source prelude
+  `opts.prelude` names, as `nex run` does.
+- **A script needs no `main`.** A host calls it by name; a `main`, where there is one, is what `run`
+  calls, and it is held to §11.2 as a program's is.
+- **A refused script is its diagnostics as values**, never printed: each is a `NexDiagnostic` with
+  its file, its line and column (from 1), its span in that file, its message and its text rendered as
+  `nex` prints it. The parser's, the elaborator's and the interpreter's refusals all come back this
+  way, an unreadable entry as one diagnostic.
+
+### 16.2 Running and calling
+
+- **The module-level bindings are initialized on the first request** — `run`, `call`, `get` or
+  `set` — in the order a program initializes them, and keep their values from one request to the
+  next. A trap while they initialize answers that request and every later one, the bindings never
+  having been made.
+- **`run(args)`** calls `main` with `args` as the program's arguments and answers the status: 0 when
+  `main` returns, the code `stop` gives. **`call(name, args)`** calls the top-level function `name`
+  with values, each checked against its parameter's type (§16.3), and answers its result.
+  **`call_named(name, positional, named)`** names arguments as a nex call does: `positional` fills
+  the leading parameters, `named` (each a `NexField`) any others by name. **A parameter a host's call
+  leaves out takes its default exactly as a nex call's does** (§11.3): evaluated afresh at every call,
+  in parameter order, seeing the module-level names of the function's own module, its unit
+  converted to the parameter's. A trap in a default leaves the function's own frame, at the default,
+  since the host's call has no nex frame of its own. A function taking an `inout` parameter is
+  refused, since a host passes values, not places. A `stop` inside a call is an error, `ScriptStop`.
+- **`get(name)`** reads a module-level binding, one taken apart by a destructuring `val` among them;
+  **`set(name, v)`** writes a `var`, the value checked against its type. A `val` is not written.
+- **What a script prints goes to the host's `write`**, standard output and standard error apart.
+- **A request that cannot be made is refused before anything runs**, no default evaluated: a name
+  the script does not declare, more arguments than parameters, a named argument the function has no
+  parameter for or one given twice, a parameter with no default left out, a value of the wrong type
+  — `ScriptRefused` with the reason, worded as the elaborator's refusal of the same nex call.
+- **Dropping the script lets go of everything it holds**: its compiled code, its bindings and the
+  host's objects in them. A host that reloads an edited script after every keystroke holds one
+  script at a time, and `examples/embed` reloads its model 50 times on a counted heap with nothing
+  left at exit.
+
+### 16.3 Values across the boundary
+
+- **A value crosses as a `NexValue`**: `NInt(v, bits, signed)`, `NReal(v, bits)`,
+  `NComplex(re, im, bits)`, `NBool`, `NStr`, `NArray`, `NTuple`, `NStruct(name, fields)` with its
+  fields by name, `NVariant(name, fields)` for an enum's variant, `NHandle` for a host type's object,
+  and `NNothing` for a function returning nothing. An integer is held in a `long` widened by its own
+  signedness, a `uint64` above `int64`'s range as its bit pattern; a real of any width as the
+  `real64` it widens to exactly.
+- **A number with a unit crosses as the number in the unit its declared type names.** A host
+  function declared `box(w: real<mm>)` and called as `box(1.0<in>)` is handed `25.4`; a function
+  returning `real<mm^3>` hands the host cubic millimetres. The unit is the declaration's, so a host
+  reads one convention however the script spelled its lengths (§13).
+- **An array crosses as its extents and one buffer of its elements**, column-major (§3.2): `Ints`,
+  `Reals`, `Complexes` (real and imaginary parts alternating) or `Bools`, a value per element only for
+  elements that are not numbers or `bool`. It is the elements, not a view: a slice or a transposed
+  array crosses as the elements it shows, each axis from 1. **It crosses as a copy**: a script
+  writing an array it was given leaves the host's buffer as it was, and a buffer it answers is the
+  host's own.
+- **Every value is checked against the type it meets** — a parameter of the function called, the
+  result of a host function, a binding set — and a mismatch names where the value was going:
+  `argument 1 of \`f\`, \`x\`, is int8, and the int64 given, 128, does not fit it`. An integer
+  crosses into any integer type it fits and into a real or a complex; a real crosses into a real or a
+  complex at least as wide, a complex into a complex at least as wide; everything else into its own
+  type alone. An array's rank must be its type's, a static extent the same, and its elements must
+  fill its extents; a struct is given every field, by name, and no other; a variant is named, with
+  its fields in order.
+
+### 16.4 Host functions and host types
+
+```nex
+@host struct Solid
+
+@host extern def box(w: real<mm>, h: real<mm>, d: real<mm>): Solid
+@host @pure extern def volume(s: Solid): real<mm^3>
+```
+
+- **A host function is an `extern def` marked `@host`**: a function the embedding program gives
+  under that name, not a C function. Its parameters and result are any type a host holds — numbers
+  with their units, `bool`, strings, arrays, tuples, structs, enums and host types — but not
+  functions; it takes its arguments by value, so no parameter is `inout`, and none has a default. Its
+  attributes are `@host` and `@pure`, which a parallel body (§9.4) requires as it does of a C extern.
+  It is only called, never a function value: a `def` wrapping the call is one.
+- **A host type is a struct marked `@host` with no fields**: the host's own object, which nex holds
+  and passes back and never looks inside. A script does not construct one; it has `==`, true where
+  the two are the host's same object, and prints as its name and the host's number, `Solid#7`. A
+  struct without fields that is not `@host` is refused, as is a `@host` struct with fields, a generic
+  one or one also `@c`.
+- **The host gives each by name before loading** (`Host.give`, `Host.give_type`), and a script
+  declaring a host function or type its host does not give is refused at load. A host function is a
+  sysl closure taking the arguments as values of the declared parameter types; it answers a value,
+  checked against the declared result, or a message, which traps.
+- **A host type's object is reference counted**: every value holding it shares it, the host's copy
+  included, and when the last lets go the type's `release` is called with the host's number for it —
+  when a script's local goes out of scope, when a binding is overwritten, when the script is dropped.
+  A host function makes an object through the `HostType` `give_type` answered, so that the host's
+  table of functions and the functions in it do not hold each other.
+- **A compiled program has no host**: the compiler refuses a `@host` function or type, and a program
+  declaring one runs embedded. Compiling a script for a host — a shared library the host loads, its
+  host functions passed in as callbacks — is the 3D modeller's later item in PLAN.md.
+
+### 16.5 Traps, `stop`, and stopping a runaway
+
+- **A trap is an `Err`**, `ScriptTrap(message, stack)`: the message `nex run` writes after `trap: `,
+  and the nex frames the trap left, innermost first — each the function's name and the file, line and
+  column of the call or statement in it where the trap happened, or of the function's declaration
+  where neither says. A module-level binding's initializer is the frame `module level`. A trap
+  `assert_traps` catches leaves no stack.
+- **The host may bound a run**: `opts.budget` is the steps one `run` or `call` may take — a call's
+  entry and a loop's pass are a step each — and `cancel()`, called from a host function or from
+  `write`, stops the run in progress at its next step. Either ends the run with `ScriptHalt`, which
+  `assert_traps` does not catch; the next request starts with the budget whole and uncancelled. Calls
+  nest at most 10,000 deep, as everywhere (§11.3).
+- **Another thread stops a run through the script's `CancelToken`.** `cancel_token()` answers a
+  `&sync CancelToken`, one atomic word shared with the script and nothing else of it, so a
+  modeller's UI thread may hold it while a worker thread runs the script; its `cancel()` halts the run
+  in progress at its next step, as `Script.cancel()` does, and the step reads it without a lock. A
+  cancel that arrives between requests is cleared by the next one starting, so a host cancels a run
+  it knows has begun.
+
+### 16.6 The sandbox
+
+`opts.sandbox` is for scripts from untrusted sources. A sandboxed script may not `stop` — its host
+decides when it ends — and the rest of what an untrusted script must not do the interpreter already
+refuses to every script: an `extern` (the interpreter never calls C) and a host function its host
+does not give. nex has no file I/O to refuse. A runaway sandboxed script is bounded by the budget,
+which a host running untrusted scripts sets.

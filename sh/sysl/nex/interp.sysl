@@ -53,7 +53,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
     for a in args
         kept.push(a)
 
-    val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), buf(), 0)
+    val m = machine(p, kept, write, fpe_trap)
     var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf(), buf())
     val init = it.program(test)
 
@@ -69,7 +69,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
 // What of `p` the interpreter does not run yet, each a diagnostic; empty where it runs all of it.
 // Nothing is run.
 interpretable(p: TProgram) -> Buf[Diagnostic]
-    val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), buf(), 0)
+    val m = machine(p, buf(), (s, text) -> (), false)
     var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf(), buf())
 
     it.program(None)
@@ -78,7 +78,7 @@ interpretable(p: TProgram) -> Buf[Diagnostic]
 
 // The machine let go of its code: every compiled closure holds the machine, so the two would keep
 // each other alive past the run.
-private shut(m: &Machine)
+private[nex] shut(m: &Machine)
     m.funs = buf()
     m.lambdas = buf()
 
@@ -95,6 +95,7 @@ private run_program(m: &Machine, init: Buf[Compiled]) -> Ending
 
 private ended(s: Signal) -> Ending = s match
     Trapped(message) -> Trap(message)
+    Halted(message) -> Trap(message)
     Stopped(code) -> Exit(code)
     _ -> Exit(0)
 
@@ -106,10 +107,13 @@ private[nex] type Code = &Fn(&Cells) -> Answer
 private[nex] type Binder = &Fn(&Cells, Value) -> unit
 private[nex] type Storer = &Fn(&Cells, Value) -> Answer
 
-// A function compiled: its code, and how many slots its frame holds.
+// A function compiled: its code, how many slots its frame holds, and its name and where it is
+// declared, which a trap's stack names.
 private[nex] struct Compiled
     code: Code
     slots: usize
+    name: string
+    span: Span
 
 // A lambda or a local `def` compiled. Its frame holds its parameters, then what it captures, in
 // `TLambda.captures` order; a local `def` that calls itself finds itself in `self_slot`.
@@ -118,10 +122,14 @@ private[nex] struct Lambda
     slots: usize
     params: usize
     self_slot: Option[usize]
+    name: string
+    span: Span
 
 // What every closure of a running program shares: its arguments, where its text goes, whether real
 // arithmetic traps, the module-level bindings, the functions and the lambdas by number, and how deep
-// the calls are.
+// the calls are. An embedding program (`embed.sysl`) adds the rest: the functions it gives, whether
+// the script is sandboxed, how many steps it may take and whether it is cancelled, and the stack a
+// trap leaves behind it.
 private[nex] struct Machine
     args: Buf[string]
     write: &Fn(Stream, string) -> unit
@@ -130,8 +138,62 @@ private[nex] struct Machine
     funs: Buf[Compiled]
     lambdas: Buf[Lambda]
     depth: int
+    // The program as elaborated, units and all, which the values crossing to the host are read by.
+    typed: TProgram
+    hosts: Buf[HostFn]
+    host_types: Buf[HostType]
+    sandbox: bool
+    // Steps are a call's entry and a loop's pass; the run halts when `steps` reaches `limit`.
+    steps: long
+    limit: long
+    // Shared with whatever thread the host hands it to, which may cancel the run while it runs.
+    cancel: &sync CancelToken
+    // The frames a trap has left so far, innermost first; and where in the frame it is leaving the
+    // trap happened, once a statement there has said so.
+    trace: Buf[TraceFrame]
+    site: Span
+    sited: bool
 
-private frame_of(slots: usize) -> &Cells
+// A frame a trap left: the function's name, and where in it the trap happened — the statement, or
+// the function's declaration where no statement says.
+private[nex] struct TraceFrame
+    name: string
+    span: Span
+
+private[nex] machine(p: TProgram, args: Buf[string], write: &Fn(Stream, string) -> unit, fpe: bool) -> &Machine =
+    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, cancel_token(), buf(), Span(0, 0), false)
+
+// The step limit of a run the host sets none for.
+private[nex] val NO_LIMIT: long = 9223372036854775807
+
+// Counts a step: a call's entry or a loop's pass. Answers the signal that halts the run where the
+// host's budget is spent or the host has cancelled it.
+private[nex] tick(m: &Machine) -> Option[Signal]
+    m.steps += 1
+
+    if m.steps < m.limit && !m.cancel.cancelled() then return None
+
+    Some(Halted(if m.cancel.cancelled() then "cancelled by the host" else s"stopped after ${m.limit} steps, the host's budget"))
+
+// `r`, a call's answer at `span`, the site of the trap it may be.
+private[nex] sited(m: &Machine, r: Answer, span: Span) -> Answer
+    r match
+        Err(s) -> site(m, s, span)
+        _ -> ()
+
+    r
+
+// Where a trap happened in the frame it is leaving: the first statement it passes says, the innermost.
+private[nex] site(m: &Machine, s: Signal, span: Span)
+    if m.sited then return
+
+    s match
+        Trapped(_) ->
+            m.site = span
+            m.sited = true
+        _ -> ()
+
+private[nex] frame_of(slots: usize) -> &Cells
     var v: Buf[Value] = buf()
 
     for _ in 0..<slots
@@ -153,7 +215,7 @@ private[nex] landed(s: Signal, loop_id: usize) -> int = s match
 
 // A call of function `k`: its frame made, the arguments stored in its first slots, its body run, a
 // `return` taken as its value.
-private call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answer
+private[nex] call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answer
     val f = m.funs[k]
     val frame = frame_of(f.slots)
 
@@ -162,7 +224,7 @@ private call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answer
 
         frame.v.set(j, a(c)?)
 
-    run_frame(m, f.code, frame)
+    run_frame(m, f.code, frame, f.name, f.span)
 
 // A call of lambda `k` made with `env`: the arguments in the first slots of its frame, what it
 // captures after them.
@@ -182,11 +244,15 @@ private call_lambda(m: &Machine, k: usize, env: Buf[Value], args: Buf[Code], c: 
         Some(s) -> frame.v.set(s, VClosure(k, env))
         None -> ()
 
-    run_frame(m, l.code, frame)
+    run_frame(m, l.code, frame, l.name, l.span)
 
-// A body run in its frame, a call deeper.
-private run_frame(m: &Machine, code: Code, frame: &Cells) -> Answer
+// A body run in its frame, a call deeper. A trap leaving it adds the frame to the trap's stack.
+private run_frame(m: &Machine, code: Code, frame: &Cells, name: string, span: Span) -> Answer
     if m.depth >= MAX_CALL_DEPTH then return trapped(call_depth_message())
+
+    tick(m) match
+        Some(s) -> return Err(s)
+        None -> ()
 
     m.depth += 1
 
@@ -197,6 +263,10 @@ private run_frame(m: &Machine, code: Code, frame: &Cells) -> Answer
     r match
         Err(s) -> s match
             Returning(v) -> Ok(v)
+            Trapped(_) ->
+                m.trace.push(TraceFrame(name, if m.sited then m.site else span))
+                m.sited = false
+                Err(s)
             _ -> Err(s)
         _ -> r
 
@@ -270,7 +340,11 @@ impl Interp
                 TupleGlobalDecl(g) ->
                     tuples.push(g)
                     self.global_binds(g.pat)
-                ExternDecl(x) -> self.diags.push(error(x.span, "a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled"))
+                ExternDecl(x) ->
+                    if !x.host then self.diags.push(error(x.span, "a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled"))
+                    elif host_named(self.m, display_name(x.name)).is_none() then self.diags.push(error(x.span, s"`${display_name(x.name)}` is a host function, and the program running this script gives none of that name"))
+                StructDecl(s) ->
+                    if s.host && !host_type_named(self.m, display_name(s.name)) then self.diags.push(error(s.span, s"`${display_name(s.name)}` is a host type, and the program running this script gives none of that name"))
                 _ -> ()
 
         for f in funs
@@ -318,7 +392,7 @@ impl Interp
 
         val body = self.boxing(f.params, self.ex(f.body))
 
-        Compiled(body, self.next)
+        Compiled(body, self.next, display_name(f.name), f.span)
 
     // `body` after the parameters a lambda captures are moved into cells, each a cell of its own.
     boxing(*self, params: Buf[usize], body: Code) -> Code
@@ -356,7 +430,7 @@ impl Interp
         Compiled((c) ->
             bind(c, init(c)?)
             Ok(VVoid)
-        , self.next)
+        , self.next, "module level", g.span)
 
     // A module-level binding's initializer, run in a frame of its own, its value stored.
     global(*self, g: TGlobal, k: usize) -> Compiled
@@ -368,7 +442,35 @@ impl Interp
         Compiled((c) ->
             m.globals.v.set(k, init(c)?)
             Ok(VVoid)
-        , self.next)
+        , self.next, "module level", g.span)
+
+    // By function, each parameter's default compiled to run in a frame of its own: a default sees only
+    // module-level names (DESIGN §11.3), so it needs no caller's frame. The frame a trap in it leaves
+    // is the function's, at the default.
+    defaults(*self) -> Buf[Buf[Option[Compiled]]]
+        var out: Buf[Buf[Option[Compiled]]] = buf()
+
+        for d in self.prog.decls
+            d match
+                FunDecl(f) ->
+                    var each: Buf[Option[Compiled]] = buf()
+
+                    for x in f.defaults
+                        each.push(x match
+                            Some(e) ->
+                                self.begin()
+
+                                val code = self.ex(e)
+
+                                Some(Compiled(code, self.next, display_name(f.name), e.span))
+                            None -> None
+                        )
+
+                    out.push(each)
+                _ -> ()
+
+        out
+    end defaults
 
     // The call of the function `name` the program starts at.
     entry(*self, name: string) -> Compiled
@@ -377,12 +479,21 @@ impl Interp
         var none: Buf[Code] = buf()
 
         k match
-            Some(n) -> Compiled((c) -> call_fun(m, n, none, c), 0)
-            None -> Compiled((c) -> Ok(VVoid), 0)
+            Some(n) -> Compiled((c) -> call_fun(m, n, none, c), 0, name, Span(0, 0))
+            None -> Compiled((c) -> Ok(VVoid), 0, name, Span(0, 0))
 
     fun_number(*self, name: string) -> Option[usize]
         for k in 0..<self.fun_names.len()
             if self.fun_names[k] == name then return Some(k)
+
+        None
+
+    // The `@host` extern named `name`, if it is one.
+    host_extern(*self, name: string) -> Option[TExtern]
+        for d in self.prog.decls
+            d match
+                ExternDecl(x) -> if x.name == name && x.host then return Some(x)
+                _ -> ()
 
         None
 
@@ -577,14 +688,31 @@ impl Interp
                     codes.push(self.ex(it))
 
                 val r = self.ex(result)
+                val m = self.m
+                var spans: Buf[Span] = buf()
+
+                for it in items
+                    spans.push(it.span)
+
+                val rs = result.span
 
                 return (c) ->
                     for k in 0..<codes.len()
                         val f = codes[k]
 
-                        f(c)?
+                        f(c) match
+                            Ok(_) -> ()
+                            Err(s) ->
+                                site(m, s, spans[k])
+                                return Err(s)
 
-                    r(c)
+                    val v = r(c)
+
+                    v match
+                        Err(s) -> site(m, s, rs)
+                        _ -> ()
+
+                    v
             TLet(id, init) ->
                 self.unheld(self.prog.locals[id].ty) match
                     Some(what) -> return self.later(e.span, what)
@@ -622,6 +750,8 @@ impl Interp
             TExit(id) -> return (c) -> Err(Exiting(id))
             TCycle(id) -> return (c) -> Err(Cycling(id))
             TStop(code) ->
+                if self.m.sandbox then self.diags.push(error(e.span, "a sandboxed script does not `stop`: the host that runs it decides when it ends"))
+
                 code match
                     Some(x) ->
                         val r = self.ex(x)
@@ -829,14 +959,14 @@ impl Interp
 
         val k = self.m.lambdas.len()
 
-        self.m.lambdas.push(Lambda((c) -> Ok(VVoid), 0, 0, None))
+        self.m.lambdas.push(Lambda((c) -> Ok(VVoid), 0, 0, None, "", l.body.span))
 
         val body = self.boxing(l.params, self.ex(l.body))
         val self_slot: Option[usize] = own match
             Some(id) -> Some(usize(self.slot[id]))
             None -> None
 
-        self.m.lambdas.set(k, Lambda(body, self.next, l.params.len(), self_slot))
+        self.m.lambdas.set(k, Lambda(body, self.next, l.params.len(), self_slot, if l.name == "" then "a lambda" else l.name, l.body.span))
 
         own match
             Some(id) -> self.captured.set(id, true)
@@ -954,7 +1084,11 @@ impl Interp
             Tuple(es) -> kinds.push(es)
             Nominal(name, _) ->
                 self.struct_of(name) match
-                    Some(s) -> kinds.push(field_tys(s.fields))
+                    Some(s) ->
+                        // Two values of a host type are equal where they are the host's same object.
+                        if s.host then return Some((a, b) -> Ok(VBool(same_handle(a, b))))
+
+                        kinds.push(field_tys(s.fields))
                     None -> ()
 
                 self.enum_of(name) match
@@ -1141,14 +1275,22 @@ impl Interp
         *callee.kind match
             TFnRef(name) ->
                 self.fun_number(name) match
-                    Some(k) -> return (c) -> call_fun(m, k, codes, c)
-                    // An `extern`, refused where it is declared.
-                    None -> return if self.is_extern(name) then (c) -> Ok(VVoid) else self.later(span, s"a call of `$name`")
+                    Some(k) -> return (c) -> sited(m, call_fun(m, k, codes, c), span)
+                    None ->
+                        self.host_extern(name) match
+                            Some(x) ->
+                                val h = self.host_call(x, codes)
+
+                                return (c) -> sited(m, h(c), span)
+                            None -> ()
+
+                        // An `extern`, refused where it is declared.
+                        return if self.is_extern(name) then (c) -> Ok(VVoid) else self.later(span, s"a call of `$name`")
             _ -> ()
 
         val f = self.ex(callee)
 
-        (c) -> call_value(m, f(c)?, codes, c)
+        (c) -> sited(m, call_value(m, f(c)?, codes, c), span)
 
     // An argument: its value, or for an `inout` parameter the place it names.
     argument(*self, a: TExpr) -> Code
@@ -1208,10 +1350,15 @@ impl Interp
     while_loop(*self, id: usize, cond: TExpr, body: TExpr) -> Code
         val k = self.ex(cond)
         val b = self.ex(body)
+        val m = self.m
 
         (c) ->
             loop
                 if !bool_of(k(c)?) then break
+
+                tick(m) match
+                    Some(s) -> return Err(s)
+                    None -> ()
 
                 b(c) match
                     Ok(_) -> ()
@@ -1236,6 +1383,7 @@ impl Interp
             None -> self.constant_code(VInt(1))
         val bind = self.local_binder(var_id)
         val b = self.ex(body)
+        val m = self.m
 
         (c) ->
             val first = wide(int_of(lo(c)?), signed)
@@ -1256,6 +1404,10 @@ impl Interp
 
             loop
                 bind(c, VInt(long.wrap(k)))
+
+                tick(m) match
+                    Some(s) -> return Err(s)
+                    None -> ()
 
                 b(c) match
                     Ok(_) -> ()

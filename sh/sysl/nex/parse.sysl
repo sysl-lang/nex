@@ -642,6 +642,9 @@ struct Parser
     structure(*self) -> Result[DeclKind, Diagnostic]
         val name = self.ident("a struct name")?
         val type_params = self.type_params()?
+        // A struct with no field block is a host type's declaration (`@host struct Solid`).
+        if !self.at_block() then return Ok(Struct(name, type_params, buf()))
+
         val fields = self.lines("the struct's fields on indented lines", (p) -> p.field())?
 
         self.end_marker()

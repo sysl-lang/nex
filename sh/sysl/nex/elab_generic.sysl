@@ -776,7 +776,7 @@ impl Elab
             else
                 val s = self.agg.structs[self.find_struct(i.name).unwrap()]
 
-                out.push(StructDecl(TStruct(a.decl.span, i.name, s.fields)))
+                out.push(StructDecl(TStruct(a.decl.span, i.name, s.fields, false)))
 
         out
 
