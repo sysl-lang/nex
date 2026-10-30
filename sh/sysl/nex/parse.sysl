@@ -1279,6 +1279,10 @@ struct Parser
                 Ident(n) -> if is_kw(self.tok(1), "=") then n else ""
                 _ -> ""
 
+            // `+`, `*`, `and` or `or` standing alone is an operator handed to a collective of `mpi`,
+            // `allreduce(x, +)`; which call takes one is the elaborator's question.
+            val op = one_of(self.tok(0), ["+", "*", "and", "or"])
+
             if named.len > 0
                 self.bump()
                 self.bump()
@@ -1286,6 +1290,9 @@ struct Parser
                 val value = self.expr()?
 
                 args.push(ex(self.toks.span_from(m), NamedArg(named, value)))
+            elif op.len > 0 && (is_kw(self.tok(1), ",") || is_kw(self.tok(1), close))
+                self.bump()
+                args.push(ex(self.toks.span_from(m), ExprKind.Name(op)))
             else
                 args.push(self.expr()?)
 

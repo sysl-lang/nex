@@ -62,10 +62,13 @@ struct CRoot
     t: Ty
 
 // What a wrapper does with its C arguments and its windows' buffers: calls the C function `symbol`,
-// or runs `name`, an `inout` form of the LAPACK prelude on elements of `et` (`emit_lapack.sysl`).
+// runs `name`, an `inout` form of the LAPACK prelude on elements of `et` (`emit_lapack.sysl`), or
+// updates its one window by `alpha * (op(x) @ op(y)) + beta * c`, the product of type `t` and the
+// operands of types `xt` and `yt` with BLAS's flags `fx` and `fy` (`emit_blas.sysl`).
 enum WrapJob
     CallC(symbol: string)
     Lapack(name: string, et: Ty)
+    Update(t: Ty, xt: Ty, fx: int, yt: Ty, fy: int)
 
 // An `inout` array argument: its root, by number, each slice opened from the root to the window,
 // whether its parameter is `@strided`, and whether it is `[*; ..]`, crossing as a descriptor.
@@ -134,6 +137,8 @@ impl Emitter
         var logicals: Buf[string] = buf()
         // The elements of arrays of numbers lent as `inout` scalars, written back after the call.
         var elements: Buf[ElementLent] = buf()
+
+        self.lend_roots(args)
 
         for j in 0..<x.params.len()
             datas.push("")
@@ -410,6 +415,7 @@ impl Emitter
                     ""
                 else self.def(call)
             Lapack(name, et) -> self.lapack_in_place(span, name, et, inner, wms, wts, &copies)
+            Update(t, xt, fx, yt, fy) -> self.update_in_place(span, t, xt, fx, yt, fy, inner, wms[0], wts[0], &copies)
 
         var outs: Buf[string] = buf()
         var out_tys: Buf[string] = buf()

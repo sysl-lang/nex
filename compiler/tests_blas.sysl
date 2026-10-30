@@ -133,6 +133,68 @@ emit_lapack_in_place()
 
 // -- programs ---------------------------------------------------------------------------------------
 
+// A function updating its `var c` by `stmt`, over large static operands of `t`.
+private updating(t: string, stmt: string) -> string =
+    s"def f(a: [$t; 64, 64], b: [$t; 64, 64], c0: [$t; 64, 64], s: $t) =\n  var c = c0\n  $stmt\n  c\n" + M
+
+@test("C = alpha * (A @ B) + beta * C in each spelling is one nex_la_update writing C where it lies, with no buffer for the product")
+emit_gemm_update()
+    for stmt in ["c = s * (a @ b) + 0.5 * c", "c = a @ b + c", "c += a @ b", "c += s * (a @ b)", "c = c + 2 * (a @ b)", "c = (a @ b) * s + c * s", "c = 2.0 * c + a @ b"]
+        val m = emitted(updating("real", stmt)).unwrap()
+
+        assert(m.contains("func.call @nex_la_update("), m)
+        assert(m.contains("func.func private @\"x.0\"("), m)
+        assert(!m.contains("nex_la_product") && !m.contains("linalg.matmul") && !m.contains("memref.alloc("), m)
+
+    // The runtime's entry: the kind, alpha's address, x (address, extents, leading dimension, vector,
+    // flag), y likewise, beta's address, and c where it lies.
+    val d = emitted(updating("real", "c = a @ b + c")).unwrap()
+
+    assert(d.contains("func.func private @nex_la_update(i64, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, !llvm.ptr, i64, i64, i64, i64, i64, !llvm.ptr, !llvm.ptr, i64, i64, i64)"), d)
+
+    // Complex is element code 3 and real32 code 0; a unit changes nothing.
+    val z = emitted(updating("complex", "c = s * (a @ b) + c")).unwrap()
+
+    assert(z.contains("func.call @nex_la_update(") && z.contains("arith.constant 3 : i64"), z)
+
+    val f = emitted(updating("real32", "c += a @ b")).unwrap()
+
+    assert(f.contains("func.call @nex_la_update(") && f.contains("arith.constant 0 : i64"), f)
+
+    val u = emitted("def f(a: [real<m>; 64, 64], b: [real<s>; 64, 64], c0: [real<m s>; 64, 64]) =\n  var c = c0\n  c = 2.0 * (a @ b) + c\n  c\n" + M).unwrap()
+
+    assert(u.contains("func.call @nex_la_update(") && !u.contains("nex_la_product"), u)
+
+    // A matrix and a vector are gemv's update; transpose keeps its flag at any size.
+    val v = emitted("def f(a: [real32; 128, 128], x: [real32; 128], y0: [real32; 128]) =\n  var y = y0\n  y = a @ x + y\n  y\n" + M).unwrap()
+
+    assert(v.contains("func.call @nex_la_update(") && !v.contains("nex_la_product"), v)
+
+    val t = emitted("def f(a: [real; 3, 3], c0: [real; 3, 3]) =\n  var c = c0\n  c = transpose(a) @ a + c\n  c\n" + M).unwrap()
+
+    assert(t.contains("func.call @nex_la_update(") && t.contains("arith.constant 112 : i64") && !t.contains("linalg.transpose"), t)
+
+@test("an update below the threshold is the expression as written; dynamic extents emit both paths; an operand reading C, or another spelling, is the general path")
+emit_gemm_update_paths()
+    val inline = emitted("def f(a: [real; 8, 8], b: [real; 8, 8], c0: [real; 8, 8]) =\n  var c = c0\n  c = 2.0 * (a @ b) + c\n  c\n" + M).unwrap()
+
+    assert(inline.contains("linalg.matmul") && !inline.contains("nex_la_"), inline)
+
+    val dynamic = emitted("def f(a: [real; :, :], b: [real; :, :], c0: [real; :, :]) =\n  var c = c0\n  c += a @ b\n  c\n" + M).unwrap()
+
+    assert(dynamic.contains("arith.constant 262144 : index") && dynamic.contains("func.call @nex_la_update(") && dynamic.contains("linalg.matmul"), dynamic)
+    assert(!dynamic.contains("nex_la_product"), dynamic)
+
+    for stmt in ["c = a @ c + c", "c = c @ b + c", "c = c[:, :] @ b + c", "c = a @ b - c", "c = a @ b + c + c", "c = a @ b", "c = a @ b + b"]
+        val m = emitted(updating("real", stmt)).unwrap()
+
+        assert(!m.contains("nex_la_update"), s"$stmt\n$m")
+
+    // An integer product never goes to BLAS.
+    val i = emitted(updating("integer", "c = a @ b + c")).unwrap()
+
+    assert(!i.contains("nex_la_"), i)
+
 @test("a failed factorization nothing catches writes the routine and its cause to standard error, and aborts")
 run_lapack_uncaught()
     val b = bench()
@@ -298,6 +360,118 @@ run_linear_algebra_edges()
                         "[[4.0, 1.0, 0.0], [0.25, 2.75, 1.0], [0.0, 0.36363636363636365, 1.6363636363636362]]\n0\n" +
                         "[[-2.449489742783178+0.0i, -0.816496580927726+1.632993161855452i], [0.048081641154691504+0.21393876913398135i, -2.5819888974716108+0.0i]]\n" +
                         "[1.816496580927726+0.4082482904638631i, 1.9927615562931478-0.1201020080864906i]\n0\n[[2.0, 1.0], [2.0, 1.4142135]]\n")
+
+// Updates `c = alpha * (a @ b) + beta * c` in each spelling, through BLAS (each against the product
+// made first and then added, which may differ only in the last bits) and below the threshold (equal
+// to the statement as written, to the bit); an operand reading `c`; a vector, complex, `real32` and a
+// unit; a `c` another variable still holds; `beta` zero over a NaN; and the shape traps on both
+// paths. Every engine must print these bits.
+private val UPDATES = raw"""
+    def filled(m: integer, n: integer): [real; :, :] =
+      var a: [real; :, :] = zeros((m, n))
+      for j in 1..n
+        for i in 1..m
+          a[i, j] = 1.0 / (i + 2 * j)
+      a
+    def close(x: [real; :, :], y: [real; :, :]) = maxval(abs(x - y)) <= 1.0e-12 * maxval(abs(y))
+    def upd(a: [real; :, :], b: [real; :, :], c0: [real; :, :]): [real; :, :] =
+      var c = c0
+      c = a @ b + c
+      c
+    def updv(a: [real; :, :], x: [real], y0: [real]): [real] =
+      var y = y0
+      y = a @ x + y
+      y
+    def main() =
+      val h = filled(64, 64)
+      val s = 0.25
+      var c = h + 1.0
+      c = 2.0 * (h @ h) + 0.5 * c
+      print(sum(c))
+      print(close(c, 2.0 * (h @ h) + 0.5 * (h + 1.0)))
+      val c1 = c
+      c += h @ h
+      print(close(c, c1 + h @ h))
+      val c2 = c
+      c = c + 2 * (h @ h)
+      print(close(c, c2 + 2.0 * (h @ h)))
+      val c3 = c
+      c = (h @ h) * s + c * s
+      print(close(c, (h @ h) * s + c3 * s))
+      print(sum(c))
+      print(sum(c1))
+      val c4 = c
+      c = h @ c + c
+      print(all(c == h @ c4 + c4))
+      val k = filled(3, 3)
+      var e = k + 1.0
+      e = 3.0 * (k @ k) + s * e
+      print(e)
+      print(3.0 * (k @ k) + s * (k + 1.0))
+      e += k @ k
+      print(e)
+      var t = k + 0.0
+      t = transpose(k) @ k + t
+      print(t)
+      print(all(upd(k, k, k) == k @ k + k))
+      print(sum(upd(h, h, h)))
+      val g = filled(128, 128)
+      var y = g[:, 1] + 0.0
+      y = g @ g[:, 2] + y
+      print(sum(y))
+      print(maxval(abs(y - (g @ g[:, 2] + g[:, 1]))) <= 1.0e-12)
+      print(all(updv(k, k[:, 1], k[:, 2]) == k @ k[:, 1] + k[:, 2]))
+      val z = h + 1.0i * transpose(h)
+      var w = z + 0.0
+      w = (1.0 + 1.0i) * (z @ z) + 2.0 * w
+      print(sum(w))
+      print(maxval(abs(w - ((1.0 + 1.0i) * (z @ z) + 2.0 * z))) <= 1.0e-12 * maxval(abs(w)))
+      val h32 = real32(h)
+      var f = h32 + 1.0
+      f += h32 @ h32
+      print(sum(f))
+      val am = h * 1.0<m>
+      val bs = h * 1.0<s>
+      var cu = am @ bs
+      cu = 2.0 * (am @ bs) + cu
+      print(sum(strip(cu)))
+      var n = h + 0.0
+      n[1, 1] = nan
+      n = h @ h + 0.0 * n
+      print(n[1, 1] == n[1, 1])
+      var m = k + 0.0
+      m[1, 1] = nan
+      m = k @ k + 0.0 * m
+      print(m[1, 1] == m[1, 1])
+      assert_traps(() -> print(upd(h, h, zeros((64, 63)))), "shape mismatch")
+      assert_traps(() -> print(upd(h, filled(63, 64), h)), "shape mismatch")
+      assert_traps(() -> print(upd(h, h, zeros((63, 64)))), "shape mismatch")
+      assert_traps(() -> print(upd(k, k, zeros((3, 2)))), "shape mismatch")
+      assert_traps(() -> print(upd(h, k, h)), "shape mismatch")
+      assert_traps(() -> print(updv(g, g[:, 1], zeros(127))), "shape mismatch")
+      assert_traps(() -> print(updv(k, k[:, 1], zeros(2))), "shape mismatch")
+    """
+
+@test("C = alpha * (A @ B) + beta * C updates C through BLAS where the product would go there and is the statement as written below, alike on every engine")
+run_gemm_update()
+    val b = bench()
+    val out = ran(b, UPDATES)
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+
+    val lines = split(out.text, "\n")
+
+    // Below the threshold the update is the statement as written, to the bit.
+    assert_eq(lines[8], lines[9])
+    assert_eq(out.text, "2207.1795239864373\ntrue\ntrue\ntrue\ntrue\n616.9415551340544\n2207.1795239864373\ntrue\n" +
+        "[[0.9023809523809523, 0.6612244897959183, 0.5511904761904761], [0.7625, 0.5785714285714285, 0.49255952380952384], [0.6738095238095239, 0.5247619047619048, 0.4541005291005291]]\n" +
+        "[[0.9023809523809523, 0.6612244897959183, 0.5511904761904761], [0.7625, 0.5785714285714285, 0.49255952380952384], [0.6738095238095239, 0.5247619047619048, 0.4541005291005291]]\n" +
+        "[[1.092063492063492, 0.7816326530612244, 0.6396825396825396], [0.9125, 0.6742063492063491, 0.5629960317460317], [0.7984126984126985, 0.6044444444444445, 0.5128747795414462]]\n" +
+        "[[0.5469444444444445, 0.33690476190476193, 0.2439484126984127], [0.3869047619047619, 0.25485260770975054, 0.19027777777777777], [0.3010912698412699, 0.20813492063492062, 0.1594899533887629]]\n" +
+        "true\n122.91902556054303\n9.567826205349412\ntrue\ntrue\n-18.686018151773254+249.77542384416668i\ntrue\n4218.914\n195.44002241233457\n" +
+        // `beta` zero through BLAS leaves the NaN unread; below the threshold, as written, it stays.
+        "true\nfalse\n")
 
 @test("a program calling BLAS links the platform's, or the one NEX_BLAS names; one that does not links none")
 run_blas_link()

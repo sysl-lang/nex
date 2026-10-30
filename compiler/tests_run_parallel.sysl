@@ -201,23 +201,27 @@ par_run_vectorized_bits_and_traps()
 
     finish(b)
 
-@test("traps in parallel bodies, caught many times on seven threads, give back what every abandoned iteration held")
+@test("traps in parallel bodies, caught many times on seven threads, give back what every abandoned iteration held and keep what it wrote")
 par_traps_leak_nothing()
     if !exists("/usr/bin/leaks") then skip("no leaks tool")
 
     val b = bench()
-    val name = "parallel-traps"
-    val r = check_programs(b, "leaks", [name], threads = ["7"])
-    val exe = executable(b, name)
-    val expected = read_text(repo(s"testdata/leaks/$name.out")).unwrap()
-    val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
-    val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
+    val names = ["parallel-traps", "parallel-inout-traps"]
+    val r = check_programs(b, "leaks", names[..], threads = ["7"])
+
+    assert(r.failed.len() == 0 && r.passed == 2, join(r.failed.view(), "\n"))
+
+    for name in names
+        val exe = executable(b, name)
+        val expected = read_text(repo(s"testdata/leaks/$name.out")).unwrap()
+        val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
+        val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
+
+        assert(guarded.status.ok(), s"$name under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
+        assert_eq(guarded.text, expected)
+        assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), s"$name: ${leaks.text}")
 
     finish(b)
-    assert(r.failed.len() == 0 && r.passed == 1, join(r.failed.view(), "\n"))
-    assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
-    assert_eq(guarded.text, expected)
-    assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
 
 @test("a parallel body writing a module-level array or reducing a counted value is refused by the emitter")
 par_emit_refusals()

@@ -66,7 +66,11 @@ impl Emitter
         TBlock(items, result) -> self.block_from(items, 0, result, e.ty)
         TLet(id, init) ->
             if self.in_ssa(id)
-                self.arr.set(id, self.var_start(e.span, id, init, self.lasting(init)))
+                // The value first: an initializer that writes an array (an `if` whose branch does)
+                // replaces the table of arrays the local's entry is set in.
+                val v = self.var_start(e.span, id, init, self.lasting(init))
+
+                self.arr.set(id, v)
                 self.note_origin(e.span, id, init)
                 return ""
 
@@ -694,7 +698,13 @@ impl Emitter
         // The elements of arrays of numbers lent as `inout` scalars, which are written back after it.
         var elements: Buf[ElementLent] = buf()
 
-        for a in args
+        // The place word of each `inout` array argument, which cross after the arguments (DESIGN §8.4).
+        var words = ""
+
+        self.lend_roots(args)
+
+        for k in 0..<args.len()
+            val a = args[k]
             var v = ""
             var t = ""
 
@@ -702,10 +712,31 @@ impl Emitter
                 TBorrow(place) ->
                     if is_arr(place.ty)
                         var frames: Buf[Opened] = buf()
+                        var root = LentRoot("", "", "")
 
-                        v = self.open_place(place, &frames)
+                        v = self.open_lent(place, &frames, &root)
                         t = self.ty(a.span, place.ty)
-                        back.push(Held(place, frames))
+
+                        var word = self.lent_word(place, frames, root)
+                        var slot = ""
+                        var reroot = ""
+
+                        *place.kind match
+                            TLocal(id) ->
+                                // A call through a function value cannot hand back an array of another
+                                // shape, so where the place is held in SSA form it lends a slot for it.
+                                if !is_fn_ref(callee) && root.m == "" && frames.len() == 0 && self.par_buffer(place) == ""
+                                    slot = self.zeroed_alloca("!llvm.ptr")
+                                    self.guards.push(Guard(slot, "nex_release_slot"))
+                                    word = self.def(s"arith.select ${self.def(s"llvm.icmp \"eq\" $word, ${self.null_word()} : !llvm.ptr")}, $slot, $word : !llvm.ptr")
+
+                                var seen: Buf[string] = buf()
+
+                                if self.in_ssa(id) && self.places[id] != "" && self.passes_on(callee, k, &seen) then reroot = self.places[id]
+                            _ -> ()
+
+                        words += s", $word"
+                        back.push(Held(place, frames, root, slot, reroot))
                     elif self.is_items_window(place)
                         val l = self.items_lend(a.span, place)
 
@@ -730,6 +761,11 @@ impl Emitter
 
             vals += v
             tys += t
+
+        vals += words
+
+        for _ in back
+            tys += ", !llvm.ptr"
 
         val result = self.call_with(span, callee, args, vals, tys, ret, back)
 

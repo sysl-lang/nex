@@ -167,8 +167,10 @@ form and the usual one.
 
 **Elemental functions.** A scalar function marked `@elemental` applies to arrays element by element,
 as Fortran's `ELEMENTAL` procedures and every math function of the prelude do. Called on an array of
-any rank it returns an array of the same shape, and the call fuses into the surrounding whole-array
-expression:
+any rank it returns an array of the same shape. Since it may print or trap, the call is computed for
+every element before the surrounding whole-array expression uses it, so what it prints comes in
+element order; under `parallel` it fuses into the expression's loop
+([Array expressions §5.4](/spec/05-array-expressions/)):
 
 ```nex
 @elemental
@@ -407,7 +409,9 @@ The argument to an `inout` parameter is a **place** rooted in something mutable:
 | a slice | `scale(m[:, j], 2.0)`, `scale(a[1..n by 2], -1.0)` |
 
 A slice argument borrows exactly that window of the array and the callee writes it in place. Column
-`j` of `m` is scaled where it lies; the rest of `m` is untouched. An element may be taken through
+`j` of `m` is scaled where it lies; the rest of `m` is untouched. A window keeps its shape: a callee
+assigning its parameter an array of another shape traps there, with *"shape mismatch"*, where a
+whole array would take the new array and its caller would see it. An element may be taken through
 any number of slices (`a[2..][k]`, `m[:, j][i]`, `a[.. by -1][1]`), and its indices are evaluated
 once and checked against the array's bounds before the call starts, so an index out of bounds traps
 before the callee runs. The same holds for an `extern` taking a scalar `inout` or a `[*; ..]`

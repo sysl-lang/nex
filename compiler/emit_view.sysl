@@ -30,6 +30,19 @@ struct Opened
     strides: Buf[string]
     view: string
 
+// The place a place lent to a call is a slice or an element of, through every index: `a` of
+// `a[2..][k]`, `s.v` of `s.v[k]`; the place itself where it is neither.
+lent_root_of(e: TExpr) -> TExpr = *e.kind match
+    TArray(op) -> *op match
+        TIndex(src, _) -> if is_arr(src.ty) && !is_items(src.ty) then lent_root_of(src) else e
+        _ -> e
+    _ -> e
+
+// Whether `e` is local `id` itself.
+private is_local_ref(e: TExpr, id: usize) -> bool = *e.kind match
+    TLocal(x) -> x == id
+    _ -> false
+
 // `xs` last first.
 backwards(xs: Buf[string]) -> Buf[string]
     var out: Buf[string] = buf()
@@ -41,10 +54,32 @@ backwards(xs: Buf[string]) -> Buf[string]
 
     out
 
-// An `inout` array argument: its place and the slices opened to reach it.
+// The root of a place lent to a call. A root held in storage — a captured local's cell, a
+// module-level `var`, a field — is made the only holder of its array before the call and lent as
+// that array's own buffer, so the callee's writes land in it as they are made and a trap that ends
+// the call leaves them there (DESIGN §8.4): `m` is the buffer as a memref, `h` the object holding
+// it and `ptr` the place's address. A root in SSA form has `m` empty; its function's frame is
+// gone once a trap has left it, so nothing can see what a trap would lose.
+struct LentRoot
+    m: string
+    h: string
+    ptr: string
+
+// An array local a `parallel for`'s code writes in place, and the descriptor of its buffer.
+struct ParBuf
+    id: usize
+    d: string
+
+// An `inout` array argument: its place, the slices opened to reach it and its root; for a call
+// through a function value, the slot an array the callee rebinds the place to is stored in (`""`
+// where none was lent); and where the place is an `inout` parameter of the caller held in SSA form
+// whose array the callee may replace, the parameter's own place word (DESIGN §8.4).
 struct Held
     place: TExpr
     frames: Buf[Opened]
+    root: LentRoot
+    slot: string
+    reroot: string
 
 // An element of an array of numbers lent to a call as an `inout` scalar: the array place `src` it
 // is taken from, the slices opened on the way to `src`, its index list and checked indices (tensor
@@ -189,12 +224,305 @@ impl Emitter
 
         self.place_value(e)
 
+    // Every root held in storage that one of `args` lends the call made the only holder of its
+    // array, before any is opened: a pin taken by the statement — the loop over the array the call
+    // is in, a read of it earlier in the expression — counts as a holder, since what it reads must
+    // not change, but the pins the call's own arguments take do not.
+    lend_roots(*self, args: Buf[TExpr])
+        for a in args
+            *a.kind match
+                TBorrow(place) ->
+                    val root = lent_root_of(place)
+
+                    if is_arr(root.ty) && !is_items(root.ty) && !self.in_ssa_place(root) then self.sole_holder(root.span, self.place_ptr(root), root.ty)
+                _ -> ()
+
+    // Whether the array place `e` is a local held in SSA form.
+    in_ssa_place(*self, e: TExpr) -> bool = *e.kind match
+        TLocal(id) -> self.in_ssa(id)
+        _ -> false
+
+    // `open_place` for a place lent to a call, whose root `root` describes; `lend_roots` has made a
+    // root held in storage the only holder of its array.
+    open_lent(*self, e: TExpr, frames: *Buf[Opened], root: *LentRoot) -> string
+        *e.kind match
+            TArray(op) -> *op match
+                TIndex(src, subs) ->
+                    val cur = self.open_lent(src, frames, root)
+                    val (offs, sizes, strides) = self.window(e.span, cur, src.ty, subs, buf())
+                    val v = self.sliced(e.span, cur, src.ty, self.slice_text(subs, offs, sizes, strides), e.ty)
+
+                    frames.push(Opened(src, e, cur, subs, offs, sizes, strides, v))
+                    return v
+                _ -> ()
+            TLocal(id) -> if self.in_ssa(id) then return self.read_array(e.span, id)
+            _ -> ()
+
+        val ptr = self.place_ptr(e)
+        val h = self.def(s"llvm.load $ptr : !llvm.ptr -> !llvm.ptr")
+
+        self.pin(h, e.ty, 1)
+        self.hold_temp(h, e.ty)
+
+        val d = self.desc_ty(rank_of(e.ty))
+        val m = self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> $d")} : $d to ${self.memref_ty(e.span, e.ty)}")
+
+        *root = LentRoot(m, h, ptr)
+        self.def(s"bufferization.to_tensor $m restrict writable : ${self.memref_ty(e.span, e.ty)} to ${self.tensor_ty(e.span, e.ty)}")
+
+    // The array stored at `ptr` copied into a new object of its own unless the place is its only
+    // holder and nothing pins it, so that writing its buffer changes nothing else.
+    sole_holder(*self, span: Span, ptr: string, t: Ty)
+        if self.dirty
+            self.op(s"scf.if ${self.flowing()} {")
+            self.dirty = false
+            self.sole_holder(span, ptr, t)
+            self.dirty = true
+            self.op("}")
+            return
+
+        self.external("nex_count", "!llvm.ptr", "i64")
+
+        val h = self.def(s"llvm.load $ptr : !llvm.ptr -> !llvm.ptr")
+        val n = self.def(s"func.call @nex_count($h) : (!llvm.ptr) -> i64")
+
+        self.op(s"scf.if ${self.def(s"arith.cmpi ne, $n, %one : i64")} {")
+
+        val d = self.desc_ty(rank_of(t))
+        val m = self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> $d")} : $d to ${self.memref_ty(span, t)}")
+        val v = self.def(s"bufferization.to_tensor $m restrict : ${self.memref_ty(span, t)} to ${self.tensor_ty(span, t)}")
+
+        self.op(s"llvm.store ${self.boxed_array(span, v, t)}, $ptr : !llvm.ptr, !llvm.ptr")
+        self.release_ref(h)
+        self.op("}")
+
+    // The array `v` an `inout` call handed back for the whole place `e` lent from storage as `root`:
+    // written into the lent buffer, which is where the callee wrote it unless it rebound the
+    // parameter, or stored as a new object where it has another shape.
+    whole_back(*self, span: Span, e: TExpr, v: string, root: LentRoot)
+        val held = self.def(s"bufferization.to_tensor ${root.m} restrict : ${self.memref_ty(span, e.ty)} to ${self.tensor_ty(span, e.ty)}")
+        var same = self.def("arith.constant true")
+
+        for a in 1..rank_of(e.ty)
+            same = self.def(s"arith.andi $same, ${self.def(s"arith.cmpi eq, ${self.dim(span, v, e.ty, a)}, ${self.dim(span, held, e.ty, a)} : index")} : i1")
+
+        self.op(s"scf.if $same {")
+        self.op(s"bufferization.materialize_in_destination $v in restrict writable ${root.m} : (${self.tensor_ty(span, e.ty)}, ${self.memref_ty(span, e.ty)}) -> ()")
+        self.op("} else {")
+        self.store_array(span, root.ptr, v, e.ty)
+        self.op("}")
+
+    // The `inout` array parameter whose argument the place `e` is, in SSA form: its local.
+    inout_param(*self, e: TExpr) -> Option[usize] = *e.kind match
+        TLocal(id) ->
+            if !self.in_ssa(id) || self.par_kernel then return None
+
+            self.prog.locals[id].kind match
+                LParam(m) -> if m == Inout then Some(id) else None
+                _ -> None
+        _ -> None
+
+    // `inout` array parameter `id` given the array `x` of its type `t`: written over the elements
+    // its argument's buffer holds, where the caller sees them as they are made, so that a trap
+    // later in the callee leaves them in place (DESIGN §8.4). Only a value of another shape, which
+    // the buffer cannot take, rebinds the parameter; `same_shape` where `x` is known to fit.
+    param_assign(*self, span: Span, id: usize, x: string, t: Ty, same_shape: bool)
+        val cur = self.read_array(span, id)
+
+        if same_shape
+            self.arr.set(id, self.written_over(span, cur, x, t))
+            return
+
+        val tt = self.tensor_ty(span, t)
+        var same = self.def("arith.constant true")
+
+        for a in 1..rank_of(t)
+            same = self.def(s"arith.andi $same, ${self.def(s"arith.cmpi eq, ${self.dim(span, x, t, a)}, ${self.dim(span, cur, t, a)} : index")} : i1")
+
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if $same -> ($tt) {")
+        self.op(s"scf.yield ${self.written_over(span, cur, x, t)} : $tt")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.rebound(span, id, x, t)} : $tt")
+        self.op("}")
+        self.arr.set(id, r)
+
+    // -- the place an `inout` array crosses with ----------------------------------------------------
+    //
+    // Each `inout` array parameter has a hidden pointer beside its buffer, its **place word**
+    // (DESIGN §8.4): the address of the storage the caller holds the array in — a cell, a module-level
+    // `var`, a field, or a slot a call through a function value lends — where the callee publishes an
+    // array of another shape it rebinds the parameter to, so that the caller's place holds it from
+    // then on, through a trap too; null where the caller holds the array in SSA form, which takes the
+    // array the call hands back; or 1, the window mark, where the argument is a window or element
+    // that cannot take another shape, so that rebinding the parameter to one traps there.
+
+    window_word(*self) -> string = self.def("llvm.inttoptr %one : i64 to !llvm.ptr")
+
+    null_word(*self) -> string = self.def("llvm.mlir.zero : !llvm.ptr")
+
+    // Whether the place word `p` is the address of storage.
+    names_storage(*self, p: string) -> string =
+        self.def(s"arith.cmpi ugt, ${self.def(s"llvm.ptrtoint $p : !llvm.ptr to i64")}, %one : i64")
+
+    is_window_word(*self, p: string) -> string =
+        self.def(s"arith.cmpi eq, ${self.def(s"llvm.ptrtoint $p : !llvm.ptr to i64")}, %one : i64")
+
+    // Whether the place word `p` is storage holding an array: always, but for a slot lent by a call
+    // through a function value that nothing has been stored in yet.
+    holds_array(*self, p: string) -> string
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if ${self.names_storage(p)} -> (i1) {")
+        self.op(s"scf.yield ${self.def(s"llvm.icmp \"ne\" ${self.def(s"llvm.load $p : !llvm.ptr -> !llvm.ptr")}, ${self.null_word()} : !llvm.ptr")} : i1")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.def("arith.constant false")} : i1")
+        self.op("}")
+        r
+
+    // The buffer of the array of type `t` stored at `p`, as a tensor the code writes in place.
+    rooted(*self, span: Span, p: string, t: Ty, writable: bool) -> string
+        val d = self.desc_ty(rank_of(t))
+        val m = self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load ${self.def(s"llvm.load $p : !llvm.ptr -> !llvm.ptr")} : !llvm.ptr -> $d")} : $d to ${self.memref_ty(span, t)}")
+
+        self.def(s"bufferization.to_tensor $m restrict${if writable then " writable" else ""} : ${self.memref_ty(span, t)} to ${self.tensor_ty(span, t)}")
+
+    // `inout` array parameter `id` rebound to `x`, of another shape than it holds: a trap where its
+    // argument is a window; where the caller holds it in storage, `x` stored there as a new array and
+    // the parameter that array's buffer, so the callee's later writes land where the caller sees them;
+    // otherwise a copy of `x`, which the call hands back.
+    rebound(*self, span: Span, id: usize, x: string, t: Ty) -> string
+        val p = self.places[id]
+
+        if p == "" then return self.copied(span, x, t)
+
+        self.trap_if(self.is_window_word(p), SHAPE_MISMATCH)
+
+        val tt = self.tensor_ty(span, t)
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if ${self.names_storage(p)} -> ($tt) {")
+        self.store_array(span, p, x, t)
+        self.op(s"scf.yield ${self.rooted(span, p, t, true)} : $tt")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.copied(span, x, t)} : $tt")
+        self.op("}")
+        r
+
+    // The place an `inout` array parameter `id` that a lambda captures is held in, from its buffer `a`
+    // and place word `p`: the caller's storage, where it holds the array already; otherwise a slot of
+    // the callee's (`keepers`), or a slot a call through a function value lent, given a copy of the
+    // array in a new object. The callee's slot also keeps the argument's buffer, a window of the
+    // caller's place perhaps, and a trap that leaves the callee writes the copy back over it there,
+    // so that what was written before the trap stays written as it does in an array not captured.
+    captured_param(*self, span: Span, id: usize, a: string, p: string) -> string
+        val t = self.prog.locals[id].ty
+        val kt = s"!llvm.struct<(ptr, ${self.desc_ty(rank_of(t))})>"
+        val keeper = self.zeroed_alloca(kt)
+        val lent = self.def(s"bufferization.to_buffer $a read_only : ${self.tensor_ty(span, t)} to ${self.boundary_ty(span, t)}")
+
+        self.op(s"llvm.store ${self.def(s"builtin.unrealized_conversion_cast $lent : ${self.boundary_ty(span, t)} to ${self.desc_ty(rank_of(t))}")}, ${self.def(s"llvm.getelementptr $keeper[0, 1] : (!llvm.ptr) -> !llvm.ptr, $kt")} : ${self.desc_ty(rank_of(t))}, !llvm.ptr")
+        self.guards.push(Guard(keeper, self.write_back_helper(span, t)))
+        self.keepers.set(id, keeper)
+
+        val target = self.def(s"arith.select ${self.names_storage(p)}, $p, $keeper : !llvm.ptr")
+
+        self.op(s"scf.if ${self.def(s"arith.xori ${self.holds_array(p)}, ${self.def("arith.constant true")} : i1")} {")
+        self.op(s"llvm.store ${self.boxed_array(span, a, self.prog.locals[id].ty)}, $target : !llvm.ptr, !llvm.ptr")
+        self.op("}")
+        target
+
+    // The function a trap's catch calls on the slot `captured_param` keeps for an array of type `t`:
+    // the array the slot holds written over the argument's buffer kept beside it, where the two have
+    // one shape, and released.
+    write_back_helper(*self, span: Span, t: Ty) -> string
+        val m = self.memref_ty(span, t)
+        val b = self.boundary_ty(span, t)
+        val d = self.desc_ty(rank_of(t))
+        val name = s"back.$m"
+        var text = s"func.func private @\"$name\"(%p: !llvm.ptr) {\n    %h = llvm.load %p : !llvm.ptr -> !llvm.ptr\n    %z = llvm.mlir.zero : !llvm.ptr\n"
+
+        self.external("nex_release", "!llvm.ptr", "")
+        text += "    %held = llvm.icmp \"ne\" %h, %z : !llvm.ptr\n    scf.if %held {\n"
+        text += s"      %hd = llvm.load %h : !llvm.ptr -> $d\n      %src = builtin.unrealized_conversion_cast %hd : $d to $m\n"
+        text +=s"      %wp = llvm.getelementptr %p[0, 1] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<(ptr, $d)>\n      %w = llvm.load %wp : !llvm.ptr -> $d\n"
+        text += s"      %dst = builtin.unrealized_conversion_cast %w : $d to $b\n      %same0 = arith.constant true\n"
+
+        for a in 0..<rank_of(t)
+            text += s"      %i$a = arith.constant $a : index\n      %x$a = memref.dim %src, %i$a : $m\n      %y$a = memref.dim %dst, %i$a : $b\n"
+            text += s"      %e$a = arith.cmpi eq, %x$a, %y$a : index\n      %same${a + 1} = arith.andi %same$a, %e$a : i1\n"
+
+        text += s"      scf.if %same${rank_of(t)} {\n        memref.copy %src, %dst : $m to $b\n      }\n"
+        text += "      func.call @nex_release(%h) : (!llvm.ptr) -> ()\n    }\n    func.return\n  }"
+        self.declare(name, text)
+        name
+
+    // The place word an `inout` array argument `place` crosses with, opened through `frames` from the
+    // root `root` describes.
+    lent_word(*self, place: TExpr, frames: Buf[Opened], root: LentRoot) -> string
+        if frames.len() > 0 then return self.window_word()
+
+        *place.kind match
+            TLocal(id) ->
+                val p = self.places[id]
+
+                // A parameter of the caller's passes its own word on; one a lambda captures is held
+                // in storage, but still a window if its argument was.
+                if p != "" then return if root.m == "" then p else self.def(s"arith.select ${self.is_window_word(p)}, ${self.window_word()}, ${root.ptr} : !llvm.ptr")
+                if root.m == "" && self.par_buffer(place) != "" then return self.window_word()
+            _ -> ()
+
+        if root.m != "" then root.ptr else self.null_word()
+
+    // Whether the callee `callee` may, through its parameter `k`, rebind an `inout` array argument to
+    // an array of another shape or reach it through its place: a function value may.
+    passes_on(*self, callee: TExpr, k: usize, seen: *Buf[string]) -> bool = *callee.kind match
+        TFnRef(name) ->
+            val key = s"$name/$k"
+
+            for s in *seen
+                if s == key then return false
+
+            seen.push(key)
+
+            self.find_fun(name) match
+                Some(g) -> k >= g.params.len() || self.reshapes(g.body, g.params[k], seen)
+                None -> false
+        _ -> true
+
+    // Whether the code `e` may rebind the `inout` array parameter `id` to an array of another shape
+    // or reach it through its place: by assigning it whole, by a lambda capturing it, or by passing it
+    // whole to a callee that may.
+    reshapes(*self, e: TExpr, id: usize, seen: *Buf[string]) -> bool
+        if self.boxed[id] then return true
+
+        *e.kind match
+            TAssign(op, target, _) -> if op == "=" && is_local_ref(target, id) then return true
+            TAssignTuple(_, _) -> if writes_local(e, id) then return true
+            TCall(callee, args) ->
+                for k in 0..<args.len()
+                    *args[k].kind match
+                        TBorrow(place) -> if is_local_ref(place, id) && self.passes_on(callee, k, seen) then return true
+                        _ -> ()
+            _ -> ()
+
+        for c in children(e)
+            if self.reshapes(c, id, seen) then return true
+
+        false
+
+    // The elements of `x` copied over those of `cur`, both arrays of type `t` and one shape. The value
+    // is computed whole first, so a trap while computing it leaves `cur` as it was.
+    written_over(*self, span: Span, cur: string, x: string, t: Ty) -> string =
+        self.def(s"bufferization.materialize_in_destination $x in $cur : (${self.tensor_ty(span, t)}, ${self.tensor_ty(span, t)}) -> ${self.tensor_ty(span, t)}")
+
     // The place `e`, opened through `frames`, rebound to the array `v`. A value `handed_back` by an
     // `inout` call may have any shape: a whole place takes it, and a slice traps unless it kept the
-    // shape.
-    close_place(*self, span: Span, e: TExpr, v: string, frames: Buf[Opened], handed_back: bool)
+    // shape. A place lent from storage as `root` is written into its lent buffer.
+    close_place(*self, span: Span, e: TExpr, v: string, frames: Buf[Opened], handed_back: bool, root: LentRoot = LentRoot("", "", ""))
         if frames.len() == 0
-            self.set_place(e, v, !handed_back)
+            if root.m != "" then self.whole_back(span, e, v, root) else self.set_place(e, v, !handed_back)
             return
 
         val f = frames[frames.len() - 1]
@@ -214,36 +542,56 @@ impl Emitter
             sizes.push(n)
             strides.push(self.index_const(1))
 
-        self.insert_through(span, frames, subs, offs, sizes, strides, self.cast(span, v, f.slot.ty, st), self.tensor_ty(span, st))
+        self.insert_through(span, frames, subs, offs, sizes, strides, self.cast(span, v, f.slot.ty, st), self.tensor_ty(span, st), root.m)
 
     // `x` written into the window `subs` (offsets, extents and strides by axis, nex order) of the
     // slice place `frames` opened, as one `insert` or `insert_slice` into the root place's array: the
     // windows compose, so the write is the root's own and bufferizes in place. `xt` is the type of
-    // `x`, `""` for an element.
-    insert_through(*self, span: Span, frames: Buf[Opened], subs: Buf[TSub], offs: Buf[string], sizes: Buf[string], strides: Buf[string], x: string, xt: string)
+    // `x`, `""` for an element. A root lent from storage as the buffer `into` is written there.
+    insert_through(*self, span: Span, frames: Buf[Opened], subs: Buf[TSub], offs: Buf[string], sizes: Buf[string], strides: Buf[string], x: string, xt: string,
+                   into: string = "")
         val (s, o, z, t) = self.composed(frames, frames.len(), subs, offs, sizes, strides)
         val root = frames[0]
         val tt = self.tensor_ty(span, root.src.ty)
         val v = if xt == "" then self.def(s"tensor.insert $x into ${root.cur}[${joined(backwards(o))}] : $tt")
                 else self.def(s"tensor.insert_slice $x into ${root.cur}${self.slice_text(s, o, z, t)} : $xt into $tt")
 
-        self.set_place(root.src, v, true)
+        if into == ""
+            self.set_place(root.src, v, true)
+        else
+            self.op(s"bufferization.materialize_in_destination $v in restrict writable $into : ($tt, ${self.memref_ty(span, root.src.ty)}) -> ()")
 
     // -- elements lent to a call ------------------------------------------------------------------
 
     // The address an `inout` scalar argument `place` crosses at. A place with storage of its own is
     // its address; an element of an array of numbers (`a[i]`, `m[i, j]`, `a[2..][k]`, `s.v[k]`) is a
-    // value in a tensor, so its indices are evaluated and checked once, here, before the call, its
-    // value is copied to a slot whose address crosses, and `elements` gains it: `element_back`
-    // writes the slot into the element once the call has returned.
+    // value in a tensor, so its indices are evaluated and checked once, here, before the call. An
+    // element of an array held in storage crosses as its address in the array's buffer, as does one
+    // of an array a `parallel for`'s code writes in place, so that what the callee writes before a
+    // trap stays written (DESIGN §8.4). Any other element's value is copied to a slot whose address
+    // crosses. Either way but the first, `elements` gains it: `element_back` writes what the address
+    // holds into the element once the call has returned.
     lent_ptr(*self, place: TExpr, elements: *Buf[ElementLent]) -> string
         *place.kind match
             TArray(op) -> *op match
                 TIndex(src, subs) ->
                     if is_arr(src.ty) && !is_items(src.ty) && !is_arr(place.ty)
                         var frames: Buf[Opened] = buf()
-                        val cur = self.open_place(src, &frames)
+                        var root = LentRoot("", "", "")
+                        val cur = self.open_lent(src, &frames, &root)
                         val idx = self.indices(place.span, cur, src.ty, subs, self.shifts_of(src))
+                        val top = if frames.len() > 0 then frames[0].src else src
+
+                        if root.m != "" then return self.element_address(place.span, frames, subs, idx, self.def(s"llvm.load ${root.h} : !llvm.ptr -> ${self.desc_ty(rank_of(top.ty))}"), top.ty, place.ty)
+
+                        val written = self.par_buffer(top)
+
+                        if written != ""
+                            val at = self.element_address(place.span, frames, subs, idx, written, top.ty, place.ty)
+
+                            elements.push(ElementLent(src, frames, subs, idx, at, place.ty))
+                            return at
+
                         val slot = self.alloca(self.mem_ty(place.span, place.ty))
 
                         self.store(place.span, slot, self.def(s"tensor.extract $cur[${joined(idx)}] : ${self.tensor_ty(place.span, src.ty)}"), place.ty)
@@ -253,6 +601,45 @@ impl Emitter
             _ -> ()
 
         self.place_ptr(place)
+
+    // The descriptor of the buffer a `parallel for`'s code writes the array local `e` in, `""` where
+    // `e` is no such local.
+    par_buffer(*self, e: TExpr) -> string
+        *e.kind match
+            TLocal(id) ->
+                for b in self.par_bufs
+                    if b.id == id then return b.d
+            _ -> ()
+
+        ""
+
+    // The address of the element at the checked indices `idx` (tensor order) of the window `frames`
+    // opened on a root of array type `rt` whose buffer the descriptor `d` describes: the element's
+    // own storage, where the callee writes it directly (DESIGN §8.2). `subs` is the element's index
+    // list and `t` its type.
+    element_address(*self, span: Span, frames: Buf[Opened], subs: Buf[TSub], idx: Buf[string], d: string, rt: Ty, t: Ty) -> string
+        var at = idx
+
+        if frames.len() > 0
+            var ones: Buf[string] = buf()
+
+            for _ in idx
+                ones.push(self.index_const(1))
+
+            val (_, o, _, _) = self.composed(frames, frames.len(), subs, backwards(idx), ones, ones)
+
+            at = backwards(o)
+
+        val r = rank_of(rt)
+        val dt = self.desc_ty(r)
+        var lin = self.def(s"llvm.extractvalue $d[2] : $dt")
+
+        for k in 0..<r
+            val stride = self.def(s"llvm.extractvalue $d[4, $k] : $dt")
+
+            lin = self.def(s"arith.addi $lin, ${self.def(s"arith.muli ${self.to_i64(at[k])}, $stride : i64")} : i64")
+
+        self.def(s"llvm.getelementptr ${self.def(s"llvm.extractvalue $d[1] : $dt")}[$lin] : (!llvm.ptr, i64) -> !llvm.ptr, ${self.mem_ty(span, t)}")
 
     // The element `l` lent to a call written back from its slot into the array its place holds now,
     // which another `inout` argument of the same call may have rebound.

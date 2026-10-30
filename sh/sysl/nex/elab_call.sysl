@@ -64,6 +64,8 @@ impl Elab
 
                 val q = self.global(callee.span, n)
 
+                if self.is_intrinsic(q) then return self.mpi_call(span, q, args)
+
                 self.find_generic_fun(q) match
                     Some(g) -> return self.generic_call(span, callee.span, q, g, args)
                     None -> ()

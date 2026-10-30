@@ -15,6 +15,10 @@
 // nex's first axis is not at unit stride or the columns overlap. The result is a fresh buffer the
 // runtime writes, which becomes the product's tensor.
 //
+// **`c = alpha * (a @ b) + beta * c` is one update** (`gemm_update`, `sh/sysl/nex/tir_gemm.sysl`):
+// where the product would go to BLAS, the runtime's `nex_la_update` writes `c` where it lies, with
+// no buffer for the product; below the threshold the statement is computed as written.
+//
 // A program that calls BLAS or LAPACK says so before its module (`// nex.blas`), and the driver
 // links the library.
 
@@ -130,19 +134,7 @@ impl Emitter
             Some(big) -> return if big then self.blas_matmul(e, oa, ob, a, b) else self.linalg_matmul(e, l.ty, r.ty, a, b)
             None -> ()
 
-        // The size, as `measured_axes` takes it, against the threshold.
-        var dims: Buf[string] = buf()
-
-        if rank_of(l.ty) == 2 then dims.push(self.dim(e.span, a, l.ty, 1))
-        dims.push(self.dim(e.span, a, l.ty, rank_of(l.ty)))
-        if rank_of(r.ty) == 2 then dims.push(self.dim(e.span, b, r.ty, 2))
-
-        var size = dims[0]
-
-        for k in 1..<dims.len()
-            size = self.def(s"arith.muli $size, ${dims[k]} : index")
-
-        val big = self.def(s"arith.cmpi uge, $size, ${self.index_const(usize(threshold(dims.len())))} : index")
+        val big = self.reaches_blas(e.span, l.ty, r.ty, a, b)
 
         if rank_of(e.ty) == 0
             val t = self.ty(e.span, e.ty)
@@ -156,6 +148,138 @@ impl Emitter
             return v
 
         self.either_matmul(e, l.ty, r.ty, a, b, big)
+
+    // Whether `a @ b`, of operand types `lt` and `rt`, reaches BLAS's threshold, tested at run time:
+    // the size, as `measured_axes` takes it, against the threshold.
+    private reaches_blas(*self, span: Span, lt: Ty, rt: Ty, a: string, b: string) -> string
+        var dims: Buf[string] = buf()
+
+        if rank_of(lt) == 2 then dims.push(self.dim(span, a, lt, 1))
+        dims.push(self.dim(span, a, lt, rank_of(lt)))
+        if rank_of(rt) == 2 then dims.push(self.dim(span, b, rt, 2))
+
+        var size = dims[0]
+
+        for k in 1..<dims.len()
+            size = self.def(s"arith.muli $size, ${dims[k]} : index")
+
+        self.def(s"arith.cmpi uge, $size, ${self.index_const(usize(threshold(dims.len())))} : index")
+
+    // `target op value` where it is one BLAS update (`gemm_update`, DESIGN §10.4); whether it is.
+    // Every leaf is evaluated once, in the order written. Where the product goes to BLAS — decided
+    // as `matmul` decides it — the target is written by `nex_la_update` where it lies, through a
+    // wrapper as an `inout` argument is, so bufferization copies it first only where something else
+    // still reads it. Where it does not, the value is the element-wise expression as written over
+    // the product made inline.
+    gemm_assign(*self, span: Span, op: string, target: TExpr, value: TExpr) -> bool
+        val g = gemm_update(self.prog, op, target, value) match
+            Some(g) -> g
+            None -> return false
+
+        val oa = blas_operand(g.lhs)
+        val ob = blas_operand(g.rhs)
+        var vals: Buf[string] = buf()
+        var a = ""
+        var b = ""
+
+        for k in 0..<g.leaves.len()
+            if k == g.at
+                a = self.ex(oa.x)
+                b = self.ex(ob.x)
+                vals.push("")
+            else
+                vals.push(self.ex(g.leaves[k]))
+
+        if oa.flag != NO_TRANS || ob.flag != NO_TRANS
+            self.update_through_blas(span, g, oa, ob, a, b, vals)
+            return true
+
+        static_blas(oa.x.ty, ob.x.ty) match
+            Some(big) ->
+                if big then self.update_through_blas(span, g, oa, ob, a, b, vals) else self.update_inline(span, g, a, b, vals)
+                return true
+            None -> ()
+
+        val big = self.reaches_blas(span, oa.x.ty, ob.x.ty, a, b)
+        val f = self.fork()
+
+        self.update_through_blas(span, g, oa, ob, a, b, vals)
+
+        val h = self.fork_else(f, "", Void)
+
+        self.update_inline(span, g, a, b, vals)
+        self.join(h, big, "", Void)
+        true
+
+    // The update's value as written, the product `a @ b` made inline, given to the target.
+    private update_inline(*self, span: Span, g: GemmUpdate, a: string, b: string, vals: Buf[string])
+        val p = g.leaves[g.at]
+        var vs = vals
+
+        vs.set(g.at, self.linalg_matmul(p, g.lhs.ty, g.rhs.ty, a, b))
+        self.set_place(g.target, self.mapped_values(span, g.target.ty, g.leaves, vs, g.scalar), false)
+
+    // The target written by `nex_la_update` where it lies.
+    private update_through_blas(*self, span: Span, g: GemmUpdate, oa: BlasOperand, ob: BlasOperand, a: string, b: string, vals: Buf[string])
+        val et = elem_of(g.leaves[g.at].ty)
+        var roots: Buf[CRoot] = buf()
+        var windows: Buf[CWindow] = buf()
+        var cvals: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+        val st = self.elem_ty(span, et)
+
+        cvals.push(a)
+        tys.push(self.tensor_ty(span, oa.x.ty))
+        cvals.push(b)
+        tys.push(self.tensor_ty(span, ob.x.ty))
+
+        for s in [g.alpha, g.beta]
+            cvals.push(s match
+                Some(k) -> vals[k]
+                None -> self.one_or_zero(span, et, true))
+            tys.push(st)
+
+        cvals.push("")
+        tys.push("")
+        windows.push(self.open_window(g.target, false, &roots))
+
+        val job = WrapJob.Update(g.leaves[g.at].ty, oa.x.ty, oa.flag, ob.x.ty, ob.flag)
+
+        self.c_wrapped(span, self.c_wrapper(span, job, cvals, tys, "", roots, windows), "", Void, roots)
+
+    // Inside the wrapper of an update: `inner` holds the operands `x` and `y` as tensors of types
+    // `xt` and `yt`, then `alpha` and `beta`; `cm` is the target's buffer, of type `ct`. The product
+    // is of type `t`.
+    update_in_place(*self, span: Span, t: Ty, xt: Ty, fx: int, yt: Ty, fy: int, inner: Buf[string], cm: string, ct: Ty, copies: *Buf[CArray]) -> string
+        val x = self.blas_arg(span, self.read_buffer(span, inner[0], xt), xt, false)
+        val y = self.blas_arg(span, self.read_buffer(span, inner[1], yt), yt, false)
+        val c = self.blas_arg(span, cm, ct, true)
+        val et = elem_of(t)
+        val mt = self.mem_ty(span, et)
+        var args = LaArgs(buf(), buf())
+
+        copies.push(x.copy)
+        copies.push(y.copy)
+        copies.push(c.copy)
+        args.code(self, la_kind(et))
+        args.ptr(self.scalar_slot(inner[2], et, mt))
+        args.matrix(self, x)
+        args.code(self, if rank_of(xt) == 1 then 1 else 0)
+        args.code(self, fx)
+        args.matrix(self, y)
+        args.code(self, if rank_of(yt) == 1 then 1 else 0)
+        args.code(self, fy)
+        args.ptr(self.scalar_slot(inner[3], et, mt))
+        args.matrix(self, c)
+        self.la_call("nex_la_update", args, "")
+        ""
+
+    // A slot holding the scalar `v` of type `et`, as the runtime reads one element.
+    private scalar_slot(*self, v: string, et: Ty, mt: string) -> string
+        val slot = self.alloca(mt)
+
+        self.op(s"llvm.store ${self.to_mem(v, et)}, $slot : $mt, !llvm.ptr")
+        slot
 
     // `a @ b` of operand types `lt` and `rt`, an array, through BLAS where `big` holds and through
     // `linalg` on buffers where it does not. The result's buffer is made before the choice, so the

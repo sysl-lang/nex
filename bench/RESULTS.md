@@ -49,7 +49,36 @@ Exit-bar status: **4 of 12 kernels miss on time** (axpy, complex axpy, point dis
 **4 more allocate a temporary their twin does not** (dot, nrm2, BLAS gemm, and axpy, which also misses
 on time). Every kernel the reference compiles runs at least as fast in nex.
 
-## The misses, ranked by ratio
+## With element-wise fusion
+
+The emitter fuses a quiet element-wise expression into one `linalg.generic`, writes an assignment
+to a local the expression reads in place, and computes a reduction's quiet operand as it reduces
+(DESIGN §7.1). The affected kernels, 2026-10-30 13:48 EDT, at a load of 70 to 74 the whole run, so
+both columns are slower than on a quiet machine and every ratio is unsettled until a quiet run:
+
+| kernel | gfortran | nex | ratio | bar | verdict | sums | allocs nex/twin | ref/nex | load |
+|---|---:|---:|---:|---:|---|---|---:|---:|---:|
+| axpy | 2.45 | 2.48 | 1.01 | 1.25 | meets | yes | 2 / 2 | 3.47 | 73.4 |
+| dot | 13.02 | 8.52 | 0.65 | 1.25 | meets | yes | 2 / 2 | 1.79 | 73.9 |
+| nrm2 | 13.44 | 8.41 | 0.63 | 1.25 | meets | yes | 1 / 1 | 1.67 | 70.6 |
+| stencil | 2.22 | 2.25 | 1.02 | 1.25 | meets | yes | 2 / 2 | 16.37 | 72.9 |
+| complex axpy | 6.18 | 8.03 | 1.30 | 1.25 | **MISSES** | yes | 2 / 2 | not measured¹ | 72.3 |
+| point distance | 5.92 | 10.33 | 1.75 | 1.25 | **MISSES** | yes | **106 / 5** | not measured¹ | 71.3 |
+| axpy, real32 | 1.36 | 1.21 | 0.88 | 1.25 | meets | yes | 2 / 2 | not measured² | 72.9 |
+
+What is left of the misses:
+
+1. **point distance, 1.75×**: one loop now, with no temporary per operator; what remains is two
+   80 MB buffers per pass. `d` is not read by its expression and has a dynamic shape that the
+   assignment may change, so the result goes to a new buffer, and the `for` loop, an `scf.while`,
+   copies a carried array whose new value is not its old buffer into a fresh one every pass:
+   one-shot bufferization copies an `scf.while` iteration argument whenever the body's yield is not
+   equivalent to it, where an `scf.for` does not. A counted loop emitted as `scf.for`, writing `d`
+   over where its shape is unchanged, is the fix.
+2. **complex axpy, 1.30×**: no temporary left (2 / 2); within the noise of this load of the bar,
+   and the complex multiply's lowering is the next thing to read.
+
+## The misses of the baseline, ranked by ratio
 
 The diagnoses come from `nex emit` (MLIR) and `zsh bench/run.zsh --ir <kernel>` (the LLVM IR as
 `clang -O2` optimizes it), with allocations counted as above.

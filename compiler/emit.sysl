@@ -112,6 +112,8 @@ struct Emitter
     par_stop: string
     // For the `parallel` expression being emitted, the operand whose buffer it writes in place.
     par_dest: Option[usize]
+    // Inside a `parallel for`'s code, the arrays it writes in place and their buffers.
+    par_bufs: Buf[ParBuf]
     // The slots the current function's frame record lists, and those its temporaries use
     // (`emit_own.sysl`).
     guards: Buf[Guard]
@@ -120,6 +122,11 @@ struct Emitter
     // (`emit_aggregate.sysl`).
     shown: Buf[Wanted]
     compared: Buf[Wanted]
+    // By local number, the place word each `inout` array parameter of the current function crossed
+    // with, and for one a lambda captures, the slot holding the array it boxed itself
+    // (`emit_view.sysl`); `""` for any other local.
+    places: Buf[string]
+    keepers: Buf[string]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -432,9 +439,13 @@ struct Emitter
 
         self.arr = buf()
         self.inout_arrays = buf()
+        self.places = buf()
+        self.keepers = buf()
 
         for _ in 0..<self.prog.locals.len() + 1
             self.arr.push("")
+            self.places.push("")
+            self.keepers.push("")
 
         self.entry.push("    %one = arith.constant 1 : i64\n")
 
@@ -484,15 +495,28 @@ struct Emitter
                 self.op("}")
                 from_slot = true
 
+        // A parameter a lambda captured is handed back as a copy of what its place holds, taken
+        // before the boxed array it may have made is released.
+        var handed: Buf[string] = buf()
+
+        for id in self.inout_arrays
+            handed.push(if self.in_ssa(id) then "" else self.copied(span, self.place_value(texpr(span, self.prog.locals[id].ty, TLocal(id))), self.prog.locals[id].ty))
+
         self.release_all()
+
+        for id in self.inout_arrays
+            if self.keepers[id] != "" then self.release_ref(self.def(s"llvm.load ${self.keepers[id]} : !llvm.ptr -> !llvm.ptr"))
+
         self.frame_record()
 
         if r != ""
             vals.push(if from_slot then self.load(span, self.ret_slot, self.ret) else value)
             tys.push(r)
 
-        for id in self.inout_arrays
-            vals.push(self.read_array(span, id))
+        for k in 0..<self.inout_arrays.len()
+            val id = self.inout_arrays[k]
+
+            vals.push(if handed[k] == "" then self.read_array(span, id) else handed[k])
             tys.push(self.ty(span, self.prog.locals[id].ty))
 
         if vals.len() == 0 then self.op("func.return")
@@ -525,9 +549,14 @@ struct Emitter
 
             if self.in_ssa(id)
                 self.arr.set(id, s"%a$k")
-                if self.inout_array(id) then self.inout_arrays.push(id)
+
+                if self.inout_array(id)
+                    self.inout_arrays.push(id)
+                    self.places.set(id, s"%p$k")
             elif self.inout_array(id)
-                self.later(span, "an `inout` array a lambda captures")
+                self.inout_arrays.push(id)
+                self.places.set(id, s"%p$k")
+                self.bind_borrowed(id, self.captured_param(span, id, s"%a$k", s"%p$k"))
             elif is_inout(self.prog.locals[id].kind)
                 self.bind_borrowed(id, s"%a$k")
             elif self.boxed[id]
@@ -544,6 +573,10 @@ struct Emitter
         for k in 0..<params.len()
             if out != "" then out += ", "
             out += s"%a$k: ${self.param_ty(span, params[k])}"
+
+        // After them, the place word of each `inout` array (DESIGN §8.4).
+        for k in 0..<params.len()
+            if self.inout_array(params[k]) then out += s", %p$k: !llvm.ptr"
 
         out
 
@@ -572,6 +605,14 @@ struct Emitter
 
             self.bind_borrowed(order[k], self.def(s"llvm.load $p : !llvm.ptr -> !llvm.ptr"))
 
+        // After the places, the place word of each `inout` array parameter it captures.
+        var w = order.len() + 1
+
+        for c in order
+            if self.inout_array(c)
+                self.places.set(c, self.def(s"llvm.load ${self.def(s"llvm.getelementptr %env[$w] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")} : !llvm.ptr -> !llvm.ptr"))
+                w += 1
+
         // A local `def` that calls itself reaches itself through its own code and environment.
         self.self_local[id] match
             Some(me) ->
@@ -591,6 +632,9 @@ struct Emitter
             val t = self.prog.locals[id].ty
 
             out += s", ${if is_arr(t) then self.boundary_ty(span, t) else self.param_ty(span, id)}"
+
+        for id in params
+            if self.inout_array(id) then out += ", !llvm.ptr"
 
         // An `inout` array is written in place through the adapter (`adapted`), so only the value
         // comes back.
@@ -621,8 +665,15 @@ struct Emitter
         else
             // The cells it holds a count on, how many, and then the places of the `inout` parameters it
             // borrows for the call it is an argument of.
+            // After them, the place word of each `inout` array parameter, which the lambda checks a
+            // rebinding against as the parameter's function does (DESIGN §8.4).
+            var words: Buf[usize] = buf()
+
+            for c in order
+                if self.inout_array(c) then words.push(c)
+
             self.declare("nex_env_drop", "llvm.func @nex_env_drop(!llvm.ptr)")
-            env = self.new_object(8 * (order.len() + 1), self.def("llvm.mlir.addressof @nex_env_drop : !llvm.ptr"))
+            env = self.new_object(8 * (order.len() + 1 + words.len()), self.def("llvm.mlir.addressof @nex_env_drop : !llvm.ptr"))
 
             var counted = 0
 
@@ -636,6 +687,11 @@ struct Emitter
                     counted += 1
 
                 self.op(s"llvm.store $cell, $p : !llvm.ptr, !llvm.ptr")
+
+            for j in 0..<words.len()
+                val w = if self.places[words[j]] == "" then self.null_word() else self.places[words[j]]
+
+                self.op(s"llvm.store $w, ${self.def(s"llvm.getelementptr $env[${order.len() + 1 + j}] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")} : !llvm.ptr, !llvm.ptr")
 
             self.op(s"llvm.store ${self.def(s"arith.constant $counted : i64")}, $env : i64, !llvm.ptr")
 
@@ -672,6 +728,12 @@ struct Emitter
                     tys += ", "
                 args += s"%a$k"
                 tys += t
+
+            for k in 0..<g.params.len()
+                if self.inout_array(g.params[k])
+                    params += s", %p$k: !llvm.ptr"
+                    args += s", %p$k"
+                    tys += ", !llvm.ptr"
 
             // The value, then each `inout` array as the function hands it back.
             val r = self.results_text(span, g.params, g.ret)
@@ -841,7 +903,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
                     buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf(),
-                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf(), buf(), buf())
+                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf(), buf(), buf(), buf(), buf(), buf())
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)

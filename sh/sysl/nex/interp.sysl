@@ -1370,6 +1370,10 @@ impl Interp
                 _ -> ()
             _ -> ()
 
+        gemm_update(self.prog, op, target, value) match
+            Some(g) -> return self.gemm_assign(g)
+            None -> ()
+
         val v = self.ex(value)
         val m = self.m
 

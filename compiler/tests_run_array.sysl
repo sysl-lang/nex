@@ -40,15 +40,11 @@ lowered_until(b: Bench, m: string, last: string) -> string
 
 occurrences(text: string, what: string) -> usize = split(text, what).len - 1
 
-@test("313-02's whole-array expression, three linalg.generic operations as emitted, is one loop after fusion")
+@test("313-02's whole-array expression of three operations is emitted as one linalg.generic")
 fused_point_distance()
-    val b = bench()
     val m = emitted(read_text(repo("testdata/corpus/313-02-arrays-element-wise-fusion-point-distance.nex")).unwrap()).unwrap()
-    val fused = lowered_until(b, m, "func.func(linalg-fuse-elementwise-ops)")
 
-    finish(b)
-    assert_eq(occurrences(m, "linalg.generic"), 3)
-    assert_eq(occurrences(fused, "linalg.generic"), 1)
+    assert_eq(occurrences(m, "linalg.generic"), 1)
 
 @test("== on arrays, [uint8] among them, is element-wise, and all of it says whether two are equal")
 run_array_equality()
@@ -100,10 +96,11 @@ inout_array_no_copy()
 
     finish(b)
     // As emitted the callee hands its array back; bufferized, that result is gone.
-    assert(m.contains("@\"n.zero_first\"(%a0: tensor<?xi64>) -> tensor<?xi64>"), m)
+    // The place word crosses beside the buffer (DESIGN §8.4).
+    assert(m.contains("@\"n.zero_first\"(%a0: tensor<?xi64>, %p0: !llvm.ptr) -> tensor<?xi64>"), m)
     assert_eq(occurrences(buffers, "memref.copy"), 0)
-    assert(buffers.contains("func.func private @n.zero_first(%arg0: memref<?xi64, strided<[?], offset: ?>>) {"), buffers)
-    assert_eq(occurrences(buffers, "call @n.zero_first(%cast) : (memref<?xi64, strided<[?], offset: ?>>) -> ()"), 2)
+    assert(buffers.contains("func.func private @n.zero_first(%arg0: memref<?xi64, strided<[?], offset: ?>>, %arg1: !llvm.ptr) {"), buffers)
+    assert_eq(occurrences(buffers, ": (memref<?xi64, strided<[?], offset: ?>>, !llvm.ptr) -> ()"), 2)
 
 @test("two static shapes that differ are a compile error wherever both are known")
 static_shape_errors()
