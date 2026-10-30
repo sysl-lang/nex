@@ -1460,6 +1460,18 @@ with these rules (**PROPOSED** where marked).
   would allow; nex's may be returned). A `var` array moves into the one lambda that captures it, and
   a second lambda capturing it is a compile error; a scalar `var` or a `val` may be captured by any
   number.
+- **`print` spells an aggregate as the reference does**: a tuple `(1, a)`, a struct
+  `Point { x=1.0, y=2.0 }`, a variant `Converged(3.14)` or `Diverged`, each field as `print` spells
+  it alone (a string without quotes). A generic struct prints by its own name, without its type
+  arguments: `Pair { fst=1, snd=b }`.
+- **Strings, function values and the cells a lambda captures are reference counted**, and freed
+  when the last reference goes, so a program's memory is bounded by what it holds rather than by what
+  it has built. **A cycle is not reclaimed**: a lambda stored into a `var` it captures itself, local
+  `def`s that call one another, and a local `def` that calls itself and is captured by another
+  lambda too keep themselves alive for the rest of the run. A local `def` that calls itself and is
+  captured by nothing else makes no cycle. Neither is what the frames a caught trap (`assert_traps`)
+  abandons held. Both are bounded by the program's shape, not by how long it runs, except where the
+  cycle is made inside a loop.
 
 ---
 

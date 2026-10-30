@@ -497,7 +497,7 @@ impl Emitter
                         TSubAt(k) ->
                             val i = self.ex(k)
 
-                            return self.call("nex_arg", self.widen64(i, bits_of(k.ty), is_signed(k.ty)), "i64", "!llvm.ptr")
+                            return self.own(self.call("nex_arg", self.widen64(i, bits_of(k.ty), is_signed(k.ty)), "i64", "!llvm.ptr"), Ty.Str)
                         _ -> ()
 
                 self.element(e, target, subs)
@@ -844,7 +844,7 @@ impl Emitter
 
         if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), "a range step of 0")
 
-        val n = self.count(lo, hi, step, inclusive, it)
+        val n = self.range_count(lo, hi, step, inclusive, it)
         val tt = self.tensor_ty(e.span, e.ty)
         val empty = self.def(s"tensor.empty($n) : $tt")
         val v = self.fresh()
@@ -861,7 +861,7 @@ impl Emitter
         v
 
     // How many values `lo..hi by step` (or `..<`) counts, as an `index`; the step is not 0.
-    count(*self, lo: string, hi: string, step: string, inclusive: bool, it: Ty) -> string
+    range_count(*self, lo: string, hi: string, step: string, inclusive: bool, it: Ty) -> string
         val bits = bits_of(it)
         val t = s"i$bits"
         val signed = is_signed(it)
@@ -1268,7 +1268,7 @@ impl Emitter
         for k in 0..<back.len()
             self.set_place(back[k], result_name(v, first + k, n), false)
 
-        if r == "" then "" else result_name(v, 0, n)
+        if r == "" then "" else self.own(result_name(v, 0, n), ret)
 
     // -- loops ------------------------------------------------------------------------------------
 
@@ -1349,9 +1349,6 @@ impl Emitter
         at.pop()
         self.op("}")
         self.put_text(sink, "]")
-
-    put_text(*self, sink: string, text: string)
-        self.call("nex_put_str", s"$sink, ${self.string_ref(text)}", "i64, !llvm.ptr", "")
 end Emitter
 
 // An operand of a scalar body: the `k`th value of the innermost chain frame, of `e`'s element type.

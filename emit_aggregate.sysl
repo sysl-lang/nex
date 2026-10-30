@@ -1,0 +1,397 @@
+// Emission of structs, tuples and enums, `match`, destructuring and tuple assignment.
+//
+// **A struct or a tuple is an LLVM struct value** of its fields' stored forms, in declaration order,
+// so a field is one `llvm.extractvalue` and a field of a place one `llvm.getelementptr`. Nothing in it
+// is boxed: no struct or enum contains itself (DESIGN §11.4), so every one has a size the compiler
+// knows.
+//
+// **An enum is its tag and a payload**: `!llvm.struct<(i64, array<W x i64>)>`, where the payload is
+// wide enough for the largest variant's fields. A variant's fields are an LLVM struct written into
+// the payload's storage and read back out of it, through an entry-block slot that LLVM's SROA dissolves.
+// `match` is an `scf.index_switch` on the tag.
+
+import sysl.buf.{Buf, buf}
+import sysl.math.max
+import sysl.text.split
+import sh.sysl.parsing.Span
+
+impl Emitter
+    struct_of(*self, name: string) -> Option[TStruct]
+        for d in self.prog.decls
+            d match
+                StructDecl(s) -> if s.name == name then return Some(s)
+                _ -> ()
+
+        None
+
+    enum_of(*self, name: string) -> Option[TEnum]
+        for d in self.prog.decls
+            d match
+                EnumDecl(e) -> if e.name == name then return Some(e)
+                _ -> ()
+
+        None
+
+    // The enum `t` names, if it names one.
+    enum_ty(*self, t: Ty) -> Option[TEnum] = t match
+        Nominal(name, _) -> self.enum_of(name)
+        _ -> None
+
+    // -- types ------------------------------------------------------------------------------------
+
+    agg_ty(*self, span: Span, t: Ty) -> string
+        t match
+            Tuple(es) -> return self.fields_ty(span, es)
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) -> return self.payload_ty(span, s.fields)
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) -> return s"!llvm.struct<(i64, array<${self.words(t) - 1} x i64>)>"
+                    None -> ()
+            _ -> ()
+
+        self.later(span, s"a value of type ${show_ty(t)}")
+        "i64"
+
+    fields_ty(*self, span: Span, ts: Buf[Ty]) -> string
+        var out = ""
+
+        for t in ts
+            if out != "" then out += ", "
+            out += self.mem_ty(span, t)
+
+        s"!llvm.struct<($out)>"
+
+    payload_ty(*self, span: Span, fields: Buf[FieldInfo]) -> string
+        var ts: Buf[Ty] = buf()
+
+        for f in fields
+            ts.push(f.ty)
+
+        self.fields_ty(span, ts)
+
+    // A bound on the size of a stored `t` in 8-byte words. No field is aligned to more than 8 bytes,
+    // so the fields' words added up bound a struct; an enum is its tag's word and its largest
+    // variant's.
+    words(*self, t: Ty) -> usize
+        t match
+            Complex(b) -> return if b == 64 then 2 else 1
+            Fn(_) -> return 2
+            // A stored array is its memref descriptor (`emit_array.sysl`).
+            Array(_, axes) -> return 3 + 2 * axes.len()
+            Tuple(es) -> return self.words_of(es)
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) -> return self.field_words(s.fields)
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) ->
+                        var widest = 0
+
+                        for v in e.variants
+                            widest = max(widest, self.field_words(v.fields))
+
+                        return 1 + widest
+                    None -> ()
+            _ -> ()
+
+        1
+
+    words_of(*self, ts: Buf[Ty]) -> usize
+        var n = 0
+
+        for t in ts
+            n += self.words(t)
+
+        n
+
+    field_words(*self, fields: Buf[FieldInfo]) -> usize
+        var n = 0
+
+        for f in fields
+            n += self.words(f.ty)
+
+        n
+
+    // -- values -----------------------------------------------------------------------------------
+
+    // Field `k` of `v`, an aggregate of MLIR type `m`, as a value of `t`.
+    field(*self, v: string, m: string, k: usize, t: Ty) -> string = self.from_mem(self.def(s"llvm.extractvalue $v[$k] : $m"), t)
+
+    // An aggregate of MLIR type `m` from its fields' values.
+    make(*self, m: string, vals: Buf[string], tys: Buf[Ty]) -> string
+        var v = self.def(s"llvm.mlir.undef : $m")
+
+        for k in 0..<vals.len()
+            v = self.def(s"llvm.insertvalue ${self.to_mem(vals[k], tys[k])}, $v[$k] : $m")
+
+        v
+
+    // `Point(x, y)` or `(a, b)`: each element in order.
+    aggregate(*self, span: Span, t: Ty, elems: Buf[TExpr]) -> string
+        var vals: Buf[string] = buf()
+        var tys: Buf[Ty] = buf()
+
+        for e in elems
+            vals.push(self.ex(e))
+            tys.push(e.ty)
+
+        for v in vals
+            if v == "" then return ""
+
+        self.make(self.ty(span, t), vals, tys)
+
+    // The tag of enum value `v` as an index.
+    tag_index(*self, v: string, m: string) -> string = self.def(s"arith.index_cast ${self.def(s"llvm.extractvalue $v[0] : $m")} : i64 to index")
+
+    // The fields of the variant enum value `v` of type `t` holds, as the struct `payload_ty` names.
+    payload(*self, v: string, t: Ty, fields: Buf[FieldInfo]) -> string
+        val span = Span(0, 0)
+        val m = self.ty(span, t)
+        val slot = self.alloca(m)
+
+        self.op(s"llvm.store $v, $slot : $m, !llvm.ptr")
+
+        val p = self.def(s"llvm.getelementptr $slot[0, 1] : (!llvm.ptr) -> !llvm.ptr, $m")
+
+        self.def(s"llvm.load $p : !llvm.ptr -> ${self.payload_ty(span, fields)}")
+
+    // `Converged(x)`: the tag, and the fields written into the payload.
+    variant(*self, span: Span, t: Ty, tag: usize, args: Buf[TExpr]) -> string
+        val m = self.ty(span, t)
+        var vals: Buf[string] = buf()
+
+        for a in args
+            vals.push(self.ex(a))
+
+        val slot = self.alloca(m)
+
+        self.op(s"llvm.store ${self.def(s"llvm.mlir.zero : $m")}, $slot : $m, !llvm.ptr")
+        self.op(s"llvm.store ${self.def(s"arith.constant $tag : i64")}, $slot : i64, !llvm.ptr")
+
+        if args.len() > 0
+            var tys: Buf[Ty] = buf()
+
+            for a in args
+                tys.push(a.ty)
+
+            val pt = self.fields_ty(span, tys)
+            val p = self.def(s"llvm.getelementptr $slot[0, 1] : (!llvm.ptr) -> !llvm.ptr, $m")
+
+            self.op(s"llvm.store ${self.make(pt, vals, tys)}, $p : $pt, !llvm.ptr")
+
+        self.def(s"llvm.load $slot : !llvm.ptr -> $m")
+
+    // -- match ------------------------------------------------------------------------------------
+
+    match_expr(*self, e: TExpr, scrutinee: TExpr, arms: Buf[TArm]) -> string
+        val s = self.ex(scrutinee)
+        val st = scrutinee.ty
+        val rt = self.ty(e.span, e.ty)
+        val entry = self.dirty
+
+        // The elaborator matches nothing but an enum.
+        val en = self.enum_ty(st).unwrap()
+        val idx = self.tag_index(s, self.ty(e.span, st))
+        val r = if rt == "" then "" else self.fresh()
+
+        self.op(if rt == "" then s"scf.index_switch $idx" else s"$r = scf.index_switch $idx -> $rt")
+
+        var fallback: Option[TArm] = None
+
+        for arm in arms
+            arm.pat match
+                PVariant(_, tag, binds) ->
+                    val fields = en.variants[tag].fields
+
+                    self.op(s"case $tag {")
+                    self.dirty = entry
+
+                    if fields.len() > 0
+                        val p = self.payload(s, st, fields)
+                        val pt = self.payload_ty(e.span, fields)
+
+                        for k in 0..<binds.len()
+                            binds[k] match
+                                Some(id) ->
+                                    self.bind_local(e.span, id)
+                                    self.keep(e.span, self.local_ptr(e.span, id), self.field(p, pt, k, fields[k].ty), fields[k].ty)
+                                None -> ()
+
+                    self.arm_end(arm.body, e.ty, rt)
+                PAny(_) -> if fallback.is_none() then fallback = Some(arm)
+
+        self.op("default {")
+        self.dirty = entry
+
+        fallback match
+            Some(arm) ->
+                self.bind_whole(e.span, arm.pat, s, st)
+                self.arm_end(arm.body, e.ty, rt)
+            None ->
+                // Every variant has its arm; the tag is never another.
+                if rt == "" then self.op("scf.yield") else self.yield_value("", e.ty)
+                self.op("}")
+
+        self.dirty = entry
+        if r == "" then "" else self.own(r, e.ty)
+    end match_expr
+
+    // `name -> ...`: the whole value bound.
+    bind_whole(*self, span: Span, pat: TPat, s: string, t: Ty)
+        pat match
+            PAny(Some(id)) ->
+                self.bind_local(span, id)
+                self.keep(span, self.local_ptr(span, id), s, t)
+            _ -> ()
+
+    // An arm's body as its case's region, yielding its value of `t` (MLIR type `rt`).
+    arm_end(*self, body: TExpr, t: Ty, rt: string)
+        if rt == ""
+            self.region(body)
+            self.op("scf.yield")
+        else
+            self.yield_value(self.region_value(body, t), t)
+
+        self.op("}")
+
+    // -- destructuring ----------------------------------------------------------------------------
+
+    // `val a, (b, _) = v`: each name bound to its element of `v`, of type `t`.
+    destructure(*self, span: Span, pat: TBind, v: string, t: Ty)
+        pat match
+            BLocal(id) ->
+                self.bind_local(span, id)
+                self.keep(span, self.local_ptr(span, id), v, self.prog.locals[id].ty)
+            BGlobal(name) -> self.keep(span, self.global_storage(span, name, t), v, t)
+            BSkip -> ()
+            BTuple(elems) ->
+                val m = self.ty(span, t)
+
+                t match
+                    Tuple(es) ->
+                        for k in 0..<elems.len()
+                            self.destructure(span, elems[k], self.field(v, m, k, es[k]), es[k])
+                    _ -> self.later(span, s"destructuring a ${show_ty(t)}")
+
+    // `a, b = b, a`: the right side whole, then every new value retained before any place lets go of
+    // its old one, so a value moving from one target to another survives the move.
+    assign_tuple(*self, span: Span, target: TTarget, value: TExpr)
+        val v = self.ex(value)
+        var ptrs: Buf[string] = buf()
+        var vals: Buf[string] = buf()
+        var tys: Buf[Ty] = buf()
+
+        self.targets(span, target, v, value.ty, &ptrs, &vals, &tys)
+
+        val guarded = self.dirty
+
+        if guarded
+            self.op(s"scf.if ${self.flowing()} {")
+            self.dirty = false
+
+        var olds: Buf[string] = buf()
+
+        for k in 0..<ptrs.len()
+            self.retain(vals[k], tys[k])
+
+        for k in 0..<ptrs.len()
+            olds.push(if self.managed(tys[k]) then self.load(span, ptrs[k], tys[k]) else "")
+            self.store(span, ptrs[k], vals[k], tys[k])
+
+        for k in 0..<ptrs.len()
+            if olds[k] != "" then self.release(olds[k], tys[k])
+
+        if guarded
+            self.dirty = true
+            self.op("}")
+
+    // The places a tuple assignment stores into, each with its value and type.
+    targets(*self, span: Span, target: TTarget, v: string, t: Ty, ptrs: *Buf[string], vals: *Buf[string], tys: *Buf[Ty])
+        target match
+            TPlace(place) ->
+                ptrs.push(self.place_ptr(place))
+                vals.push(v)
+                tys.push(t)
+            TDrop -> ()
+            TTargets(elems) ->
+                val m = self.ty(span, t)
+
+                t match
+                    Tuple(es) ->
+                        for k in 0..<elems.len()
+                            self.targets(span, elems[k], self.field(v, m, k, es[k]), es[k], ptrs, vals, tys)
+                    _ -> self.later(span, s"assigning a ${show_ty(t)} to a list of places")
+
+    // -- printing ---------------------------------------------------------------------------------
+
+    put_text(*self, sink: string, text: string)
+        self.call("nex_put_str", s"$sink, ${self.string_ref(text)}", "i64, !llvm.ptr", "")
+
+    // A tuple as `(a, b)`, a struct as `Point { x=1.0, y=2.0 }` (a generic one by its own name, without
+    // its type arguments), a variant as `Converged(3.14)`.
+    put_aggregate(*self, span: Span, sink: string, v: string, t: Ty)
+        val m = self.ty(span, t)
+
+        t match
+            Tuple(es) ->
+                self.put_text(sink, "(")
+
+                for k in 0..<es.len()
+                    if k > 0 then self.put_text(sink, ", ")
+                    self.put_value(span, sink, self.field(v, m, k, es[k]), es[k])
+
+                self.put_text(sink, ")")
+                return
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) ->
+                        self.put_text(sink, s"${split(s.name, "[")[0]} { ")
+
+                        for k in 0..<s.fields.len()
+                            if k > 0 then self.put_text(sink, ", ")
+                            self.put_text(sink, s"${s.fields[k].name}=")
+                            self.put_value(span, sink, self.field(v, m, k, s.fields[k].ty), s.fields[k].ty)
+
+                        self.put_text(sink, " }")
+                        return
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) ->
+                        self.op(s"scf.index_switch ${self.tag_index(v, m)}")
+
+                        for tag in 0..<e.variants.len()
+                            val fields = e.variants[tag].fields
+
+                            self.op(s"case $tag {")
+                            self.put_text(sink, e.variants[tag].name)
+
+                            if fields.len() > 0
+                                val p = self.payload(v, t, fields)
+                                val pt = self.payload_ty(span, fields)
+
+                                self.put_text(sink, "(")
+
+                                for k in 0..<fields.len()
+                                    if k > 0 then self.put_text(sink, ", ")
+                                    self.put_value(span, sink, self.field(p, pt, k, fields[k].ty), fields[k].ty)
+
+                                self.put_text(sink, ")")
+
+                            self.op("scf.yield")
+                            self.op("}")
+
+                        self.op("default {")
+                        self.op("scf.yield")
+                        self.op("}")
+                        return
+                    None -> ()
+            _ -> ()
+
+        self.later(span, s"printing ${show_ty(t)}")
+    end put_aggregate
+end Emitter

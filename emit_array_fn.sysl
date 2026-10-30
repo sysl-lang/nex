@@ -25,6 +25,17 @@ impl Emitter
         if name == "rank" then return self.int_const(s"${rank_of(args[0].ty)}", bits_of(t))
         if name == "shape" && rank_of(args[0].ty) == 1 then return self.extent_of(span, self.ex(args[0]), args[0].ty, 1, t)
 
+        if name == "shape"
+            val v = self.ex(args[0])
+            var vals: Buf[string] = buf()
+            var tys: Buf[Ty] = buf()
+
+            for a in 1..rank_of(args[0].ty)
+                vals.push(self.extent_of(span, v, args[0].ty, a, INTEGER))
+                tys.push(INTEGER)
+
+            return self.make(self.ty(span, t), vals, tys)
+
         if name == "size"
             val v = self.ex(args[0])
             var n = self.index_const(1)

@@ -61,4 +61,4 @@ memref_copy(size: long, src: *Unranked, dst: *Unranked)
 array_alloc(bytes: long) -> *u8
     val n = if bytes > 0 then bytes else 1
 
-    malloc(usize(n))
+    calloc(usize(n), 1)
