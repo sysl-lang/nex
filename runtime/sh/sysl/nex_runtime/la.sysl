@@ -16,7 +16,7 @@ module sh.sysl.nex_runtime
 // is, 112 transposed, 113 conjugated and transposed.
 
 import sh.sysl.blas.{MatrixView, Op, VectorView, dot, gemm, gemv}
-import sh.sysl.lapack.{Error, Scalar, chol, chol_inplace, eig, eigh, eigvals, inv, lstsq, lu, lu_inplace, qr, qr_inplace, solve, solve_inplace, svd, svdvals, zeros}
+import sh.sysl.lapack.{Error, Scalar, chol, chol_inplace, det, eig, eigh, eigvals, inv, lstsq, lu, lu_inplace, qr, qr_inplace, solve, solve_inplace, svd, svdvals, zeros}
 // The standard complex number, which `print.sysl`'s `Complex` (the layout compiled code hands over)
 // would otherwise shadow.
 import sysl.math.complex.Complex as Cx
@@ -114,39 +114,13 @@ la_inv[T: Scalar](a: MatrixView[T]) -> Result[MatrixView[T], string]
     square("inv", a)?
     inv(a).map_err(failure)
 
-// `det(A)`: `?getrf`, the product of U's diagonal from the first, negated for each row interchange;
-// zero for a singular matrix — one whose U has a zero on the diagonal, which is when `?getrf`
-// reports one.
-//
-// The product is taken here rather than by `sh.sysl.lapack.det` because of how a complex product
-// rounds: sysl fuses `a·c − b·d` into one multiply-add, where compiled nex's `complex.mul` rounds
-// each product, and the two engines must agree to the bit.
+// `det(A)`: `?getrf`, the product of U's diagonal from the first, negated for each row interchange,
+// each complex product's four real products rounded on their own as compiled nex's `complex.mul`
+// rounds them; zero for a singular matrix — one whose U has a zero on the diagonal, which is when
+// `?getrf` reports one.
 la_det[T: Scalar](a: MatrixView[T]) -> Result[T, string]
     square("det", a)?
-
-    val f = lu(a).map_err(failure)?
-    var acc = T.one()
-
-    for i in 0..<a.rows
-        val d = f.factors.at(i, i)
-
-        if d == T.zero() then return Ok(T.zero())
-
-        acc = times(acc, if f.ipiv[i] != i32(i + 1) then -d else d)
-
-    Ok(acc)
-
-// `x · y`, a complex product with each of its four products rounded on its own, as `complex.mul`
-// computes it.
-private times[T: Scalar](x: T, y: T) -> T
-    if !T.is_complex() then return x * y
-
-    val rr = T.real_part(x) * T.real_part(y)
-    val ii = T.imag_part(x) * T.imag_part(y)
-    val ir = T.imag_part(x) * T.real_part(y)
-    val ri = T.real_part(x) * T.imag_part(y)
-
-    T.from_parts((rr - ii).to_real(), (ir + ri).to_real())
+    det(a).map_err(failure)
 
 // `lu(A)`: L (unit lower, m × k), U (upper, k × n), and the permutation p, from 1, with
 // `A[p[i], :] == (L @ U)[i, :]`.

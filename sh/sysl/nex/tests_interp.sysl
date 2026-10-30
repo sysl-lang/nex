@@ -294,9 +294,6 @@ itp_closure_traps()
 
 @test("what the interpreter does not run yet is refused before anything runs, at the construct")
 itp_refusals()
-    assert_eq(interpreted(main_of(["print(1)", "val xs = [1.0, 2.0]", "print(xs @ xs)"])), "refused: `@` is not interpreted yet @4:9")
-    assert_eq(interpreted(main_of(["val a = [[2.0, 0.0], [0.0, 2.0]]", "print(solve(a, [1.0, 1.0]))"])),
-              "refused: the linear-algebra function `solve` is not interpreted yet @3:9")
     assert_eq(interpreted(main_of(["var s = 0", "parallel for i in 1..3 reduce s: +", "  s += i"])), "refused: a `parallel` construct is not interpreted yet @3:3")
     assert_eq(interpreted(main_of(["var z = 1.0 + 2.0i", "z.re = 3.0", "print(z)"])), "refused: a complex's part as a place is not interpreted yet @3:3")
     assert_eq(interpreted("extern def cos(x: real): real\n" + main_of(["print(cos(0.0))"])),

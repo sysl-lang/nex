@@ -26,7 +26,7 @@ requires {
 // both engines calling the same functions.
 dependencies {
   blas   { git = "github.com/sysl-lang/blas", version = "0.1.0" }
-  lapack { git = "github.com/sysl-lang/lapack", version = "0.1.0" }
+  lapack { git = "github.com/sysl-lang/lapack", version = "0.1.1" }
 }
 
 // **Which BLAS and LAPACK answer is chosen once, here**, and passed on to `lapack`, which passes it on
