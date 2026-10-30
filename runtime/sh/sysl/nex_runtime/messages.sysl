@@ -44,6 +44,33 @@ val ASSERT_EQ_FAILED = "assert_eq failed"
 val DID_NOT_TRAP = "assert_traps: the function did not trap"
 val NOT_MENTIONED = "assert_traps: expected substring not present in trap"
 
+// Operands of `@` or of an elementwise operation whose extents do not agree.
+val SHAPE_MISMATCH = "shape mismatch"
+
+// -- the linear-algebra prelude (DESIGN §10.5) -------------------------------------------------------
+
+// `name`'s matrix has not as many rows as columns.
+not_square_message(name: string) -> string = s"$name: the matrix is not square"
+
+// `name`'s right-hand side has not as many rows as its matrix.
+rows_message(name: string) -> string = s"$name: the right-hand side has not the matrix's number of rows"
+
+// LAPACK's `info` above zero, by what it means for the routine `name` called: a zero pivot `U[i,i]`,
+// the leading minor of order `i` not positive definite, or an iteration that did not converge.
+singular_message(name: string, i: long) -> string = s"$name: matrix is singular (U[$i,$i] = 0)"
+
+indefinite_message(name: string, i: long) -> string = s"$name: matrix is not positive definite (leading minor $i)"
+
+unconverged_message(name: string) -> string = s"$name: did not converge"
+
+// LAPACK's `info` below zero: the argument at `position` of `routine` refused, which no well-typed
+// call makes.
+refused_message(name: string, routine: string, position: long) -> string = s"$name: LAPACK's $routine refused its argument $position"
+
+val LU_PIVOTS = "lu_inplace: ipiv holds fewer than min(m, n) pivots"
+val QR_TAU = "qr_inplace: tau holds fewer than min(m, n) elements"
+val SOLVE_PIVOTS = "solve_inplace: ipiv holds fewer pivots than the matrix has rows"
+
 // `assert(c, text)` failing.
 assertion_message(text: string) -> string = s"$ASSERTION_FAILED: $text"
 

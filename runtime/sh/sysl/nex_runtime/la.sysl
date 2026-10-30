@@ -1,0 +1,560 @@
+module sh.sysl.nex_runtime
+
+// nex's linear algebra, the one implementation both engines call (DESIGN §10.4, §10.5): `@` through
+// BLAS and the linear-algebra prelude through LAPACK, on `sh.sysl.blas`'s views and
+// `sh.sysl.lapack`'s routines — the same routines, the same dense copies and the same workspace
+// queries whichever engine asks, so the two answer bit for bit alike.
+//
+// **The sysl functions (`la_*`)** take and answer views and slices, which is how the interpreter holds
+// an array, and fail with the trap's message as nex words it. A vector is a one-column view.
+//
+// **The exported functions (`nex_la_*`)** are what compiled code calls. Each array arrives as the
+// address of its first element, its extents and its leading dimension, and is made a view where it
+// lies, with no copy (`from_ptr`); each answer is written into dense storage the caller allocated
+// (leading dimension max(rows, 1)); a failure traps. An element type arrives as a code — 0 `real32`,
+// 1 `real64`, 2 `complex[real32]`, 3 `complex[real64]` — and an operand's flag as CBLAS's: 111 as it
+// is, 112 transposed, 113 conjugated and transposed.
+
+import sh.sysl.blas.{MatrixView, Op, VectorView, dot, gemm, gemv}
+import sh.sysl.lapack.{Error, Scalar, chol, chol_inplace, eig, eigh, eigvals, inv, lstsq, lu, lu_inplace, qr, qr_inplace, solve, solve_inplace, svd, svdvals, zeros}
+// The standard complex number, which `print.sysl`'s `Complex` (the layout compiled code hands over)
+// would otherwise shadow.
+import sysl.math.complex.Complex as Cx
+import sysl.math.{max, min}
+import sysl.raw.ptr_cast
+
+// -- the library ----------------------------------------------------------------------------------
+
+// The `pkg-config` module whose `--libs` a compiled program calling BLAS or LAPACK links, where this
+// build's `library` choice finds its library that way; `""` where it does not.
+la_pkg_config() -> string
+#if feature_openblas
+    "openblas"
+#else
+    ""
+#endif
+
+// The libraries such a program links otherwise, as `blas` and `lapack` name them: Accelerate's
+// `cblas` and `lapack` on macOS, OpenBLAS elsewhere.
+la_libraries() -> []const string
+#if macos
+    ["cblas", "lapack"]
+#else
+    ["openblas"]
+#endif
+
+// -- products -------------------------------------------------------------------------------------
+
+// `op(x) @ op(y)` written to `c`, where `x` or `y` may be a vector (`x_vec`, `y_vec`), but not both: a
+// matrix by a matrix is `?gemm`, a matrix and a vector `?gemv`, a vector by a matrix `?gemv` with the
+// matrix's flag turned, and `x @ conj(transpose(Y))`, which no `?gemv` flag spells, `?gemm` with `x`
+// as one row. `c` is the result's extents: a vector result is one column.
+la_product_into[T: Scalar](x: MatrixView[T], x_vec: bool, fx: Op, y: MatrixView[T], y_vec: bool, fy: Op, c: MatrixView[T]) -> Result[unit, string]
+    if !x_vec && !y_vec
+        if inner(fx, x, false) != inner(fy, y, true) then return Err(SHAPE_MISMATCH)
+
+        return product(gemm(fx, fy, T.one(), x, y, T.zero(), c))
+
+    if !x_vec
+        if inner(fx, x, false) != y.rows then return Err(SHAPE_MISMATCH)
+
+        return product(gemv(fx, T.one(), x, y.col(0), T.zero(), c.col(0)))
+
+    if fy != Op.ConjTrans
+        if inner(fy, y, true) != x.rows then return Err(SHAPE_MISMATCH)
+
+        return product(gemv(if fy == Op.NoTrans then Op.Trans else Op.NoTrans, T.one(), y, x.col(0), T.zero(), c.col(0)))
+
+    if y.cols != x.rows then return Err(SHAPE_MISMATCH)
+
+    val row = MatrixView.from_ptr(x.ptr(), 1, x.rows, 1).map_err((e) -> s"$e")?
+    val out = MatrixView.from_ptr(c.ptr(), 1, y.rows, 1).map_err((e) -> s"$e")?
+
+    product(gemm(Op.NoTrans, Op.ConjTrans, T.one(), row, y, T.zero(), out))
+
+// `op(x) @ op(y)` as `la_product_into` takes it, into fresh storage.
+la_product[T: Scalar](x: MatrixView[T], x_vec: bool, fx: Op, y: MatrixView[T], y_vec: bool, fy: Op) -> Result[MatrixView[T], string]
+    val rows = if !x_vec then outer(fx, x, false) else outer(fy, y, true)
+    val cols = if !x_vec && !y_vec then outer(fy, y, true) else 1
+    val c: MatrixView[T] = zeros(rows, cols)
+
+    la_product_into(x, x_vec, fx, y, y_vec, fy, c)?
+    Ok(c)
+
+// `x @ y` of two vectors, unconjugated (`?dot`, `?dotu_sub`).
+la_dot[T: Scalar](x: VectorView[T], y: VectorView[T]) -> Result[T, string]
+    if x.len != y.len then return Err(SHAPE_MISMATCH)
+
+    dot(x, y).map_err((e) -> s"$e")
+
+// The extent `op(a)` meets its partner on: its columns on the left (`right` false), its rows on the
+// right.
+private inner[T](op: Op, a: MatrixView[T], right: bool) -> usize = if (op == Op.NoTrans) != right then a.cols else a.rows
+
+// The extent `op(a)` gives the product: its rows on the left, its columns on the right.
+private outer[T](op: Op, a: MatrixView[T], right: bool) -> usize = if (op == Op.NoTrans) != right then a.rows else a.cols
+
+private product(r: Result[unit, sh.sysl.blas.BlasError]) -> Result[unit, string] = r.map_err((e) -> s"$e")
+
+// -- the value forms ------------------------------------------------------------------------------
+
+// `solve(A, B)`: `?gesv`.
+la_solve[T: Scalar](a: MatrixView[T], b: MatrixView[T]) -> Result[MatrixView[T], string]
+    square("solve", a)?
+    rows("solve", a, b)?
+    solve(a, b).map_err(failure)
+
+// `lstsq(A, B)`: `?gelsd`, the minimum-norm solution.
+la_lstsq[T: Scalar](a: MatrixView[T], b: MatrixView[T]) -> Result[MatrixView[T], string]
+    rows("lstsq", a, b)?
+    lstsq(a, b).map_err(failure)
+
+// `inv(A)`: `?getrf`, then `?getri`.
+la_inv[T: Scalar](a: MatrixView[T]) -> Result[MatrixView[T], string]
+    square("inv", a)?
+    inv(a).map_err(failure)
+
+// `det(A)`: `?getrf`, the product of U's diagonal from the first, negated for each row interchange;
+// zero for a singular matrix — one whose U has a zero on the diagonal, which is when `?getrf`
+// reports one.
+//
+// The product is taken here rather than by `sh.sysl.lapack.det` because of how a complex product
+// rounds: sysl fuses `a·c − b·d` into one multiply-add, where compiled nex's `complex.mul` rounds
+// each product, and the two engines must agree to the bit.
+la_det[T: Scalar](a: MatrixView[T]) -> Result[T, string]
+    square("det", a)?
+
+    val f = lu(a).map_err(failure)?
+    var acc = T.one()
+
+    for i in 0..<a.rows
+        val d = f.factors.at(i, i)
+
+        if d == T.zero() then return Ok(T.zero())
+
+        acc = times(acc, if f.ipiv[i] != i32(i + 1) then -d else d)
+
+    Ok(acc)
+
+// `x · y`, a complex product with each of its four products rounded on its own, as `complex.mul`
+// computes it.
+private times[T: Scalar](x: T, y: T) -> T
+    if !T.is_complex() then return x * y
+
+    val rr = T.real_part(x) * T.real_part(y)
+    val ii = T.imag_part(x) * T.imag_part(y)
+    val ir = T.imag_part(x) * T.real_part(y)
+    val ri = T.real_part(x) * T.imag_part(y)
+
+    T.from_parts((rr - ii).to_real(), (ir + ri).to_real())
+
+// `lu(A)`: L (unit lower, m × k), U (upper, k × n), and the permutation p, from 1, with
+// `A[p[i], :] == (L @ U)[i, :]`.
+la_lu[T: Scalar](a: MatrixView[T]) -> Result[(MatrixView[T], MatrixView[T], []long), string]
+    val f = lu(a).map_err(failure)?
+    var perm: []long = [0; f.perm.len]
+
+    for i in 0..<perm.len do perm[i] = long(f.perm[i] + 1)
+
+    Ok((f.l, f.u, perm))
+
+// `chol(A, upper)`: `?potrf` on the triangle `upper` names, the other one zero.
+la_chol[T: Scalar](a: MatrixView[T], upper: bool) -> Result[MatrixView[T], string]
+    square("chol", a)?
+    chol(a, upper).map_err(failure)
+
+// `qr(A)`: the thin Q (m × k) and R (k × n).
+la_qr[T: Scalar](a: MatrixView[T]) -> Result[(MatrixView[T], MatrixView[T]), string]
+    val f = qr(a).map_err(failure)?
+
+    Ok((f.q, f.r))
+
+// `eigvals(A)`: `?geev`, the values complex.
+la_eigvals[T: Scalar](a: MatrixView[T]) -> Result[[]Cx[T::Real], string]
+    square("eigvals", a)?
+    eigvals(a).map_err(failure)
+
+// `eig(A)`: `?geev`, the values and the vectors complex.
+la_eig[T: Scalar](a: MatrixView[T]) -> Result[([]Cx[T::Real], MatrixView[Cx[T::Real]]), string]
+    square("eig", a)?
+
+    val f = eig(a).map_err(failure)?
+
+    Ok((f.values, f.vectors))
+
+// `eigh(A)`: `?syevd` / `?heevd` on the lower triangle, the values ascending.
+la_eigh[T: Scalar](a: MatrixView[T]) -> Result[([]T::Real, MatrixView[T]), string]
+    square("eigh", a)?
+
+    val f = eigh(a).map_err(failure)?
+
+    Ok((f.values, f.vectors))
+
+// `svd(A)`: `?gesdd`, thin: U (m × k), the k singular values, V (n × k).
+la_svd[T: Scalar](a: MatrixView[T]) -> Result[(MatrixView[T], []T::Real, MatrixView[T]), string]
+    val f = svd(a).map_err(failure)?
+
+    Ok((f.u, f.s, f.v))
+
+// `svdvals(A)`: `?gesdd`, the values only.
+la_svdvals[T: Scalar](a: MatrixView[T]) -> Result[[]T::Real, string] = svdvals(a).map_err(failure)
+
+// -- the `inout` forms, answering LAPACK's `info` -------------------------------------------------
+
+// `solve_inplace(A, ipiv, B)`: `?gesv` where the arrays lie.
+la_solve_inplace[T: Scalar](a: MatrixView[T], ipiv: []i32, b: MatrixView[T]) -> Result[i32, string]
+    square("solve_inplace", a)?
+
+    if ipiv.len < a.rows then return Err(SOLVE_PIVOTS)
+
+    rows("solve_inplace", a, b)?
+    solve_inplace(a, ipiv, b).map_err(failure)
+
+// `lu_inplace(A, ipiv)`: `?getrf` where the arrays lie.
+la_lu_inplace[T: Scalar](a: MatrixView[T], ipiv: []i32) -> Result[i32, string]
+    if ipiv.len < min(a.rows, a.cols) then return Err(LU_PIVOTS)
+
+    lu_inplace(a, ipiv).map_err(failure)
+
+// `chol_inplace(A, upper)`: `?potrf` where A lies.
+la_chol_inplace[T: Scalar](a: MatrixView[T], upper: bool) -> Result[i32, string]
+    square("chol_inplace", a)?
+    chol_inplace(a, upper).map_err(failure)
+
+// `qr_inplace(A, tau)`: `?geqrf` where the arrays lie.
+la_qr_inplace[T: Scalar](a: MatrixView[T], tau: []T) -> Result[i32, string]
+    if tau.len < min(a.rows, a.cols) then return Err(QR_TAU)
+
+    qr_inplace(a, tau).map_err(failure)
+
+private square[T](name: string, a: MatrixView[T]) -> Result[unit, string] =
+    if a.rows != a.cols then Err(not_square_message(name)) else Ok(())
+
+private rows[T](name: string, a: MatrixView[T], b: MatrixView[T]) -> Result[unit, string] =
+    if b.rows != a.rows then Err(rows_message(name)) else Ok(())
+
+// A failed call as nex words it.
+private failure(e: Error) -> string = e.cause match
+    Singular(i) -> singular_message(e.function, long(i))
+    NotPositiveDefinite(i) -> indefinite_message(e.function, long(i))
+    NoConvergence(_) -> unconverged_message(e.function)
+    IllegalArgument(k) -> refused_message(e.function, e.routine, long(k))
+    Shape(_) -> e.to_string()
+
+// -- the entry points of compiled code --------------------------------------------------------------
+
+@export("nex_la_product")
+la_product_c(kind: long, x: *u8, xr: long, xc: long, xld: long, x_vec: long, fx: long, y: *u8, yr: long, yc: long, yld: long, y_vec: long, fy: long, c: *u8, cr: long, cc: long)
+    val ok = kind match
+        0 -> done(product_at[f32](x, xr, xc, xld, x_vec, fx, y, yr, yc, yld, y_vec, fy, c, cr, cc))
+        1 -> done(product_at[real](x, xr, xc, xld, x_vec, fx, y, yr, yc, yld, y_vec, fy, c, cr, cc))
+        2 -> done(product_at[Cx[f32]](x, xr, xc, xld, x_vec, fx, y, yr, yc, yld, y_vec, fy, c, cr, cc))
+        _ -> done(product_at[Cx[real]](x, xr, xc, xld, x_vec, fx, y, yr, yc, yld, y_vec, fy, c, cr, cc))
+
+    if !ok then raise_trap()
+
+private product_at[T: Scalar](x: *u8, xr: long, xc: long, xld: long, x_vec: long, fx: long, y: *u8, yr: long, yc: long, yld: long, y_vec: long, fy: long, c: *u8, cr: long, cc: long) -> Result[unit, string] =
+    la_product_into(view[T](x, xr, xc, xld)?, x_vec != 0, op_of(fx), view[T](y, yr, yc, yld)?, y_vec != 0, op_of(fy), view[T](c, cr, cc, max(cr, 1))?)
+
+// `x @ y` of two vectors of `n` and `m` elements at unit stride, written to `out`.
+@export("nex_la_dot")
+la_dot_c(kind: long, x: *u8, n: long, y: *u8, m: long, out: *u8)
+    val ok = kind match
+        0 -> done(dot_at[f32](x, n, y, m, out))
+        1 -> done(dot_at[real](x, n, y, m, out))
+        2 -> done(dot_at[Cx[f32]](x, n, y, m, out))
+        _ -> done(dot_at[Cx[real]](x, n, y, m, out))
+
+    if !ok then raise_trap()
+
+private dot_at[T: Scalar](x: *u8, n: long, y: *u8, m: long, out: *u8) -> Result[unit, string]
+    val o: *T = ptr_cast(out)
+
+    o[0] = la_dot(vector[T](x, n)?, vector[T](y, m)?)?
+    Ok(())
+
+@export("nex_la_solve")
+la_solve_c(kind: long, a: *u8, ar: long, ac: long, lda: long, b: *u8, br: long, bc: long, ldb: long, out: *u8)
+    val ok = kind match
+        0 -> done(solve_at[f32](a, ar, ac, lda, b, br, bc, ldb, out))
+        1 -> done(solve_at[real](a, ar, ac, lda, b, br, bc, ldb, out))
+        2 -> done(solve_at[Cx[f32]](a, ar, ac, lda, b, br, bc, ldb, out))
+        _ -> done(solve_at[Cx[real]](a, ar, ac, lda, b, br, bc, ldb, out))
+
+    if !ok then raise_trap()
+
+private solve_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, b: *u8, br: long, bc: long, ldb: long, out: *u8) -> Result[unit, string]
+    store(la_solve(view[T](a, ar, ac, lda)?, view[T](b, br, bc, ldb)?)?, out)
+    Ok(())
+
+@export("nex_la_lstsq")
+la_lstsq_c(kind: long, a: *u8, ar: long, ac: long, lda: long, b: *u8, br: long, bc: long, ldb: long, out: *u8)
+    val ok = kind match
+        0 -> done(lstsq_at[f32](a, ar, ac, lda, b, br, bc, ldb, out))
+        1 -> done(lstsq_at[real](a, ar, ac, lda, b, br, bc, ldb, out))
+        2 -> done(lstsq_at[Cx[f32]](a, ar, ac, lda, b, br, bc, ldb, out))
+        _ -> done(lstsq_at[Cx[real]](a, ar, ac, lda, b, br, bc, ldb, out))
+
+    if !ok then raise_trap()
+
+private lstsq_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, b: *u8, br: long, bc: long, ldb: long, out: *u8) -> Result[unit, string]
+    store(la_lstsq(view[T](a, ar, ac, lda)?, view[T](b, br, bc, ldb)?)?, out)
+    Ok(())
+
+// `inv`, `chol`, `det` — a square matrix in, one answer out; `upper` is `chol`'s.
+@export("nex_la_inv")
+la_inv_c(kind: long, a: *u8, ar: long, ac: long, lda: long, out: *u8)
+    val ok = kind match
+        0 -> done(inv_at[f32](a, ar, ac, lda, out))
+        1 -> done(inv_at[real](a, ar, ac, lda, out))
+        2 -> done(inv_at[Cx[f32]](a, ar, ac, lda, out))
+        _ -> done(inv_at[Cx[real]](a, ar, ac, lda, out))
+
+    if !ok then raise_trap()
+
+private inv_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, out: *u8) -> Result[unit, string]
+    store(la_inv(view[T](a, ar, ac, lda)?)?, out)
+    Ok(())
+
+@export("nex_la_det")
+la_det_c(kind: long, a: *u8, ar: long, ac: long, lda: long, out: *u8)
+    val ok = kind match
+        0 -> done(det_at[f32](a, ar, ac, lda, out))
+        1 -> done(det_at[real](a, ar, ac, lda, out))
+        2 -> done(det_at[Cx[f32]](a, ar, ac, lda, out))
+        _ -> done(det_at[Cx[real]](a, ar, ac, lda, out))
+
+    if !ok then raise_trap()
+
+private det_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, out: *u8) -> Result[unit, string]
+    val o: *T = ptr_cast(out)
+
+    o[0] = la_det(view[T](a, ar, ac, lda)?)?
+    Ok(())
+
+@export("nex_la_chol")
+la_chol_c(kind: long, a: *u8, ar: long, ac: long, lda: long, upper: long, out: *u8)
+    val ok = kind match
+        0 -> done(chol_at[f32](a, ar, ac, lda, upper, out))
+        1 -> done(chol_at[real](a, ar, ac, lda, upper, out))
+        2 -> done(chol_at[Cx[f32]](a, ar, ac, lda, upper, out))
+        _ -> done(chol_at[Cx[real]](a, ar, ac, lda, upper, out))
+
+    if !ok then raise_trap()
+
+private chol_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, upper: long, out: *u8) -> Result[unit, string]
+    store(la_chol(view[T](a, ar, ac, lda)?, upper != 0)?, out)
+    Ok(())
+
+// `lu(A)` into L, U and the permutation, an `integer` vector.
+@export("nex_la_lu")
+la_lu_c(kind: long, a: *u8, ar: long, ac: long, lda: long, l: *u8, u: *u8, perm: *u8)
+    val ok = kind match
+        0 -> done(lu_at[f32](a, ar, ac, lda, l, u, perm))
+        1 -> done(lu_at[real](a, ar, ac, lda, l, u, perm))
+        2 -> done(lu_at[Cx[f32]](a, ar, ac, lda, l, u, perm))
+        _ -> done(lu_at[Cx[real]](a, ar, ac, lda, l, u, perm))
+
+    if !ok then raise_trap()
+
+private lu_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, l: *u8, u: *u8, perm: *u8) -> Result[unit, string]
+    val (lm, um, p) = la_lu(view[T](a, ar, ac, lda)?)?
+
+    store(lm, l)
+    store(um, u)
+    store_all(p, perm)
+    Ok(())
+
+@export("nex_la_qr")
+la_qr_c(kind: long, a: *u8, ar: long, ac: long, lda: long, q: *u8, r: *u8)
+    val ok = kind match
+        0 -> done(qr_at[f32](a, ar, ac, lda, q, r))
+        1 -> done(qr_at[real](a, ar, ac, lda, q, r))
+        2 -> done(qr_at[Cx[f32]](a, ar, ac, lda, q, r))
+        _ -> done(qr_at[Cx[real]](a, ar, ac, lda, q, r))
+
+    if !ok then raise_trap()
+
+private qr_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, q: *u8, r: *u8) -> Result[unit, string]
+    val (qm, rm) = la_qr(view[T](a, ar, ac, lda)?)?
+
+    store(qm, q)
+    store(rm, r)
+    Ok(())
+
+// `eigvals(A)` where `vectors` is null, else `eig(A)`.
+@export("nex_la_eig")
+la_eig_c(kind: long, a: *u8, ar: long, ac: long, lda: long, values: *u8, vectors: *u8)
+    val ok = kind match
+        0 -> done(eig_at[f32](a, ar, ac, lda, values, vectors))
+        1 -> done(eig_at[real](a, ar, ac, lda, values, vectors))
+        2 -> done(eig_at[Cx[f32]](a, ar, ac, lda, values, vectors))
+        _ -> done(eig_at[Cx[real]](a, ar, ac, lda, values, vectors))
+
+    if !ok then raise_trap()
+
+private eig_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, values: *u8, vectors: *u8) -> Result[unit, string]
+    val m = view[T](a, ar, ac, lda)?
+
+    if usize(vectors) == 0
+        store_all(la_eigvals(m)?, values)
+        return Ok(())
+
+    val (w, v) = la_eig(m)?
+
+    store_all(w, values)
+    store(v, vectors)
+    Ok(())
+
+@export("nex_la_eigh")
+la_eigh_c(kind: long, a: *u8, ar: long, ac: long, lda: long, values: *u8, vectors: *u8)
+    val ok = kind match
+        0 -> done(eigh_at[f32](a, ar, ac, lda, values, vectors))
+        1 -> done(eigh_at[real](a, ar, ac, lda, values, vectors))
+        2 -> done(eigh_at[Cx[f32]](a, ar, ac, lda, values, vectors))
+        _ -> done(eigh_at[Cx[real]](a, ar, ac, lda, values, vectors))
+
+    if !ok then raise_trap()
+
+private eigh_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, values: *u8, vectors: *u8) -> Result[unit, string]
+    val (w, v) = la_eigh(view[T](a, ar, ac, lda)?)?
+
+    store_all(w, values)
+    store(v, vectors)
+    Ok(())
+
+// `svdvals(A)` where `u` is null, else `svd(A)`.
+@export("nex_la_svd")
+la_svd_c(kind: long, a: *u8, ar: long, ac: long, lda: long, u: *u8, s: *u8, v: *u8)
+    val ok = kind match
+        0 -> done(svd_at[f32](a, ar, ac, lda, u, s, v))
+        1 -> done(svd_at[real](a, ar, ac, lda, u, s, v))
+        2 -> done(svd_at[Cx[f32]](a, ar, ac, lda, u, s, v))
+        _ -> done(svd_at[Cx[real]](a, ar, ac, lda, u, s, v))
+
+    if !ok then raise_trap()
+
+private svd_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, u: *u8, s: *u8, v: *u8) -> Result[unit, string]
+    val m = view[T](a, ar, ac, lda)?
+
+    if usize(u) == 0
+        store_all(la_svdvals(m)?, s)
+        return Ok(())
+
+    val (um, sv, vm) = la_svd(m)?
+
+    store(um, u)
+    store_all(sv, s)
+    store(vm, v)
+    Ok(())
+
+@export("nex_la_solve_inplace")
+la_solve_inplace_c(kind: long, a: *u8, ar: long, ac: long, lda: long, ipiv: *u8, np: long, b: *u8, br: long, bc: long, ldb: long) -> long
+    val info = kind match
+        0 -> answered(solve_inplace_at[f32](a, ar, ac, lda, ipiv, np, b, br, bc, ldb))
+        1 -> answered(solve_inplace_at[real](a, ar, ac, lda, ipiv, np, b, br, bc, ldb))
+        2 -> answered(solve_inplace_at[Cx[f32]](a, ar, ac, lda, ipiv, np, b, br, bc, ldb))
+        _ -> answered(solve_inplace_at[Cx[real]](a, ar, ac, lda, ipiv, np, b, br, bc, ldb))
+
+    if info < 0 then raise_trap()
+
+    info
+
+private solve_inplace_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, ipiv: *u8, np: long, b: *u8, br: long, bc: long, ldb: long) -> Result[i32, string] =
+    la_solve_inplace(view[T](a, ar, ac, lda)?, pivots(ipiv, np), view[T](b, br, bc, ldb)?)
+
+@export("nex_la_lu_inplace")
+la_lu_inplace_c(kind: long, a: *u8, ar: long, ac: long, lda: long, ipiv: *u8, np: long) -> long
+    val info = kind match
+        0 -> answered(lu_inplace_at[f32](a, ar, ac, lda, ipiv, np))
+        1 -> answered(lu_inplace_at[real](a, ar, ac, lda, ipiv, np))
+        2 -> answered(lu_inplace_at[Cx[f32]](a, ar, ac, lda, ipiv, np))
+        _ -> answered(lu_inplace_at[Cx[real]](a, ar, ac, lda, ipiv, np))
+
+    if info < 0 then raise_trap()
+
+    info
+
+private lu_inplace_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, ipiv: *u8, np: long) -> Result[i32, string] =
+    la_lu_inplace(view[T](a, ar, ac, lda)?, pivots(ipiv, np))
+
+@export("nex_la_chol_inplace")
+la_chol_inplace_c(kind: long, a: *u8, ar: long, ac: long, lda: long, upper: long) -> long
+    val info = kind match
+        0 -> answered(chol_inplace_at[f32](a, ar, ac, lda, upper))
+        1 -> answered(chol_inplace_at[real](a, ar, ac, lda, upper))
+        2 -> answered(chol_inplace_at[Cx[f32]](a, ar, ac, lda, upper))
+        _ -> answered(chol_inplace_at[Cx[real]](a, ar, ac, lda, upper))
+
+    if info < 0 then raise_trap()
+
+    info
+
+private chol_inplace_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, upper: long) -> Result[i32, string] =
+    la_chol_inplace(view[T](a, ar, ac, lda)?, upper != 0)
+
+@export("nex_la_qr_inplace")
+la_qr_inplace_c(kind: long, a: *u8, ar: long, ac: long, lda: long, tau: *u8, nt: long) -> long
+    val info = kind match
+        0 -> answered(qr_inplace_at[f32](a, ar, ac, lda, tau, nt))
+        1 -> answered(qr_inplace_at[real](a, ar, ac, lda, tau, nt))
+        2 -> answered(qr_inplace_at[Cx[f32]](a, ar, ac, lda, tau, nt))
+        _ -> answered(qr_inplace_at[Cx[real]](a, ar, ac, lda, tau, nt))
+
+    if info < 0 then raise_trap()
+
+    info
+
+private qr_inplace_at[T: Scalar](a: *u8, ar: long, ac: long, lda: long, tau: *u8, nt: long) -> Result[i32, string]
+    val t: *T = ptr_cast(tau)
+
+    la_qr_inplace(view[T](a, ar, ac, lda)?, t[0..<usize(nt)])
+
+// -- crossing ---------------------------------------------------------------------------------------
+
+// The matrix whose element (0, 0) is at `p`, its columns `ld` apart, where it lies.
+private view[T](p: *u8, rows: long, cols: long, ld: long) -> Result[MatrixView[T], string]
+    val q: *T = ptr_cast(p)
+
+    MatrixView.from_ptr(q, usize(rows), usize(cols), usize(ld)).map_err((e) -> s"$e")
+
+// The vector of `n` elements at unit stride from `p`.
+private vector[T](p: *u8, n: long) -> Result[VectorView[T], string]
+    val q: *T = ptr_cast(p)
+
+    VectorView.from_ptr(q, usize(n), 1).map_err((e) -> s"$e")
+
+private pivots(p: *u8, n: long) -> []i32
+    val q: *i32 = ptr_cast(p)
+
+    q[0..<usize(n)]
+
+private op_of(flag: long) -> Op = if flag == 112 then Op.Trans elif flag == 113 then Op.ConjTrans else Op.NoTrans
+
+// `m` written column after column into the dense storage at `out`.
+private store[T](m: MatrixView[T], out: *u8)
+    val o: *T = ptr_cast(out)
+    val ld = max(m.rows, 1)
+
+    for j in 0..<m.cols
+        for i in 0..<m.rows do o[i + j * ld] = m.at(i, j)
+
+private store_all[T](xs: []T, out: *u8)
+    val o: *T = ptr_cast(out)
+
+    for i in 0..<xs.len do o[i] = xs[i]
+
+// Whether the call succeeded; where it did not, the trap noted, which the caller raises once nothing
+// it holds is left to give back.
+private done(r: Result[unit, string]) -> bool = r match
+    Ok(_) -> true
+    Err(m) ->
+        note_trap(m)
+        false
+
+// LAPACK's `info`, at least 0; -1 where the trap was noted.
+private answered(r: Result[i32, string]) -> long = r match
+    Ok(i) -> long(i)
+    Err(m) ->
+        note_trap(m)
+        -1

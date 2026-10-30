@@ -1384,13 +1384,21 @@ product both times, no copy.
    *(unverified on Linux)*, through the LP64 (`int32`) interface. **A program whose `@` or
    linear-algebra prelude calls BLAS or LAPACK links it with no flag**, and one that calls neither
    links none; `NEX_BLAS` names other link options in its place (`NEX_BLAS="-L/opt/openblas/lib
-   -lopenblas"`).
+   -lopenblas"`). **Which library is the default is chosen once, by the runtime's `library`
+   feature** (`platform`, or `openblas` found through `pkg-config`), so the interpreter and the
+   programs the compiler links use the same one.
+
+**Both engines run one implementation of every linear-algebra operation**: the runtime's
+(`sh.sysl.nex_runtime`, on the `blas` and `lapack` packages). The compiler emits a call of its entry
+for the operation with each operand where it lies — the address of its first element, its extents,
+its leading dimension and its flag — and the interpreter calls the same functions on its own arrays,
+so the two answer bit for bit alike.
 
 The routine follows the shape: `gemm`, `gemv` (`T` flag for vector-matrix), `dot` (`dotu` for
 complex: nex's `@` does not conjugate). `x @ conj(transpose(Y))`, which `gemv` has no flag for, is
 `gemm` with `x` as one row. With static extents the decision is made at compile time; with dynamic
 ones the compiler emits both paths and a run-time test, both writing one result buffer made before
-the test. Operands that fail §10.3's stride rules are copied first, and so is a matrix whose column
+the test; the test stays in the emitted code because the small path is a `linalg` operation inline. Operands that fail §10.3's stride rules are copied first, and so is a matrix whose column
 stride is less than its row count. The prelude's `dot(x, y)` is a reduction (§9.2.1), reproducible
 and never dispatched; `x @ y` is the product and dispatches. `C = alpha * (A @ B) + beta * C`
 assigned to the same `C` is one `gemm` with `beta` (**PROPOSED**).
@@ -1408,7 +1416,7 @@ The prelude reaches LAPACK for the dense linear-algebra kernels. **The first set
 | `solve(A, b)` | `?gesv` | `x` with `A @ x == b` (`b` a vector or a matrix of right-hand sides) |
 | `lstsq(A, b)` | `?gelsd` | the least-squares `x` |
 | `inv(A)` | `?getrf` + `?getri` | the inverse |
-| `det(A)` | `?getrf` | the determinant; `0.0` for a singular matrix (no trap) |
+| `det(A)` | `?getrf` | the determinant: U's diagonal multiplied in order, negated per row interchange, each product rounded as nex's `*` rounds it (a complex one's four products unfused); `0.0` for a singular matrix (no trap) |
 | `lu(A)` | `?getrf` | `(L, U, p)`, the pivoted factors |
 | `chol(A)` | `?potrf` | lower `L` with `A == L @ conj(transpose(L))`, `A` symmetric/Hermitian positive-definite |
 | `chol(A, upper = true)` | `?potrf` | upper `U` with `A == conj(transpose(U)) @ U` |

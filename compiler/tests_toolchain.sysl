@@ -50,7 +50,7 @@ private lower(bin: string, work: string, proof: string, links: []const string = 
                                         stdin = Stdio.FromPath(lowered))).unwrap()
     var args: Buf[string] = buf()
 
-    for a in ["-Wno-override-module", "-O2", s"$work/$proof.ll", runtime_archive(work), "-lm", "-o", s"$work/$proof"]
+    for a in ["-Wno-override-module", "-O2", s"$work/$proof.ll", runtime_archive(work), "-lm", UNUSED_CODE, "-o", s"$work/$proof"]
         args.push(a)
 
     for a in links
@@ -99,7 +99,7 @@ proof_disjoint_read_inout()
 proof_blas()
     val bin = llvm_bin()
     val work = make_temp_dir("nex-toolchain").unwrap()
-    val links = blas_links()
+    val links = blas_links().unwrap()
 
     // A BLAS is there when a C program calling one links.
     write_text(s"$work/probe.c", "void cblas_dscal(int, double, double *, int);\nint main(void) { double x = 1.0; cblas_dscal(1, 2.0, &x, 1); return x != 2.0; }\n").unwrap()

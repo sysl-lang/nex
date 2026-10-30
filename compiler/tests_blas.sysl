@@ -24,45 +24,51 @@ emit_blas_threshold()
     val dynamic = emitted(PRODUCT).unwrap()
 
     assert(small.contains("linalg.matmul"), small)
-    assert(!small.contains("cblas") && !small.contains("// nex.blas"), small)
+    assert(!small.contains("nex_la_") && !small.contains("// nex.blas"), small)
     assert(large.starts_with("// nex.blas\n"), large)
-    assert(large.contains("func.call @\"cblas_dgemm\"("), large)
-    assert(!large.contains("linalg.matmul"), large)
+    assert(large.contains("func.call @nex_la_product("), large)
+    assert(!large.contains("linalg.matmul") && !large.contains("memref.copy"), large)
     assert(dynamic.contains("arith.constant 262144 : index"), dynamic)
-    assert(dynamic.contains("func.call @\"cblas_dgemm\"("), dynamic)
+    assert(dynamic.contains("func.call @nex_la_product("), dynamic)
     assert(dynamic.contains("linalg.matmul ins("), dynamic)
 
     for p in ["def f(a: [real; :, :], x: [real]) = a @ x\n", "def f(x: [real], a: [real; :, :]) = x @ a\n"]
         val m = emitted(p + M).unwrap()
 
-        assert(m.contains("arith.constant 16384 : index") && m.contains("func.call @\"cblas_dgemv\"(") && (m.contains("linalg.matvec") || m.contains("linalg.vecmat")), m)
+        assert(m.contains("arith.constant 16384 : index") && m.contains("func.call @nex_la_product(") && (m.contains("linalg.matvec") || m.contains("linalg.vecmat")), m)
 
     val dot = emitted("def f(x: [real32], y: [real32]) = x @ y\n" + M).unwrap()
 
-    assert(dot.contains("arith.constant 4096 : index") && dot.contains("func.call @\"cblas_sdot\"(") && dot.contains("linalg.dot"), dot)
+    assert(dot.contains("arith.constant 4096 : index") && dot.contains("func.call @nex_la_dot(") && dot.contains("linalg.dot"), dot)
+
+    // The runtime's one entry per routine takes each operand as an address, its extents and its
+    // leading dimension, and the element type as a code.
+    assert(large.contains("func.func private @nex_la_product(i64, !llvm.ptr, i64, i64, i64, i64, i64, !llvm.ptr, i64, i64, i64, i64, i64, !llvm.ptr, i64, i64)"), large)
+    assert(dot.contains("func.func private @nex_la_dot(i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr)"), dot)
 
 @test("@ of integers and of real16 never goes to BLAS")
 emit_blas_never()
     for t in ["integer", "real16", "int32"]
         val m = emitted(s"def f(a: [$t; :, :], b: [$t; :, :]) = a @ b\n" + M).unwrap()
 
-        assert(!m.contains("cblas") && !m.contains("// nex.blas") && m.contains("linalg.matmul"), m)
+        assert(!m.contains("nex_la_") && !m.contains("// nex.blas") && m.contains("linalg.matmul"), m)
 
 @test("transpose(A) @ B passes BLAS's T flag with no transposed copy, conj(transpose(Z)) its C flag, at any size")
 emit_blas_flags()
     val t = emitted("def f(a: [real; 3, 2], b: [real; 3, 2]) = transpose(a) @ b\n" + M).unwrap()
 
-    assert(t.contains("arith.constant 112 : i32") && t.contains("func.call @\"cblas_dgemm\"("), t)
-    assert(!t.contains("linalg.transpose") && !t.contains("linalg.matmul"), t)
+    assert(t.contains("arith.constant 112 : i64") && t.contains("func.call @nex_la_product("), t)
+    assert(!t.contains("linalg.transpose") && !t.contains("linalg.matmul") && !t.contains("memref.copy"), t)
 
     val c = emitted("def f(z: [complex; :, :]) = conj(transpose(z)) @ z\n" + M).unwrap()
 
-    assert(c.contains("arith.constant 113 : i32") && c.contains("func.call @\"cblas_zgemm\"("), c)
-    assert(!c.contains("linalg.transpose") && !c.contains("complex.conj"), c)
+    // `complex` is the runtime's element code 3.
+    assert(c.contains("arith.constant 113 : i64") && c.contains("arith.constant 3 : i64") && c.contains("func.call @nex_la_product("), c)
+    assert(!c.contains("linalg.transpose") && !c.contains("complex.conj") && !c.contains("memref.copy"), c)
 
     val v = emitted("def f(a: [real; :, :], x: [real]) = x @ transpose(a)\n" + M).unwrap()
 
-    assert(v.contains("func.call @\"cblas_dgemv\"(") && !v.contains("linalg.transpose"), v)
+    assert(v.contains("func.call @nex_la_product(") && v.contains("arith.constant 112 : i64") && !v.contains("linalg.transpose"), v)
 
     // An operand that is promoted is made first, and BLAS reads what was made.
     val p = emitted("def f(a: [real32; :, :], b: [real; :, :]) = transpose(a) @ b\n" + M).unwrap()
@@ -85,22 +91,36 @@ emit_strip_to_cblas()
     assert(m.contains("func.call @\"cblas_ddot\"("), m)
     assert(!m.contains("memref.copy") && !m.contains("linalg.copy") && !m.contains("linalg.generic"), m)
 
-@test("each value form calls its LAPACK routine for the element type, by reference, its character arguments' lengths after")
+@test("each value form calls the runtime's entry of its name, its arguments where they lie, and copies nothing itself")
 emit_lapack_routines()
     val d = emitted("def f(a: [real; :, :], b: [real]) = (solve(a, b), inv(a), det(a), lu(a), chol(a), qr(a), eigvals(a), eig(a), eigh(a), svd(a), svdvals(a), lstsq(a, b))\n" + M).unwrap()
 
     assert(d.starts_with("// nex.blas\n"), d)
 
-    for r in ["dgesv_", "dgetrf_", "dgetri_", "dpotrf_", "dgeqrf_", "dorgqr_", "dgeev_", "dsyevd_", "dgesdd_", "dgelsd_"]
-        assert(d.contains(s"func.call @\"$r\"("), r)
+    for r in ["solve", "inv", "det", "lu", "chol", "qr", "eig", "eigh", "svd", "lstsq"]
+        assert(d.contains(s"func.call @nex_la_$r("), r)
 
-    assert(d.contains("func.func private @\"dpotrf_\"(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64)"), d)
-    assert(d.contains("func.func private @\"dgesv_\"(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr)"), d)
+    // No LAPACK routine is called from the program, and no input is copied there: the runtime makes
+    // the copies LAPACK overwrites.
+    assert(!d.contains("dgesv_") && !d.contains("memref.copy"), d)
+    assert(d.contains("func.func private @nex_la_chol(i64, !llvm.ptr, i64, i64, i64, i64, !llvm.ptr)"), d)
+    assert(d.contains("func.func private @nex_la_solve(i64, !llvm.ptr, i64, i64, i64, !llvm.ptr, i64, i64, i64, !llvm.ptr)"), d)
 
+    // `complex[real32]` is the runtime's element code 2.
     val z = emitted("def f(a: [complex[real32]; :, :]) = (qr(a), eigh(a), eig(a), svdvals(a))\n" + M).unwrap()
 
-    for r in ["cgeqrf_", "cungqr_", "cheevd_", "cgeev_", "cgesdd_"]
-        assert(z.contains(s"func.call @\"$r\"("), r)
+    assert(z.contains("arith.constant 2 : i64"), z)
+
+    for r in ["qr", "eigh", "eig", "svd"]
+        assert(z.contains(s"func.call @nex_la_$r("), r)
+
+@test("a block of a larger matrix reaches the runtime where it lies, its leading dimension the parent's column stride")
+emit_lapack_block()
+    val m = emitted("def f(a: [real; :, :]) = inv(a[2..5, 3..6])\n" + M).unwrap()
+
+    assert(m.contains("func.call @nex_la_inv("), m)
+    assert(m.contains("memref.extract_strided_metadata"), m)
+    assert(!m.contains("memref.copy"), m)
 
 @test("an inout form writes where its arrays lie, through a wrapper taking their roots")
 emit_lapack_in_place()
@@ -109,7 +129,7 @@ emit_lapack_in_place()
     assert(m.contains("func.func private @\"x.0\"("), m)
     assert(m.contains("memref.subview"), m)
     assert(m.contains("bufferization.materialize_in_destination"), m)
-    assert(m.contains("func.call @\"dgetrf_\"("), m)
+    assert(m.contains("func.call @nex_la_lu_inplace("), m)
 
 // -- programs ---------------------------------------------------------------------------------------
 

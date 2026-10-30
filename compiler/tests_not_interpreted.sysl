@@ -260,6 +260,7 @@ val NOT_INTERPRETED: []const (string, string) = [
     ("items_empty_and_self_windows", "I3"),
     ("items-rearranged", "I3"),
     ("items-sliced", "I3"),
+    ("la_runtime_matches_compiled", "I3"),
     ("lambda", "I3"),
     ("lambda-seq", "I3"),
     ("linear-algebra", "I3"),

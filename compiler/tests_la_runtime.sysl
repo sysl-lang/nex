@@ -1,0 +1,260 @@
+@tests
+
+// The runtime's linear algebra (`runtime/…/la.sysl`) called as the interpreter calls it — sysl views
+// in, sysl views out — against a compiled program computing the same on the same inputs. The two must
+// agree to the bit, which their printed text shows: a `real64` is printed as the shortest decimal
+// that reads back to it, and a `real32` at its own width.
+//
+// Both reach the same functions, so what this checks is the crossing: each array reaching the
+// runtime where it lies with its extents, leading dimension and flag, and each answer landing in the
+// right place. The one product the runtime takes itself, the determinant, is checked against the
+// program's own arithmetic as well.
+
+import nex_runtime.sh.sysl.nex_runtime.*
+import sh.sysl.blas.{MatrixView, Op}
+import sysl.buf.{Buf, buf}
+import sysl.math.complex.Complex as Cx
+import sysl.text.split
+
+// The program: A 4 × 4, W 5 × 3, Z complex 4 × 4 and a vector long enough for `@` to call BLAS.
+private val PROGRAM = raw"""
+def main() =
+  var a: [real; :, :] = zeros((4, 4))
+  var z: [complex; :, :] = zeros((4, 4))
+  var w: [real; :, :] = zeros((5, 3))
+  var y: [real] = zeros(5000)
+  for c in 1..4
+    for r in 1..4
+      a[r, c] = 1.0 * ((r * 7 + c * 3) % 11) - 5.0 + 0.25 * r
+      z[r, c] = a[r, c] + 1.0i * (r - c)
+  for c in 1..3
+    for r in 1..5
+      w[r, c] = 1.0 * ((r * 5 + c * 2) % 7) - 3.0 + 0.5 * c
+  for k in 1..5000
+    y[k] = 1.0 / k
+  var h: [complex; :, :] = zeros((6, 6))
+  for c in 1..6
+    for r in 1..6
+      h[r, c] = 1.0 / (r + c + 1) + 1.0 * ((r * 7 + c * 3 + 1) % 11) - 5.0 + 1.0i * (1.0 / (r + c + 5) + 1.0 * ((r * 7 + c * 3 + 5) % 11) - 5.0)
+  val v = [1.0, -2.0, 3.0, 0.5]
+  val x = [1.0, -1.0, 2.0]
+  print(solve(a, v))
+  print(lstsq(w, [1.0, 2.0, 3.0, 4.0, 5.0]))
+  print(inv(a))
+  print(det(a))
+  val (l, u, p) = lu(a)
+  print(l)
+  print(u)
+  print(p)
+  val s = transpose(a) @ a
+  print(s)
+  print(chol(s))
+  print(chol(s, upper = true))
+  val (q, r) = qr(w)
+  print(q)
+  print(r)
+  print(eigvals(a))
+  val (ew, ev) = eig(a)
+  print(ev)
+  val (hw, hv) = eigh(s)
+  print(hw)
+  print(hv)
+  val (su, ss, sv) = svd(w)
+  print(su)
+  print(ss)
+  print(sv)
+  print(svdvals(a))
+  print(transpose(w) @ w)
+  print(x @ transpose(w))
+  print(y @ y)
+  print(solve(z, v + 0.5i * v))
+  print(det(z))
+  print(det(h))
+  val (hl, hu, hp) = lu(h)
+  var acc = 1.0 + 0.0i
+  for k in 1..6
+    acc = acc * hu[k, k]
+  var odd = false
+  for k in 1..5
+    for m in (k + 1)..6
+      if hp[k] > hp[m]
+        odd = not odd
+  if odd
+    acc = -acc
+  print(acc)
+  print(eigvals(z))
+  print(svdvals(z))
+  print(conj(transpose(z)) @ z)
+  val f = real32(a)
+  print(solve(f, real32(v)))
+  print(det(f))
+  print(svdvals(f))
+"""
+
+@test("the runtime's linear algebra called from sysl answers what a compiled program answers, to the bit")
+la_runtime_matches_compiled()
+    val b = bench()
+    val out = ran(b, PROGRAM)
+
+    finish(b)
+
+    val a = matrix(4, 4, (i, j) -> real((i * 7 + j * 3) % 11) - 5.0 + 0.25 * real(i))
+    val w = matrix(5, 3, (i, j) -> real((i * 5 + j * 2) % 7) - 3.0 + 0.5 * real(j))
+    val z = cmatrix(4, 4, (i, j) -> Cx(a.at(i - 1, j - 1), real(i) - real(j)))
+    val v = column([1.0, -2.0, 3.0, 0.5])
+    var ys: []real = [0.0; 5000]
+
+    for i in 0..<5000 do ys[i] = 1.0 / real(i + 1)
+
+    var expect: Buf[string] = buf()
+
+    expect.push(cols_text(la_solve(a, v).unwrap(), r64))
+    expect.push(cols_text(la_lstsq(w, column([1.0, 2.0, 3.0, 4.0, 5.0])).unwrap(), r64))
+    expect.push(rows_text(la_inv(a).unwrap(), r64))
+    expect.push(r64(la_det(a).unwrap()))
+
+    val (l, u, p) = la_lu(a).unwrap()
+
+    expect.push(rows_text(l, r64))
+    expect.push(rows_text(u, r64))
+    expect.push(list_text(p, (n) -> s"$n"))
+
+    val s = la_product(a, false, Op.Trans, a, false, Op.NoTrans).unwrap()
+
+    expect.push(rows_text(s, r64))
+    expect.push(rows_text(la_chol(s, false).unwrap(), r64))
+    expect.push(rows_text(la_chol(s, true).unwrap(), r64))
+
+    val (q, r) = la_qr(w).unwrap()
+
+    expect.push(rows_text(q, r64))
+    expect.push(rows_text(r, r64))
+    expect.push(list_text(la_eigvals(a).unwrap(), c64))
+
+    val (_, ev) = la_eig(a).unwrap()
+
+    expect.push(rows_text(ev, c64))
+
+    val (hw, hv) = la_eigh(s).unwrap()
+
+    expect.push(list_text(hw, r64))
+    expect.push(rows_text(hv, r64))
+
+    val (su, ss, sv) = la_svd(w).unwrap()
+
+    expect.push(rows_text(su, r64))
+    expect.push(list_text(ss, r64))
+    expect.push(rows_text(sv, r64))
+    expect.push(list_text(la_svdvals(a).unwrap(), r64))
+    expect.push(rows_text(la_product(w, false, Op.Trans, w, false, Op.NoTrans).unwrap(), r64))
+    expect.push(cols_text(la_product(column([1.0, -1.0, 2.0]), true, Op.NoTrans, w, false, Op.Trans).unwrap(), r64))
+
+    val yv = column(ys)
+
+    expect.push(r64(la_dot(yv.col(0), yv.col(0)).unwrap()))
+
+    val zv = cmatrix(4, 1, (i, _) -> Cx(v.at(i - 1, 0), 0.5 * v.at(i - 1, 0)))
+
+    expect.push(cols_text(la_solve(z, zv).unwrap(), c64))
+    expect.push(c64(la_det(z).unwrap()))
+
+    // A determinant whose complex products round: each of `complex.mul`'s four products rounded on
+    // its own, never fused.
+    val h = cmatrix(6, 6, (i, j) -> Cx(1.0 / real(i + j + 1) + real((i * 7 + j * 3 + 1) % 11) - 5.0, 1.0 / real(i + j + 5) + real((i * 7 + j * 3 + 5) % 11) - 5.0))
+
+    expect.push(c64(la_det(h).unwrap()))
+
+    // The oracle the runtime cannot touch: the same product taken in nex, U's diagonal multiplied in
+    // order by the program's own `complex.mul` and the sign of the permutation applied after, which
+    // rounds alike since a negation is exact.
+    expect.push(expect[expect.len() - 1])
+    expect.push(list_text(la_eigvals(z).unwrap(), c64))
+    expect.push(list_text(la_svdvals(z).unwrap(), r64))
+    expect.push(rows_text(la_product(z, false, Op.ConjTrans, z, false, Op.NoTrans).unwrap(), c64))
+
+    val f = matrix32(a)
+
+    expect.push(cols_text(la_solve(f, matrix32(v)).unwrap(), r32))
+    expect.push(r32(la_det(f).unwrap()))
+    expect.push(list_text(la_svdvals(f).unwrap(), r32))
+
+    val got = split(out.text, "\n")
+
+    assert(out.status.ok(), out.err.unwrap_or(""))
+
+    for k in 0..<expect.len()
+        assert_eq(got[k], expect[k])
+
+    assert_eq(got.len, expect.len() + 1)
+
+// -- helpers ----------------------------------------------------------------------------------------
+
+// A dense m × n matrix whose element (i, j), from 1, is `at(i, j)`.
+private matrix(m: usize, n: usize, at: (usize, usize) -> real) -> MatrixView[real]
+    var xs: []real = [0.0; m * n]
+
+    for j in 0..<n
+        for i in 0..<m do xs[i + j * m] = at(i + 1, j + 1)
+
+    MatrixView.of(xs, m, n).unwrap()
+
+private cmatrix(m: usize, n: usize, at: (usize, usize) -> Cx[real]) -> MatrixView[Cx[real]]
+    var xs: []Cx[real] = [Cx(0.0, 0.0); m * n]
+
+    for j in 0..<n
+        for i in 0..<m do xs[i + j * m] = at(i + 1, j + 1)
+
+    MatrixView.of(xs, m, n).unwrap()
+
+private matrix32(a: MatrixView[real]) -> MatrixView[f32]
+    var xs: []f32 = [0.0; a.rows * a.cols]
+
+    for j in 0..<a.cols
+        for i in 0..<a.rows do xs[i + j * a.rows] = f32(a.at(i, j))
+
+    MatrixView.of(xs, a.rows, a.cols).unwrap()
+
+// A vector as the runtime takes one: one column.
+private column(xs: []real) -> MatrixView[real] = MatrixView.of(xs, xs.len, 1).unwrap()
+
+private r64(x: real) -> string = format_real_nex(x)
+
+private r32(x: f32) -> string = format_real_nex(real(x), 32)
+
+private c64(z: Cx[real]) -> string = complex_text(z.re, z.im)
+
+// A matrix as nex prints one, row by row.
+private rows_text[T](m: MatrixView[T], el: (T) -> string) -> string
+    var out = "["
+
+    for i in 0..<m.rows
+        if i > 0 then out += ", "
+
+        out += "["
+
+        for j in 0..<m.cols
+            if j > 0 then out += ", "
+            out += el(m.at(i, j))
+
+        out += "]"
+
+    out + "]"
+
+// A one-column matrix as nex prints a vector.
+private cols_text[T](m: MatrixView[T], el: (T) -> string) -> string
+    var out = "["
+
+    for i in 0..<m.rows
+        if i > 0 then out += ", "
+        out += el(m.at(i, 0))
+
+    out + "]"
+
+private list_text[T](xs: []T, el: (T) -> string) -> string
+    var out = "["
+
+    for i in 0..<xs.len
+        if i > 0 then out += ", "
+        out += el(xs[i])
+
+    out + "]"

@@ -1,29 +1,30 @@
 // Emission of `@` through BLAS (DESIGN §10.4).
 //
 // **A product of `real32`, `real64` or complex elements goes to BLAS where it is large or where its
-// shape needs it**: `cblas_?gemm` for matrix by matrix, `cblas_?gemv` for a matrix and a vector, and
-// `cblas_?dot` (`?dotu_sub` for complex: `@` does not conjugate) for two vectors. An operand written
-// `transpose(X)` or `conj(transpose(X))` is `X` itself, passed with BLAS's `T` or `C` flag, so no
-// transposed copy is made; such a product always dispatches. Otherwise a product whose extents are
-// static is decided here, and one whose extents are not is decided at run time, both paths emitted
-// under an `scf.if`. Below the threshold, and for every other element type, `@` is a `linalg`
-// operation (`emit_array_fn.sysl`).
+// shape needs it**, through the runtime's `nex_la_product` (`?gemm`, `?gemv`) and `nex_la_dot` (`?dot`,
+// `?dotu_sub`: `@` does not conjugate), the functions the interpreter calls too (`runtime/…/la.sysl`).
+// An operand written `transpose(X)` or `conj(transpose(X))` is `X` itself, passed with BLAS's `T` or
+// `C` flag, so no transposed copy is made; such a product always dispatches. Otherwise a product
+// whose extents are static is decided here, and one whose extents are not is decided at run time,
+// both paths emitted under an `scf.if`: the small path is a `linalg` operation inline
+// (`emit_array_fn.sysl`), which is why the decision stays in the emitted code rather than the
+// runtime. Below the threshold, and for every other element type, `@` is that `linalg` operation.
 //
 // **An operand crosses as §10.3 says an array crosses to C**: the address of its first element where
 // it lies, with the column stride as its leading dimension, or a dense copy (`nex_c_gather`) where
-// nex's first axis is not at unit stride or the columns overlap. The result is a fresh buffer BLAS
-// writes, which becomes the product's tensor.
+// nex's first axis is not at unit stride or the columns overlap. The result is a fresh buffer the
+// runtime writes, which becomes the product's tensor.
 //
 // A program that calls BLAS or LAPACK says so before its module (`// nex.blas`), and the driver
-// links the platform's BLAS.
+// links the library.
 
 import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
+import nex_runtime.sh.sysl.nex_runtime.SHAPE_MISMATCH
 
-// CBLAS's constants: column-major storage, and an operand as it is, transposed, or conjugated and
+// CBLAS's flags, which the runtime takes too: an operand as it is, transposed, or conjugated and
 // transposed.
-private val COL_MAJOR = 102
 private val NO_TRANS = 111
 private val TRANS = 112
 private val CONJ_TRANS = 113
@@ -39,9 +40,9 @@ struct BlasOperand
     x: TExpr
     flag: int
 
-// An array as BLAS and LAPACK take it: the address of its first element and its leading dimension
-// (`i32`), nex's extents of it (`index`; a vector has one column), and where it was gathered, the
-// copy to give back after the call.
+// An array as BLAS and LAPACK take it: the address of its first element and its leading dimension,
+// nex's extents of it (all `index`; a vector has one column), and where it was gathered, the copy to
+// give back after the call.
 struct BlasArg
     ptr: string
     ld: string
@@ -49,7 +50,7 @@ struct BlasArg
     cols: string
     copy: CArray
 
-// A buffer the compiler allocates for BLAS or LAPACK to write, dense and column-major: its memref and
+// A buffer the compiler allocates for the runtime to write, dense and column-major: its memref and
 // the memref's type, the address of its first element, and nex's extents of it.
 struct LBuf
     m: string
@@ -58,11 +59,18 @@ struct LBuf
     rows: string
     cols: string
 
-// The BLAS and LAPACK prefix of an element type, `s`, `d`, `c` or `z`; `""` for one they have none for.
-blas_prefix(t: Ty) -> string = base_of(t) match
-    Real(b) -> if b == 32 then "s" elif b == 64 then "d" else ""
-    Complex(b) -> if b == 32 then "c" elif b == 64 then "z" else ""
-    _ -> ""
+// Whether BLAS and LAPACK have routines for the element type `t`: `real32`, `real64` and the two
+// complex types.
+blas_element(t: Ty) -> bool = base_of(t) match
+    Real(b) -> b == 32 || b == 64
+    Complex(b) -> b == 32 || b == 64
+    _ -> false
+
+// The runtime's code for the element type `t`: 0 `real32`, 1 `real64`, 2 `complex[real32]`,
+// 3 `complex[real64]`.
+la_kind(t: Ty) -> int = base_of(t) match
+    Complex(b) -> if b == 32 then 2 else 3
+    b -> if bits_of(b) == 32 then 0 else 1
 
 // `x` as BLAS reads it: `transpose(X)` is `X` with the `T` flag, `conj(transpose(X))` with `C`.
 private blas_operand(x: TExpr) -> BlasOperand = *x.kind match
@@ -108,20 +116,18 @@ impl Emitter
     // `a @ b` (DESIGN §7.2, §10.4): through BLAS, through `linalg`, or through either as its size
     // decides at run time.
     matmul(*self, e: TExpr, l: TExpr, r: TExpr) -> string
-        val p = blas_prefix(elem_of(e.ty))
-
-        if p == "" then return self.linalg_matmul(e, l.ty, r.ty, self.ex(l), self.ex(r))
+        if !blas_element(elem_of(e.ty)) then return self.linalg_matmul(e, l.ty, r.ty, self.ex(l), self.ex(r))
 
         val oa = blas_operand(l)
         val ob = blas_operand(r)
 
-        if oa.flag != NO_TRANS || ob.flag != NO_TRANS then return self.blas_matmul(e, p, oa, ob, self.ex(oa.x), self.ex(ob.x))
+        if oa.flag != NO_TRANS || ob.flag != NO_TRANS then return self.blas_matmul(e, oa, ob, self.ex(oa.x), self.ex(ob.x))
 
         val a = self.ex(l)
         val b = self.ex(r)
 
         static_blas(l.ty, r.ty) match
-            Some(big) -> return if big then self.blas_matmul(e, p, oa, ob, a, b) else self.linalg_matmul(e, l.ty, r.ty, a, b)
+            Some(big) -> return if big then self.blas_matmul(e, oa, ob, a, b) else self.linalg_matmul(e, l.ty, r.ty, a, b)
             None -> ()
 
         // The size, as `measured_axes` takes it, against the threshold.
@@ -143,18 +149,18 @@ impl Emitter
             val v = self.fresh()
 
             self.op(s"$v = scf.if $big -> ($t) {")
-            self.op(s"scf.yield ${self.blas_matmul(e, p, oa, ob, a, b)} : $t")
+            self.op(s"scf.yield ${self.blas_matmul(e, oa, ob, a, b)} : $t")
             self.op("} else {")
             self.op(s"scf.yield ${self.linalg_matmul(e, l.ty, r.ty, a, b)} : $t")
             self.op("}")
             return v
 
-        self.either_matmul(e, p, l.ty, r.ty, a, b, big)
+        self.either_matmul(e, l.ty, r.ty, a, b, big)
 
     // `a @ b` of operand types `lt` and `rt`, an array, through BLAS where `big` holds and through
     // `linalg` on buffers where it does not. The result's buffer is made before the choice, so the
     // product has one buffer whichever path wrote it.
-    private either_matmul(*self, e: TExpr, p: string, lt: Ty, rt: Ty, a: string, b: string, big: string) -> string
+    private either_matmul(*self, e: TExpr, lt: Ty, rt: Ty, a: string, b: string, big: string) -> string
         val span = e.span
         val ra = rank_of(lt)
         val rb = rank_of(rt)
@@ -169,12 +175,12 @@ impl Emitter
         val y = self.blas_arg(span, bm, rt, false)
         var copies: Buf[CArray] = buf()
 
-        self.blas_into(span, p, e.ty, x, ra, NO_TRANS, y, rb, NO_TRANS, c)
+        self.la_product(e.ty, x, ra, NO_TRANS, y, rb, NO_TRANS, c)
         copies.push(x.copy)
         copies.push(y.copy)
         self.give_back(copies)
         self.op("} else {")
-        self.trap_if(self.def(s"arith.cmpi ne, ${self.dim(span, a, lt, ra)}, ${self.dim(span, b, rt, 1)} : index"), "shape mismatch")
+        self.trap_if(self.def(s"arith.cmpi ne, ${self.dim(span, a, lt, ra)}, ${self.dim(span, b, rt, 1)} : index"), SHAPE_MISMATCH)
         self.op(s"linalg.fill ins(${self.one_or_zero(span, elem_of(e.ty), false)} : ${self.elem_ty(span, elem_of(e.ty))}) outs(${c.m} : ${c.mty})")
 
         // With the axes reversed, nex's `A @ B` is storage's `Bᵀ Aᵀ`, so the operands swap.
@@ -184,8 +190,8 @@ impl Emitter
         self.op("}")
         self.buffer_tensor(span, c, e.ty)
 
-    // `a @ b` through BLAS routine prefix `p`, the operands' values `a` and `b`.
-    private blas_matmul(*self, e: TExpr, p: string, oa: BlasOperand, ob: BlasOperand, a: string, b: string) -> string
+    // `a @ b` through BLAS, the operands' values `a` and `b`.
+    private blas_matmul(*self, e: TExpr, oa: BlasOperand, ob: BlasOperand, a: string, b: string) -> string
         val span = e.span
         val x = self.blas_arg(span, self.read_buffer(span, a, oa.x.ty), oa.x.ty, false)
         val y = self.blas_arg(span, self.read_buffer(span, b, ob.x.ty), ob.x.ty, false)
@@ -193,14 +199,14 @@ impl Emitter
         val rb = rank_of(ob.x.ty)
         var out = ""
 
-        if ra == 1 && rb == 1 then out = self.blas_dot(span, p, e.ty, x, y)
+        if ra == 1 && rb == 1 then out = self.la_dot(span, e.ty, x, y)
         else
             // The result's extents: op(X)'s rows and op(Y)'s columns.
             val rows = if oa.flag == NO_TRANS then x.rows else x.cols
             val cols = if ob.flag == NO_TRANS then y.cols else y.rows
             val c = if ra == 2 && rb == 2 then self.fresh_buffer(span, elem_of(e.ty), rows, cols) elif ra == 2 then self.fresh_buffer(span, elem_of(e.ty), rows, "") else self.fresh_buffer(span, elem_of(e.ty), cols, "")
 
-            self.blas_into(span, p, e.ty, x, ra, oa.flag, y, rb, ob.flag, c)
+            self.la_product(e.ty, x, ra, oa.flag, y, rb, ob.flag, c)
             out = self.buffer_tensor(span, c, e.ty)
 
         var copies: Buf[CArray] = buf()
@@ -210,94 +216,38 @@ impl Emitter
         self.give_back(copies)
         out
 
-    // The routine a product of operands `x` and `y` of ranks `ra` and `rb` (not both vectors) takes,
-    // called to write `c`.
-    private blas_into(*self, span: Span, p: string, t: Ty, x: BlasArg, ra: usize, fx: int, y: BlasArg, rb: usize, fy: int, c: LBuf)
-        if ra == 2 && rb == 2 then return self.gemm(span, p, t, x, fx, y, fy, c)
-        if ra == 2 then return self.gemv(span, p, t, x, fx, y, c)
-        if fy == NO_TRANS then return self.gemv(span, p, t, y, TRANS, x, c)
-        if fy == TRANS then return self.gemv(span, p, t, y, NO_TRANS, x, c)
+    // `op(X) @ op(Y)` of operands of ranks `ra` and `rb` (not both vectors), of type `t`, written to
+    // `c` by the runtime, which checks the extents agree.
+    private la_product(*self, t: Ty, x: BlasArg, ra: usize, fx: int, y: BlasArg, rb: usize, fy: int, c: LBuf)
+        var args = LaArgs(buf(), buf())
 
-        // `x @ conj(transpose(Y))` has no `gemv` flag: it is `gemm` with `x` as one row.
-        self.gemm(span, p, t, BlasArg(x.ptr, self.def("arith.constant 1 : i32"), self.index_const(1), x.rows, x.copy), NO_TRANS, y, CONJ_TRANS, c)
-
-    // `op(X) @ op(Y)` written to `c`, a matrix, or a vector where `X` is one row.
-    private gemm(*self, span: Span, p: string, t: Ty, x: BlasArg, fx: int, y: BlasArg, fy: int, c: LBuf)
-        val m = if fx == NO_TRANS then x.rows else x.cols
-        val k = if fx == NO_TRANS then x.cols else x.rows
-        val n = if fy == NO_TRANS then y.cols else y.rows
-
-        self.trap_if(self.def(s"arith.cmpi ne, $k, ${if fy == NO_TRANS then y.rows else y.cols} : index"), "shape mismatch")
-
-        var args: Buf[string] = buf()
-        var tys: Buf[string] = buf()
-
-        for flag in [COL_MAJOR, fx, fy]
-            push_arg(&args, &tys, self.def(s"arith.constant $flag : i32"), "i32")
-
-        for d in [m, n, k]
-            push_arg(&args, &tys, self.i32_of(d), "i32")
-
-        self.blas_scalar(elem_of(t), 1.0, &args, &tys)
-        push_arg(&args, &tys, x.ptr, "!llvm.ptr")
-        push_arg(&args, &tys, x.ld, "i32")
-        push_arg(&args, &tys, y.ptr, "!llvm.ptr")
-        push_arg(&args, &tys, y.ld, "i32")
-        self.blas_scalar(elem_of(t), 0.0, &args, &tys)
-        push_arg(&args, &tys, c.ptr, "!llvm.ptr")
-        push_arg(&args, &tys, self.i32_of(self.def(s"arith.maxsi $m, ${self.index_const(1)} : index")), "i32")
-        self.blas_call(s"cblas_${p}gemm", args, tys, "")
-
-    // `op(X) @ v` written to the vector `c`.
-    private gemv(*self, span: Span, p: string, t: Ty, x: BlasArg, fx: int, v: BlasArg, c: LBuf)
-        self.trap_if(self.def(s"arith.cmpi ne, ${if fx == NO_TRANS then x.cols else x.rows}, ${v.rows} : index"), "shape mismatch")
-
-        val one = self.def("arith.constant 1 : i32")
-        var args: Buf[string] = buf()
-        var tys: Buf[string] = buf()
-
-        for flag in [COL_MAJOR, fx]
-            push_arg(&args, &tys, self.def(s"arith.constant $flag : i32"), "i32")
-
-        push_arg(&args, &tys, self.i32_of(x.rows), "i32")
-        push_arg(&args, &tys, self.i32_of(x.cols), "i32")
-        self.blas_scalar(elem_of(t), 1.0, &args, &tys)
-        push_arg(&args, &tys, x.ptr, "!llvm.ptr")
-        push_arg(&args, &tys, x.ld, "i32")
-        push_arg(&args, &tys, v.ptr, "!llvm.ptr")
-        push_arg(&args, &tys, one, "i32")
-        self.blas_scalar(elem_of(t), 0.0, &args, &tys)
-        push_arg(&args, &tys, c.ptr, "!llvm.ptr")
-        push_arg(&args, &tys, one, "i32")
-        self.blas_call(s"cblas_${p}gemv", args, tys, "")
+        args.code(self, la_kind(elem_of(t)))
+        args.matrix(self, x)
+        args.code(self, if ra == 1 then 1 else 0)
+        args.code(self, fx)
+        args.matrix(self, y)
+        args.code(self, if rb == 1 then 1 else 0)
+        args.code(self, fy)
+        args.ptr(c.ptr)
+        args.index(self, c.rows)
+        args.index(self, c.cols)
+        self.la_call("nex_la_product", args, "")
 
     // `x @ y` of two vectors, a scalar of type `t`.
-    private blas_dot(*self, span: Span, p: string, t: Ty, x: BlasArg, y: BlasArg) -> string
-        self.trap_if(self.def(s"arith.cmpi ne, ${x.rows}, ${y.rows} : index"), "shape mismatch")
+    private la_dot(*self, span: Span, t: Ty, x: BlasArg, y: BlasArg) -> string
+        val st = self.mem_ty(span, t)
+        val slot = self.alloca(st)
+        var args = LaArgs(buf(), buf())
 
-        val one = self.def("arith.constant 1 : i32")
-        var args: Buf[string] = buf()
-        var tys: Buf[string] = buf()
-
-        push_arg(&args, &tys, self.i32_of(x.rows), "i32")
-        push_arg(&args, &tys, x.ptr, "!llvm.ptr")
-        push_arg(&args, &tys, one, "i32")
-        push_arg(&args, &tys, y.ptr, "!llvm.ptr")
-        push_arg(&args, &tys, one, "i32")
-
-        base_of(t) match
-            Complex(b) ->
-                val st = s"!llvm.struct<(f$b, f$b)>"
-                val slot = self.alloca(st)
-
-                self.op(s"llvm.store ${self.def(s"llvm.mlir.zero : $st")}, $slot : $st, !llvm.ptr")
-                push_arg(&args, &tys, slot, "!llvm.ptr")
-                self.blas_call(s"cblas_${p}dotu_sub", args, tys, "")
-
-                val z = self.def(s"llvm.load $slot : !llvm.ptr -> $st")
-
-                self.def(s"complex.create ${self.def(s"llvm.extractvalue $z[0] : $st")}, ${self.def(s"llvm.extractvalue $z[1] : $st")} : complex<f$b>")
-            _ -> self.blas_call(s"cblas_${p}dot", args, tys, self.ty(span, t))
+        self.op(s"llvm.store ${self.def(s"llvm.mlir.zero : $st")}, $slot : $st, !llvm.ptr")
+        args.code(self, la_kind(t))
+        args.ptr(x.ptr)
+        args.index(self, x.rows)
+        args.ptr(y.ptr)
+        args.index(self, y.rows)
+        args.ptr(slot)
+        self.la_call("nex_la_dot", args, "")
+        self.from_mem(self.def(s"llvm.load $slot : !llvm.ptr -> $st"), t)
 
     // -- arrays crossing to BLAS and LAPACK -------------------------------------------------------
 
@@ -333,7 +283,7 @@ impl Emitter
         self.op(s"llvm.store ${self.def(s"builtin.unrealized_conversion_cast $m : ${self.boundary_ty(span, t)} to $dt")}, $desc : $dt, !llvm.ptr")
         self.op(s"scf.yield ${self.always("nex_c_gather", s"${self.elem_const(t)}, ${self.def(s"arith.constant $r : i64")}, $desc", "i64, i64, !llvm.ptr", "!llvm.ptr")} : !llvm.ptr")
         self.op("}")
-        BlasArg(p, self.i32_of(ld), rows, cols, CArray(m, t, p, ok, desc, writes))
+        BlasArg(p, ld, rows, cols, CArray(m, t, p, ok, desc, writes))
 
     // A fresh dense buffer of elements of `et`: a matrix of extents `rows` by `cols`, or a vector of
     // `rows` where `cols` is `""`.
@@ -351,29 +301,36 @@ impl Emitter
 
         self.cast(span, self.def(s"bufferization.to_tensor ${b.m} restrict writable : ${b.mty} to ${self.tensor_ty(span, vt)}"), vt, t)
 
-    i32_of(*self, i: string) -> string = self.def(s"arith.index_cast $i : index to i32")
-
-    // A BLAS scalar argument of element type `et` with value `x`: a real by value, a complex by
-    // the address of its parts.
-    private blas_scalar(*self, et: Ty, x: real, args: *Buf[string], tys: *Buf[string])
-        base_of(et) match
-            Complex(b) ->
-                val st = s"!llvm.struct<(f$b, f$b)>"
-                val slot = self.alloca(st)
-                val re = self.def(s"llvm.insertvalue ${self.real_const(x, b)}, ${self.def(s"llvm.mlir.zero : $st")}[0] : $st")
-
-                self.op(s"llvm.store $re, $slot : $st, !llvm.ptr")
-                push_arg(args, tys, slot, "!llvm.ptr")
-            _ -> push_arg(args, tys, self.real_const(x, bits_of(base_of(et))), s"f${bits_of(base_of(et))}")
-
-    // A call of the BLAS or LAPACK routine `symbol`, declared once with C's types, its value of MLIR
-    // type `rt` (`""` for none).
-    blas_call(*self, symbol: string, args: Buf[string], tys: Buf[string], rt: string) -> string
+    // A call of the runtime's linear-algebra entry `name` with `args`, its value of MLIR type `rt`
+    // (`""` for none). The module then links BLAS and LAPACK.
+    la_call(*self, name: string, args: LaArgs, rt: string) -> string
         self.use_blas()
-        self.declare(s"c.$symbol", s"func.func private @\"$symbol\"(${joined(tys)})${if rt == "" then "" else s" -> ($rt)"}")
-        self.effect(s"func.call @\"$symbol\"(${joined(args)}) : (${joined(tys)}) -> ${result_text(rt)}", rt)
+        self.call(name, joined(args.vals), joined(args.tys), rt)
 end Emitter
 
-push_arg(args: *Buf[string], tys: *Buf[string], v: string, t: string)
-    args.push(v)
-    tys.push(t)
+// The arguments of a call of the runtime's linear algebra, and their MLIR types.
+struct LaArgs
+    vals: Buf[string]
+    tys: Buf[string]
+
+    ptr(*self, v: string)
+        self.vals.push(v)
+        self.tys.push("!llvm.ptr")
+
+    // An `index` value, as the runtime's `long`.
+    index(*self, e: *Emitter, i: string)
+        self.vals.push(e.to_i64(i))
+        self.tys.push("i64")
+
+    // A constant: an element type's code, a flag, a choice.
+    code(*self, e: *Emitter, n: int)
+        self.vals.push(e.def(s"arith.constant $n : i64"))
+        self.tys.push("i64")
+
+    // A matrix as the runtime takes one: the address of element (0, 0), its rows, its columns and
+    // its leading dimension.
+    matrix(*self, e: *Emitter, x: BlasArg)
+        self.ptr(x.ptr)
+        self.index(e, x.rows)
+        self.index(e, x.cols)
+        self.index(e, x.ld)

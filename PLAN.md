@@ -461,6 +461,13 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
     (`NEX_BLAS`), nex 5.61 against C's 4.92 (1.14×) in the one quiet stretch, and every later run at
     that load spread 5–15 ms on both sides, too wide to read a 10% bar. The OpenBLAS comparison is
     to be taken again on a quiet machine.
+
+    *Measured* again with `@` through the runtime's `nex_la_product` (one extra call per product)
+    against the direct `cblas_dgemm` call it replaced, the two binaries alternated, 14 runs each
+    through a nice'd build slot at load 57–67: medians 15.2 and 15.4 ms against 12.7 and 14.4 ms,
+    bests 9.3 and 10.4 against 10.0 and 11.4 — a spread of 9–22 ms on both sides, with the runtime
+    path the faster at its best. The call costs nothing measurable at that load; the bar is to be read
+    again on a quiet machine.
 11. **M11 — modules and `nex test`.** The module loader, the source prelude found by
     `--prelude-path` / `NEX_HOME`, `@test` discovery; `nex test` prints a line per failure and a
     summary, filters by a name substring, and keeps running after a test traps. *Exit*: the reference's module loader,

@@ -21,3 +21,33 @@ requires {
   os   = true
   heap = true
 }
+
+// **`@` and the linear-algebra prelude** (`la.sysl`): `blas` for the products, `lapack` for the rest,
+// both engines calling the same functions.
+dependencies {
+  blas   { git = "github.com/sysl-lang/blas", version = "0.1.0" }
+  lapack { git = "github.com/sysl-lang/lapack", version = "0.1.0" }
+}
+
+// **Which BLAS and LAPACK answer is chosen once, here**, and passed on to `lapack`, which passes it on
+// to `blas`: the platform's (Accelerate on macOS, OpenBLAS elsewhere), or OpenBLAS everywhere. The
+// interpreter links what this choice names, and the `nex` command links every compiled program that
+// calls BLAS or LAPACK against the same (`la_libraries`), unless `NEX_BLAS` names other options.
+//
+// The archive `build-c` writes leaves those symbols to the program's link, so one archive serves
+// either choice.
+features {
+  platform {
+    doc     = "the platform's BLAS and LAPACK: Accelerate on macOS, OpenBLAS (-lopenblas) elsewhere"
+    enables = ["lapack/platform"]
+  }
+
+  openblas {
+    doc     = "OpenBLAS, found through openblas.pc — on macOS in place of Accelerate"
+    enables = ["lapack/openblas"]
+  }
+}
+
+choices {
+  library { doc = "which BLAS and LAPACK answer the calls", of = [platform, openblas], default = platform }
+}
