@@ -1327,6 +1327,17 @@ with these rules (**PROPOSED** where marked).
 - **A tuple built in place converts element by element** to the tuple its position expects:
   `val t: (real, real) = 1, n` adopts `1` and widens `n`. A tuple value as a whole does not widen:
   `val u: (real, real) = t` with `t: (int64, int64)` is a compile error. **PROPOSED.**
+- **A destructuring pattern nests**: `val a, (b, c) = 1, (2.5, true)`, and `for` takes the same
+  patterns. Parentheses group a tuple inside another, and are what a type annotation needs.
+- **A binding takes apart only tuples.** A variant pattern in a `val` or `var` (`val Converged(x) =
+  s`) is a compile error, even where the enum has a single variant: a binding cannot fail, and `match`
+  is how a variant is taken apart.
+- **A tuple assignment stores a tuple into a list of places**: `a, b = b, a`, `p.x, (v[1], _) =
+  f()`. The right side is evaluated whole first, then each element is stored into its target left to
+  right, so `a, b = b, a` swaps. A target is anything a plain assignment may store into, or `_`. A
+  right side written as a tuple converts element by element to the targets' types, as a tuple built
+  in place does; a tuple value is stored as it is, without widening. A place written twice in one
+  list (`a, a = 1, 2`) is a compile error, and a list of targets takes only `=`, never `+=`.
 - **A module-level destructuring binding** (`val a, b = 10, 20`) evaluates its initializer once and
   binds each name as a module-level binding; one that binds no name (`val _, _ = …`) is a compile
   error, since the top level holds no statements.
@@ -1337,7 +1348,9 @@ with these rules (**PROPOSED** where marked).
   that name, and is `f(x, args)` otherwise.
 - **A `match` arm is a variant pattern, a name or `_`.** A variant with fields is matched with all of
   them, `Circle(r)`, `Rect(w, _)`; writing `Circle` alone for a variant with fields is a compile
-  error. A field's sub-pattern is a name or `_`. Every variant is covered once, by its arm or by a
+  error. A field's sub-pattern is a name or `_`. A tuple pattern, as an arm or as a field's
+  sub-pattern, is a compile error: a tuple is taken apart by a destructuring binding, inside the arm
+  where it is a field. Every variant is covered once, by its arm or by a
   catch-all; an arm that repeats a variant or follows a catch-all is a compile error. The arms meet
   in one type as an `if`'s branches do, a literal arm adopting the others' type (§2.3).
 - **What a lambda captures** (ref §4.11, §8.3 rule 4): a lambda **escapes** unless it is written

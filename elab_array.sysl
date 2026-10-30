@@ -779,6 +779,9 @@ children(e: TExpr) -> Buf[TExpr]
         TAssign(_, t, v) ->
             out.push(t)
             out.push(v)
+        TAssignTuple(t, v) ->
+            target_places(t, &out)
+            out.push(v)
         TReturn(v) -> v match
             Some(x) -> out.push(x)
             None -> ()

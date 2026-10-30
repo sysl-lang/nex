@@ -288,6 +288,16 @@ impl Elab
             TBorrow(place) ->
                 self.walk_place(p, fx, place, b)
                 return
+            TAssignTuple(target, value) ->
+                var places: Buf[TExpr] = buf()
+
+                target_places(target, &places)
+
+                for place in places
+                    self.walk_place(p, fx, place, b)
+
+                self.walk(p, fx, value, b)
+                return
             TArray(op) -> *op match
                 TIndex(target, subs) ->
                     owned_of(*b, target) match
@@ -462,6 +472,7 @@ private collect(p: TProgram, e: TExpr, b: *Body)
                 pattern_locals(a.pat, &b.bound)
         TDestructure(_, pat, _) -> bound_locals(pat, &b.bound)
         TAssign(_, target, _) -> b.places.push(target)
+        TAssignTuple(target, _) -> target_places(target, &b.places)
         TBorrow(place) -> b.places.push(place)
         TLambdaRef(l) ->
             if !has(b.lambdas, l)

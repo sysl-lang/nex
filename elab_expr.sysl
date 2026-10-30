@@ -913,6 +913,10 @@ impl Elab
             Some(k) -> return self.contribution(span, op, k, value)
             None -> ()
 
+        *target.kind match
+            ExprKind.Tuple(_) -> return self.assign_tuple(span, target, value)
+            _ -> ()
+
         val p = self.place(target)
 
         if is_array(p.ty) then return self.array_assign(span, op, target, p, value)

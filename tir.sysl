@@ -98,6 +98,9 @@ enum TKind
     // `target = value` or a compound `target += value`, whose `op` is the operator (`=` for a plain
     // store); `value` is already in the target's type.
     TAssign(op: string, target: TExpr, value: TExpr)
+    // `a, b = b, a`: `value`, a tuple, is evaluated whole, and then each of its elements is stored
+    // into its target, left to right.
+    TAssignTuple(target: TTarget, value: TExpr)
     TReturn(value: Option[TExpr])
     TExit(loop_id: usize)
     TCycle(loop_id: usize)
@@ -147,6 +150,14 @@ enum TBind
     // `_`: the element is computed and dropped.
     BSkip
     BTuple(elems: Buf[TBind])
+
+// The left of a tuple assignment: where each element of the tuple is stored.
+enum TTarget
+    // A local, a module-level `var`, a field or an element, as a plain assignment's target is.
+    TPlace(place: TExpr)
+    // `_`: the element is computed and dropped.
+    TDrop
+    TTargets(elems: Buf[TTarget])
 
 // How a local came to be.
 enum LocalKind

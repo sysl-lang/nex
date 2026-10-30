@@ -88,7 +88,8 @@ An arm's body may be a single expression after `->` or an indented block, as in 
 | `_` | anything, binding nothing |
 
 Inside a variant pattern each sub-pattern is a name or `_`; a pattern does not nest a second variant
-inside the first. `name` and `_` at the top of an arm are catch-alls.
+or a tuple inside the first. A field that holds a tuple is bound to a name and taken apart inside the
+arm's body with `val x, y = q`. `name` and `_` at the top of an arm are catch-alls.
 
 ```nex
 enum Color =

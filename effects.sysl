@@ -239,6 +239,13 @@ private scan(p: TProgram, fx: Effects, vars: Buf[string], e: TExpr, sc: *Scan)
         TLambdaRef(l) -> add_id(&sc.edges, fx.funs.len() + l)
         TAssign(_, target, _) -> written(fx, vars, target, sc)
         TBorrow(place) -> written(fx, vars, place, sc)
+        TAssignTuple(target, _) ->
+            var places: Buf[TExpr] = buf()
+
+            target_places(target, &places)
+
+            for place in places
+                written(fx, vars, place, sc)
         TDestructure(_, pat, _) ->
             var names: Buf[string] = buf()
 
@@ -309,6 +316,15 @@ root_of(place: TExpr) -> TExpr = *place.kind match
         TIndex(target, _) -> root_of(target)
         _ -> place
     _ -> place
+
+// The places a tuple assignment stores into.
+target_places(t: TTarget, out: *Buf[TExpr])
+    t match
+        TPlace(place) -> out.push(place)
+        TDrop -> ()
+        TTargets(elems) ->
+            for e in elems
+                target_places(e, out)
 
 bound_locals(b: TBind, out: *Buf[usize])
     b match
