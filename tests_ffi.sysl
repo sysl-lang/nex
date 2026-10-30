@@ -1,0 +1,265 @@
+@tests
+
+// `extern def` (DESIGN §10): what the elaborator accepts and refuses in a declaration and its
+// attributes, the C signatures and copies the emitter writes, the declarations it lowers to checked
+// against clang's for the same C functions, and programs calling the test library
+// (`testdata/ffi/nexffi.c`) through windows, roots and paths the `testdata/v2` programs do not reach.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.{read_text, write_text}
+import sysl.process.{Status, Var, capture}
+import sysl.testing.compiler
+import sysl.text.{join, replace_all, split}
+
+private val M = "def main() = ()\n"
+
+// -- declarations -----------------------------------------------------------------------------------
+
+@test("an extern's attributes are recorded: its C symbol, its link inputs, @pure and @strided")
+extern_attributes()
+    assert_eq(elaborated("@link(\"m\")\n@link(framework = \"Accelerate\")\n@symbol(\"cblas_ddot\")\n@pure\nextern def ddot(n: int32, @strided x: [real], incx: int32): real\n" + M),
+        "(extern ddot (int32, [real64], int32) -> real64 @symbol(\"cblas_ddot\") @link(\"m\") @link(framework = \"Accelerate\") @pure @strided(2))\n(def main () void ())")
+    assert_eq(elaborated("extern def f(a: int8, b: uint16, c: real16, d: complex[real32], e: bool, s: string, x: inout int32, m: inout [real; :, :, :])\n" + M),
+        "(extern f (int8, uint16, real16, complex[real32], bool, string, inout int32, inout [real64; :, :, :]) -> void)\n(def main () void ())")
+
+@test("an extern's attributes are refused where they say nothing it takes")
+extern_attributes_refused()
+    assert_eq(refused("@inline\nextern def f(x: real): real\n" + M), "error: `@inline` is not an attribute of an `extern def`, which takes `@link`, `@symbol`, `@pure` and `@fortran` @1:1")
+    assert_eq(refused("@link\nextern def f(x: real): real\n" + M), "error: `@link` names a library, `@link(\"m\")`, or a framework, `@link(framework = \"Accelerate\")` @1:1")
+    assert_eq(refused("@link(path = \"x\")\nextern def f(x: real): real\n" + M), "error: `@link` names a library, `@link(\"m\")`, or a framework, `@link(framework = \"Accelerate\")` @1:1")
+    assert_eq(refused("@symbol(T)\nextern def f(x: real): real\n" + M), "error: `@symbol` names the C symbol, `@symbol(\"dgesv_\")` @1:1")
+    assert_eq(refused("@symbol(\"a\")\n@symbol(\"b\")\nextern def f(x: real): real\n" + M), "error: `f` has one C symbol, and `@symbol` is given twice @1:1")
+    assert_eq(refused("@pure(\"yes\")\nextern def f(x: real): real\n" + M), "error: `@pure` takes no arguments @1:1")
+    assert_eq(refused("extern def cos(x: real): real\n@symbol(\"cos\")\nextern def cosine(x: real): real\n" + M), "error: `cosine` and `cos` both name the C symbol `cos` @2:1")
+    assert_eq(refused("extern def f(@strided x: real): real\n" + M), "error: `@strided` passes an array's view as it lies, and `x` is not an array @1:27")
+    assert_eq(refused("extern def f(@strided(2) x: [real]): real\n" + M), "error: `@strided` takes no arguments @1:30")
+    assert_eq(refused("extern def f(@dense x: [real]): real\n" + M), "error: `@dense` is not an attribute of an `extern` parameter, which takes `@strided` @1:25")
+    assert_eq(refused("@fortran\nextern def f(x: real): real\n" + M), "error: a `@fortran` extern is not elaborated yet @1:1")
+
+@test("an extern takes what crosses to C and returns a scalar or nothing; anything else is refused")
+extern_types_refused()
+    assert_eq(refused("extern def f(s: inout string)\n" + M), "error: a `string` crosses to C as a `const char *` it may not write, so `s` cannot be `inout` @1:23")
+    assert_eq(refused("extern def f(s: [string])\n" + M), "error: an array crosses to C as a pointer to its elements, which must be numbers or `bool`, and [string] holds string @1:17")
+    assert_eq(refused("struct P\n  x: real\nextern def f(p: P)\n" + M), "error: a struct crosses to C by pointer only where it is declared `@c`, which lays it out as C does, and `P` is not @3:17")
+    assert_eq(refused("extern def f(t: (real, real))\n" + M), "error: (real64, real64) does not cross to C: an `extern` takes numbers, `bool`, `string`, arrays of numbers, `@c` structs and callbacks @1:17")
+    assert_eq(refused("extern def f(): string\n" + M), "error: an `extern` returns a number, a `bool`, a complex or nothing, and string does not cross back from C @1:17")
+    assert_eq(refused("extern def f(): [real]\n" + M), "error: an `extern` returns a number, a `bool`, a complex or nothing, and [real64] does not cross back from C @1:17")
+    assert_eq(refused("@c\nstruct P\n  x: real\nextern def f(): P\n" + M), "error: an `extern` returns a number, a `bool`, a complex or nothing, and P does not cross back from C @4:17")
+
+@test("c_ptr is C's void *, named only in an extern, and only as a callback's @data partner")
+extern_c_ptr()
+    assert_eq(elaborated("extern def integrate(f: (real, c_ptr) -> real, data: @data(f) c_ptr, a: real, b: real): real\n" + M),
+        "(extern integrate ((real64, c_ptr) -> real64, c_ptr, real64, real64) -> real64 @data(2 -> 1))\n(def main () void ())")
+    assert_eq(refused("extern def f(data: @data(g) c_ptr, g: (c_ptr) -> real)\n" + M), "ok")
+    assert_eq(refused("def main() =\n  val p: c_ptr = 0\n"), "error: `c_ptr` is C's `void *`, and only an `extern` declaration names it @2:10")
+    assert_eq(refused("extern def f(p: c_ptr)\n" + M), "error: a `c_ptr` is a callback's user data: declare `p: @data(f) c_ptr`, naming the callback parameter it goes with @1:17")
+    assert_eq(refused("extern def f(f: (real) -> real, x: @data(f) real)\n" + M), "error: a `@data` parameter is C's `void *` for its callback's user data, so `x` is declared `c_ptr` @1:45")
+    assert_eq(refused("extern def f(p: @data(g) c_ptr)\n" + M), "error: `@data(g)` names no parameter of this `extern` @1:26")
+    assert_eq(refused("extern def f(n: int32, p: @data(n) c_ptr)\n" + M), "error: `@data(n)` names the callback its user data goes with, and `n` is int32, not a function @1:36")
+    assert_eq(refused("extern def f(f: (real) -> real, p: inout @data(f) c_ptr)\n" + M), "error: a `c_ptr` is a callback's user data, passed by value, so `p` cannot be `inout` @1:51")
+    assert_eq(refused("extern def f(p: @keep c_ptr)\n" + M), "error: `@keep` is not an attribute of an `extern` parameter's type, which takes `@data(f)` @1:23")
+    assert_eq(refused("extern def q(f: (real) -> real, x: real): real\ndef g(x: real) = x\ndef main() = print(q(g, 1.0))\n"), "error: a call of an `extern` taking a callback is not elaborated yet @3:20")
+
+@test("a @c struct holds numbers, bool and @c structs; any other field, a generic one or another attribute is refused")
+c_structs()
+    assert_eq(refused("@c\nstruct In\n  a: int8\n  z: complex\n@c\nstruct Out\n  i: In\n  ok: bool\nextern def f(o: inout Out, i: In)\n" + M), "ok")
+    assert_eq(refused("@c\nstruct P\n  name: string\n" + M), "error: a `@c` struct holds numbers, `bool` and `@c` structs, as C lays them out, and its field `name` is string @1:1")
+    assert_eq(refused("struct In\n  a: int8\n@c\nstruct Out\n  i: In\n" + M), "error: a `@c` struct holds numbers, `bool` and `@c` structs, as C lays them out, and its field `i` is In @3:1")
+    assert_eq(refused("@c\nstruct P\n  v: [real]\n" + M), "error: a `@c` struct holds numbers, `bool` and `@c` structs, as C lays them out, and its field `v` is [real64] @1:1")
+    assert_eq(refused("@c\nstruct P[T]\n  x: T\n" + M), "error: a `@c` struct is laid out as C lays it out, so `P` cannot be generic @1:1")
+    assert_eq(refused("@packed\nstruct P\n  x: real\n" + M), "error: `@packed` is not an attribute of a struct, which takes `@c` @1:1")
+    assert_eq(refused("@c(\"x\")\nstruct P\n  x: real\n" + M), "error: `@c` takes no arguments @1:1")
+
+@test("a parallel body and an @elemental function call only @pure externs, directly or through a function")
+extern_purity()
+    val head = "@pure\nextern def p(x: real): real\nextern def q(x: real): real\ndef via(x: real) = q(x)\n"
+    val body = "def main() =\n  var y: [real] = zeros(4)\n  parallel for i in 1..4\n    y[i] = "
+
+    assert_eq(refused(head + body + "p(1.0 * i)\n"), "ok")
+    assert_eq(refused(head + body + "q(1.0 * i)\n"), "error: `q` is an `extern` not declared `@pure`, and a parallel body calls only `@pure` externs @8:12")
+    assert_eq(refused(head + body + "via(1.0 * i)\n"), "error: `via` calls `q`, an `extern` not declared `@pure`, and a parallel body calls only `@pure` externs @8:12")
+    assert_eq(refused(head + "@elemental def e(x: real) = p(x)\ndef main() = print(e([1.0]))\n"), "ok")
+    assert_eq(refused(head + "@elemental def e(x: real) = q(x)\ndef main() = print(e([1.0]))\n"), "error: an `@elemental` function may be run in any order, so it cannot call `q`, an `extern` not declared `@pure` @5:1")
+
+// -- emission ---------------------------------------------------------------------------------------
+
+@test("an extern is declared by its C symbol with C's types: complexes as clang passes them, narrow integers widened")
+emit_extern_signatures()
+    val m = emitted("@link(\"m\")\nextern def cexp(z: complex): complex\n@symbol(\"nf_mix\")\n@link(framework = \"Accelerate\")\nextern def mix(a: int8, b: uint16, c: bool, d: complex[real32], e: real16, f: inout int64, s: string): bool\ndef main() =\n  var k = 0\n  print(cexp(1 + 0i))\n  print(mix(1, 2, true, 1 + 0i, 1.0, k, \"x\"))\n").unwrap()
+
+    assert(m.starts_with("// nex.link -lm\n// nex.link -framework Accelerate\nmodule {\n"), m)
+    assert(m.contains("func.func private @\"cexp\"(!llvm.array<2 x f64>) -> (!llvm.struct<(f64, f64)>)"), m)
+    assert(m.contains("func.func private @\"nf_mix\"(i8 {llvm.signext}, i16 {llvm.zeroext}, i1 {llvm.zeroext}, !llvm.array<2 x f32>, f16, !llvm.ptr, !llvm.ptr) -> (i1 {llvm.zeroext})"), m)
+    assert(!m.contains("@\"mix\""), m)
+
+@test("an array parameter without @strided is gathered where C cannot address it, and given back after; a @strided one, or strip of one, never is")
+emit_extern_copies()
+    val decls = "extern def r(x: [real]): real\nextern def w(x: inout [real])\nextern def s(@strided x: [real]): real\nextern def sw(@strided x: inout [real])\n"
+    val read = emitted(decls + "def main() =\n  val a = [1.0, 2.0, 3.0, 4.0]\n  print(r(a[1..4 by 2]))\n").unwrap()
+
+    assert(read.contains("memref.extract_strided_metadata"), read)
+    assert(read.contains("func.call @nex_c_gather("), read)
+    assert(read.contains("func.call @nex_storage_free("), read)
+    assert(!read.contains("nex_c_scatter"), read)
+
+    val written = emitted(decls + "def main() =\n  var a = [1.0, 2.0, 3.0, 4.0]\n  w(a[1..4 by 2])\n  print(a)\n").unwrap()
+
+    assert(written.contains("func.call @nex_c_gather("), written)
+    assert(written.contains("func.call @nex_c_scatter("), written)
+    assert(written.contains("memref.subview"), written)
+    assert(written.contains("bufferization.materialize_in_destination"), written)
+
+    for program in ["  val a = [1.0, 2.0, 3.0, 4.0]\n  print(s(a[1..4 by 2]))\n", "  var a = [1.0, 2.0, 3.0, 4.0]\n  sw(a[1..4 by 2])\n  print(a)\n", "  val a = [1.0<m>, 2.0<m>]\n  print(s(strip(a)))\n"]
+        val m = emitted(decls + "def main() =\n" + program).unwrap()
+
+        assert(!m.contains("nex_c_gather"), m)
+        assert(!m.contains("nex_c_scatter"), m)
+        assert(!m.contains("memref.copy"), m)
+
+@test("the extern declarations nex lowers to are clang's for the same C functions")
+extern_abi_matches_clang()
+    val b = bench()
+    val fixture = read_text("testdata/ffi/nexffi.c").unwrap()
+    val ll = s"${b.work}/fixture.ll"
+    val cc = capture(s"${b.tc.llvm_bin}/clang", ["-O0", "-S", "-emit-llvm", "testdata/ffi/nexffi.c", "-o", ll], stderr = true).unwrap()
+
+    assert(cc.status.ok(), cc.err.unwrap_or(""))
+
+    // Every function the fixture defines; the FFI programs call most of them.
+    var names: Buf[string] = buf()
+
+    for line in split(fixture, "\n")
+        val head = line.index_of(" nf_")
+
+        if head.is_some() && line.contains("(") && !line.starts_with(" ") && !line.starts_with("//")
+            val rest = line[head.unwrap() + 1..]
+
+            names.push(rest[0..<rest.index_of("(").unwrap()])
+
+    val clang = declarations(read_text(ll).unwrap(), "define ")
+    var checked = 0
+
+    for file in ["065-ffi-libm-and-scalars", "066-ffi-arrays-strides-and-leading-dimension", "067-ffi-complex-by-value", "068-ffi-c-struct-by-reference"]
+        val out = ran(b, read_text(s"testdata/v2/$file.nex").unwrap(), links = ffi_fixture(b).view())
+
+        assert(out.status.ok(), out.err.unwrap_or(""))
+
+        val nex = declarations(read_text(s"${b.work}/program.ll").unwrap(), "declare ")
+
+        for n in names
+            val ours = lookup(nex, n)
+
+            if ours == "" then continue
+
+            assert_eq(ours, lookup(clang, n))
+            checked += 1
+
+    finish(b)
+    assert(names.len() >= 30, join(names.view(), " "))
+    assert(checked >= 30, s"$checked")
+
+// The `define` or `declare` lines of LLVM IR `ir` that name a function `@nf_…`, each as its result,
+// name and parameter types, without `noundef`, parameter names or attribute groups.
+private declarations(ir: string, word: string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for line in split(ir, "\n")
+        if !line.starts_with(word) || !line.contains("@nf_") then continue
+
+        val text = replace_all(replace_all(line[word.len..], " noundef", ""), " local_unnamed_addr", "")
+        val close = text.last_index_of(")").unwrap()
+
+        out.push(without_names(text[0..close]))
+
+    out
+
+// `%0`, `%1` … removed with the space before each.
+private without_names(text: string) -> string
+    var out = ""
+    var k = 0
+
+    while k < text.len
+        if text[k..<k + 1] == " " && k + 1 < text.len && text[k + 1..<k + 2] == "%"
+            k += 2
+
+            while k < text.len && text[k..<k + 1] != "," && text[k..<k + 1] != ")"
+                k += 1
+
+            continue
+
+        out += text[k..<k + 1]
+        k += 1
+
+    out
+
+private lookup(decls: Buf[string], name: string) -> string
+    for d in decls
+        if d.contains(s"@$name(") then return d
+
+    ""
+
+// -- programs ---------------------------------------------------------------------------------------
+
+private val LIB = "@link(\"nexffi\")\nextern def nf_fill(n: int32, x: inout [real])\n@link(\"nexffi\")\nextern def nf_dswap(n: int32, x: inout [real], y: inout [real])\n@link(\"nexffi\")\nextern def nf_mat_bump(m: int32, n: int32, a: inout [real; :, :], lda: int32)\n@link(\"nexffi\")\nextern def nf_weighted(n: int32, x: [real]): real\n"
+
+@test("an inout window crosses in place from any root: a parameter, a module-level var, a captured local, a loop's local")
+run_extern_roots()
+    val b = bench()
+    val links = ffi_fixture(b)
+    val out = ran(b, LIB + "var g = [1.0, 2.0, 3.0, 4.0]\ndef bump_middle(m: inout [real; :, :]) = nf_mat_bump(2, 2, m[2..3, 2..3], 4)\ndef main() =\n  var m: [real; :, :] = zeros((4, 4))\n  bump_middle(m)\n  print(m)\n  nf_fill(2, g[3..])\n  print(g)\n  var c = [0.0, 0.0, 0.0]\n  val fill_c = () -> nf_fill(2, c[2..])\n  fill_c()\n  print(c)\n  for k in 1..3\n    var row = [1.0, 1.0, 1.0, 1.0]\n    nf_fill(int32(k), row[1..4 by 1])\n    print(row)\n", links = links.view())
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[[0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 1.0, 0.0], [0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 0.0, 0.0]]\n[1.0, 2.0, 10.0, 20.0]\n[0.0, 10.0, 20.0]\n[10.0, 1.0, 1.0, 1.0]\n[10.0, 20.0, 1.0, 1.0]\n[10.0, 20.0, 30.0, 1.0]\n")
+
+@test("two inout windows of one array cross together, written in place; values sharing it keep their elements")
+run_extern_shared_root()
+    val b = bench()
+    val links = ffi_fixture(b)
+    val out = ran(b, LIB + "def main() =\n  var a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n  val before = a\n  nf_dswap(3, a[1..3], a[4..6])\n  print(a)\n  print(before)\n  nf_dswap(2, a[1..2], a[3..])\n  print(a)\n  val v = a[2..5]\n  nf_fill(4, a[1..4])\n  print(v)\n  print(a)\n", links = links.view())
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[4.0, 5.0, 6.0, 1.0, 2.0, 3.0]\n[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n[6.0, 1.0, 4.0, 5.0, 2.0, 3.0]\n[1.0, 4.0, 5.0, 2.0]\n[10.0, 20.0, 30.0, 40.0, 2.0, 3.0]\n")
+
+@test("an extern call after an exit in its statement is not made, and one after a return is not either")
+run_extern_skipped()
+    val b = bench()
+    val links = ffi_fixture(b)
+    val out = ran(b, LIB + "def f(n: integer): real =\n  var x = [1.0, 2.0]\n  nf_fill(int32(if n > 0 then return -1.0 else 2), x)\n  nf_weighted(2, x)\ndef main() =\n  print(f(1))\n  print(f(0))\n  var y = [1.0, 2.0, 3.0]\n  for k in 1..3\n    nf_fill(int32(if k == 2 then exit else 1), y[k..k])\n  print(y)\n", links = links.view())
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "-1.0\n50.0\n[10.0, 2.0, 3.0]\n")
+
+@test("the nex command links -l libraries from -L directories, before or after the file, joined or apart")
+run_extern_command_links()
+    val b = bench()
+    val nex = s"${b.work}/nex"
+    val built = capture(compiler(), ["build", ".", "-o", nex], stderr = true).unwrap()
+
+    assert(built.status.ok(), built.err.unwrap_or(""))
+
+    ffi_fixture(b)
+
+    val env = [Var("NEX_RUNTIME", b.tc.runtime)]
+    val src = s"${b.work}/ffi.nex"
+
+    write_text(src, "extern def nf_inc8(x: uint8): uint8\ndef main() = print(nf_inc8(41))\n").unwrap()
+
+    val apart = capture(nex, ["run", "-L", b.work, "-l", "nexffi", src], env = env, stderr = true).unwrap()
+    val joined_after = capture(nex, ["run", src, s"-L${b.work}", "-lnexffi"], env = env, stderr = true).unwrap()
+    val build = capture(nex, ["build", src, "-o", s"${b.work}/ffi", "-l", "nexffi", "-L", b.work], env = env, stderr = true).unwrap()
+    val direct = capture(s"${b.work}/ffi", [], stderr = true).unwrap()
+    val unlinked = capture(nex, ["run", src], env = env, stderr = true).unwrap()
+    val dangling = capture(nex, ["run", src, "-l"], env = env, stderr = true).unwrap()
+
+    finish(b)
+    assert_eq(apart.text, "42\n")
+    assert_eq(joined_after.text, "42\n")
+    assert(build.status.ok(), build.err.unwrap_or(""))
+    assert_eq(direct.text, "42\n")
+    assert(unlinked.status == Status.Exited(1), s"${unlinked.status}")
+    assert(unlinked.err.unwrap_or("").contains("nf_inc8"), unlinked.err.unwrap_or(""))
+    assert(dangling.status == Status.Exited(1), s"${dangling.status}")
+    assert(dangling.err.unwrap_or("").contains("`-l` needs a value"), dangling.err.unwrap_or(""))

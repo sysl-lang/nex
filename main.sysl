@@ -3,14 +3,15 @@
 // `build` (or `compile`) makes a native program, beside the source or at `-o`, and `run` makes one in
 // a temporary directory, runs it with the
 // arguments after `--` and exits with its status. `--fpe-trap`, before the file, makes real division
-// by zero, invalid operations and overflow trap (DESIGN §2.5).
+// by zero, invalid operations and overflow trap (DESIGN §2.5). `-L dir` and `-l lib`, anywhere
+// before `--`, add a library search directory and a library to the link (DESIGN §10.1).
 
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, read_bytes, remove_dir_all}
 import sysl.process.run
 import sh.sysl.parsing.{Source, full_report, source}
 
-private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run> [--fpe-trap] <file.nex> [-o out] [-- args]"
+private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run> [--fpe-trap] [-L dir] [-l lib] <file.nex> [-o out] [-- args]"
 
 main(args: []string)
     if args.len < 3
@@ -19,17 +20,39 @@ main(args: []string)
 
     val command = args[1]
     var fpe_trap = false
+    var file = ""
+    var out = ""
+    var links: Buf[string] = buf()
+    var program_args: Buf[string] = buf()
     var k = 2
 
-    if args[k] == "--fpe-trap"
-        fpe_trap = true
+    while k < args.len
+        val a = args[k]
+
+        if a == "--"
+            for b in args[k + 1..]
+                program_args.push(b)
+            break
+        elif a == "--fpe-trap"
+            fpe_trap = true
+        elif a == "-o" || a == "-L" || a == "-l"
+            if k + 1 >= args.len then fail(s"nex: `$a` needs a value\n$usage")
+
+            k += 1
+
+            if a == "-o" then out = args[k] else links.push(a + args[k])
+        elif a.starts_with("-L") || a.starts_with("-l")
+            links.push(a)
+        elif file == ""
+            file = a
+        else
+            fail(s"nex: unexpected `$a`\n$usage")
+
         k += 1
 
-    if k >= args.len
+    if file == ""
         print(usage)
         exit(2)
-
-    val file = args[k]
 
     if command == "emit"
         mlir_of(file, fpe_trap) match
@@ -45,18 +68,10 @@ main(args: []string)
             Err(m) -> fail(m)
 
         if build
-            val out = if k + 2 < args.len && args[k + 1] == "-o" then args[k + 2] else default_output(file)
-
-            compile_file_here(file, out, tc, fpe_trap)
+            compile_file_here(file, if out == "" then default_output(file) else out, tc, fpe_trap, links.view())
             return
 
-        var program_args: Buf[string] = buf()
-
-        if k + 1 < args.len && args[k + 1] == "--"
-            for a in args[k + 2..]
-                program_args.push(a)
-
-        val (work, exe) = compile_temp(file, tc, fpe_trap) match
+        val (work, exe) = compile_temp(file, tc, fpe_trap, links.view()) match
             Ok(p) -> p
             Err(m) -> fail(m)
 
@@ -112,12 +127,12 @@ end main
 private default_output(file: string) -> string =
     if file.ends_with(".nex") then file[0..<file.len - 4] elif file.ends_with(".lnex") then file[0..<file.len - 5] else file + ".out"
 
-private compile_file_here(file: string, out: string, tc: Toolchain, fpe_trap: bool)
+private compile_file_here(file: string, out: string, tc: Toolchain, fpe_trap: bool, links: []const string)
     val work = make_temp_dir("nex") match
         Ok(w) -> w
         Err(e) -> fail(s"nex: cannot make a temporary directory: $e")
 
-    val done = compile_file(file, out, work, tc, fpe_trap)
+    val done = compile_file(file, out, work, tc, fpe_trap, links)
 
     _ = remove_dir_all(work)
 

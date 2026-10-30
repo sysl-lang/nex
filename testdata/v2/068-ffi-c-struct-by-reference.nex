@@ -1,0 +1,51 @@
+// A `@c` struct crossing to C by reference, laid out as C lays it out (DESIGN §10.2): C reads every
+// field of one passed in read mode — through the padding after an `int32`, a `bool` and an `int8`,
+// a `complex` and a trailing `real32` — writes every field of one passed `inout`, swaps the two
+// structs inside another and writes a field of one held in a field. A read-mode struct is C's
+// own copy, so the program's is unchanged.
+
+@c
+struct Body
+  id: int32
+  mass: real
+  live: bool
+  tag: int8
+  z: complex
+  w: real32
+
+@c
+struct Pair
+  a: Body
+  n: int16
+  b: Body
+
+@link("nexffi")
+extern def nf_body_read(b: Body): real
+
+@link("nexffi")
+extern def nf_body_step(b: inout Body)
+
+@link("nexffi")
+extern def nf_pair_swap(p: inout Pair)
+
+@link("nexffi")
+extern def nf_sizeof_body(): int64
+
+def show(b: Body): string = s"${b.id} ${b.mass} ${b.live} ${b.tag} ${b.z} ${b.w}"
+
+def main() =
+  print(nf_sizeof_body())
+  var b = Body(7, 2.5, true, 10, 1 + 2i, 0.5)
+  print(nf_body_read(b))
+  nf_body_step(b)
+  print(show(b))
+  nf_body_step(b)
+  print(show(b))
+  print(nf_body_read(Body(1, 0.0, false, 0, 0 + 0i, 0.0)))
+
+  var p = Pair(Body(1, 1.0, false, 1, 0 + 0i, 1.0), 21, Body(2, 2.0, true, 2, 1 + 1i, 2.0))
+  nf_pair_swap(p)
+  print(s"${show(p.a)} | ${p.n} | ${show(p.b)}")
+  nf_body_step(p.b)
+  print(show(p.b))
+  print(show(p.a))

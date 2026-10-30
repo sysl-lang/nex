@@ -42,7 +42,7 @@ show_tprogram(p: TProgram) -> string
             GlobalDecl(g) -> s"(${bind_word(g.kind)} ${g.name} ${show_ty(g.ty)} ${show_texpr(p, g.init)})"
             TupleGlobalDecl(g) -> s"(${bind_word(g.kind)} ${show_bind(p, g.pat)} ${show_ty(g.ty)} ${show_texpr(p, g.init)})"
             FunDecl(f) -> s"(def ${f.name} ${show_params(p, f.params, f.defaults)} ${show_ty(f.ret)} ${show_texpr(p, f.body)})"
-            ExternDecl(x) -> s"(extern ${x.name} ${show_ty(fn_type(x.params, x.modes, x.ret))})")
+            ExternDecl(x) -> s"(extern ${x.name} ${show_ty(fn_type(x.params, x.modes, x.ret))}${show_extern_attrs(x)})")
 
     for k in 0..<p.lambdas.len()
         val l = p.lambdas[k]
@@ -70,6 +70,31 @@ show_tprogram(p: TProgram) -> string
 
     join(out.view(), "\n")
 end show_tprogram
+
+// What an extern's attributes say beyond its signature, each after a space: its C symbol where it
+// differs from its name, its link inputs, `@pure`, and by parameter (from 1) `@strided` and
+// `@data`'s partner.
+private show_extern_attrs(x: TExtern) -> string
+    var out = ""
+
+    if x.symbol != x.name then out += s" @symbol(\"${x.symbol}\")"
+
+    for l in x.links
+        out += s" @link(\"$l\")"
+
+    for f in x.frameworks
+        out += s" @link(framework = \"$f\")"
+
+    if x.pure then out += " @pure"
+
+    for k in 0..<x.params.len()
+        if x.strided[k] then out += s" @strided(${k + 1})"
+
+        x.partner[k] match
+            Some(f) -> out += s" @data(${k + 1} -> ${f + 1})"
+            None -> ()
+
+    out
 
 private bind_word(kind: BindKind) -> string = kind match
     Val -> "val"
