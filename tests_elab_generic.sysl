@@ -148,9 +148,11 @@ elab_generic_rank_errors()
         "(def main () void (print (call:int64 f[int64, 2] (array:[int64; :, :] (array:[int64] 1 2) (array:[int64] 3 4)))))\n(def f[int64, 2] ((a#0 [int64; :, :])) int64 (+:int64 (extent:int64 a#0 2) (size:int64 (flatten:[int64] (map:[int64; :, :] a#0 (lambda 0))))))\n(lambda 0 _ ((x#1 int64)) int64 (captures) passed (*:int64 x#1 2))")
     assert_eq(refused("struct S[R: Rank]\n  a: [real; R]\n" + MAIN),"error: `R: Rank` stands for an array's rank, which only a function may take; a struct's or an enum's parameters are types @1:1")
 
-@test("a unit parameter is the units' to elaborate")
+@test("a unit parameter beside a type parameter, or on a struct, is not elaborated yet")
 elab_generic_unit_parameter()
-    assert_eq(refused("def sqr[U: Unit](x: real) = x * x\n" + MAIN), "error: a unit parameter (`U: Unit`) is not elaborated yet @1:1")
+    assert_eq(refused("def sqr[U: Unit](x: real) = x * x\n" + MAIN), "ok")
+    assert_eq(refused("def f[T: Real, U: Unit](x: T, y: real<U>) = y\n" + MAIN), "error: a unit parameter (`U: Unit`) is not elaborated yet @1:1")
+    assert_eq(refused("struct S[U: Unit]\n  x: real<U>\n" + MAIN), "error: a unit parameter (`U: Unit`) is not elaborated yet @1:1")
 
 // -- structs and enums ------------------------------------------------------------------------------
 

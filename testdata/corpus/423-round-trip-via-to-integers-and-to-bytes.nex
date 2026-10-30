@@ -7,4 +7,4 @@ def main() =
   val ints = to_integers(b)
   print(ints)
   val back = to_bytes(ints)
-  print(back == b)
+  print(all(back == b))

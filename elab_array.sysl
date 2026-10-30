@@ -231,6 +231,9 @@ impl Elab
             Some(t) -> if is_array(t) && !has_error(t) then Some(t) else None
             None -> None
 
+        // A written type that was refused has been reported already.
+        if elems.len() == 0 && want.is_some() && is_error(want.unwrap()) then return self.invalid(span)
+
         if elems.len() == 0
             wanted match
                 Some(t) -> return texpr(span, Ty.Array(elem_of(t), dynamic_axes(rank_of(t))), TArray(TArrayLit(buf())))
@@ -282,6 +285,8 @@ impl Elab
                     val c = self.literal_class(leaves[k])
 
                     self.elab(leaves[k], Some(adoption(c, elem).unwrap_or(default_of(c))))
+
+            if has_unit(elem_of(v.ty)) then return self.not_yet(span, "an array whose elements carry a unit")
 
             items.push(if is_array(v.ty) then self.coerce(v, with_elem(v.ty, elem), "an item of this array") else self.coerce(v, elem, "an element of this array"))
 
@@ -527,6 +532,8 @@ impl Elab
 
         val ea = elem_of(a.ty)
         val eb = elem_of(b.ty)
+
+        if has_unit(ea) || has_unit(eb) then return self.not_yet(span, "an array whose elements carry a unit")
 
         if !is_relational(op) && (!is_numeric(ea) && !is_wild(ea) || !is_numeric(eb) && !is_wild(eb))
             self.fail(span, s"element-wise `${op}` needs numbers; found ${self.shown(a)} and ${self.shown(b)}")

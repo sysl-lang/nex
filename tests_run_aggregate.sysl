@@ -20,7 +20,7 @@ private val M4_M5_CATEGORIES = ["structs", "tuple destructuring", "paren-less tu
 // compile yet.
 private val WAITING_ON_ARRAYS = ["210-field-write-through-an-array-element-receiver-mutates-the-sl"]
 
-private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates"]
+private val LEAK_PROGRAMS = ["strings-and-closures", "aggregates", "views"]
 
 @test("every program of PLAN.md's M4 and M5 corpus categories prints its .out, but for those waiting on arrays")
 run_m4_m5_corpus()
@@ -53,13 +53,38 @@ run_leak_programs()
         reports.push(s"$name: ${leaks_line(leaks.text)}")
 
     finish(b)
-    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.")
+    assert_eq(join(reports.view(), "\n"), "strings-and-closures: 0 leaks for 0 total leaked bytes.\naggregates: 0 leaks for 0 total leaked bytes.\nviews: 0 leaks for 0 total leaked bytes.")
 
 @test("a struct holding an array waits on arrays, and says so")
 run_struct_with_array_waits()
     val e = emitted("struct Grid\n  cells: [real]\n\ndef main() =\n  val g = Grid([1.0, 2.0])\n  print(g.cells[1])\n").err().unwrap_or("")
 
     assert_eq(e, "error: an array inside a struct, tuple or enum (Grid) is not compiled yet @5:3")
+
+@test("== and != compare structs, tuples and enums field by field: strings by text, reals as == does, enums by variant first")
+run_aggregate_equality()
+    val b = bench()
+    val program = "struct Point\n  x: real\n  y: real\nstruct Named\n  name: string\n  at: Point\nstruct Pair[T]\n  fst: T\n  snd: T\n" +
+        "enum Shape =\n  Circle(r: real)\n  Rect(w: real, h: real)\n  Empty\n" +
+        "def same[T: Eq](a: T, b: T): bool = a == b\n" +
+        "def main() =\n  val p = Point(1.0, 2.0)\n  val r = Point(1.0, 3.0)\n" +
+        "  print((p == Point(1.0, 2.0), p == r, p != r, p == Point(1, 2.0)))\n" +
+        "  print((Named(\"a\", p) == Named(\"a\", p), Named(\"a\", p) == Named(\"b\", p), Named(\"a\", p) == Named(\"a\", r)))\n" +
+        "  val t = 1, 2.5, \"x\"\n  print((t == (1, 2.5, \"x\"), t != (1, 2.5, \"y\"), (1, 2) == (1, 3)))\n" +
+        "  val s: Shape = Empty\n" +
+        "  print((Circle(1.0) == Circle(1.0), Circle(1.0) == Circle(2.0), Circle(1.0) == Rect(1.0, 1.0), Rect(1.0, 2.0) != Rect(1.0, 2.0), s == Empty, Empty != s))\n" +
+        "  print((Point(nan, 0.0) == Point(nan, 0.0), Point(nan, 0.0) != Point(nan, 0.0)))\n" +
+        "  print((same(Pair(1, 2), Pair(1, 2)), same((1, \"a\"), (1, \"b\")), Pair(\"a\", \"b\") == Pair(\"a\", \"b\")))\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "(true, false, true, true)\n(true, false, false)\n(true, true, false)\n(true, false, false, false, true, false)\n(false, true)\n(true, false, true)\n")
+
+@test("== on a struct holding an array waits, as the struct does")
+run_struct_with_array_equality_waits()
+    val e = emitted("struct Grid\n  cells: [real]\ndef same(a: Grid, b: Grid) = a == b\ndef main() = ()\n").err().unwrap_or("")
+
+    assert_eq(e, "error: an array inside a struct, tuple or enum (Grid) is not compiled yet @3:1")
 
 // `text` compiled into `exe`.
 private compiled(b: Bench, text: string, exe: string)

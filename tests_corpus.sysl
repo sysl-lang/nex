@@ -170,6 +170,25 @@ corpus_generic_programs_elaborate()
     assert_eq(clean, 36)
 end corpus_generic_programs_elaborate
 
+@test("every units-of-measure corpus program elaborates")
+corpus_units_programs_elaborate()
+    var clean = 0
+
+    for line in split(INDEX, "\n")
+        if line.len == 0 || line.starts_with("file\t") then continue
+
+        val cols = split(line, "\t")
+
+        if cols[1] != "units of measure" then continue
+
+        val src = source_of(cols[0], read_text(s"testdata/corpus/${cols[0]}.nex").unwrap())
+
+        elaborate(parse_program(src).unwrap()) match
+            Ok(_) -> clean += 1
+            Err(ds) -> assert(false, s"${cols[0]}: ${ds[0].message} @${src.locate(ds[0].span.start)}")
+
+    assert_eq(clean, 6)
+
 @test("all 433 corpus programs parse")
 corpus_parses()
     var count = 0

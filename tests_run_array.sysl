@@ -16,10 +16,7 @@ private val M6_CATEGORIES = ["arrays", "auto-clone (§8.3)", "[byte] buffer"]
 private val DISAGREEING = [
     // `var b = a` of a `val` used again is a clone (DESIGN §8.4), so `a[1]` stays 10; the `.out`,
     // the reference's, prints 999.
-    "299-val-source-bound-to-var-does-not-need-cloning-val-is-immutab",
-    // Awaiting the user's decision on `==` for byte buffers: DESIGN §7.1 makes `==` element-wise.
-    "423-round-trip-via-to-integers-and-to-bytes",
-    "425-structural-equality-on-length-and-bytes"]
+    "299-val-source-bound-to-var-does-not-need-cloning-val-is-immutab"]
 
 private val STAGES = from_utf8(embed("experiments/mlir/pipeline.txt")).unwrap().trim()
 
@@ -33,10 +30,10 @@ run_m6_corpus()
 
     assert_eq(join(r.waiting.view(), "\n"), "")
     assert_eq(join(names.view(), "\n"), join(DISAGREEING[..], "\n"))
-    assert_eq(r.passed, 112)
+    assert_eq(r.passed, 114)
 
 // `m` lowered by the pipeline's passes up to and including the first whose text starts `last`.
-private lowered_until(b: Bench, m: string, last: string) -> string
+lowered_until(b: Bench, m: string, last: string) -> string
     var passes: Buf[string] = buf()
 
     for p in split(STAGES, ",")
@@ -52,7 +49,7 @@ private lowered_until(b: Bench, m: string, last: string) -> string
     assert(out.status.ok(), out.err.unwrap_or(""))
     out.text
 
-private occurrences(text: string, what: string) -> usize = split(text, what).len - 1
+occurrences(text: string, what: string) -> usize = split(text, what).len - 1
 
 @test("313-02's whole-array expression, three linalg.generic operations as emitted, is one loop after fusion")
 fused_point_distance()
@@ -63,6 +60,36 @@ fused_point_distance()
     finish(b)
     assert_eq(occurrences(m, "linalg.generic"), 3)
     assert_eq(occurrences(fused, "linalg.generic"), 1)
+
+@test("== on arrays, [uint8] among them, is element-wise, and all of it says whether two are equal")
+run_array_equality()
+    val b = bench()
+    val program = "def main() =\n  var a: [uint8] = zeros(3)\n  a[2] = 7\n  val c: [uint8] = zeros(3)\n" +
+        "  print(a == c)\n  print((all(a == c), any(a != c), all(a == a)))\n  print([1.0, 2.0, nan] == [1.0, 5.0, nan])\n  val d: [uint8] = zeros(2)\n  print(a == d)\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "[true, false, true]\n(false, true, true)\n[true, false, false]\n")
+    assert_eq(out.err.unwrap_or(""), "trap: shape mismatch\n")
+
+@test("element-wise operands whose shapes differ trap at run time, also where folding learns both shapes")
+run_elementwise_folded_shape_mismatch()
+    val b = bench()
+    var errs: Buf[string] = buf()
+
+    for body in ["  val a: [real] = zeros(3)\n  val d: [real] = zeros(2)\n  print(a + d)\n",
+                 "  val m: [real; :, :] = zeros((2, 3))\n  val n: [real; :, :] = zeros((3, 2))\n  print(m < n)\n",
+                 "  val a: [real] = zeros(3)\n  val d: [real] = zeros(2)\n  print((a + a) * d)\n",
+                 "  val a: [integer] = fill(2, 4)\n  print(max(a, fill(3, 1)))\n"]
+        val out = ran(b, "def main() =\n" + body)
+
+        errs.push(s"${out.text}${out.err.unwrap_or("")}")
+
+    val same = ran(b, "def main() =\n  val a: [real] = fill(2, 1.5)\n  print(a + fill(2, 1.0))\n")
+
+    finish(b)
+    assert_eq(join(errs.view(), ""), "trap: shape mismatch\ntrap: shape mismatch\ntrap: shape mismatch\ntrap: shape mismatch\n")
+    assert_eq(same.text, "[2.5, 2.5]\n")
 
 @test("an inout array is passed as its buffer and written in place: no copy, and the callee returns nothing")
 inout_array_no_copy()

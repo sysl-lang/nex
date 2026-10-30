@@ -32,17 +32,20 @@ enum Extent
     Named(name: string)
 
 // An exact rational, `num / den` in lowest terms with `den` positive: a unit's exponent or its
-// scale factor.
+// scale factor. 256 bits hold the prelude's factors and their products to the fifth power; a
+// factor that would not fit is `INEXACT` (`units.sysl`), which the elaborator refuses.
 struct Ratio
-    num: i64
-    den: i64
+    num: i256
+    den: i256
 
-// A unit of measure: an exponent over each of the seven SI base dimensions (m, kg, s, A, K, mol, cd,
-// in that order) and the exact factor that relates it to the coherent SI unit of that dimension
-// (`mm` is length to the power 1 with factor 1/1000).
+// A unit of measure (DESIGN §13): its base units and unit parameters with their exponents, the exact
+// factor that relates it to the product of those base units (`mm` is `m` to the power 1 with factor
+// 1/1000), and the named units it is spelt with, which are what it prints as. Two units are one unit
+// when `dims` and `factor` agree, whatever their spelling: `N` and `kg m / s^2`.
 struct Unit
-    exps: Buf[Ratio]
+    dims: Buf[Power]
     factor: Ratio
+    spelling: Buf[Power]
 
 enum Ty
     // `int8` … `int64` (`signed`) and `uint8` … `uint64`.
@@ -279,20 +282,13 @@ private axes_eq(xs: Buf[Extent], ys: Buf[Extent]) -> bool
     true
 end axes_eq
 
-private unit_eq(a: Unit, b: Unit) -> bool
-    if a.factor.num != b.factor.num || a.factor.den != b.factor.den then return false
-
-    for k in 0..<a.exps.len()
-        if a.exps[k].num != b.exps[k].num || a.exps[k].den != b.exps[k].den then return false
-
-    true
-
 // -- the lattice ------------------------------------------------------------------------------------
 
 // Whether a value of `from` may stand where `to` is expected: the same type, or a path along the
 // arrows of DESIGN §2.2. `Never`, and a type with `Error` anywhere in it, go anywhere.
 promotes(from: Ty, to: Ty) -> bool
     if is_wild(from) || has_error(from) || has_error(to) || ty_eq(from, to) then return true
+    if has_unit(from) || has_unit(to) then return unit_promotes(from, to)
 
     from match
         Int(fb, fs) -> to match
@@ -316,6 +312,7 @@ end promotes
 common(a: Ty, b: Ty) -> Option[Ty]
     if is_wild(a) then return Some(b)
     if is_wild(b) || ty_eq(a, b) then return Some(a)
+    if has_unit(a) || has_unit(b) then return unit_common(a, b)
 
     a match
         Int(ab, asg) -> b match
@@ -385,7 +382,7 @@ show_ty(t: Ty) -> string = t match
     Tuple(elems) -> "(" + show_tys(elems) + ")"
     Nominal(name, args) -> if args.len() == 0 then name else name + "[" + show_tys(args) + "]"
     Param(name, _, _) -> name
-    Measured(base, unit) -> show_ty(*base) + "<" + show_unit(*unit) + ">"
+    Measured(base, unit) -> show_ty(*base) + "<" + spell(*unit) + ">"
     Error -> "?"
 
 private show_tys(ts: Buf[Ty]) -> string
@@ -423,22 +420,3 @@ private show_array(elem: Ty, axes: Buf[Extent]) -> string
 
     if sugar then "[" + show_ty(elem) + "]" else "[" + show_ty(elem) + "; " + join(out.view(), ", ") + "]"
 end show_array
-
-private val BASE_UNITS = ["m", "kg", "s", "A", "K", "mol", "cd"]
-
-// A unit as its base dimensions, `m kg s^-2`, with its factor in front where it is not 1.
-private show_unit(u: Unit) -> string
-    var out: Buf[string] = buf()
-
-    if u.factor.num != 1 || u.factor.den != 1 then out.push(show_ratio(u.factor))
-
-    for k in 0..<u.exps.len()
-        val x = u.exps[k]
-
-        if x.num == 0 then continue
-
-        if x.num == 1 && x.den == 1 then out.push(BASE_UNITS[k]) else out.push(BASE_UNITS[k] + "^" + show_ratio(x))
-
-    if out.len() == 0 then "1" else join(out.view(), " ")
-
-private show_ratio(r: Ratio) -> string = if r.den == 1 then s"${r.num}" else s"(${r.num}/${r.den})"

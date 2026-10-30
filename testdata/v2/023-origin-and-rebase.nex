@@ -1,0 +1,70 @@
+// Offset views (DESIGN §6.4): a symmetric kernel indexed `-r..r`, a grid with ghost cells indexed from
+// 0, `end` on an offset view, an index outside the view's bounds trapping, a slice of an offset view
+// being 1-based, `origin` of an offset view replacing its first indices, an offset view read as a
+// value, and `rebase` making the 1-based copy a function is given.
+
+def first_and_last(v: [integer]) = s"${v[1]} ${v[end]} ${length(v)}"
+
+def smooth(x: [integer], kernel: [integer]) =
+  val r = length(kernel) div 2
+  val w = origin(kernel, -r)
+  var out = zeros(length(x))
+  for i in 1 + r..length(x) - r
+    var acc = 0
+    for k in -r..r
+      acc += w[k] * x[i - k]
+    out[i] = acc
+  out
+
+def laplacian(grid: [integer; :, :]) =
+  val g = origin(grid, 0, 0)
+  val n = rows(grid) - 2
+  var out = zeros((n, n))
+  for i in 1..n
+    for j in 1..n
+      out[i, j] = g[i - 1, j] + g[i + 1, j] + g[i, j - 1] + g[i, j + 1] - 4 * g[i, j]
+  out
+
+def main() =
+  val kernel = [1, 2, 3, 2, 1]
+  val w = origin(kernel, -2)
+  print(s"${w[-2]} ${w[0]} ${w[2]} ${w[end]} ${w[end - 1]}")
+  print(smooth([0, 0, 1, 0, 0, 0, 5, 0, 0], kernel))
+  assert_traps(() -> print(w[3]), "out of bounds")
+  assert_traps(() -> print(w[-3]), "out of bounds")
+  print("w[3] and w[-3] trap")
+  print(w[1])
+
+  print(w[-1..1])
+  print(w[-1..1][1])
+  print(w[0..])
+  print(w[.. by -2])
+  print(sum(w))
+  print(w)
+  print(w * 10)
+  var count = 0
+  for x in w
+    count += x
+  print(count)
+
+  val v = origin(w, 10)
+  print(s"${v[10]} ${v[14]} ${v[end]}")
+  assert_traps(() -> print(v[-2]), "out of bounds")
+
+  print(first_and_last(rebase(w)))
+  print(first_and_last(rebase(w[-1..])))
+  print(rebase(kernel))
+
+  val grid = [[0, 0, 0, 0], [0, 1, 2, 0], [0, 3, 4, 0], [0, 0, 0, 0]]
+  print(laplacian(grid))
+  val g = origin(grid, 0, -1)
+  print(s"${g[0, -1]} ${g[1, 0]} ${g[end, end]} ${g[2, 1]}")
+  print(g[1, :])
+  print(g[1..2, 0..1])
+  assert_traps(() -> print(g[4, 0]), "out of bounds")
+  assert_traps(() -> print(g[0, 3]), "out of bounds")
+  print("each axis keeps its own first index")
+  val h = origin(grid, 0)
+  print(s"${h[1, 2]} ${h[2, 3]}")
+  assert_traps(() -> print(h[0, 0]), "out of bounds")
+  print(h[0, 4])
