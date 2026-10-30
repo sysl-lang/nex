@@ -53,7 +53,14 @@ impl Elab
                 self.find_top(n) match
                     Some(TopFun(k)) -> return self.call_fun(span, callee.span, k, args)
                     Some(TopValue(_)) -> return self.call_value(span, self.name(callee.span, n, None), args)
+                    Some(TopExtern(k)) -> return self.call_extern(span, callee.span, k, args)
                     None -> ()
+
+                if n == "strip" then return self.strip_call(span, args)
+
+                if n == "to"
+                    self.fail(callee.span, "`to` names the unit it converts to: `to<mm>(x)`")
+                    return self.invalid(span)
 
                 scalar_named(n) match
                     Some(t) -> return self.conversion(span, n, t, args)
@@ -81,6 +88,14 @@ impl Elab
                     _ -> ()
 
                 self.call_value(span, self.infer(callee), args)
+            Measured(target, unit) ->
+                // `to<mm>(x)`, unless `to` is a binding of the program.
+                *target.kind match
+                    Name(n) ->
+                        if n == "to" && self.lookup_local(n).is_none() && self.find_top(n).is_none() then return self.to_call(span, unit, args)
+                    _ -> ()
+
+                self.call_value(span, self.infer(callee), args)
             _ -> self.call_value(span, self.infer(callee), args)
     end call
 
@@ -96,9 +111,10 @@ impl Elab
     field(*self, span: Span, receiver: Expr, name: string) -> TExpr
         val v = self.infer(receiver)
 
-        v.ty match
+        base_of(v.ty) match
             Complex(b) ->
-                if name == "re" || name == "im" then return texpr(span, Real(b), TComplexPart(v, name == "im"))
+                // The parts of a `complex<V>` are each a `real<V>`.
+                if name == "re" || name == "im" then return texpr(span, measured(Real(b), unit_of(v.ty)), TComplexPart(v, name == "im"))
 
                 self.fail(span, s"a complex number has the fields `re` and `im`, not `${name}`")
                 self.invalid(span)
@@ -220,10 +236,15 @@ impl Elab
                     next += 1
 
         var out: Buf[TExpr] = buf()
+        val generic = self.funs[k].uparams.len() > 0
+        var bound = UnitBindings(buf(), buf())
 
         for j in 0..<slots.len()
             slots[j] match
-                Some(a) -> out.push(self.argument(a, sig.tys[j], sig.modes[j], s"argument `${sig.names[j]}`"))
+                Some(a) ->
+                    val what = s"argument `${sig.names[j]}`"
+
+                    out.push(if generic then self.unit_argument(&bound, a, sig.tys[j], sig.modes[j], what) else self.argument(a, sig.tys[j], sig.modes[j], what))
                 None ->
                     sig.defaults[j] match
                         Some(d) -> out.push(d)
@@ -233,7 +254,7 @@ impl Elab
 
         val ty = self.fun_type(k, at)
         val ret = ty match
-            Fn(s) -> s.ret
+            Fn(s) -> subst_ty(s.ret, bound)
             _ -> Error
 
         texpr(span, ret, TCall(texpr(at, ty, TFnRef(name)), out))
@@ -263,6 +284,7 @@ impl Elab
         val from = v.ty
 
         if is_error(from) then return self.invalid(span)
+        if has_unit(from) then return self.measured_conversion(span, name, target, v)
         if ty_eq(from, target) then return v
         if promotes(from, target) then return texpr(span, target, TPromote(v))
 
@@ -282,6 +304,7 @@ impl Elab
 
     // Arguments that are elaborated together into one common type, literals adopting it.
     unified(*self, span: Span, what: string, args: Buf[Expr]) -> Buf[TExpr]
+        val reported = self.diags.len()
         var vals: Buf[Option[TExpr]] = buf()
         var shared: Option[Ty] = None
 
@@ -311,7 +334,12 @@ impl Elab
         var ty = out[0].ty
 
         for k in 1..<out.len()
-            ty = common(ty, out[k].ty).unwrap_or(Error)
+            ty = common(ty, out[k].ty) match
+                Some(t) -> t
+                None ->
+                    // A literal of no unit beside one that has a unit, which the pass above did not meet.
+                    if (has_unit(ty) || has_unit(out[k].ty)) && !is_error(ty) && self.diags.len() == reported then self.unit_mismatch(span, what, out[0], out[k])
+                    Error
 
         for k in 0..<out.len()
             out.set(k, promote(out[k], ty))
@@ -352,7 +380,7 @@ impl Elab
 
             val out = self.unified(span, name, args)
 
-            if !is_ordered(out[0].ty) && !is_error(out[0].ty) then self.fail(span, s"`${name}` compares integers and reals; these are ${show_ty(out[0].ty)}")
+            if !is_ordered(base_of(out[0].ty)) && !is_error(out[0].ty) then self.fail(span, s"`${name}` compares integers and reals; these are ${show_ty(out[0].ty)}")
 
             return texpr(span, out[0].ty, TBuiltin(name, out))
 
@@ -362,12 +390,13 @@ impl Elab
             var out = self.unified(span, name, args)
             val ty = if is_int(out[0].ty) then REAL else out[0].ty
 
-            if !is_real(ty) && !is_error(ty) then self.fail(span, s"`${name}` takes reals; these are ${show_ty(ty)}")
+            if !is_real(base_of(ty)) && !is_error(ty) then self.fail(span, s"`${name}` takes reals; these are ${show_ty(ty)}")
 
             for k in 0..<out.len()
                 out.set(k, promote(out[k], ty))
 
-            return texpr(span, ty, TBuiltin(name, out))
+            // `atan2` gives an angle, dimensionless whatever its arguments' one unit (DESIGN §13.4).
+            return texpr(span, if name == "atan2" then base_of(ty) else ty, TBuiltin(name, out))
 
         if args.len() != 1 then return self.arity(span, name, "one value")
 
@@ -377,6 +406,7 @@ impl Elab
         out.push(v)
 
         if is_error(v.ty) then return texpr(span, Error, TBuiltin(name, out))
+        if has_unit(v.ty) then return self.measured_builtin(span, name, v)
 
         val result = self.scalar_result(span, name, v.ty)
 
@@ -419,7 +449,7 @@ impl Elab
                 Fn(_) -> self.fail(a.span, s"a function cannot be printed")
                 _ -> ()
 
-            out.push(v)
+            out.push(printable(v))
 
         texpr(span, Void, TBuiltin(name, out))
 

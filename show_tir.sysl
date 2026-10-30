@@ -7,7 +7,8 @@
 // name and its number, `x#3`, so two bindings that share a spelling read apart; a module-level
 // binding and a function print as their names. A loop prints as `L` and its number, with its label
 // in front where it has one: `outer:L2`. In a chain the operands print once and the links name them
-// by position, `$1`, `$2`.
+// by position, `$1`, `$2`. A literal with a unit prints with it, `9.81<m/s^2>`; a conversion
+// between scales prints its factor, `(rescale:real64<mm> 25.4 1.0<in>)`.
 //
 // A function prints as `(def name ((param type) ...) result body)` and a module-level binding as
 // `(val name type init)`; the lambdas follow the declarations, one to a line, as
@@ -24,7 +25,8 @@ show_tprogram(p: TProgram) -> string
     for d in p.decls
         out.push(d match
             GlobalDecl(g) -> s"(${bind_word(g.kind)} ${g.name} ${show_ty(g.ty)} ${show_texpr(p, g.init)})"
-            FunDecl(f) -> s"(def ${f.name} ${show_params(p, f.params, f.defaults)} ${show_ty(f.ret)} ${show_texpr(p, f.body)})")
+            FunDecl(f) -> s"(def ${f.name} ${show_params(p, f.params, f.defaults)} ${show_ty(f.ret)} ${show_texpr(p, f.body)})"
+            ExternDecl(x) -> s"(extern ${x.name} ${show_ty(fn_type(x.params, x.modes, x.ret))})")
 
     for k in 0..<p.lambdas.len()
         val l = p.lambdas[k]
@@ -96,6 +98,9 @@ real_text(x: real) -> string
 
     text + ".0"
 
+// A literal's unit as it was written after it, `<m/s^2>`, where it has one.
+private unit_suffix(t: Ty) -> string = if has_unit(t) then "<" + spell(unit_of(t)) + ">" else ""
+
 private show_lit(v: Lit) -> string = v match
     IntVal(n) -> s"${n}"
     RealVal(x) -> real_text(x)
@@ -107,13 +112,15 @@ show_texpr(p: TProgram, e: TExpr) -> string
     var items: Buf[string] = buf()
 
     *e.kind match
-        TLiteral(v, adopted) -> if adopted then s"(${typed("adopt", e.ty)} ${show_lit(v)})" else show_lit(v)
-        TConstant(name, adopted) -> if adopted then s"(${typed("adopt", e.ty)} ${name})" else name
+        TLiteral(v, adopted) -> if adopted then s"(${typed("adopt", e.ty)} ${show_lit(v)})" else show_lit(v) + unit_suffix(e.ty)
+        TConstant(name, adopted) -> if adopted then s"(${typed("adopt", e.ty)} ${name})" else name + unit_suffix(e.ty)
         TLocal(id) -> local_name(p, id)
         TGlobalRef(name) -> name
         TFnRef(name) -> name
         TPromote(v) -> s"(${typed("promote", e.ty)} ${show_texpr(p, v)})"
         TConvert(v, traps) -> s"(${typed(if traps then "convert-trap" else "convert", e.ty)} ${show_texpr(p, v)})"
+        TRescale(v, f) -> s"(${typed("rescale", e.ty)} ${real_text(ratio_real(f))} ${show_texpr(p, v)})"
+        TUnitAs(v) -> s"(${typed(if has_unit(e.ty) then "unit" else "strip", e.ty)} ${show_texpr(p, v)})"
         TMakeComplex(re, im) -> s"(${typed("complex", e.ty)} ${show_texpr(p, re)} ${show_texpr(p, im)})"
         TComplexPart(v, imag) -> s"(${typed(if imag then ".im" else ".re", e.ty)} ${show_texpr(p, v)})"
         TBinary(op, l, r) -> s"(${typed(op, e.ty)} ${show_texpr(p, l)} ${show_texpr(p, r)})"

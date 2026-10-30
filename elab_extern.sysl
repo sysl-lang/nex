@@ -1,0 +1,85 @@
+// `extern def`: a C function declared and called (DESIGN §10, §13.7).
+//
+// **An extern's signature is resolved before any body is elaborated**, since it has no body to infer
+// a result from. **Its parameters and result never carry a unit**: a C function takes the number, so
+// a caller passes `strip(x)` and gives the result a unit by multiplying.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// An `extern def` as written.
+struct ExternSrc
+    decl: Decl
+    name: string
+    params: Buf[Param]
+    ret: Option[Type]
+
+impl Elab
+    // The `k`th extern's parameter and result types.
+    resolve_extern(*self, k: usize)
+        val x = self.externs[k]
+        var tys: Buf[Ty] = buf()
+        var modes: Buf[Mode] = buf()
+        var names: Buf[string] = buf()
+
+        for p in x.params
+            if contains(names, p.name) then self.fail(x.decl.span, s"redeclaration of `${p.name}`")
+            if p.default.is_some() then self.fail(p.typ.span, "an `extern` parameter has no default")
+
+            val ty = self.resolve_type(p.typ)
+
+            if has_unit(ty) then self.fail(p.typ.span, s"an `extern` parameter never carries a unit: C takes the number, so declare it ${show_ty(base_of(ty))} and pass `strip(x)`")
+
+            names.push(p.name)
+            tys.push(ty)
+            modes.push(p.mode)
+
+        val ret = x.ret match
+            Some(t) ->
+                val r = self.resolve_type(t)
+
+                if has_unit(r) then self.fail(t.span, s"an `extern` result never carries a unit: declare it ${show_ty(base_of(r))} and give the result its unit by multiplying, `${x.name}(...) * 1.0<${spell(unit_of(r))}>`")
+                r
+            None -> Void
+
+        self.xout.push(TExtern(x.decl.span, x.name, tys, modes, ret))
+    end resolve_extern
+
+    extern_type(self, k: usize) -> Ty = fn_type(self.xout[k].params, self.xout[k].modes, self.xout[k].ret)
+
+    // A call of the `k`th extern: positional arguments, each a plain number where it is one.
+    call_extern(*self, span: Span, at: Span, k: usize, args: Buf[Expr]) -> TExpr
+        val x = self.xout[k]
+
+        if args.len() != x.params.len()
+            self.fail(span, s"`${x.name}` takes ${x.params.len()} argument${if x.params.len() == 1 then "" else "s"}, and ${args.len()} ${if args.len() == 1 then "is" else "are"} given")
+            return self.invalid(span)
+
+        var out: Buf[TExpr] = buf()
+
+        for j in 0..<args.len()
+            val a = args[j]
+            val ty = x.params[j]
+
+            *a.kind match
+                NamedArg(_, _) ->
+                    self.fail(a.span, s"an `extern` takes its arguments by position")
+                    out.push(self.invalid(a.span))
+                    continue
+                _ -> ()
+
+            if x.modes[j] == Inout
+                out.push(self.borrow(a, ty))
+                continue
+
+            val v = self.elab(a, Some(ty))
+
+            if has_unit(v.ty)
+                self.fail(a.span, s"`${x.name}` is an `extern`, whose parameters never carry a unit; pass the number: `${x.name}(strip(x))`")
+                out.push(self.invalid(a.span))
+            else
+                out.push(self.coerce(v, ty, s"argument ${j + 1}"))
+
+        texpr(span, x.ret, TCall(texpr(at, self.extern_type(k), TFnRef(x.name)), out))
+    end call_extern
+end Elab

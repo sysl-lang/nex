@@ -32,7 +32,7 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]]
     Ok(e.program())
 
 private elab(p: Program) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), buf(), buf(), empty_units())
 
 // How far a declaration has got.
 enum Progress
@@ -40,10 +40,11 @@ enum Progress
     Working
     Finished
 
-// What a top-level name denotes: the `k`th module-level binding or the `k`th function.
+// What a top-level name denotes: the `k`th module-level binding, function or extern.
 enum TopKind
     TopValue(k: usize)
     TopFun(k: usize)
+    TopExtern(k: usize)
 
 struct Top
     name: string
@@ -66,13 +67,14 @@ struct Sig
     modes: Buf[Mode]
     defaults: Buf[Option[TExpr]]
 
-// A `def` as written.
+// A `def` as written, with the names of its unit parameters (`[U: Unit]`).
 struct FunSrc
     decl: Decl
     name: string
     params: Buf[Param]
     ret: Option[Type]
     body: Expr
+    uparams: Buf[string]
 
 struct ScopeEntry
     name: string
@@ -139,6 +141,10 @@ struct Elab
     pending: Buf[Pending]
     fx: Fx
 
+    externs: Buf[ExternSrc]
+    xout: Buf[TExtern]
+    units: Units
+
     // -- diagnostics ------------------------------------------------------------------------------
 
     fail(*self, span: Span, message: string)
@@ -156,6 +162,10 @@ struct Elab
 
     run(*self)
         self.collect()
+        self.resolve_units()
+
+        for k in 0..<self.externs.len()
+            self.resolve_extern(k)
 
         for k in 0..<self.funs.len()
             self.ensure_sig(k)
@@ -164,6 +174,7 @@ struct Elab
             top.kind match
                 TopValue(k) -> self.ensure_global(k)
                 TopFun(k) -> self.ensure_body(k)
+                TopExtern(_) -> ()
 
         self.check_main()
     end run
@@ -176,6 +187,8 @@ struct Elab
 
     // Every top-level declaration, by name, in source order.
     collect(*self)
+        self.load_prelude_units()
+
         for d in self.prog.decls
             *d.kind match
                 Bind(kind, pat, typ, init) ->
@@ -198,7 +211,9 @@ struct Elab
                                     self.gstate.push(Finished)
                                     self.gty.push(Error)
                 Fun(name, tparams, params, ret, body) ->
-                    if tparams.len() > 0 then
+                    val uparams = unit_params(tparams)
+
+                    if uparams.len() < tparams.len() then
                         self.later(d.span, "a generic function")
                     elif d.attrs.len() > 0 then
                         self.later(d.span, s"the attribute `@${d.attrs[0].name}`")
@@ -207,17 +222,22 @@ struct Elab
                             Some(b) ->
                                 if self.declare(d.span, name)
                                     self.tops.push(Top(name, TopFun(self.funs.len())))
-                                    self.funs.push(FunSrc(d, name, params, ret, b))
+                                    self.funs.push(FunSrc(d, name, params, ret, b, uparams))
                                     self.fret.push(Error)
                                     self.fret_known.push(false)
                                     self.fstate.push(Waiting)
                             None -> self.fail(d.span, s"`${name}` has no body")
-                Extern(_, _, _) -> self.later(d.span, "an `extern` declaration")
+                Extern(name, params, ret) ->
+                    if d.attrs.len() > 0
+                        self.later(d.span, s"the attribute `@${d.attrs[0].name}`")
+                    elif self.declare(d.span, name)
+                        self.tops.push(Top(name, TopExtern(self.externs.len())))
+                        self.externs.push(ExternSrc(d, name, params, ret))
                 Struct(_, _, _) -> self.later(d.span, "a struct")
                 Enum(_, _, _) -> self.later(d.span, "an enum")
                 Module(_) -> self.later(d.span, "a module declaration")
                 Import(_, _, _) -> self.later(d.span, "an import")
-                UnitDecl(_, _, _) -> self.later(d.span, "a unit declaration")
+                UnitDecl(name, factor, body) -> self.declare_unit(d.span, name, factor, body)
     end collect
 
     // Whether `name` is free at the top level; if not, says so.
@@ -235,6 +255,9 @@ struct Elab
             Some(TopFun(k)) -> k
             Some(TopValue(k)) ->
                 self.fail(self.globals[k].decl.span, "`main` must be a function: `def main()` or `def main(args: [string])`")
+                return
+            Some(TopExtern(k)) ->
+                self.fail(self.externs[k].decl.span, "`main` is the program's own function, not an `extern`: `def main()` or `def main(args: [string])`")
                 return
             None ->
                 self.fail(Span(0, 0), "a program needs a `def main()` or a `def main(args: [string])`")
@@ -295,6 +318,7 @@ struct Elab
         val f = self.funs[k]
         var sig = Sig(buf(), buf(), buf(), buf(), buf())
         val saved = self.fx
+        val saved_units = self.enter_unit_params(f.uparams)
         self.fx = empty_fx()
 
         for p in f.params
@@ -326,6 +350,8 @@ struct Elab
                 if f.name == "main"
                     self.fret.set(k, Void)
                     self.fret_known.set(k, true)
+
+        self.leave_unit_params(saved_units)
     end ensure_sig
 
     ensure_body(*self, k: usize)
@@ -338,6 +364,7 @@ struct Elab
         val saved = self.fx
         val pending_base = self.pending.len()
         val diags_base = self.diags.len()
+        val saved_units = self.enter_unit_params(f.uparams)
 
         self.fx = empty_fx()
         self.fx.frames.push(Frame(None, self.fret[k], self.fret_known[k], 0))
@@ -353,6 +380,7 @@ struct Elab
         self.fret_known.set(k, true)
         self.close()
         self.unresolved_lambdas(pending_base, diags_base)
+        self.leave_unit_params(saved_units)
         self.fx = saved
         self.fout.push(TFun(f.decl.span, f.name, sig.params, sig.defaults, frame.ret, body))
         self.fstate.set(k, Finished)
@@ -538,9 +566,7 @@ struct Elab
                     ps.push(self.resolve_type(p))
 
                 fn_type(ps, modes, self.resolve_type(ret))
-            Measured(_, _) ->
-                self.later(t.span, "a type with a unit of measure")
-                Error
+            Measured(base, unit) -> self.measured_type(t.span, base, unit)
     end resolve_type
 
     // -- the result -------------------------------------------------------------------------------
@@ -556,6 +582,7 @@ struct Elab
                 TopFun(k) ->
                     for f in self.fout
                         if f.name == self.funs[k].name then decls.push(FunDecl(f))
+                TopExtern(k) -> decls.push(ExternDecl(self.xout[k]))
 
         var lambdas: Buf[TLambda] = buf()
 
@@ -571,6 +598,15 @@ struct Elab
         TProgram(decls, self.locals, lambdas, self.loops)
     end program
 end Elab
+
+// The names of a generic list's unit parameters, `U` of `[U: Unit]`.
+private unit_params(tparams: Buf[TypeParam]) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for t in tparams
+        if t.constraint == Some("Unit") then out.push(t.name)
+
+    out
 
 contains(names: Buf[string], name: string) -> bool
     for n in names

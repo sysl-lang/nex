@@ -39,6 +39,9 @@ private max_class(a: int, b: int) -> int = if a > b then a else b
 // The type a literal of `class` takes beside, or in the place of, a value of type `other`; `None`
 // where it cannot take that type and keeps its own.
 adoption(class: int, other: Ty) -> Option[Ty]
+    // A literal beside a value with a unit takes the number type under it; its own unit, or none,
+    // is its own (DESIGN §13.2).
+    if has_unit(other) then return adoption(class, base_of(other))
     if class == INT_LITERAL && is_numeric(other) then return Some(other)
     if class == REAL_LITERAL && (is_real(other) || is_complex(other)) then return Some(other)
 
@@ -60,9 +63,12 @@ private literal_type(class: int, want: Option[Ty]) -> Ty = want match
 
 private some_adoption(class: int, other: Ty) -> Option[Ty] = Some(adoption(class, other).unwrap_or(default_of(class)))
 
-// The widening of `v` to `to`, as a node, where it is not already of that type.
+// The widening of `v` to `to`, as a node, where it is not already of that type; a value in another
+// unit of `to`'s dimension is converted to `to`'s unit first.
 promote(v: TExpr, to: Ty) -> TExpr =
-    if ty_eq(v.ty, to) || is_wild(v.ty) || has_error(v.ty) || has_error(to) then v else texpr(v.span, to, TPromote(v))
+    if ty_eq(v.ty, to) || is_wild(v.ty) || has_error(v.ty) || has_error(to) then v
+    elif converts(v.ty, to) && !unit_eq(unit_of(v.ty), unit_of(to)) then promote(rescaled(v, unit_of(to)), to)
+    else texpr(v.span, to, TPromote(v))
 
 // Two operands, each elaborated.
 struct Operands
@@ -99,11 +105,13 @@ impl Elab
 
     // `v` where a `ty` is required: as it is, widened along the lattice, or refused.
     coerce(*self, v: TExpr, ty: Ty, what: string) -> TExpr
-        if promotes(v.ty, ty) then return promote(v, ty)
+        if promotes(v.ty, ty) || converts(v.ty, ty) then return promote(v, ty)
 
         var message = s"${what} must be ${show_ty(ty)}, but this is ${show_ty(v.ty)}"
 
-        if is_numeric(v.ty) && is_numeric(ty)
+        if has_unit(v.ty) || has_unit(ty)
+            if is_numeric(base_of(v.ty)) && is_numeric(base_of(ty)) then message = message + unit_note(v, ty)
+        elif is_numeric(v.ty) && is_numeric(ty)
             message = message + s": that would narrow it; convert it explicitly, `${show_ty(ty)}(...)`"
 
         self.fail(value_span(v), message)
@@ -140,6 +148,7 @@ impl Elab
             Name(n) ->
                 if !self.is_prelude_constant(n) then NOT_LITERAL elif n == "i" then COMPLEX_LITERAL else REAL_LITERAL
             Juxtapose(c, b) -> self.literal_pair(c, b, false)
+            Measured(v, _) -> self.literal_class(v)
             BinOp(op, l, r) ->
                 if op == "+" || op == "-" || op == "*" || op == "^" then self.literal_pair(l, r, false)
                 elif op == "/" then self.literal_pair(l, r, true)
@@ -215,7 +224,7 @@ impl Elab
                 texpr(span, Never, TStop(c))
             Assign(op, target, value) -> self.assign(span, op, target, value)
             Block(items, result) -> self.block(span, items, result, want)
-            Measured(_, _) -> self.not_yet(span, "a value with a unit of measure")
+            Measured(value, unit) -> self.annotate(span, value, unit, want)
             Range(_, _, _, _) -> self.not_yet(span, "a range as a value (an integer array)")
             ExprKind.Array(_) -> self.not_yet(span, "an array literal")
             ExprKind.Tuple(_) -> self.not_yet(span, "a tuple")
@@ -255,6 +264,7 @@ impl Elab
 
                 return texpr(span, ty, TGlobalRef(n))
             Some(TopFun(k)) -> return texpr(span, self.fun_type(k, span), TFnRef(n))
+            Some(TopExtern(k)) -> return texpr(span, self.extern_type(k), TFnRef(n))
             None -> ()
 
         if self.is_prelude_constant(n) then return self.constant(span, n, want)
@@ -370,6 +380,8 @@ impl Elab
                     val signed = if is_signed(a) then a else b
 
                     self.fail(span, s"`${op}` mixes ${show_ty(a)} and ${show_ty(b)}, and neither holds the other's range; convert one: `${show_ty(signed)}(u) ${op} n`")
+                elif (has_unit(a) || has_unit(b)) && !same_dims(unit_of(a), unit_of(b))
+                    self.fail(span, s"`${op}` cannot combine " + unit_clash(unit_of(a), unit_of(b)))
                 else
                     self.fail(span, s"`${op}` cannot combine ${show_ty(a)} and ${show_ty(b)}")
                 None
@@ -379,6 +391,7 @@ impl Elab
     apply(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
         if is_error(a.ty) || is_error(b.ty) then return texpr(span, Error, TBinary(op, a, b))
         if is_array(a.ty) || is_array(b.ty) then return self.not_yet(span, "an element-wise operation on arrays")
+        if has_unit(a.ty) || has_unit(b.ty) then return self.measured_apply(span, op, a, b)
 
         if is_comparison(op)
             if is_numeric(a.ty) && is_numeric(b.ty)
@@ -442,6 +455,7 @@ impl Elab
             exp = self.infer(r)
 
         if is_error(base.ty) || is_error(exp.ty) then return texpr(span, Error, TBinary("^", base, exp))
+        if has_unit(base.ty) || has_unit(exp.ty) then return self.measured_power(span, r, base, exp)
 
         if !is_numeric(base.ty) || !is_numeric(exp.ty)
             self.fail(span, s"`^` needs numbers; found ${show_ty(base.ty)} and ${show_ty(exp.ty)}")
@@ -465,7 +479,7 @@ impl Elab
 
         val v = self.elab(x, want)
 
-        if !is_numeric(v.ty) && !is_error(v.ty)
+        if !is_numeric(base_of(v.ty)) && !is_error(v.ty)
             self.fail(span, s"`-` needs a number; found ${show_ty(v.ty)}")
             return texpr(span, Error, TUnary(op, v))
 
@@ -559,7 +573,7 @@ impl Elab
             Some(Void) -> true
             _ -> false
 
-        if is_numeric(a) && is_numeric(b)
+        if is_numeric(base_of(a)) && is_numeric(base_of(b))
             common(a, b) match
                 Some(t) -> return t
                 None -> ()
@@ -873,6 +887,9 @@ impl Elab
             Some(TopFun(_)) ->
                 self.fail(span, s"`${n}` is a function and cannot be assigned")
                 self.invalid(span)
+            Some(TopExtern(_)) ->
+                self.fail(span, s"`${n}` is a function and cannot be assigned")
+                self.invalid(span)
             None ->
                 self.unknown_name(span, n)
                 self.invalid(span)
@@ -896,7 +913,10 @@ impl Elab
 
             self.fail(span, message)
 
-        texpr(span, Void, TAssign(op, p, promote(v, p.ty)))
+        // `+=` and `-=` convert the value to the target's unit; `*=` and `/=` keep the value's own.
+        val goal = if bop == "+" || bop == "-" then p.ty else measured(base_of(p.ty), unit_of(v.ty))
+
+        texpr(span, Void, TAssign(op, p, promote(v, goal)))
     end assign
 
     // -- interpolation ----------------------------------------------------------------------------
@@ -911,9 +931,9 @@ impl Elab
                     val v = self.infer(x)
 
                     if is_void(v.ty) then self.fail(x.span, "this has no value to put in a string: it is void")
-                    if format && spec.len > 0 then self.check_spec(x.span, spec, v.ty)
+                    if format && spec.len > 0 then self.check_spec(x.span, spec, base_of(v.ty))
 
-                    out.push(TValue(v, spec))
+                    interp_value(&out, v, spec)
 
         texpr(span, Ty.Str, TInterp(out, format))
 

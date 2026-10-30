@@ -1,0 +1,546 @@
+// Units of measure in the elaborator (DESIGN §13): `unit` declarations and the prelude's units,
+// a unit spelt in a type or after a value, and the rules each operator, conversion and prelude
+// function follows for a value that carries one.
+//
+// **A `unit` declaration is reduced on demand**, as a module-level binding is: the first use of a
+// name resolves the declaration behind it, and a declaration reached again while it is being resolved
+// is circular. The prelude's units (DESIGN §13.9) are declarations too, written in nex below and
+// read once; a module's own declaration of a prelude unit's name shadows it.
+//
+// **Mixing scales is made explicit where it happens.** `+`, `-`, a comparison and every position
+// that expects a type convert a value of the same dimension to the unit they need, through
+// `promote`, which writes a `TRescale` with the exact ratio of the two scales.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.join
+import sh.sysl.parsing.{Span, nearest_name, source_of}
+
+private val PRELUDE_UNITS = "unit m\nunit kg\nunit s\nunit A\nunit K\nunit mol\nunit cd\nunit N = kg m / s^2\nunit J = N m\nunit W = J / s\nunit Pa = N / m^2\nunit Hz = 1 / s\nunit C = A s\nunit V = W / A\nunit ohm = V / A\nunit rad = 1\nunit mm = 0.001 m\nunit cm = 0.01 m\nunit km = 1000 m\nunit g = 0.001 kg\nunit ms = 0.001 s\nunit us = 0.000001 s\nunit ns = 0.000000001 s\nunit kPa = 1000 Pa\nunit MPa = 1000000 Pa\nunit GPa = 1000000000 Pa\nunit kN = 1000 N\nunit kJ = 1000 J\nunit kW = 1000 W\nunit in = 0.0254 m\nunit ft = 12 in\nunit yd = 3 ft\nunit mi = 5280 ft\nunit lb = 0.45359237 kg\nunit oz = 0.0625 lb\nunit lbf = 4.4482216152605 N\nunit slug = lbf s^2 / ft\nunit psi = lbf / in^2\nunit ksi = 1000 psi\nunit BTU = 1055.05585262 J\nunit hp = 550 ft lbf / s\nunit usgal = 231 in^3\nunit ukgal = 0.00454609 m^3\n"
+
+private val COMPARISON_OPS = ["==", "!=", "<", "<=", ">", ">="]
+
+// The prelude functions that keep their argument's unit, and those whose result is a plain number
+// whatever the argument's unit.
+private val KEEP_UNIT = ["abs", "floor", "ceil", "round", "trunc", "conj"]
+private val DROP_UNIT = ["sign", "arg"]
+
+// A `unit` declaration as written, the module's or the prelude's.
+struct UnitSrc
+    span: Span
+    name: string
+    factor: Option[string]
+    body: Option[UnitExpr]
+    prelude: bool
+
+struct Units
+    srcs: Buf[UnitSrc]
+    state: Buf[Progress]
+    // Each declaration's unit once resolved; `None` where it was refused.
+    vals: Buf[Option[Unit]]
+    // The unit parameters of the function being elaborated.
+    params: Buf[string]
+    // The declarations being resolved, outermost first: what a circular one is reported with.
+    path: Buf[usize]
+
+empty_units() -> Units = Units(buf(), buf(), buf(), buf(), buf())
+
+private member(names: []const string, name: string) -> bool
+    for n in names
+        if n == name then return true
+
+    false
+
+// The exponent `^` is given where its base carries a unit: an integer or a fraction of two, as
+// written, `x^2`, `x^-1`, `x^(1/2)`.
+private constant_exponent(e: Expr) -> Option[Ratio] = *e.kind match
+    IntLit(n) -> Some(ratio(i256(n), 1))
+    Unary(op, x) ->
+        if op != "-" then return None
+
+        constant_exponent(x) match
+            Some(r) -> Some(Ratio(-r.num, r.den))
+            None -> None
+    BinOp(op, a, b) ->
+        if op != "/" then return None
+
+        val p = constant_exponent(a)
+        val q = constant_exponent(b)
+
+        if p.is_none() || q.is_none() || q.unwrap().num == 0 then None else Some(rdiv(p.unwrap(), q.unwrap()))
+    _ -> None
+
+// The literal `v` is, as written, where it is one: what a suggestion to give it a unit shows.
+private bare_literal(v: TExpr) -> Option[string] = *v.kind match
+    TLiteral(IntVal(n), _) -> Some(s"${n}")
+    TLiteral(RealVal(x), _) -> Some(real_text(x))
+    TConstant(name, _) -> Some(name)
+    TPromote(x) -> bare_literal(x)
+    _ -> None
+
+private verb(op: string) -> string = if op == "+" then "add" elif op == "-" then "subtract" else "compare"
+
+// Two units of different dimensions, met by an operator: what is wrong, and where one side is a
+// plain number, how to give it the unit.
+private clash(lead: string, a: TExpr, b: TExpr) -> string
+    val ua = unit_of(a.ty)
+    val ub = unit_of(b.ty)
+
+    if is_one(ub) then return s"${lead} ${spell(ua)} and ${plain_word(b)}: ${plain_advice(b, ua)}"
+    if is_one(ua) then return s"${lead} ${plain_word(a)} and ${spell(ub)}: ${plain_advice(a, ub)}"
+
+    lead + " " + unit_clash(ua, ub)
+
+private plain_word(v: TExpr) -> string = if bare_literal(v).is_some() then "a bare number" else "a plain number"
+
+// How a plain number beside a value in unit `u` is given that unit.
+private plain_advice(v: TExpr, u: Unit) -> string = bare_literal(v) match
+    Some(t) -> s"a bare literal is dimensionless; write it with its unit, `${t}<${spell(u)}>`"
+    None -> s"a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<${spell(u)}>`"
+
+// `in and lbf: length and force are different dimensions`.
+unit_clash(ua: Unit, ub: Unit) -> string =
+    s"${spell(ua)} and ${spell(ub)}: ${dimension_name(ua)} and ${dimension_name(ub)} are different dimensions"
+
+// Why a value of `v.ty` does not stand where `ty` is expected, once one of them carries a unit.
+unit_note(v: TExpr, ty: Ty) -> string
+    val ua = unit_of(v.ty)
+    val ut = unit_of(ty)
+
+    if same_dims(ua, ut) then return s": that would narrow it; convert it explicitly, `${show_ty(base_of(ty))}(...)`"
+
+    if is_one(ua) then return ": " + plain_advice(v, ut)
+    if is_one(ut) then return ": strip the unit to take the number, `strip(x)`"
+
+    s": ${dimension_name(ua)} and ${dimension_name(ut)} are different dimensions"
+
+// `v` as `print` and an interpolation see it: a value with a unit is its number followed by a
+// space and the unit's spelling, so emission never sees the unit (DESIGN §13.4).
+interp_value(out: *Buf[TPart], v: TExpr, spec: string)
+    if !has_unit(v.ty)
+        out.push(TValue(v, spec))
+        return
+
+    out.push(TValue(texpr(v.span, base_of(v.ty), TUnitAs(v)), spec))
+    out.push(TText(" " + spell(unit_of(v.ty))))
+
+printable(v: TExpr) -> TExpr
+    if !has_unit(v.ty) then return v
+
+    var parts: Buf[TPart] = buf()
+
+    interp_value(&parts, v, "")
+    texpr(v.span, Ty.Str, TInterp(parts, false))
+
+// The unit parameters bound at one call of a function generic over units, in the order solved.
+struct UnitBindings
+    names: Buf[string]
+    units: Buf[Unit]
+
+// `t` with the bound unit parameters replaced by their units.
+subst_ty(t: Ty, b: UnitBindings) -> Ty = if has_unit(t) then measured(base_of(t), subst_unit(unit_of(t), b.names, b.units)) else t
+
+impl Elab
+    // -- declarations -----------------------------------------------------------------------------
+
+    // The prelude's units, read as a module's declarations would be.
+    load_prelude_units(*self)
+        parse_program(source_of("prelude", PRELUDE_UNITS)) match
+            Ok(p) ->
+                for d in p.decls
+                    *d.kind match
+                        UnitDecl(name, factor, body) -> self.add_unit(UnitSrc(d.span, name, factor, body, true))
+                        _ -> ()
+            Err(d) -> self.fail(d.span, "the prelude's units do not parse: " + d.message)
+
+    private add_unit(*self, src: UnitSrc)
+        self.units.srcs.push(src)
+        self.units.state.push(Waiting)
+        self.units.vals.push(None)
+
+    // A module's `unit` declaration, collected.
+    declare_unit(*self, span: Span, name: string, factor: Option[string], body: Option[UnitExpr])
+        for s in self.units.srcs
+            if !s.prelude && s.name == name
+                self.fail(span, s"redeclaration of the unit `${name}`")
+                return
+
+        self.add_unit(UnitSrc(span, name, factor, body, false))
+
+    // Every unit the module declares, used or not, so a mistake in one is reported.
+    resolve_units(*self)
+        for k in 0..<self.units.srcs.len()
+            if !self.units.srcs[k].prelude then self.unit_decl_value(k)
+
+    // The declaration a unit name denotes: the module's own first, then the prelude's. Inside the
+    // prelude only the prelude's are seen.
+    private find_unit(self, name: string, prelude: bool) -> Option[usize]
+        if !prelude
+            for k in 0..<self.units.srcs.len()
+                if !self.units.srcs[k].prelude && self.units.srcs[k].name == name then return Some(k)
+
+        for k in 0..<self.units.srcs.len()
+            if self.units.srcs[k].prelude && self.units.srcs[k].name == name then return Some(k)
+
+        None
+
+    // The `k`th declaration's unit, reducing it first where it has not been.
+    private unit_decl_value(*self, k: usize) -> Option[Unit]
+        val src = self.units.srcs[k]
+
+        if self.units.state[k] == Finished then return self.units.vals[k]
+
+        if self.units.state[k] == Working
+            var names: Buf[string] = buf()
+            var on = false
+
+            for j in self.units.path
+                if j == k then on = true
+                if on then names.push(self.units.srcs[j].name)
+
+            names.push(src.name)
+            self.fail(src.span, s"the unit `${src.name}` is defined through itself: ${join(names.view(), " -> ")}")
+            return None
+
+        self.units.state.set(k, Working)
+        self.units.path.push(k)
+
+        val saved = self.units.params
+        self.units.params = buf()
+
+        val u = src.body match
+            None -> Some(base_unit(src.name))
+            Some(b) -> self.unit_expr_value(b, src.prelude) match
+                Some(x) ->
+                    val f = src.factor match
+                        Some(t) -> decimal_ratio(t)
+                        None -> ONE_RATIO
+
+                    if !is_exact(f) || f.num <= 0
+                        self.fail(src.span, s"the scale of `${src.name}` is a positive decimal number: `unit in = 0.0254 m`")
+                        None
+                    else
+                        self.exact(src.span, named(scaled(x, f), src.name))
+                None -> None
+
+        self.units.params = saved
+        self.units.path.pop()
+        self.units.state.set(k, Finished)
+        self.units.vals.set(k, u)
+        u
+    end unit_decl_value
+
+    // `u`, where its scale could be held exactly.
+    private exact(*self, span: Span, u: Unit) -> Option[Unit]
+        if is_exact(u.factor) then return Some(u)
+
+        self.fail(span, "the scale of this unit has no exact value: it is too large to hold, or the root of a scale that is not a perfect power")
+        None
+
+    // A unit expression, reduced.
+    unit_expr_value(*self, e: UnitExpr, prelude: bool) -> Option[Unit]
+        *e.kind match
+            One -> Some(unit_one())
+            Base(name) ->
+                if !prelude && contains(self.units.params, name) then return Some(param_unit(name))
+
+                self.find_unit(name, prelude) match
+                    Some(k) -> self.unit_decl_value(k)
+                    None ->
+                        self.unknown_unit(e.span, name)
+                        None
+            Mul(a, b) ->
+                val x = self.unit_expr_value(a, prelude)
+                val y = self.unit_expr_value(b, prelude)
+
+                if x.is_none() || y.is_none() then None else self.exact(e.span, unit_mul(x.unwrap(), y.unwrap()))
+            Div(a, b) ->
+                val x = self.unit_expr_value(a, prelude)
+                val y = self.unit_expr_value(b, prelude)
+
+                if x.is_none() || y.is_none() then None else self.exact(e.span, unit_div(x.unwrap(), y.unwrap()))
+            Pow(b, n, d) -> self.unit_expr_value(b, prelude) match
+                Some(x) -> self.exact(e.span, unit_pow(x, ratio(i256(n), i256(d))))
+                None -> None
+    end unit_expr_value
+
+    private unknown_unit(*self, span: Span, name: string)
+        var names: Buf[string] = buf()
+
+        for s in self.units.srcs
+            names.push(s.name)
+
+        names.extend(self.units.params.view())
+
+        nearest_name(name, names) match
+            Some(near) -> self.fail(span, s"unknown unit `${name}`; did you mean `${near}`?")
+            None -> self.fail(span, s"unknown unit `${name}`")
+
+    // The unit parameters a function's types and body see, returning those they replace.
+    enter_unit_params(*self, params: Buf[string]) -> Buf[string]
+        val saved = self.units.params
+
+        self.units.params = params
+        saved
+
+    leave_unit_params(*self, saved: Buf[string])
+        self.units.params = saved
+
+    // -- types and values -------------------------------------------------------------------------
+
+    // `real<m>`, `complex[real32]<V>`.
+    measured_type(*self, span: Span, base: Type, u: UnitExpr) -> Ty
+        val b = self.resolve_type(base)
+        val unit = self.unit_expr_value(u, false)
+
+        if is_error(b) then return Error
+
+        if !is_real(b) && !is_complex(b)
+            self.fail(span, s"a unit attaches to a real or complex type, and this is ${show_ty(b)}: an integer counts things")
+            return Error
+
+        unit match
+            Some(x) -> measured(b, x)
+            None -> Error
+
+    // `9.81<m/s^2>`, `(a + b)<m>`: a dimensionless number given a unit.
+    annotate(*self, span: Span, value: Expr, u: UnitExpr, want: Option[Ty]) -> TExpr
+        *value.kind match
+            Name(n) ->
+                if n == "to" && self.lookup_local(n).is_none() && self.find_top(n).is_none()
+                    self.fail(span, "`to<u>` converts the value it is called on: `to<mm>(x)`")
+                    return self.invalid(span)
+            _ -> ()
+
+        val unit = self.unit_expr_value(u, false)
+        val goal = want match
+            Some(t) -> Some(base_of(t))
+            None -> None
+
+        // An integer literal with a unit is the real literal of that value: `12<in>` is `12.0<in>`.
+        val v = *value.kind match
+            IntLit(n) -> self.elab(Expr(value.span, RealLit(real(n))), goal)
+            _ -> self.elab(value, goal)
+
+        if is_error(v.ty) || unit.is_none() then return self.invalid(span)
+
+        if has_unit(v.ty)
+            self.fail(span, s"this already carries the unit ${spell(unit_of(v.ty))}; a value changes unit with `to<${spell(unit.unwrap())}>(x)`")
+            return self.invalid(span)
+
+        if is_int(v.ty)
+            self.fail(span, "a unit attaches to a real or complex value, and this is an integer, which counts things: `real(n)<m>`")
+            return self.invalid(span)
+
+        if !is_real(v.ty) && !is_complex(v.ty)
+            self.fail(span, s"a unit attaches to a number, and this is ${show_ty(v.ty)}")
+            return self.invalid(span)
+
+        val ty = measured(v.ty, unit.unwrap())
+
+        *v.kind match
+            TLiteral(_, _) -> texpr(span, ty, *v.kind)
+            TConstant(_, _) -> texpr(span, ty, *v.kind)
+            _ -> if has_unit(ty) then texpr(span, ty, TUnitAs(v)) else v
+    end annotate
+
+    // `to<mm>(x)`: `x` in another unit of its dimension (DESIGN §13.3).
+    to_call(*self, span: Span, u: UnitExpr, args: Buf[Expr]) -> TExpr
+        val target = self.unit_expr_value(u, false)
+
+        if args.len() != 1
+            self.fail(span, "`to<u>(x)` converts one value")
+            return self.invalid(span)
+
+        val v = self.infer(args[0])
+
+        if is_error(v.ty) || target.is_none() then return self.invalid(span)
+
+        val to = target.unwrap()
+        val from = unit_of(v.ty)
+
+        if !is_real(base_of(v.ty)) && !is_complex(base_of(v.ty))
+            self.fail(args[0].span, s"`to` converts a number with a unit, and this is ${show_ty(v.ty)}")
+            return self.invalid(span)
+
+        if !same_dims(from, to)
+            self.fail(span, s"`to<${spell(to)}>` converts within one dimension: ${spell(from)} is ${dimension_name(from)}, and ${spell(to)} is ${dimension_name(to)}")
+            return self.invalid(span)
+
+        if unit_eq(from, to) && spell(from) == spell(to) then return v
+
+        val r = rescaled(v, to)
+
+        texpr(span, r.ty, *r.kind)
+    end to_call
+
+    // `strip(x)`: the number in `x`'s own unit, dimensionless.
+    strip_call(*self, span: Span, args: Buf[Expr]) -> TExpr
+        if args.len() != 1 then return self.arity(span, "strip", "one value")
+
+        val v = self.infer(args[0])
+
+        if is_error(v.ty) then return self.invalid(span)
+        if has_unit(v.ty) then return texpr(span, base_of(v.ty), TUnitAs(v))
+
+        if !is_numeric(v.ty)
+            self.fail(args[0].span, s"`strip` removes the unit from a number, and this is ${show_ty(v.ty)}")
+            return self.invalid(span)
+
+        v
+
+    // -- operators --------------------------------------------------------------------------------
+
+    // An arithmetic or comparison operator where an operand carries a unit (DESIGN §13.3).
+    measured_apply(*self, span: Span, op: string, a: TExpr, b: TExpr) -> TExpr
+        val ua = unit_of(a.ty)
+        val ub = unit_of(b.ty)
+
+        if !is_numeric(base_of(a.ty)) || !is_numeric(base_of(b.ty))
+            self.fail(span, s"`${op}` needs numbers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+            return texpr(span, Error, TBinary(op, a, b))
+
+        val comparison = member(COMPARISON_OPS, op)
+
+        if op == "+" || op == "-" || comparison
+            if !same_dims(ua, ub)
+                self.fail(span, clash("cannot " + verb(op), a, b))
+                return texpr(span, Error, TBinary(op, a, b))
+
+            // The right operand is converted to the left one's unit.
+            val c = self.common_of(span, op, a.ty, b.ty).unwrap_or(Error)
+            val ordering = op == "<" || op == "<=" || op == ">" || op == ">="
+
+            if ordering && is_complex(base_of(c)) then self.fail(span, s"`${op}` orders integers and reals; complex numbers have no order")
+
+            return texpr(span, if comparison then Bool else c, TBinary(op, promote(a, c), promote(b, c)))
+
+        if op == "*" || op == "/"
+            val c = self.common_of(span, op, base_of(a.ty), base_of(b.ty)).unwrap_or(Error)
+            val u = if op == "*" then unit_mul(ua, ub) else unit_div(ua, ub)
+
+            if self.exact(span, u).is_none() then return texpr(span, Error, TBinary(op, a, b))
+
+            return texpr(span, measured(c, u), TBinary(op, promote(a, measured(c, ua)), promote(b, measured(c, ub))))
+
+        self.fail(span, s"`${op}` needs two integers; found ${show_ty(a.ty)} and ${show_ty(b.ty)}")
+        texpr(span, Error, TBinary(op, a, b))
+    end measured_apply
+
+    // `x ^ n` where `x` or `n` carries a unit: `n` a constant, so the result's unit is known.
+    measured_power(*self, span: Span, r: Expr, base: TExpr, exp: TExpr) -> TExpr
+        if has_unit(exp.ty)
+            self.fail(r.span, s"an exponent is a plain number, and this one carries the unit ${spell(unit_of(exp.ty))}")
+            return texpr(span, Error, TBinary("^", base, exp))
+
+        val u = unit_of(base.ty)
+
+        val k = constant_exponent(r) match
+            Some(k) -> k
+            None ->
+                self.fail(span, s"`^` on a value with a unit needs a constant exponent, so that the result's unit is known (`x^2`, `x^(1/2)`); this base is ${show_ty(base.ty)}, so strip the unit to raise it to a computed power: `strip(x)^n`")
+                return texpr(span, Error, TBinary("^", base, exp))
+
+        val pu = unit_pow(u, k)
+
+        if self.exact(span, pu).is_none() then return texpr(span, Error, TBinary("^", base, exp))
+        if is_int(exp.ty) then return texpr(span, measured(base_of(base.ty), pu), TBinary("^", base, exp))
+
+        val c = self.common_of(span, "^", base_of(base.ty), exp.ty).unwrap_or(Error)
+
+        texpr(span, measured(c, pu), TBinary("^", promote(base, measured(c, u)), promote(exp, c)))
+    end measured_power
+
+    // -- the prelude ------------------------------------------------------------------------------
+
+    // A one-argument prelude function on a value with a unit (DESIGN §13.4).
+    measured_builtin(*self, span: Span, name: string, v: TExpr) -> TExpr
+        val u = unit_of(v.ty)
+        val b = base_of(v.ty)
+        var out: Buf[TExpr] = buf()
+
+        if member(KEEP_UNIT, name) || member(DROP_UNIT, name)
+            out.push(v)
+
+            val r = self.scalar_result(span, name, b)
+
+            return texpr(span, if member(KEEP_UNIT, name) then measured(r, u) else r, TBuiltin(name, out))
+
+        if name == "sqrt" || name == "cbrt"
+            val ru = unit_pow(u, ratio(1, if name == "sqrt" then 2 else 3))
+
+            out.push(v)
+
+            if !is_exact(ru.factor)
+                self.fail(span, s"`${name}` of ${spell(u)} has no exact scale; convert it to base units first: `${name}(to<${spell(Unit(u.dims, ONE_RATIO, buf()))}>(x))`")
+                return texpr(span, Error, TBuiltin(name, out))
+
+            return texpr(span, measured(self.scalar_result(span, name, b), ru), TBuiltin(name, out))
+
+        if !is_dimensionless(u)
+            self.fail(span, s"`${name}` takes a dimensionless argument, and this is ${show_ty(v.ty)} (${dimension_name(u)}); strip the unit to pass the number: `${name}(strip(x))`")
+            out.push(v)
+            return texpr(span, Error, TBuiltin(name, out))
+
+        // A dimensionless value with a scale (`mm/in`) is first brought to scale 1.
+        out.push(rescaled(v, unit_one()))
+        texpr(span, self.scalar_result(span, name, b), TBuiltin(name, out))
+    end measured_builtin
+
+    // `real32(x)` on a value with a unit: the number converted, the unit kept.
+    measured_conversion(*self, span: Span, name: string, target: Ty, v: TExpr) -> TExpr
+        val b = base_of(v.ty)
+        val ty = measured(target, unit_of(v.ty))
+
+        if is_int(target)
+            self.fail(span, s"`${name}(...)` gives an integer, which carries no unit; strip the unit first: `${name}(strip(x))`")
+            return self.invalid(span)
+
+        if is_complex(b) && !is_complex(target)
+            self.fail(span, s"a complex number does not convert to ${show_ty(target)}: take `.re` (or `abs`, `arg`) first")
+            return self.invalid(span)
+
+        if ty_eq(b, target) then return v
+        if promotes(b, target) then return texpr(span, ty, TPromote(v))
+
+        texpr(span, ty, TConvert(v, false))
+
+    // Two values of different units met by a prelude function that unifies its arguments.
+    unit_mismatch(*self, span: Span, name: string, a: TExpr, b: TExpr)
+        self.fail(span, clash(s"`${name}` cannot combine", a, b))
+
+    // -- generic units ----------------------------------------------------------------------------
+
+    // An argument to a parameter whose type mentions a unit parameter: the first such argument binds
+    // the parameter, and the parameter's type with what is bound is the argument's goal (DESIGN §13.5).
+    unit_argument(*self, bound: *UnitBindings, a: Expr, ty: Ty, mode: Mode, what: string) -> TExpr
+        val pu = subst_unit(unit_of(ty), bound.names, bound.units)
+
+        if !has_param(pu) || mode == Inout then return self.argument(a, measured(base_of(ty), pu), mode, what)
+
+        val v = if self.literal_class(a) != NOT_LITERAL then self.elab(a, Some(base_of(ty))) else self.infer(a)
+
+        if is_error(v.ty) then return v
+
+        var free: Buf[Power] = buf()
+
+        for p in pu.dims
+            if p.param then free.push(p)
+
+        if free.len() == 1
+            // `pu` is `rest U^e`, so `U` is `(arg / rest)^(1/e)`.
+            var only: Buf[string] = buf()
+            var none: Buf[Unit] = buf()
+
+            only.push(free[0].name)
+            none.push(unit_one())
+
+            val rest = subst_unit(pu, only, none)
+            val solved = unit_pow(unit_div(unit_of(v.ty), rest), rinv(free[0].exp))
+
+            if is_exact(solved.factor)
+                bound.names.push(free[0].name)
+                bound.units.push(solved)
+
+        self.coerce(v, measured(base_of(ty), subst_unit(unit_of(ty), bound.names, bound.units)), what)
+    end unit_argument
+end Elab
