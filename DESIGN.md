@@ -758,7 +758,9 @@ prints come in the order of the operations. Either way the shapes are checked, a
 in the order the operations one by one check them: after both operands of each are evaluated. **An
 assignment writes its target in place** where the target is a local array the expression reads at
 the element it computes (`y = a*x + y`), or a local of static shape: each element is read before it
-is written. Where the old value is still read — by another holder (`val keep = y`), or by an operand
+is written. A local of dynamic shape the expression does not read (`d = sqrt(x*x + y*y)`) is written
+in place where its extents are the result's when the assignment runs, and gets a new array where they
+are not. Where the old value is still read — by another holder (`val keep = y`), or by an operand
 that is a view of the target read at other elements (`v = v[n..1 by -1] + v`) — bufferization copies
 it first. **A reduction's quiet operand is fused into it**: `sum(x * y)`, `dot(x, y)` and
 `sqrt(sum(x * x))` compute each product as the reduction reads it, in the same blocks and tree.
@@ -1918,6 +1920,11 @@ the test; the test stays in the emitted code because the small path is a `linalg
 stride is less than its row count. The prelude's `dot(x, y)` is a reduction (§9.2.1), reproducible
 and never dispatched; `x @ y` is the product and dispatches.
 
+**`C = A @ B` assigned to a local `C` that neither operand names writes `C`'s own buffer** where,
+when it runs, `C` has the product's extents and lies dense from its first element; otherwise the
+product gets a new buffer. Where `C`'s old value is still read (`val keep = C`), bufferization copies
+it first.
+
 **`C = alpha * (A @ B) + beta * C` is one BLAS update**, `gemm` with `alpha` and `beta` (`gemv` where
 `B` or `A` is a vector), writing `C` where it lies with no buffer for the product. The forms
 recognized are an assignment to a `var` local `C` of `real32`, `real64` or complex elements that no
@@ -1944,8 +1951,8 @@ result) and an `alpha` of zero leaves `A` and `B` unread. Both engines make the 
 extents the statement traps *"shape mismatch"* on either path.
 
 **A BLAS result may differ in the last bits from the `linalg` path**, since it sums in a different
-order. Every corpus matrix is far below the threshold. A build flag disables dispatch
-(**PROPOSED**: `nex build --no-blas`).
+order. Every corpus matrix is far below the threshold. No build option disables
+dispatch.
 
 ### 10.5 LAPACK
 

@@ -1,0 +1,149 @@
+@tests
+
+// Counted loops (DESIGN §11.1): a `for` whose passes are known on entry and that no pass can end early
+// is an `scf.for`, which one-shot bufferization lets carry an array's buffer from pass to pass, where
+// an `scf.while` copies it at every pass whose new value is not the old buffer. Every other loop is an
+// `scf.while`. Each program runs on both engines, which must agree; the interpreter has one loop, so
+// agreement is the check that the two lowerings count the same passes with the same values.
+
+// How many `scf.while` and `scf.for` loops the emitter writes for `main`'s body `body`.
+private loops_in(body: string) -> string
+    val m = emitted(s"def main() =\n$body").unwrap()
+
+    s"${occurrences(m, "scf.while")} while, ${occurrences(m, "scf.for %")} for"
+
+@test("a for over a range, an array or strings is an scf.for; a while, and a for a pass can leave, an scf.while")
+counted_loop_forms()
+    // Counted: up, down by a step, stopping before the end, with a `cycle` of its own, over an array,
+    // over strings, a step only known at run time, and a 64-bit range whose constant end is not the
+    // type's last value.
+    assert_eq(loops_in("  var t = 0\n  for i in 1..10\n    t += i\n  print(t)\n"), "0 while, 1 for")
+    assert_eq(loops_in("  var t = 0\n  for k in 10..1 by -2\n    t += k\n  print(t)\n"), "0 while, 1 for")
+    assert_eq(loops_in("  var t = 0\n  for i in 1..<5\n    if i == 2 then cycle\n    t += i\n  print(t)\n"), "0 while, 1 for")
+    assert_eq(loops_in("  var t = 0\n  for x in [1, 2, 3]\n    t += x\n  print(t)\n"), "0 while, 1 for")
+    assert_eq(loops_in("  for s in [\"a\", \"b\"]\n    print(s)\n"), "0 while, 1 for")
+    assert_eq(loops_in("  var n = 5\n  var s = 1\n  for k in n..10 by s\n    print(k)\n"), "0 while, 1 for")
+    assert_eq(loops_in("  var n = 5\n  for k in n..9223372036854775806\n    print(k)\n"), "0 while, 1 for")
+    assert_eq(loops_in("  var n = 5\n  for k in n..<9223372036854775807\n    print(k)\n"), "0 while, 1 for")
+    // `cycle outer` leaves the inner loop, not the outer one; an `exit` leaves only its own.
+    assert_eq(loops_in("  outer: for i in 1..3\n    for j in 1..3\n      if j == 2 then cycle outer\n      print(j)\n"), "1 while, 1 for")
+    assert_eq(loops_in("  for i in 1..3\n    for j in 1..3\n      if j == 2 then exit\n      print(j)\n"), "1 while, 1 for")
+    // Not counted: a `while`, an `exit`, an `exit` of the loop around, a `return`.
+    assert_eq(loops_in("  var t = 0\n  while t < 3\n    t += 1\n"), "1 while, 0 for")
+    assert_eq(loops_in("  for i in 1..10\n    if i == 2 then exit\n    print(i)\n"), "1 while, 0 for")
+    assert_eq(loops_in("  for x in [1, 2]\n    if x == 2 then exit\n    print(x)\n"), "1 while, 0 for")
+    assert_eq(loops_in("  outer: for i in 1..3\n    for j in 1..3\n      if j == 2 then exit outer\n      print(j)\n"), "2 while, 0 for")
+    assert_eq(loops_in("  for i in 1..3\n    if i == 2 then return\n    print(i)\n"), "1 while, 0 for")
+    // A 64-bit range that may run end to end in steps of 1 has 2⁶⁴ passes, which no `i64` counts.
+    assert_eq(loops_in("  var n = 5\n  for k in n..9223372036854775807\n    print(k)\n"), "1 while, 0 for")
+    assert_eq(loops_in("  var n = 5\n  for k in n..-9223372036854775807 - 1 by -1\n    print(k)\n"), "1 while, 0 for")
+    assert_eq(loops_in("  var n: uint64 = 0\n  for k in 0..n\n    print(k)\n"), "1 while, 0 for")
+
+@test("a counted loop carries its arrays without a copy: d = expression and c = a @ b write over the old buffer")
+counted_loop_buffers()
+    val b = bench()
+    val distance = "def main(args: [string]) =\n  val n = length(args) + 4\n  val x1 = fill(n, 1.0)\n  val y1 = fill(n, 2.0)\n  val x2 = fill(n, 4.0)\n" +
+                   "  val y2 = fill(n, 6.0)\n  var d: [real] = zeros(n)\n  for r in 1..3\n    d = sqrt((x2 - x1)^2 + (y2 - y1)^2)\n  print(d)\n"
+    val product = "def main(args: [string]) =\n  val n = length(args) + 3\n  val a: [real; :, :] = fill((n, n), 1.0)\n  val b: [real; :, :] = fill((n, n), 2.0)\n" +
+                  "  var c: [real; :, :] = a @ b\n  for k in 1..3\n    c = a @ b\n  print(c)\n  for k in 1..2\n    c = transpose(a) @ b\n  print(c)\n"
+    val dm = emitted(distance).unwrap()
+    val pm = emitted(product).unwrap()
+    val db = lowered_until(b, dm, "convert-bufferization-to-memref")
+    val pb = lowered_until(b, pm, "convert-bufferization-to-memref")
+    val d_out = ran(b, distance)
+    val p_out = ran(b, product)
+
+    finish(b)
+    assert_eq(occurrences(dm, "scf.while"), 0)
+    assert_eq(occurrences(pm, "scf.while"), 0)
+    assert_eq(occurrences(db, "memref.copy"), 0)
+    assert_eq(occurrences(pb, "memref.copy"), 0)
+    // The five arrays, and in the loop a new `d` only where its extents differ from the result's.
+    assert_eq(occurrences(db, "memref.alloc(%"), 6)
+    // `a`, `b` and `c`, and in each loop a new `c` only where its own buffer does not fit.
+    assert_eq(occurrences(pb, "memref.alloc(%"), 5)
+    assert_eq(d_out.text, "[5.0, 5.0, 5.0, 5.0]\n")
+    assert_eq(p_out.text, "[[6.0, 6.0, 6.0], [6.0, 6.0, 6.0], [6.0, 6.0, 6.0]]\n[[6.0, 6.0, 6.0], [6.0, 6.0, 6.0], [6.0, 6.0, 6.0]]\n")
+
+@test("a counted loop counts as the while it replaces: the ends of int8, uint8 and int64, steps, empty ranges, bounds read once")
+counted_loop_integers()
+    val b = bench()
+    val out = ran(b, "def main() =\n  val lo8: int8 = 120\n  val hi8: int8 = 127\n  for k in lo8..hi8\n    print(k)\n  for k in lo8..hi8 by 3\n    print(k)\n" +
+                     "  val nlo: int8 = -126\n  val nhi: int8 = -128\n  for k in nlo..nhi by -1\n    print(k)\n" +
+                     "  val z8: uint8 = 0\n  val top8: uint8 = 255\n  var total = 0\n  for k in z8..top8\n    total += k\n  print(total)\n  for k in top8..z8 by 200\n    print(k)\n" +
+                     "  val m = 9223372036854775807\n  for k in 9223372036854775805..m\n    print(k)\n  val lowest = -9223372036854775807 - 1\n" +
+                     "  for k in lowest + 2..lowest by -1\n    print(k)\n  for k in m - 1..m\n    print(k)\n" +
+                     "  for i in 5..1\n    print(i)\n  for i in 1..<1\n    print(i)\n  for i in 1..5 by -1\n    print(i)\n  for i in 3..1 by -1\n    print(i)\n" +
+                     "  for i in 1..10 by 4\n    print(i)\n  for i in 1..<10 by 4\n    print(i)\n  var n = 3\n  for i in 1..n\n    n = 10\n    print(i)\n" +
+                     "  var s = -1\n  for k in 3..1 by s\n    print(k)\n  s = 0\n  assert_traps(() -> for k in 1..2 by s do print(k), \"a `for` step of 0\")\n  print(\"done\")\n")
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "120\n121\n122\n123\n124\n125\n126\n127\n120\n123\n126\n-126\n-127\n-128\n32640\n" +
+                        "9223372036854775805\n9223372036854775806\n9223372036854775807\n-9223372036854775806\n-9223372036854775807\n-9223372036854775808\n" +
+                        "9223372036854775806\n9223372036854775807\n3\n2\n1\n1\n5\n9\n1\n5\n9\n1\n2\n3\n3\n2\n1\ndone\n")
+
+@test("exit, cycle and labels across nested counted and uncounted loops, a return from one, and a trap in a counted pass")
+counted_loop_control()
+    val b = bench()
+    val out = ran(b, "def first_above(a: [real], t: real): integer =\n  for i in 1..length(a)\n    if a[i] > t then return i\n  0\n\n" +
+                     "def main() =\n  outer: for i in 1..4\n    for j in 1..4\n      if j == 3 then cycle outer\n      if i == 3 then exit outer\n      print(i * 10 + j)\n" +
+                     "  for i in 1..4\n    for j in 1..4\n      if j == 2 then cycle\n      if j == 4 then exit\n      print(i * 10 + j)\n" +
+                     "  for i in 1..5\n    if i % 2 == 0 then cycle\n    print(i)\n  print(first_above([1.0, 2.0, 3.0, 4.0], 2.5))\n" +
+                     "  for x in [1, 2, 3, 4]\n    if x == 3 then exit\n    print(x)\n" +
+                     "  for i in 1..3\n    print(i)\n    if i == 3 then print([1, 2][i])\n  print(\"unreached\")\n")
+
+    finish(b)
+    assert_eq(out.text, "11\n12\n21\n22\n11\n13\n21\n23\n31\n33\n41\n43\n1\n3\n5\n3\n1\n2\n1\n2\n3\n")
+    assert_eq(out.err.unwrap_or(""), "trap: index out of bounds\n")
+    assert(!out.status.ok())
+
+@test("arrays a counted loop carries: written by element, reassigned to another shape, held by another local, iterated while reassigned")
+counted_loop_arrays()
+    val b = bench()
+    val out = ran(b, "def main() =\n  var v: [real] = zeros(3)\n  for i in 1..3\n    v[i] = i * 2.0\n  print(v)\n" +
+                     "  var a = [1.0, 2.0, 3.0]\n  for x in a\n    a = a * 2.0\n    print(x)\n  print(a)\n  for s in [\"p\", \"q\"]\n    print(s)\n" +
+                     "  var acc = [0.0, 0.0]\n  for r in 1..3\n    acc = acc + [1.0, 2.0] * r\n  print(acc)\n" +
+                     "  var d: [real] = zeros(2)\n  val keep = d\n  for r in 1..2\n    d = sqrt([4.0, 9.0, 16.0] * r)\n    print(d)\n  print(keep)\n" +
+                     "  var e: [real] = zeros(2)\n  for r in 1..3\n    print(length(e))\n    e = fill(r + 2, 1.0) * r\n  print(e)\n" +
+                     "  var g: [real] = zeros(2)\n  val held = g\n  for r in 1..2\n    g = sqrt([4.0, 9.0] * r)\n  print(g)\n  print(held)\n" +
+                     "  var m: [real; :, :] = zeros((2, 3))\n  for r in 1..3\n    m = fill((r, 2), 1.0) * r\n    print(m)\n" +
+                     "  var s: [real] = zeros(2)\n  s = sqrt([4.0, 9.0, 16.0])\n  print(s)\n")
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[2.0, 4.0, 6.0]\n1.0\n2.0\n3.0\n[8.0, 16.0, 24.0]\np\nq\n[6.0, 12.0]\n" +
+                        "[2.0, 3.0, 4.0]\n[2.8284271247461903, 4.242640687119285, 5.656854249492381]\n[0.0, 0.0]\n" +
+                        "2\n3\n4\n[3.0, 3.0, 3.0, 3.0, 3.0]\n[2.8284271247461903, 4.242640687119285]\n[0.0, 0.0]\n" +
+                        "[[1.0, 1.0]]\n[[2.0, 2.0], [2.0, 2.0]]\n[[3.0, 3.0], [3.0, 3.0], [3.0, 3.0]]\n[2.0, 3.0, 4.0]\n")
+
+@test("c = a @ b over its own buffer only where it fits and no operand reads it: views, held copies, aliases, transposes, vectors")
+matmul_over_target()
+    val b = bench()
+    val out = ran(b, "def grid(m: integer, n: integer, s: real): [real; :, :] =\n  var g: [real; :, :] = zeros((m, n))\n  for j in 1..n\n    for i in 1..m\n      g[i, j] = s * i + 2 * j\n  g\n\n" +
+                     "def main() =\n  val a = grid(3, 3, 1.0)\n  val b = grid(3, 3, 2.0)\n  var c: [real; :, :] = zeros((2, 2))\n  for k in 1..2\n    c = a @ b\n    print(c)\n" +
+                     "  var e = c\n  for k in 1..2\n    c = e @ b\n  print(e)\n  print(c)\n  var h = c\n  for k in 1..2\n    c = transpose(a) @ b\n  print(h)\n  print(c)\n" +
+                     "  for k in 1..2\n    c = c @ b\n  print(c)\n" +
+                     "  val big = grid(70, 70, 0.5)\n  var p: [real; :, :] = zeros((70, 70))\n  val q = p\n  for k in 1..2\n    p = big @ big\n  print(sum(p))\n  print(sum(q))\n" +
+                     "  var y: [real] = zeros(3)\n  val held = y\n  for k in 1..2\n    y = a @ [1.0, 2.0, 3.0]\n  print(y)\n  print(held)\n" +
+                     "  var w = grid(4, 4, 1.0)\n  var v = w[1..3, 1..3]\n  for k in 1..2\n    v = a @ b\n  print(v)\n  print(w)\n" +
+                     "  var f: [real; 3, 3] = zeros((3, 3))\n  for k in 1..2\n    f = transpose(a) @ b\n  print(f)\n")
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, EXPECTED_PRODUCTS)
+
+// `a @ b` at each pass and `e` holding it, `e @ b` and `h` holding it, the transposed product, `c @ b`
+// twice, the 70 × 70 BLAS product and `q` keeping zeros, the vector product and `held`, the view `v`
+// written while `w` keeps its values, and the static `f`.
+private val EXPECTED_PRODUCTS = "[[98.0, 128.0, 158.0], [116.0, 152.0, 188.0], [134.0, 176.0, 218.0]]\n" +
+                                "[[98.0, 128.0, 158.0], [116.0, 152.0, 188.0], [134.0, 176.0, 218.0]]\n" +
+                                "[[98.0, 128.0, 158.0], [116.0, 152.0, 188.0], [134.0, 176.0, 218.0]]\n" +
+                                "[[2424.0, 3192.0, 3960.0], [2880.0, 3792.0, 4704.0], [3336.0, 4392.0, 5448.0]]\n" +
+                                "[[2424.0, 3192.0, 3960.0], [2880.0, 3792.0, 4704.0], [3336.0, 4392.0, 5448.0]]\n" +
+                                "[[76.0, 100.0, 124.0], [112.0, 148.0, 184.0], [148.0, 196.0, 244.0]]\n" +
+                                "[[47328.0, 62304.0, 77280.0], [70080.0, 92256.0, 114432.0], [92832.0, 122208.0, 151584.0]]\n" +
+                                "2.8416906875E9\n0.0\n[34.0, 40.0, 46.0]\n[0.0, 0.0, 0.0]\n" +
+                                "[[98.0, 128.0, 158.0], [116.0, 152.0, 188.0], [134.0, 176.0, 218.0]]\n" +
+                                "[[3.0, 5.0, 7.0, 9.0], [4.0, 6.0, 8.0, 10.0], [5.0, 7.0, 9.0, 11.0], [6.0, 8.0, 10.0, 12.0]]\n" +
+                                "[[76.0, 100.0, 124.0], [112.0, 148.0, 184.0], [148.0, 196.0, 244.0]]\n"

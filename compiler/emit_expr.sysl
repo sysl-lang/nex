@@ -651,6 +651,28 @@ impl Emitter
 
         val magnitude = self.def(s"arith.select $up, $step, ${self.def(s"arith.subi $zero, $step : $t")} : $t")
         val passes = self.def(s"arith.divui $distance, $magnitude : $t")
+
+        // Where no pass can end the loop early and the count of passes fits an `index`, the loop
+        // is an `scf.for` over them, the variable `lo + pass × step` in its own type.
+        if !leaves_loop(body, id) && passes_fit(lo_e, hi_e, inclusive, step_e, vt)
+            var count = if bits < 64 then self.def(s"arith.extui $passes : $t to i64") else passes
+
+            count = self.def(s"arith.addi $count, %one : i64")
+            count = self.def(s"arith.select $empty, ${self.def("arith.constant 0 : i64")}, $count : i64")
+
+            val l = self.counted_open(self.def(s"arith.index_cast $count : i64 to index"), body)
+            var pass = self.def(s"arith.index_cast ${l.iv} : index to i64")
+
+            if bits < 64 then pass = self.def(s"arith.trunci $pass : i64 to $t")
+
+            self.bind_local(span, var_id)
+            self.store(span, self.local_ptr(span, var_id), self.def(s"arith.addi $lo, ${self.def(s"arith.muli $pass, $step : $t")} : $t"), vt)
+            self.region(body)
+            self.end_pass(id)
+            self.loop_close(l)
+            self.after_loop(id)
+            return ""
+
         val last = self.def(s"arith.addi $lo, ${self.def(s"arith.muli $passes, $step : $t")} : $t")
         val counter = self.alloca(t)
         val done = self.alloca("i1")
@@ -810,6 +832,47 @@ impl Emitter
                 if is_arr(ret) then self.def(s"bufferization.to_tensor $v restrict : $rb to $r") else self.own(v, ret)
     end call_with
 end Emitter
+
+// Whether the passes of `for v in lo..hi by step`, with `v` of type `t`, are sure to number fewer
+// than 2⁶⁴, so that an `i64` counts them: always below 64 bits and for a range that stops before
+// `hi`, and otherwise unless the range may run from one end of the type to the other in steps of 1.
+private passes_fit(lo: TExpr, hi: TExpr, inclusive: bool, step: Option[TExpr], t: Ty) -> bool
+    if bits_of(t) < 64 || !inclusive then return true
+
+    val signed = is_signed(t)
+    val min = if signed then -(i128(1) << 63) else i128(0)
+    val max = if signed then (i128(1) << 63) - 1 else (i128(1) << 64) - 1
+    val s = step match
+        Some(x) -> constant_of(x)
+        None -> Some(i128(1))
+    val up = s match
+        Some(v) -> v == 1
+        None -> true
+    val back = s match
+        Some(v) -> v == -1
+        None -> true
+    val down = signed && back
+
+    !(up && may_be(lo, min) && may_be(hi, max)) && !(down && may_be(lo, max) && may_be(hi, min))
+
+// Whether `e` may have the value `v`: unless it is a constant of another value.
+private may_be(e: TExpr, v: i128) -> bool = constant_of(e) match
+    Some(c) -> c == v
+    None -> true
+
+// The value of the integer constant `e`, where it is one.
+private constant_of(e: TExpr) -> Option[i128] = *e.kind match
+    TLiteral(l, _) -> l match
+        IntVal(n) -> Some(n)
+        _ -> None
+    TPromote(v) -> constant_of(v)
+    TUnary(op, v) ->
+        if op != "-" then return None
+
+        constant_of(v) match
+            Some(n) -> Some(-n)
+            None -> None
+    _ -> None
 
 private is_fn_ref(e: TExpr) -> bool = *e.kind match
     TFnRef(_) -> true

@@ -164,10 +164,8 @@ val s = csqrt(-4.0 + 0.0i)            // 0.0+2.0i
 
 Complex **arrays** cross as pointers to interleaved (re, im) pairs, C99's and BLAS's layout.
 
-{{< note >}}
-That complex arrays match the C99 and BLAS layout has not yet been verified against a running
-program; the detail may change.
-{{< /note >}}
+The test suite passes complex arrays to C and Fortran routines that read and write them, on macOS
+arm64.
 
 ## 11.4 `@c` structs
 
@@ -346,10 +344,7 @@ a capturing closure for a callback parameter that has no `@data` partner is a co
 **A trap inside a callback** — an out-of-bounds index, an integer overflow — unwinds to the nex
 frame that made the extern call; the C frames between are abandoned.
 
-{{< note >}}
-Unwinding a trap through the C frames of a callback has not yet been verified; the detail may
-change.
-{{< /note >}}
+The test suite checks this, with the writes made before the trap kept, on macOS arm64.
 
 ## 11.7 Calling Fortran
 
@@ -418,10 +413,8 @@ What `@fortran` does:
    view crosses with no copy.
 5. **Complex** is by reference like every other argument.
 
-{{< note >}}
-The convention for a Fortran `COMPLEX` *function result* follows gfortran's for the target and has
-not yet been verified; the detail may change.
-{{< /note >}}
+The convention for a Fortran `COMPLEX` *function result* follows gfortran's for the target; the test
+suite calls a `complex(8)` function on macOS arm64, and no other target has been tried.
 
 Match the Fortran kinds exactly. A default `INTEGER` is 4 bytes: `int32`, not `integer`. `DOUBLE
 PRECISION` and `REAL(8)` are `real`; a default `REAL` is `real32`; `COMPLEX(8)` is `complex`.
@@ -550,16 +543,8 @@ old elements unread, as BLAS specifies, so a NaN there does not reach the result
 product's extents traps *"shape mismatch"*.
 
 **A BLAS result may differ from the fused path in the last bits**, because BLAS sums in a different
-order. To get the fused path everywhere — for a bit-for-bit comparison with an earlier run, say —
-build with `--no-blas`:
-
-```
-nex build --no-blas model.nex
-```
-
-{{< note >}}
-The flag's name `--no-blas` may change.
-{{< /note >}}
+order. No build option turns the dispatch off: a product below the size threshold takes the fused
+path, and a larger one takes BLAS.
 
 To call a BLAS routine `@` does not cover, declare it with `extern def` as in §11.1 and §11.5.
 

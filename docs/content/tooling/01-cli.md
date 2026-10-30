@@ -41,31 +41,36 @@ Compiles the program to a native executable and leaves it on disk.
 | `--fpe-trap` | real division by zero, invalid operations and overflow trap instead of giving `inf` or `nan` (gfortran's `-ffpe-trap=zero,invalid,overflow`); `nex run` takes it too |
 | `-L dir` | adds `dir` to the library search path |
 | `-l name` | links the library `name`, beside those named by `@link("name")` |
+| `-o file` | names the executable (`nex build` only) |
+
+`nex run --interp` and `nex test --interp` run the program in the interpreter instead, which needs no
+LLVM toolchain; `nex --version` prints the version.
+
+The compiler finds LLVM (`mlir-opt`, `mlir-translate`, `clang`) at `NEX_LLVM_HOME`, else Homebrew's
+`opt/llvm`, and the runtime archive `libnex_rt.a` at `NEX_RUNTIME`, else beside the `nex` executable.
+`NEX_BLAS` names the BLAS and LAPACK link options in place of the platform's.
 
 A program with a `@fortran` extern is linked against the gfortran runtime automatically
 ([Interoperability](/spec/11-interop/)).
 
-{{< note >}}
-`nex build --no-blas` disables the dispatch of `@` to BLAS and is a proposed flag. The compiler's own
-loops are then used for every product.
-{{< /note >}}
-
 ## 1.3 nex test
 
 ```
-nex test
+nex test main.nex
 ```
 
-Finds every function marked `@test` in the project's test modules, compiles them and runs each. It
-prints one line for each failing test and then a summary of how many passed and failed, and exits
-non-zero when any failed. A trap inside a test fails that test only; the others still run.
+Finds every function marked `@test` in the program's modules and in the test modules beneath its
+directory, compiles them and runs each. It prints one line for each failing test and then a summary
+of how many passed and failed, and exits non-zero when any failed. A trap inside a test fails that
+test only; the others still run.
 
 ```
-nex test axpy
+nex test main.nex axpy
 ```
 
-runs only the tests whose names contain the given substring. `nex test --np 4` runs each test as a
-4-rank MPI job, and a test that traps on a rank fails with the rank in front of its message.
+runs only the tests whose names contain the given substring. `nex test --np 4 main.nex` runs each
+test as a 4-rank MPI job, and a test that traps on a rank fails with the rank in front of its
+message.
 
 ```nex
 @test
@@ -80,9 +85,6 @@ def axpy_adds() =
 
 ## 1.4 Finding the prelude
 
-The prelude is part of the installation. The compiler finds it through the `NEX_HOME` environment
-variable, or `--prelude-path` on the command line, when it is not in the default place.
-
-{{< note >}}
-The spelling of these two options may change.
-{{< /note >}}
+The prelude is built into the compiler. A source prelude directory, read beside it, is the one
+`--prelude-path` names, else `$NEX_HOME/lib/prelude` where that exists; without either, the built-in
+prelude alone is used.

@@ -68,15 +68,32 @@ both columns are slower than on a quiet machine and every ratio is unsettled unt
 
 What is left of the misses:
 
-1. **point distance, 1.75×**: one loop now, with no temporary per operator; what remains is two
-   80 MB buffers per pass. `d` is not read by its expression and has a dynamic shape that the
-   assignment may change, so the result goes to a new buffer, and the `for` loop, an `scf.while`,
-   copies a carried array whose new value is not its old buffer into a fresh one every pass:
-   one-shot bufferization copies an `scf.while` iteration argument whenever the body's yield is not
-   equivalent to it, where an `scf.for` does not. A counted loop emitted as `scf.for`, writing `d`
-   over where its shape is unchanged, is the fix.
+1. **point distance, 1.75×**: one loop, with no temporary per operator, but two 80 MB buffers per
+   pass, which the next section removes.
 2. **complex axpy, 1.30×**: no temporary left (2 / 2); within the noise of this load of the bar,
    and the complex multiply's lowering is the next thing to read.
+
+## With counted loops as `scf.for`
+
+A `for` whose passes are counted on entry and that no pass can leave early is an `scf.for`, which
+carries its arrays without a copy per pass; `d = <expression>` on a dynamic-shape `d` it does not
+read writes `d`'s buffer where the extents agree at run time, and `c = a @ b` hands BLAS `c`'s own
+buffer where it fits and lies dense (DESIGN §7.1, §10.4, §11.1). The five kernels the change touches,
+2026-10-30 14:41 to 14:45 EDT, each side built from its own checkout and run back to back under one
+build slot (`nice -n 15`); *before* is the fusion commit above (`86a3aac`). Load at each row:
+
+| kernel | gfortran | nex before | nex after | ratio before | ratio after | allocs before | allocs after (nex/twin) | load before / after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| point distance | 5.05 / 4.29 | 6.51 | 4.27 | 1.29 | **1.00** | 106 | **5 / 5** | 14.7 / 24.5 |
+| BLAS gemm | 8.59 / 9.49 (C) | 6.39 | 6.14 | 0.74 | 0.65 | 44 | **3 / 3** | 14.1 / 23.1 |
+| stencil | 1.66 / 1.55 | 1.63 | 1.56 | 0.98 | 1.01 | 2 | 2 / 2 | 14.1 / 23.1 |
+| gemm (naive) | 186.73 / 135.23 | 167.30 | 119.09 | 0.90 | 0.88 | 3 | 3 / 3 | 14.8 / 19.6 |
+| gemv | 2.65 / 2.59 | 2.62 | 2.55 | 0.99 | 0.98 | 1 | 1 / 1 | 29.2 / 16.9 |
+
+The twin column is the twin's time in each run (before / after), since the load moved between them;
+the ratio is against the twin of the same run. Point distance now meets the bar and allocates what
+its twin does: the two 80 MB buffers per pass are gone, and BLAS gemm's two per product with them.
+Stencil, naive gemm and gemv carry no array whose buffer changes, and stay where they were.
 
 ## The misses of the baseline, ranked by ratio
 

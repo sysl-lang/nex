@@ -23,14 +23,15 @@
 
 package {
   name    = "nex"
-  version = "0.0.1"
+  version = "0.1.0"
   sysl    = "0.8.4"
 }
 
 workspace = ["compiler", "runtime", "examples/embed"]
 
 // The perf oracle's kernels: nex programs and their C and Fortran twins, which no sysl build compiles.
-exclude = ["bench"]
+// `mpi` is the MPI preview's nex module and its C shim, linked by the nex driver, not by sysl.
+exclude = ["bench", "mpi"]
 
 // The lexer and parser are written on `sh.sysl.parsing`: its scanner, its layout pass for the
 // off-side rule, its interpolated-literal reader and its diagnostics.

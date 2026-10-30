@@ -19,7 +19,7 @@ axpy_in_place()
     assert_eq(occurrences(m, "linalg.generic"), 1)
     // The two `fill`s; the sum has none of its own.
     assert_eq(occurrences(m, "tensor.empty"), 2)
-    assert(m.contains("ins(%v43 : tensor<?xf64>) outs(%v44 : tensor<?xf64>)"), m)
+    assert(m.contains("ins(%v41 : tensor<?xf64>) outs(%v42 : tensor<?xf64>)"), m)
     assert_eq(occurrences(buffers, "memref.alloc"), 2)
     assert_eq(occurrences(buffers, "memref.copy"), 0)
     assert_eq(out.text, "[4.25, 4.25, 4.25, 4.25]\n")

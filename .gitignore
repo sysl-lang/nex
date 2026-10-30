@@ -3,6 +3,9 @@
 /libnex_rt.a.h
 /compiler/nexc
 /runtime/nex-runtime
+/runtime/nex_runtime
+/examples/embed/embed
+/dist/
 /.sysl/
 /docs/_site/
 /docs/public/

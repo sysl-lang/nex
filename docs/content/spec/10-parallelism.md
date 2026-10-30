@@ -449,6 +449,11 @@ a reduction's bits.
 
 ## 10.8 Many nodes: the `mpi` module
 
+{{< note >}}
+The `mpi` module is a preview in 0.1.0: it is built and tested on one machine under Open MPI, not on
+a cluster, and its interface may grow or change.
+{{< /note >}}
+
 `parallel` uses the cores of one node. A program that runs across a cluster imports `mpi`, the
 module nex ships: every process, a **rank**, runs the same `main`, and data moves only where the
 program moves it.

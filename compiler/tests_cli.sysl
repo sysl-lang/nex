@@ -1,0 +1,34 @@
+@tests
+
+// What the `nex` command answers about itself: its version, which every manifest of the workspace
+// states too.
+
+import nex.sh.sysl.nex.NEX_VERSION
+import sysl.fs.{make_temp_dir, read_text, remove_dir_all}
+import sysl.process.{Status, capture}
+import sysl.testing.compiler
+
+@test("`nex --version` and `nex version` print the version, and every manifest states it")
+cli_version()
+    val work = make_temp_dir("nex-cli").unwrap()
+    val nex = s"$work/nex"
+    val built = capture(compiler(), ["build", repo("compiler"), "-o", nex], stderr = true).unwrap()
+
+    assert(built.status.ok(), built.err.unwrap_or(""))
+
+    val flag = capture(nex, ["--version"], stderr = true).unwrap()
+    val word = capture(nex, ["version"], stderr = true).unwrap()
+    val extra = capture(nex, ["--version", "x"], stderr = true).unwrap()
+
+    remove_dir_all(work)
+    assert(flag.status.ok(), flag.err.unwrap_or(""))
+    assert_eq(flag.text, s"nex $NEX_VERSION\n")
+    assert_eq(word.text, s"nex $NEX_VERSION\n")
+    // With more arguments than the version asks for, the command is the ordinary one and `--version`
+    // is no command.
+    assert(extra.status == Status.Exited(2), s"${extra.status}")
+
+    for manifest in ["sysl.hocon", "compiler/sysl.hocon", "runtime/sysl.hocon", "examples/embed/sysl.hocon"]
+        val text = read_text(repo(manifest)).unwrap()
+
+        assert(text.contains(s"version = \"$NEX_VERSION\""), s"$manifest does not state version $NEX_VERSION")

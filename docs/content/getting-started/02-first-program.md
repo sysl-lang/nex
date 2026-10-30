@@ -19,7 +19,8 @@ Run it:
 nex run hello.nex
 ```
 
-`nex run` compiles `hello.nex` to a native binary and runs it. Nothing is interpreted.
+`nex run` compiles `hello.nex` to a native binary and runs it. Nothing is interpreted, unless you
+ask: `nex run --interp hello.nex` runs it on the interpreter, which needs no LLVM.
 
 ## 2.2 A small array program
 

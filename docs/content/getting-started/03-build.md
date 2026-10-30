@@ -44,7 +44,6 @@ build links the library for its platform:
 - Linux: OpenBLAS.
 
 {{< note >}}
-OpenBLAS linkage on Linux is unverified, and `nex build --no-blas` (to turn BLAS dispatch off) is a
-proposed flag. A BLAS result can differ from the compiler's own loop in the last bits, because the
+OpenBLAS linkage on Linux is untested, and no build option turns BLAS dispatch off. A BLAS result can differ from the compiler's own loop in the last bits, because the
 library sums in a different order.
 {{< /note >}}
