@@ -34,7 +34,7 @@ extern_attributes_refused()
     assert_eq(refused("extern def f(@strided x: real): real\n" + M), "error: `@strided` passes an array's view as it lies, and `x` is not an array @1:26")
     assert_eq(refused("extern def f(@strided(\"2\") x: [real]): real\n" + M), "error: `@strided` takes no arguments @1:31")
     assert_eq(refused("extern def f(@dense x: [real]): real\n" + M), "error: `@dense` is not an attribute of an `extern` parameter, which takes `@strided` @1:24")
-    assert_eq(refused("@fortran\nextern def f(x: real): real\n" + M), "error: a `@fortran` extern is not elaborated yet @1:1")
+    assert_eq(refused("@fortran(\"gfortran\")\nextern def f(x: real): real\n" + M), "error: `@fortran` takes no arguments @1:1")
 
 @test("an extern takes what crosses to C and returns a scalar or nothing; anything else is refused")
 extern_types_refused()
@@ -129,6 +129,45 @@ extern_purity()
     assert_eq(refused(head + body + "via(1.0 * i)\n"), "error: `via` calls `q`, an `extern` not declared `@pure`, and a parallel body calls only `@pure` externs @8:12")
     assert_eq(refused(head + "@elemental def e(x: real) = p(x)\ndef main() = print(e([1.0]))\n"), "ok")
     assert_eq(refused(head + "@elemental def e(x: real) = q(x)\ndef main() = print(e([1.0]))\n"), "error: an `@elemental` function may be run in any order, so it cannot call `q`, an `extern` not declared `@pure` @5:1")
+
+// -- Fortran ----------------------------------------------------------------------------------------
+
+@test("a @fortran extern's symbol is gfortran's: the name in lowercase with an underscore, @symbol overriding it")
+fortran_symbols()
+    assert_eq(elaborated("@fortran\nextern def DGTSV(n: int32, info: inout int32)\n" + M),
+        "(extern DGTSV (int32, inout int32) -> void @symbol(\"dgtsv_\") @fortran)\n(def main () void ())")
+    assert_eq(elaborated("@fortran @link(\"mesh\")\n@symbol(\"__mesh_MOD_read_mesh\")\nextern def read_mesh(file: string, nodes: inout [real; :, :], n: inout int32)\n" + M),
+        "(extern read_mesh (string, inout [real64; :, :], inout int32) -> void @symbol(\"__mesh_MOD_read_mesh\") @link(\"mesh\") @fortran)\n(def main () void ())")
+    assert_eq(elaborated("@fortran\nextern def ok(x: complex, b: bool, z: [complex], f: (real, bool) -> bool): bool\n" + M),
+        "(extern ok (complex[real64], bool, [complex[real64]], (real64, bool) -> bool) -> bool @symbol(\"ok_\") @fortran)\n(def main () void ())")
+
+@test("a @fortran extern refuses what a plain Fortran procedure has no dummy for, and two spellings of one name")
+fortran_refused()
+    assert_eq(refused("@fortran\nextern def faxpy(n: int32)\n@fortran\nextern def FAXPY(n: int32)\n" + M), "error: `FAXPY` and `faxpy` both name the C symbol `faxpy_` @3:1")
+    assert_eq(refused("@fortran\nextern def f(g: (real) -> real, p: c_ptr)\n" + M), "error: a Fortran procedure hands its callbacks no user data, so a `@fortran` extern takes no `c_ptr`; a callback passed to it captures nothing @2:36")
+    assert_eq(refused("@fortran\nextern def f(g: (real, c_ptr) -> real, p: @data(g) c_ptr)\n" + M), "error: a Fortran procedure hands its callbacks no user data, so `p` takes no `@data` @2:52\nerror: a Fortran procedure hands its callbacks no user data, so `g`'s type takes no `c_ptr` @2:17")
+    assert_eq(refused("@c\nstruct P\n  x: real\n@fortran\nextern def f(p: inout P)\n" + M), "error: a derived type does not cross to a plain Fortran procedure, so `P` cannot; reach it through a `bind(c)` wrapper written in Fortran and declare that as a C `extern` @5:23")
+    assert_eq(refused("@fortran\nextern def f(n: int32, b: [bool])\n" + M), "error: a Fortran `logical` array has gfortran's 4-byte elements, and a `[bool]` has 1-byte ones: declare `b` as `[int32]`, 0 for `.false.` and 1 for `.true.` @2:27")
+    assert_eq(refused("@fortran\nextern def f(s: inout string)\n" + M), "error: a `string` crosses to Fortran as a `character(*)` it may not write, so `s` cannot be `inout` @2:23")
+    assert_eq(refused("@fortran\nextern def f(g: (inout real) -> void)\n" + M), "error: Fortran passes a callback its arguments by reference, and nex reads each as a value, so parameter 1 of `g` cannot be `inout` @2:17")
+    assert_eq(refused("@fortran\nextern def f(g: (real) -> string)\n" + M), "error: a callback returns a number, a `bool`, a complex or nothing to C, and `g` returns string @2:17")
+    assert_eq(refused("@fortran\nextern def f(): [real]\n" + M), "error: an `extern` returns a number, a `bool`, a complex or nothing, and [real64] does not cross back from C @2:17")
+    assert_eq(refused("@fortran\nextern def f(x: real): real\ndef main() =\n  val g = f\n  print(g(1.0))\n"), "error: `f` is a `@fortran` extern, which takes every argument by reference, so it is only called; wrap the call in a `def` to pass it as a value @4:11")
+    assert_eq(refused("@fortran\nextern def f(x: real): real\nextern def apply(g: (real) -> real): real\ndef main() = print(apply(f))\n"), "error: `f` is a `@fortran` extern, which takes every argument by reference, so it is only called; wrap the call in a `def` to pass it as a value @4:26")
+    assert_eq(refused("@fortran\nextern def each(g: (real) -> void)\ndef main() =\n  val k = 2.0\n  each(x -> print(k * x))\n"), "error: this lambda captures `k`, and a callback with no `@data` partner is a bare C function pointer, with no environment to carry it @5:8")
+
+@test("a @fortran extern takes an address for every argument and each string's length after them; a logical is 4 bytes")
+emit_fortran_signatures()
+    val m = emitted("@fortran @link(\"f\")\nextern def mix(n: int32, a: real, s: string, ok: inout bool, x: [real], z: complex, t: string, f: (real, bool) -> bool): bool\ndef keep(x: real, b: bool) = b and x > 0.0\ndef main() =\n  var ok = true\n  print(mix(1, 2.0, \"ab\", ok, [1.0], 1 + 1i, \"c\", keep))\n").unwrap()
+
+    assert(m.starts_with("// nex.link -lf\n// nex.fortran\nmodule {\n"), m)
+    assert(m.contains("func.func private @\"mix_\"(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> (i32)"), m)
+    assert(m.contains("func.call @nex_str_bytes("), m)
+    assert(m.contains("(%c0: !llvm.ptr, %c1: !llvm.ptr) -> (i32)"), m)
+
+    val c = emitted("extern def f(x: real): real\ndef main() = print(f(1.0))\n").unwrap()
+
+    assert(!c.contains("nex.fortran"), c)
 
 // -- emission ---------------------------------------------------------------------------------------
 
@@ -356,3 +395,78 @@ run_callbacks_leak_nothing()
     finish(b)
     assert(out.status.ok(), out.err.unwrap_or(""))
     assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
+
+// -- Fortran programs -------------------------------------------------------------------------------
+
+// The bench with both test libraries, the Fortran one built by gfortran; the link options. Without
+// gfortran the test skips, saying so.
+private fortran_bench() -> (Bench, Buf[string])
+    if gfortran().is_none() then skip("no gfortran at NEX_GFORTRAN or /opt/homebrew/bin/gfortran: the Fortran FFI tests compile testdata/ffi/nexfort.f90 with it")
+
+    val b = bench()
+    val links = ffi_fixture(b)
+
+    fortran_fixture(b)
+    (b, links)
+
+// What linking `text` says, where it must fail.
+private link_error(b: Bench, text: string, links: Buf[string]) -> string = lower_module(emitted(text).unwrap(), s"${b.work}/program", b.work, b.tc, links.view()) match
+    Ok(_) -> "linked"
+    Err(e) -> e
+
+@test("a program with a @fortran extern links gfortran's runtime itself; one whose Fortran is not linked, or with no gfortran, is refused at the link")
+run_fortran_runtime_linked()
+    val (b, links) = fortran_bench()
+    val obj = s"${b.work}/nexfort.o"
+    val fc = capture(gfortran().unwrap(), ["-O2", "-c", "testdata/ffi/nexfort.f90", "-o", obj], stderr = true).unwrap()
+
+    assert(fc.status.ok(), fc.err.unwrap_or(""))
+
+    // A static archive names no runtime: `matmul` and `len_trim` are found only because nex links it.
+    val ar = capture(s"${b.tc.llvm_bin}/llvm-ar", ["rcs", s"${b.work}/libnexfort_static.a", obj], stderr = true).unwrap()
+
+    assert(ar.status.ok(), ar.err.unwrap_or(""))
+
+    val decls = "@fortran @link(\"nexfort_static\")\nextern def fmatmul(m: int32, k: int32, n: int32, a: [real; :, :], b: [real; :, :], c: inout [real; :, :])\n@fortran @link(\"nexfort_static\")\nextern def flen_trim(s: string): int32\n"
+    val out = ran(b, decls + "def main() =\n  var c: [real; :, :] = zeros((1, 2))\n  fmatmul(1, 2, 2, reshape([2.0, 3.0], 1, 2), reshape([1.0, 10.0, 100.0, 1000.0], 2, 2), c)\n  print(c)\n  print(flen_trim(\"héllo  \"))\n", links = links.view())
+    val unlinked = link_error(b, "@fortran\nextern def fdot(n: int32, x: [real], y: [real]): real\ndef main() = print(fdot(1, [1.0], [2.0]))\n", links)
+    val absent = link_error(b, "@fortran @link(\"nexfort\")\nextern def fnothere(x: real): real\ndef main() = print(fnothere(1.0))\n", links)
+    val runtime = fortran_runtime(gfortran().unwrap())
+    val missing = fortran_runtime("/nonexistent/gfortran")
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[[32.0, 3200.0]]\n6\n")
+    assert(unlinked.contains("_fdot_"), unlinked)
+    assert(absent.contains("_fnothere_"), absent)
+    assert(join(runtime.unwrap().view(), " ").contains("-lgfortran"), "")
+    assert_eq(missing.unwrap_err(), "nex: the program calls Fortran (`@fortran`), which links gfortran's runtime, and there is no gfortran at /nonexistent/gfortran; install gfortran or set NEX_GFORTRAN")
+
+@test("Fortran's temporaries are each thread's own in a parallel body; an inout bool or integer of any place; one def a callback of C and of Fortran")
+run_fortran_places_and_callbacks()
+    val (b, links) = fortran_bench()
+    val decls = "@fortran @pure @link(\"nexfort\")\nextern def fpositive(x: real): bool\n@fortran @pure @link(\"nexfort\")\nextern def fdot(n: int32, x: [real], y: [real]): real\n@fortran @link(\"nexfort\")\nextern def fall_positive(n: int32, x: [real], ok: inout bool)\n@fortran @link(\"nexfort\")\nextern def fcount(s: string, t: string, n: inout int32)\n@fortran @link(\"nexfort\")\nextern def fsimpson(f: (real) -> real, a: real, b: real, n: int32, r: inout real)\n@link(\"nexffi\")\nextern def nf_integrate_plain(f: (real) -> real, a: real, b: real, n: int32): real\n"
+    val main = "var flag = true\nstruct Counter\n  n: int32\ndef square(x: real): real = x * x\ndef main() =\n  var p = [false, false, false, false, false, false, false, false]\n  var d: [real] = zeros(8)\n  val x = [1.0, 2.0, 3.0]\n  parallel for i in 1..8\n    p[i] = fpositive(i - 4.5)\n    d[i] = fdot(3, x * (1.0 * i), x)\n  print(p)\n  print(d)\n  fall_positive(2, [1.0, 2.0], flag)\n  print(flag)\n  fall_positive(2, [1.0, -1.0], flag)\n  print(flag)\n  var c = Counter(0)\n  for s in [\"aaaa\", \"ab\"]\n    fcount(s, \"a\", c.n)\n    print(c.n)\n  var r = 0.0\n  fsimpson(square, 0.0, 3.0, 6, r)\n  print(r)\n  print(nf_integrate_plain(square, 0.0, 3.0, 6))\n"
+    val out = ran(b, decls + main, links = links.view())
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "[false, false, false, false, true, true, true, true]\n[14.0, 28.0, 42.0, 56.0, 70.0, 84.0, 98.0, 112.0]\ntrue\nfalse\n4\n1\n9.0\n9.0\n")
+
+@test("the Fortran programs leak nothing: strings, logicals and callbacks crossing")
+run_fortran_leak_nothing()
+    if !exists("/usr/bin/leaks") then skip("no leaks tool")
+
+    val (b, links) = fortran_bench()
+    var reports: Buf[string] = buf()
+
+    for file in ["071-ffi-fortran-subroutines", "072-ffi-fortran-character-arguments", "073-ffi-fortran-callbacks"]
+        val out = ran(b, read_text(s"testdata/v2/$file.nex").unwrap(), links = links.view())
+
+        assert(out.status.ok(), out.err.unwrap_or(""))
+        reports.push(capture("/usr/bin/leaks", ["--atExit", "--", s"${b.work}/program"], stderr = true).unwrap().text)
+
+    finish(b)
+
+    for r in reports
+        assert(r.contains(": 0 leaks for 0 total leaked bytes."), r)

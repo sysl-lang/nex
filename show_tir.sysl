@@ -72,7 +72,7 @@ show_tprogram(p: TProgram) -> string
 end show_tprogram
 
 // What an extern's attributes say beyond its signature, each after a space: its C symbol where it
-// differs from its name, its link inputs, `@pure`, and by parameter (from 1) `@strided` and
+// differs from its name, its link inputs, `@pure`, `@fortran`, and by parameter (from 1) `@strided` and
 // `@data`'s partner.
 private show_extern_attrs(x: TExtern) -> string
     var out = ""
@@ -86,6 +86,7 @@ private show_extern_attrs(x: TExtern) -> string
         out += s" @link(framework = \"$f\")"
 
     if x.pure then out += " @pure"
+    if x.fortran then out += " @fortran"
 
     for k in 0..<x.params.len()
         if x.strided[k] then out += s" @strided(${k + 1})"

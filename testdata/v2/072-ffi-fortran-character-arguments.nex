@@ -1,0 +1,32 @@
+// A `string` to a Fortran `character(*)` dummy (DESIGN §10.6): its bytes in place, and its length
+// as a hidden `size_t` after every declared argument, one per string in order. Fortran's `len` sees
+// the string's length in bytes, its trailing blanks included, and no terminator is counted.
+
+@fortran @link("nexfort")
+extern def flen_trim(s: string): int32
+
+@fortran @link("nexfort")
+extern def fcount(s: string, t: string, n: inout int32)
+
+@fortran @link("nexfort")
+extern def fsandwich(a: int32, s: string, b: int32, total: inout int32)
+
+def main() =
+  print(flen_trim("hello   "))
+  print(flen_trim(""))
+  val name = "nex"
+  print(flen_trim(s"$name and Fortran  "))
+
+  var n: int32 = 0
+  fcount("abababa", "aba", n)
+  print(n)
+  fcount("banana", "an", n)
+  print(n)
+  fcount("x", "longer", n)
+  print(n)
+
+  var total: int32 = 0
+  fsandwich(7, "four", 3, total)
+  print(total)
+  fsandwich(1, "", 2, total)
+  print(total)

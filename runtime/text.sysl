@@ -187,6 +187,10 @@ put_fmt_str(sink: long, s: *u8, spec: *u8)
 @export("nex_str_concat")
 str_concat(a: *u8, b: *u8) -> *u8 = c_string(c_text(a) + c_text(b))
 
+// A string's length in bytes, which a Fortran `character(*)` dummy is passed beside it.
+@export("nex_str_bytes")
+str_bytes(s: *u8) -> long = long(strlen(s))
+
 @export("nex_str_eq")
 str_eq(a: *u8, b: *u8) -> bool = c_text(a) == c_text(b)
 

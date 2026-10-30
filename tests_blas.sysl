@@ -3,7 +3,7 @@
 // `@` through BLAS and the LAPACK prelude (DESIGN §10.4, §10.5, §13.6): the types and units the
 // elaborator gives the linear-algebra functions and what it refuses, the routines the emitter calls
 // and where it keeps to `linalg`, and the link and the traps of the programs that call them. The
-// `testdata/v2` programs 070–072 run the values.
+// `testdata/v2` programs 074–076 run the values.
 
 import sysl.buf.{Buf, buf}
 import sysl.fs.{exists, write_text}

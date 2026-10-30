@@ -80,6 +80,25 @@ ffi_fixture(b: Bench) -> Buf[string]
     out.push(s"-L${b.work}")
     out
 
+// The gfortran the Fortran tests compile `testdata/ffi/nexfort.f90` with, as the driver finds it,
+// where there is one.
+gfortran() -> Option[string]
+    val g = get_or("NEX_GFORTRAN", "/opt/homebrew/bin/gfortran")
+
+    if exists(g) then Some(g) else None
+
+// The Fortran library of `testdata/ffi/nexfort.f90` built into the bench as `libnexfort.dylib`,
+// which names gfortran's runtime itself, as a Fortran library is shipped (`ffi_fixture`'s `-L`
+// finds it); false where there is no gfortran.
+fortran_fixture(b: Bench) -> bool
+    val g = gfortran() match
+        Some(g) -> g
+        None -> return false
+    val out = capture(g, ["-O2", "-shared", "testdata/ffi/nexfort.f90", "-o", s"${b.work}/libnexfort.dylib"], stderr = true).unwrap()
+
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    true
+
 // `text` compiled and run with `args`, linked with `links`: what it wrote and how it ended.
 ran(b: Bench, text: string, args: []const string = [], fpe_trap: bool = false, links: []const string = []) -> Output
     val m = emitted(text, fpe_trap) match
@@ -159,10 +178,12 @@ run_m3_corpus()
     assert_eq(join(r.waiting.view(), "\n"), "")
     assert_eq(r.passed, 153)
 
-@test("every program of testdata/v2 prints its .out, the FFI ones linked with the test library")
+@test("every program of testdata/v2 prints its .out, the FFI ones linked with the test libraries")
 run_v2()
     val b = bench()
     val links = ffi_fixture(b)
+    // Without gfortran the programs calling Fortran are left out; `tests_ffi.sysl` says so.
+    val fortran = fortran_fixture(b)
     var passed = 0
     var failed: Buf[string] = buf()
 
@@ -170,6 +191,9 @@ run_v2()
         if line.len == 0 || line.starts_with("file\t") then continue
 
         val name = split(line, "\t")[0]
+
+        if !fortran && name.contains("-ffi-fortran-") then continue
+
         val out = ran(b, read_text(s"testdata/v2/$name.nex").unwrap(), links = links.view())
 
         if out.status.ok() && out.text == read_text(s"testdata/v2/$name.out").unwrap() then passed += 1
@@ -177,7 +201,7 @@ run_v2()
 
     finish(b)
     assert(failed.len() == 0, join(failed.view(), "\n"))
-    assert_eq(passed, 47)
+    assert_eq(passed, if fortran then 51 else 47)
 
 @test("a trap nothing catches writes its message to standard error after what was printed, and aborts")
 run_uncaught_trap()

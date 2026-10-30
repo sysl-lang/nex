@@ -11,7 +11,8 @@
 // **The link takes the command line's `-L`/`-l` options and the libraries the program's externs
 // `@link`**, which the emitter writes as `// nex.link` lines before the module (DESIGN §10.1). **A
 // program whose `@` or linear-algebra prelude calls BLAS or LAPACK** says so in a `// nex.blas` line,
-// and links Accelerate on macOS and OpenBLAS elsewhere, or what `NEX_BLAS` names.
+// and links Accelerate on macOS and OpenBLAS elsewhere, or what `NEX_BLAS` names. **A program with
+// a `@fortran` extern links gfortran's runtime**, which a `// nex.fortran` line says.
 //
 // LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm`; the runtime at `NEX_RUNTIME`, else
 // `libnex_rt.a` beside the `nex` executable.
@@ -128,6 +129,37 @@ blas_links() -> Buf[string]
 
     out
 
+// Whether the module's lines before it say it has a `@fortran` extern.
+private calls_fortran(mlir: string) -> bool
+    for line in split(mlir, "\n")
+        if line == "module {" then break
+        if line == "// nex.fortran" then return true
+
+    false
+
+// The link options for gfortran's runtime, found where the compiler `gfortran` says it lies; the
+// directory is also the program's run-time search path.
+fortran_runtime(gfortran: string) -> Result[Buf[string], string]
+    val missing = s"nex: the program calls Fortran (`@fortran`), which links gfortran's runtime, and there is no gfortran at $gfortran; install gfortran or set NEX_GFORTRAN"
+
+    if !exists(gfortran) then return Err(missing)
+
+    for lib in ["libgfortran.dylib", "libgfortran.so"]
+        val found = tool(gfortran, [s"-print-file-name=$lib"], Inherit)?.trim()
+
+        // gfortran answers the bare name where it has no such file.
+        if found == lib || !exists(found) then continue
+
+        val dir = dir_of(found)
+        var out: Buf[string] = buf()
+
+        out.push(s"-L$dir")
+        out.push("-lgfortran")
+        out.push(s"-Wl,-rpath,$dir")
+        return Ok(out)
+
+    Err(s"nex: the program calls Fortran (`@fortran`), which links gfortran's runtime, and $gfortran finds no libgfortran")
+
 // An MLIR module lowered to LLVM IR in `work`; the file's path.
 private translate(mlir: string, work: string, tc: Toolchain) -> Result[string, string]
     val input = s"$work/program.mlir"
@@ -163,6 +195,11 @@ lower_module(mlir: string, out: string, work: string, tc: Toolchain, links: []co
 
     if uses_blas(mlir)
         for a in blas_links()
+            args.push(a)
+
+    if calls_fortran(mlir)
+        // The gfortran at `NEX_GFORTRAN`, else Homebrew's.
+        for a in fortran_runtime(get_or("NEX_GFORTRAN", "/opt/homebrew/bin/gfortran"))?
             args.push(a)
 
     args.push("-lm")

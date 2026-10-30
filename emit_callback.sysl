@@ -15,6 +15,10 @@
 // address of a slot in the caller's frame holding the function value, borrowed for the call: the
 // inner half calls the value's code with its environment, so one trampoline serves every callback of
 // one C type.
+//
+// **A Fortran procedure's callback takes the address of each argument** (DESIGN §10.6): its trampoline
+// loads each into the frame, a `logical` as its 4 bytes, and returns a `logical` result as 4 bytes. A
+// C extern named for one is called through its trampoline, since C takes the values themselves.
 
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
@@ -27,19 +31,25 @@ struct CCallback
 
 impl Emitter
     // The callback argument `a` for a parameter of type `t`, as C receives it.
-    c_callback(*self, a: TExpr, t: Ty, with_data: bool) -> CCallback
+    // A Fortran procedure's callback (`fortran`) is passed its arguments by reference, so a C extern
+    // named for it is called through a trampoline too.
+    c_callback(*self, a: TExpr, t: Ty, with_data: bool, fortran: bool) -> CCallback
         val sig = callback_sig(t)
 
         if with_data
             val slot = self.alloca(CLOSURE)
 
             self.op(s"llvm.store ${self.ex(a)}, $slot : $CLOSURE, !llvm.ptr")
-            return CCallback(self.trampoline(a.span, sig, ""), slot)
+            return CCallback(self.trampoline(a.span, sig, "", false), slot)
 
         val code = *a.kind match
             TFnRef(name) ->
                 self.find_extern(name) match
-                    Some(x) -> return CCallback(self.c_function(a.span, x), "")
+                    Some(x) ->
+                        if !fortran then return CCallback(self.c_function(a.span, x), "")
+
+                        self.extern_fn_value(a.span, x)
+                        return CCallback(self.trampoline(a.span, sig, s"r.${x.name}", true), "")
                     None -> ()
 
                 self.fn_value(a.span, name)
@@ -51,7 +61,7 @@ impl Emitter
                 self.later(a.span, "this callback")
                 return CCallback(self.def("llvm.mlir.zero : !llvm.ptr"), "")
 
-        CCallback(self.trampoline(a.span, sig, code), "")
+        CCallback(self.trampoline(a.span, sig, code, fortran), "")
 
     // The address of the C function `x`.
     private c_function(*self, span: Span, x: TExtern) -> string
@@ -61,16 +71,19 @@ impl Emitter
         self.def(s"builtin.unrealized_conversion_cast $c : $fty to !llvm.ptr")
 
     // The address of the trampoline for a callback of type `sig` calling `code`, or with `code` empty,
-    // the function value its user data holds.
-    private trampoline(*self, span: Span, sig: &FnSig, code: string) -> string
+    // the function value its user data holds. A Fortran one (`fortran`) takes each argument's address.
+    private trampoline(*self, span: Span, sig: &FnSig, code: string, fortran: bool) -> string
+        // Each argument as the frame holds it, by value: a Fortran `logical` as its 4 bytes.
         var ctys: Buf[string] = buf()
+        var heads: Buf[string] = buf()
 
         for t in sig.params
-            ctys.push(self.c_param_ty(span, t, Mode.Read))
+            ctys.push(if fortran && is_logical_ty(t) then "i32" else self.c_param_ty(span, t, Mode.Read))
+            heads.push(if fortran then "!llvm.ptr" else ctys[ctys.len() - 1])
 
-        val rt = self.c_result_ty(span, sig.ret)
-        val fty = s"(${joined(ctys)}) -> ${result_text(rt)}"
-        val key = s"cb $code $fty"
+        val rt = self.ext_result_ty(span, sig.ret, fortran)
+        val fty = s"(${joined(heads)}) -> ${result_text(rt)}"
+        val key = s"cb${if fortran then " fortran" else ""} $code $fty"
         var k = self.wrappers.len()
 
         for j in 0..<self.wrappers.len()
@@ -78,22 +91,23 @@ impl Emitter
 
         if k == self.wrappers.len()
             self.wrappers.push(key)
-            self.callback_code(span, s"cb.$k", sig, code, ctys, rt)
+            self.callback_code(span, s"cb.$k", sig, code, ctys, rt, fortran)
 
         val c = self.def(s"func.constant @\"cb.$k\" : $fty")
 
         self.def(s"builtin.unrealized_conversion_cast $c : $fty to !llvm.ptr")
 
     // The trampoline `name` and its inner half.
-    private callback_code(*self, span: Span, name: string, sig: &FnSig, code: string, ctys: Buf[string], rt: string)
-        // The frame: each argument but the user data, as C passed it, then the result.
+    private callback_code(*self, span: Span, name: string, sig: &FnSig, code: string, ctys: Buf[string], rt: string, fortran: bool)
+        // The frame: each argument but the user data, as C passed it or as a Fortran caller's address
+        // holds it, then the result.
         var fields: Buf[string] = buf()
         var field: Buf[usize] = buf()
         var head: Buf[string] = buf()
         var data = "%null"
 
         for k in 0..<sig.params.len()
-            head.push(s"%c$k: ${ctys[k]}${c_ext(sig.params[k], Mode.Read)}")
+            head.push(if fortran then s"%c$k: !llvm.ptr" else s"%c$k: ${ctys[k]}${c_ext(sig.params[k], Mode.Read)}")
             field.push(fields.len())
 
             if is_c_ptr_ty(sig.params[k]) then data = s"%c$k" else fields.push(ctys[k])
@@ -113,7 +127,12 @@ impl Emitter
         else outer += s"    %one = arith.constant 1 : i64\n    %f = llvm.alloca %one x $frame : (i64) -> !llvm.ptr\n$slots"
 
         for k in 0..<sig.params.len()
-            if !is_c_ptr_ty(sig.params[k]) then outer += s"    llvm.store %c$k, %p${field[k]} : ${ctys[k]}, !llvm.ptr\n"
+            if is_c_ptr_ty(sig.params[k]) then continue
+
+            if fortran
+                outer += s"    %v$k = llvm.load %c$k : !llvm.ptr -> ${ctys[k]}\n    llvm.store %v$k, %p${field[k]} : ${ctys[k]}, !llvm.ptr\n"
+            else
+                outer += s"    llvm.store %c$k, %p${field[k]} : ${ctys[k]}, !llvm.ptr\n"
 
         if rt != "" then outer += s"    %z = llvm.mlir.zero : $rt\n    llvm.store %z, %p$result : $rt, !llvm.ptr\n"
 
@@ -142,6 +161,12 @@ impl Emitter
                 Complex(b) ->
                     inner += nex_complex_text(s"%a$k", s"%c$k", ctys[k], b)
                     args.push(s"%a$k")
+                Bool ->
+                    if ctys[k] == "i32"
+                        inner += s"    %z$k = arith.constant 0 : i32\n    %a$k = arith.cmpi ne, %c$k, %z$k : i32\n"
+                        args.push(s"%a$k")
+                    else
+                        args.push(s"%c$k")
                 _ -> args.push(s"%c$k")
 
             tys.push(self.ty(span, t))
@@ -163,11 +188,17 @@ impl Emitter
                 Complex(b) ->
                     inner += c_complex_text("%w", "%v", rt, b)
                     "%w"
+                Bool ->
+                    if rt == "i32"
+                        inner += "    %w = arith.extui %v : i1 to i32\n"
+                        "%w"
+                    else
+                        "%v"
                 _ -> "%v"
 
             inner += s"    llvm.store $w, %p$result : $rt, !llvm.ptr\n"
 
-        val res = if rt == "" then "" else s" -> ($rt${c_ext(sig.ret, Mode.Read)})"
+        val res = if rt == "" then "" else s" -> ($rt${result_ext(sig.ret, fortran)})"
 
         self.funcs.push(s"  func.func private @\"$name\"(${joined(head)})$res {\n$outer  }\n\n")
         self.funcs.push(s"  func.func private @\"${name}.in\"(%env: !llvm.ptr, %f: !llvm.ptr) {\n${inner}    func.return\n  }\n\n")

@@ -27,6 +27,11 @@
 // the call the block is scattered back over an `inout` window (`nex_c_scatter`) or freed. A
 // `@strided` parameter is never copied.
 //
+// **A `@fortran` extern takes every argument by address** (DESIGN §10.6): a read-mode scalar is the
+// address of a temporary holding it, a `bool` as gfortran's 4-byte `logical` (an `inout` one copied
+// back after the call), and each string's length in bytes follows the declared arguments as an `i64`.
+// Arrays cross as they do to C. A `logical` result is 4 bytes, true where it is not zero.
+//
 // The libraries and frameworks the externs `@link` are written as `// nex.link` lines before the
 // module, which the driver reads (`driver.sysl`).
 
@@ -77,13 +82,17 @@ impl Emitter
 
         None
 
-    // The `// nex.link` lines for every extern's `@link`, each once.
+    // The `// nex.link` lines for every extern's `@link`, each once, and `// nex.fortran` where an
+    // extern is `@fortran`, for which the driver links gfortran's runtime.
     link_lines(*self) -> string
         var seen: Buf[string] = buf()
+        var fortran = false
 
         for d in self.prog.decls
             d match
                 ExternDecl(x) ->
+                    if x.fortran then fortran = true
+
                     for l in x.links
                         if !contains_text(seen, s"-l$l") then seen.push(s"-l$l")
 
@@ -96,6 +105,7 @@ impl Emitter
         for s in seen
             out += s"// nex.link $s\n"
 
+        if fortran then out += "// nex.fortran\n"
         if contains_text(self.declared, BLAS_MARK) then out += "// nex.blas\n"
 
         out
@@ -114,6 +124,10 @@ impl Emitter
         var datas: Buf[string] = buf()
         var callbacks = false
         var next = 0
+        // For a Fortran procedure: each string's length in bytes, and each `inout` `bool`'s place and
+        // the `logical` temporary it crosses in, in pairs.
+        var lengths: Buf[string] = buf()
+        var logicals: Buf[string] = buf()
 
         for j in 0..<x.params.len()
             datas.push("")
@@ -128,7 +142,7 @@ impl Emitter
             next += 1
 
             if is_callback_ty(x.params[j])
-                val cb = self.c_callback(a, x.params[j], has_data(x.partner, j))
+                val cb = self.c_callback(a, x.params[j], has_data(x.partner, j), x.fortran)
 
                 vals.push(cb.code)
                 datas.set(j, cb.data)
@@ -140,10 +154,21 @@ impl Emitter
                     if is_arr(place.ty)
                         windows.push(self.open_window(place, x.strided[j], &roots))
                         vals.push("")
+                    elif x.fortran && is_logical_ty(place.ty)
+                        // A `logical` is 4 bytes to Fortran: the place's value crosses in a temporary
+                        // and is stored back after the call.
+                        val p = self.place_ptr(place)
+                        val slot = self.fortran_temp(a.span, self.def(s"llvm.load $p : !llvm.ptr -> i1"), place.ty)
+
+                        logicals.push(p)
+                        logicals.push(slot)
+                        vals.push(slot)
                     else
                         vals.push(self.place_ptr(place))
                 _ ->
                     val v = self.ex(a)
+
+                    if x.fortran && is_string(x.params[j]) then lengths.push(self.call("nex_str_bytes", v, "!llvm.ptr", "i64"))
 
                     vals.push(base_of(x.params[j]) match
                         Array(_, _) ->
@@ -158,16 +183,22 @@ impl Emitter
 
                             self.op(s"llvm.store $v, $slot : $ty, !llvm.ptr")
                             slot
-                        Complex(b) -> self.c_complex(v, b)
-                        _ -> v)
+                        Str -> v
+                        _ -> if x.fortran then self.fortran_temp(a.span, v, x.params[j])
+                        else base_of(x.params[j]) match
+                            Complex(b) -> self.c_complex(v, b)
+                            _ -> v)
 
         for j in 0..<x.params.len()
             x.partner[j] match
                 Some(f) -> vals.set(j, datas[f])
                 None -> ()
 
+        for n in lengths
+            vals.push(n)
+
         val tys = self.declare_c(span, x)
-        val rt = self.c_result_ty(span, ret)
+        val rt = self.ext_result_ty(span, ret, x.fortran)
 
         // A callback's trap is raised once C has returned (`runtime/trap.sysl`).
         if callbacks then self.call("nex_cb_begin", "", "", "")
@@ -179,26 +210,62 @@ impl Emitter
 
         self.give_back(arrays)
 
+        for k in 0..<logicals.len() / 2
+            val w = self.def(s"llvm.load ${logicals[2 * k + 1]} : !llvm.ptr -> i32")
+
+            self.op(s"llvm.store ${self.def(s"arith.cmpi ne, $w, ${self.def("arith.constant 0 : i32")} : i32")}, ${logicals[2 * k]} : i1, !llvm.ptr")
+
         if callbacks then self.call("nex_cb_end", "", "", "")
 
         value
     end extern_call
 
-    // The C function `x` declared by its symbol, once; the C types of its parameters.
+    // The C function `x` declared by its symbol, once; the C types of its parameters. A Fortran
+    // procedure takes an address for each, then a `size_t` for each string's length.
     declare_c(*self, span: Span, x: TExtern) -> Buf[string]
         var tys: Buf[string] = buf()
         var decl: Buf[string] = buf()
 
         for j in 0..<x.params.len()
+            if x.fortran
+                tys.push("!llvm.ptr")
+                decl.push("!llvm.ptr")
+                continue
+
             val t = self.c_param_ty(span, x.params[j], x.modes[j])
 
             tys.push(t)
             decl.push(t + c_ext(x.params[j], x.modes[j]))
 
-        val rt = self.c_result_ty(span, x.ret)
+        if x.fortran
+            for t in x.params
+                if is_string(t)
+                    tys.push("i64")
+                    decl.push("i64")
 
-        self.declare(s"c.${x.symbol}", s"func.func private @\"${x.symbol}\"(${joined(decl)})${if rt == "" then "" else s" -> ($rt${c_ext(x.ret, Mode.Read)})"}")
+        val rt = self.ext_result_ty(span, x.ret, x.fortran)
+
+        self.declare(s"c.${x.symbol}", s"func.func private @\"${x.symbol}\"(${joined(decl)})${if rt == "" then "" else s" -> ($rt${result_ext(x.ret, x.fortran)})"}")
         tys
+
+    // The MLIR type of a result of type `t` as C, or a Fortran procedure where `fortran`, gives it: a
+    // Fortran `logical` is gfortran's default kind, 4 bytes.
+    ext_result_ty(*self, span: Span, t: Ty, fortran: bool) -> string
+        if fortran && is_logical_ty(t) then return "i32"
+
+        self.c_result_ty(span, t)
+
+    // The value `v` of a scalar argument of type `t` to a Fortran procedure, stored in a temporary
+    // whose address crosses: a complex as its parts, a `bool` as a default `logical`.
+    private fortran_temp(*self, span: Span, v: string, t: Ty) -> string
+        val (w, ty) = base_of(t) match
+            Complex(b) -> (self.c_complex(v, b), s"!llvm.array<2 x f$b>")
+            Bool -> (self.def(s"arith.extui $v : i1 to i32"), "i32")
+            _ -> (v, self.ty(span, t))
+        val slot = self.alloca(ty)
+
+        self.op(s"llvm.store $w, $slot : $ty, !llvm.ptr")
+        slot
 
     // The `inout` array place `place` opened: its root, numbered in `roots`, which gains it unless an
     // earlier argument of the call holds the same one, and the slices opened from it to the window.
@@ -384,13 +451,15 @@ impl Emitter
 
             self.op("}")
 
-    // A C result `r` of type `rt` as a value of `ret`: a complex from the struct of its parts.
+    // A C result `r` of type `rt` as a value of `ret`: a complex from the struct of its parts, a
+    // Fortran `logical` true where it is not zero.
     c_value(*self, r: string, rt: string, ret: Ty) -> string = base_of(ret) match
         Complex(b) ->
             val re = self.def(s"llvm.extractvalue $r[0] : $rt")
             val im = self.def(s"llvm.extractvalue $r[1] : $rt")
 
             self.def(s"complex.create $re, $im : complex<f$b>")
+        Bool -> if rt == "i32" then self.def(s"arith.cmpi ne, $r, ${self.def("arith.constant 0 : i32")} : i32") else r
         _ -> r
 
     // The array buffer `m` of type `t` as C receives it. Unless the parameter is `strided`, a buffer
@@ -539,6 +608,17 @@ c_ext(t: Ty, mode: Mode) -> string
         Int(b, signed) -> if b < 32 then (if signed then " {llvm.signext}" else " {llvm.zeroext}") else ""
         Bool -> " {llvm.zeroext}"
         _ -> ""
+
+// The extension of a result of type `t`: none for a Fortran `logical`, which is 32 bits.
+result_ext(t: Ty, fortran: bool) -> string = if fortran && is_logical_ty(t) then "" else c_ext(t, Mode.Read)
+
+is_logical_ty(t: Ty) -> bool = base_of(t) match
+    Bool -> true
+    _ -> false
+
+is_string(t: Ty) -> bool = base_of(t) match
+    Str -> true
+    _ -> false
 
 private contains_text(xs: Buf[string], x: string) -> bool
     for y in xs

@@ -1,0 +1,20 @@
+// Fortran 2003 `bind(c)` procedures are C functions to nex (DESIGN §10.6): declared as any C
+// extern, with `@symbol` naming the `bind(c, name=…)` name where it differs from the nex one. Their
+// `value` arguments cross by value and their arrays by pointer; a `logical(c_bool)` is a `bool`.
+
+@link("nexfort")
+extern def nf_hypot(x: real, y: real): real
+
+@link("nexfort")
+@symbol("nf_fill_bc")
+extern def fill(n: int32, x: inout [real], v: real, neg: bool)
+
+def main() =
+  print(nf_hypot(3.0, 4.0))
+  print(nf_hypot(5.0, 12.0))
+
+  var x: [real] = zeros(4)
+  fill(4, x, 2.5, false)
+  print(x)
+  fill(2, x[3..], 1.5, true)
+  print(x)
