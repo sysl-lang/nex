@@ -223,7 +223,8 @@ private[nex] owned(r: Value) -> &Arr
 
     val b: &Arr = Arr(Store(v, false), a.offset, a.ext, a.str, a.shifts)
 
-    store_through(r, VArr(b))
+    // A whole array stored at a place that is not a window, which cannot trap.
+    _ = store_through(r, VArr(b))
     b
 
 // -- places inside arrays -----------------------------------------------------------------------------

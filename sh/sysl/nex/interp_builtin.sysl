@@ -303,6 +303,32 @@ impl Interp
 
                 return (v) -> TUPLE_OPEN + fields_text(parts, v) + TUPLE_CLOSE
             Nominal(name, _) ->
+                // A type holding itself through an array reaches its own printer while it is being
+                // made, and is given one that calls it once it is.
+                for (n, slot) in self.printing
+                    if n == name
+                        return (v) ->
+                            val f = slot.p[0]
+
+                            f(v)
+
+                val slot: &PrinterSlot = PrinterSlot(buf())
+
+                self.printing.push((name, slot))
+
+                val p = self.nominal_printer(name, t)
+
+                self.printing.pop()
+                slot.p.push(p)
+                return p
+            _ -> ()
+
+        (v) -> scalar_text(v, t)
+
+    // What spells a struct or an enum named `name`.
+    nominal_printer(*self, name: string, t: Ty) -> Printer
+        t match
+            Nominal(_, _) ->
                 self.struct_of(name) match
                     Some(s) ->
                         val parts = self.printers(field_tys(s.fields))
@@ -354,6 +380,10 @@ impl Interp
 end Interp
 
 private[nex] type Printer = &Fn(Value) -> string
+
+// The printer of a type, once it is made.
+private[nex] struct PrinterSlot
+    p: Buf[Printer]
 
 // The fields of `v` spelled by `parts`, separated.
 private fields_text(parts: Buf[Printer], v: Value) -> string

@@ -345,7 +345,7 @@ not_interpreted_is_exact()
     var running = ""
 
     for (c, stage) in NOT_INTERPRETED
-        assert(stage == "I2" || stage == "I3" || stage == "I4" || stage == "I5", s"`$c`: `$stage` is no stage of the interpreter")
+        assert(stage == "I2" || stage == "I3" || stage == "I3-LA" || stage == "I4" || stage == "I5", s"`$c`: `$stage` is no stage of the interpreter")
         assert(!listed(c), s"`$c` is in COMPILED_ONLY too, which already keeps it from the interpreter")
 
         var found = sources.contains(s"\n$c()\n") || sources.contains(s"\"$c\"")

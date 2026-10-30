@@ -267,7 +267,10 @@ impl Emitter
         for d in dims
             total = self.def(s"arith.muli $total, $d : index")
 
-        self.trap_if(self.def(s"arith.cmpi ne, $total, ${self.dim(span, f, ft, 1)} : index"), RESHAPE_SIZE)
+        val n = self.dim(span, f, ft, 1)
+        val bad = self.def(s"arith.cmpi ne, $total, $n : index")
+
+        self.trap_if(bad, RESHAPE_SIZE)
 
         val r = dims.len()
         val dt = self.view_ty(Ty.Array(elem_of(t), dynamic_axes(r)))
@@ -278,9 +281,11 @@ impl Emitter
         var sizes: Buf[string] = buf()
         var k = r
 
+        // Where the trap is taken the shape is the source's length on the first axis and 1 on the
+        // rest, so no folding of a shape known statically meets an expansion of the wrong size.
         while k > 0
             k -= 1
-            sizes.push(dims[k])
+            sizes.push(self.def(s"arith.select $bad, ${if k == 0 then n else self.index_const(1)}, ${dims[k]} : index"))
 
         for j in 0..<r
             if j > 0 then group += ", "

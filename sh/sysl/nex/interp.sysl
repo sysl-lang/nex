@@ -54,7 +54,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
         kept.push(a)
 
     val m: &Machine = Machine(kept, write, fpe_trap, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), None, false, buf(), buf(), buf())
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), buf(), None, false, buf(), buf(), buf())
     val init = it.program(test)
 
     if it.diags.len() > 0
@@ -70,7 +70,7 @@ interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit,
 // Nothing is run.
 interpretable(p: TProgram) -> Buf[Diagnostic]
     val m: &Machine = Machine(buf(), (s, text) -> (), false, Cells(buf()), buf(), buf(), 0)
-    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), None, false, buf(), buf(), buf())
+    var it = Interp(p, m, buf(), buf(), buf(), 0, buf(), buf(), buf(), None, false, buf(), buf(), buf())
 
     it.program(None)
     shut(m)
@@ -219,6 +219,8 @@ private[nex] struct Interp
     // The slot holding the target of each index list being compiled, innermost last: what `end`
     // reads.
     ends: Buf[usize]
+    // The structs and enums whose printers are being made, each with where its printer goes.
+    printing: Buf[(string, &PrinterSlot)]
     // `main`'s parameter, the program's arguments.
     args_local: Option[usize]
     // Whether the function being compiled has reported what it lacks; one diagnostic is enough.

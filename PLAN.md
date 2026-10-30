@@ -502,6 +502,20 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       frame. Printing an aggregate takes its punctuation from the runtime, which the emitter shares.
     - **I3 — arrays, views and the prelude**: rank-N arrays, slices as views, `inout` windows,
       element-wise expressions, the array prelude and the linear-algebra prelude, computed natively.
+      Built, but for `@` and LAPACK (I3-LA, on the runtime's `la.sysl`): an array is a window onto
+      shared storage — an offset, and an extent and a stride per nex axis — so a slice, a reversed
+      axis and an `origin` view copy nothing (`interp_array.sysl`). Storage is copied when a place
+      writes it while it is shared: reading an array out of a place into anything that can keep it
+      marks the storage shared, and a read that lives only while one operation runs (an operand, an
+      argument, an index's target, where nothing evaluated after it writes a local) marks nothing.
+      The copy keeps the layout, so an `inout` window, which is storage positions in the place's
+      array, stays a window of it. Element-wise nodes run node by node as the emitter's
+      `linalg.generic`s do, a scalar body over frame slots for elemental functions, `map` and
+      conversions; `real64` `+ - * /` loop over the numbers directly. The reductions block and
+      combine as the compiled ones do (`interp_array_prelude.sysl`), so a `sum` has the same bits.
+      Measured (`bench`-style kernel, 200 000 elements, 50 passes of two element-wise statements and
+      a `sum`, then an element loop): 0.02 s compiled, 0.64 s interpreted, about 30× — the
+      element-wise statements dominate, each a pass over boxed values.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`.
