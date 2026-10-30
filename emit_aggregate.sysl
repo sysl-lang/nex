@@ -380,8 +380,6 @@ impl Emitter
     // Whether the aggregates `a` and `b` of type `t` are equal: every field equal, and for an enum
     // the same variant first.
     aggregate_equal(*self, span: Span, a: string, b: string, t: Ty) -> string
-        if self.holds_array(t) then return self.unsupported(span, s"`==` on a struct, tuple or enum holding an array (${show_ty(t)})")
-
         val m = self.ty(span, t)
 
         t match
@@ -398,41 +396,77 @@ impl Emitter
 
         self.unsupported(span, s"`==` on ${show_ty(t)}")
 
-    // Whether an aggregate of type `t` has an array among its parts, at any depth. No struct or enum
-    // holds itself (DESIGN §11.4), so the walk ends.
-    holds_array(*self, t: Ty) -> bool
-        t match
-            Array(_, _) -> return true
-            Tuple(es) ->
-                for e in es
-                    if self.holds_array(e) then return true
-            Nominal(name, _) ->
-                self.struct_of(name) match
-                    Some(s) ->
-                        for f in s.fields
-                            if self.holds_array(f.ty) then return true
-                    None -> ()
-
-                self.enum_of(name) match
-                    Some(e) ->
-                        for v in e.variants
-                            for f in v.fields
-                                if self.holds_array(f.ty) then return true
-                    None -> ()
-            _ -> ()
-
-        false
-
     // Field by field, each compared as `==` compares its type, the results anded.
     fields_equal(*self, span: Span, a: string, b: string, m: string, ts: Buf[Ty]) -> string
         var all = self.def("arith.constant true")
 
         for k in 0..<ts.len()
-            val eq = self.binary(span, "==", self.field(a, m, k, ts[k]), self.field(b, m, k, ts[k]), ts[k])
+            val eq = self.part_equal(span, self.field(a, m, k, ts[k]), self.field(b, m, k, ts[k]), ts[k])
 
             all = self.def(s"arith.andi $all, $eq : i1")
 
         all
+
+    // Whether two parts of an aggregate of type `t` are equal: an array as `all(a == b)`, anything
+    // else as its own `==` compares it.
+    part_equal(*self, span: Span, a: string, b: string, t: Ty) -> string = t match
+        Array(_, _) -> self.array_equal(span, a, b, t)
+        _ -> self.binary(span, "==", a, b, t)
+
+    // Whether the arrays `a` and `b` of type `t` hold the same shape and equal elements. Arrays of
+    // different shapes are unequal rather than an error (DESIGN §11.4), so the elements are compared
+    // only where every extent agrees.
+    array_equal(*self, span: Span, a: string, b: string, t: Ty) -> string
+        val items = is_items(t)
+
+        if items && rank_of(t) != 1 then return self.unsupported(span, s"`==` on a ${show_ty(t)} inside an aggregate")
+
+        val ea = self.extents(span, a, t)
+        val eb = self.extents(span, b, t)
+        var same = self.def("arith.constant true")
+
+        for k in 0..<ea.len()
+            same = self.def(s"arith.andi $same, ${self.def(s"arith.cmpi eq, ${ea[k]}, ${eb[k]} : index")} : i1")
+
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if $same -> (i1) {")
+
+        val n = self.nest_open(ea, self.def("arith.constant true"), "i1")
+        val held = self.mark()
+        val et = elem_of(t)
+        var x = ""
+        var y = ""
+
+        if items
+            val k = self.def(s"arith.addi ${self.to_i64(n.ivs[0])}, %one : i64")
+
+            x = self.any_element(span, a, t, k)
+            y = self.any_element(span, b, t, k)
+        else
+            val tt = self.tensor_ty(span, t)
+
+            x = self.def(s"tensor.extract $a[${joined(n.ivs)}] : $tt")
+            y = self.def(s"tensor.extract $b[${joined(n.ivs)}] : $tt")
+
+        val eq = self.part_equal(span, x, y, et)
+
+        self.release_from(held)
+        self.op(s"scf.yield ${self.nest_close(n, self.def(s"arith.andi ${n.accs[n.accs.len() - 1]}, $eq : i1"))} : i1")
+        self.op("} else {")
+        self.op(s"scf.yield ${self.def("arith.constant false")} : i1")
+        self.op("}")
+        r
+    end array_equal
+
+    // The extents of the array `v` of type `t` as `index` values, tensor order.
+    extents(*self, span: Span, v: string, t: Ty) -> Buf[string]
+        if !is_items(t) then return self.dims(span, v, t)
+
+        var out: Buf[string] = buf()
+
+        out.push(self.def(s"arith.index_cast ${self.items_count(v)} : i64 to index"))
+        out
 
     // The same tag, then the payloads of that variant compared field by field.
     variants_equal(*self, span: Span, a: string, b: string, t: Ty, e: TEnum) -> string
@@ -453,9 +487,11 @@ impl Emitter
 
             self.op(s"case $tag {")
 
+            val held = self.mark()
             val eq = if fields.len() == 0 then self.def("arith.constant true")
                      else self.fields_equal(span, self.payload(a, t, fields), self.payload(b, t, fields), self.payload_ty(span, fields), field_types(fields))
 
+            self.release_from(held)
             self.op(s"scf.yield $eq : i1")
             self.op("}")
 

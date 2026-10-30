@@ -1,0 +1,44 @@
+struct Grid
+  cells: [real]
+
+struct Board
+  name: string
+  m: [integer; :, :]
+
+struct Fixed
+  m: [real; 2, 2]
+
+struct Tagged
+  tags: [string]
+
+struct Layer
+  grid: Grid
+  board: Board
+
+enum Field =
+  Samples(xs: [real])
+  Matrix(m: [integer; :, :], scale: real)
+  Blank
+
+def same[T: Eq](a: T, b: T): bool = a == b
+
+def main() =
+  val g = Grid([1.0, 2.0, 3.0])
+  print((g == Grid([1.0, 2.0, 3.0]), g == Grid([1.0, 2.0, 4.0]), g != Grid([1.0, 2.0, 4.0])))
+  print((g == Grid([1.0, 2.0]), g != Grid([1.0, 2.0]), Grid([]) == Grid([]), Grid([]) == g))
+  print((Grid([nan]) == Grid([nan]), Grid([nan]) != Grid([nan])))
+  val b = Board("b", [[1, 2], [3, 4]])
+  print((b == Board("b", [[1, 2], [3, 4]]), b == Board("b", [[1, 2], [3, 5]]), b == Board("c", [[1, 2], [3, 4]])))
+  print((b == Board("b", [[1, 2, 3], [4, 5, 6]]), b == Board("b", [[1, 2]]), b == Board("b", [[1], [2], [3], [4]])))
+  print((Fixed([[1.0, 0.0], [0.0, 1.0]]) == Fixed([[1.0, 0.0], [0.0, 1.0]]), Fixed([[1.0, 0.0], [0.0, 1.0]]) == Fixed([[1.0, 0.0], [1.0, 1.0]])))
+  val t = Tagged(["a", s"b${1 + 1}"])
+  print((t == Tagged(["a", "b2"]), t == Tagged(["a", "b3"]), t == Tagged(["a"]), t != Tagged(["a", "b2", "c"])))
+  val l = Layer(g, b)
+  print((l == Layer(Grid([1.0, 2.0, 3.0]), b), l == Layer(g, Board("b", [[1, 2], [3, 4], [5, 6]])), l != Layer(Grid([1.0]), b)))
+  val p = (1, g, [true, false])
+  print((p == (1, g, [true, false]), p == (1, g, [true, true]), p == (1, g, [true]), (2, g, [true, false]) == p))
+  val s: Field = Samples([1.0, 2.0])
+  print((s == Samples([1.0, 2.0]), s == Samples([1.0]), s == Samples([1.0, 3.0]), s == Blank, Blank == Blank))
+  val mx = Matrix([[1, 2], [3, 4]], 2.0)
+  print((mx == Matrix([[1, 2], [3, 4]], 2.0), mx == Matrix([[1, 2], [3, 4]], 3.0), mx == Matrix([[1, 2, 3, 4]], 2.0), mx == s))
+  print((same(g, Grid([1.0, 2.0, 3.0])), same(t, Tagged(["a"])), same((g, t), (g, t))))
