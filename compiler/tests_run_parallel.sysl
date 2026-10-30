@@ -127,10 +127,10 @@ par_run_links_openmp_only_when_parallel()
     build(b, "def main() =\n  val x: [real] = linspace(0.0, 1.0, 10)\n  print(sum(x))\n", seq)
     build(b, "def main() =\n  val x: [real] = linspace(0.0, 1.0, 10)\n  print(parallel sum(x))\n", par)
 
-    val seq_syms = capture("/usr/bin/nm", ["-u", seq], stderr = true).unwrap().text
-    val par_syms = capture("/usr/bin/nm", ["-u", par], stderr = true).unwrap().text
-    val seq_libs = capture("/usr/bin/otool", ["-L", seq], stderr = true).unwrap().text
-    val par_libs = capture("/usr/bin/otool", ["-L", par], stderr = true).unwrap().text
+    val seq_syms = capture("nm", ["-u", seq], stderr = true).unwrap().text
+    val par_syms = capture("nm", ["-u", par], stderr = true).unwrap().text
+    val seq_libs = linked_libraries(seq)
+    val par_libs = linked_libraries(par)
 
     finish(b)
     assert(!seq_syms.contains("omp") && !seq_libs.contains("libomp"), seq_syms)

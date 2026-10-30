@@ -16,8 +16,9 @@
 // a `@fortran` extern links gfortran's runtime**, which a `// nex.fortran` line says, and **a program
 // importing `mpi` links the found MPI and the module's shim**, which a `// nex.mpi` line says.
 //
-// LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm`; the runtime at `NEX_RUNTIME`, else
-// `libnex_rt.a` beside the `nex` executable.
+// LLVM is found at `NEX_LLVM_HOME`, else Homebrew's `opt/llvm` or apt.llvm.org's `/usr/lib/llvm-23`,
+// else above an `mlir-opt` on `PATH` (`llvm_home_in`); the runtime at `NEX_RUNTIME`, else
+// `libnex_rt.a` beside the `nex` executable; gfortran at `NEX_GFORTRAN`, else on `PATH`.
 
 import nex.sh.sysl.nex.*
 import nex_runtime.sh.sysl.nex_runtime.{la_libraries, la_pkg_config}
@@ -45,9 +46,50 @@ struct Toolchain
     llvm_bin: string
     runtime: string
 
+// Where an LLVM with MLIR is looked for when `NEX_LLVM_HOME` does not say, in order: Homebrew's
+// on macOS, apt.llvm.org's on Linux, then the other.
+#if macos
+val LLVM_HOMES: []const string = ["/opt/homebrew/opt/llvm", "/usr/lib/llvm-23"]
+#else
+val LLVM_HOMES: []const string = ["/usr/lib/llvm-23", "/opt/homebrew/opt/llvm"]
+#endif
+
+// The LLVM a program is lowered with: `given` (`NEX_LLVM_HOME`) where it is set; else the first of
+// `homes` holding `bin/mlir-opt`; else the directory above the `bin/` of an `mlir-opt` on `search`
+// (a `PATH`, as `module load llvm` leaves one); else the first of `homes`, which the missing
+// `mlir-opt` is then reported against.
+llvm_home_in(given: string, homes: []const string, search: string) -> string
+    if given != "" then return given
+
+    for h in homes
+        if exists(s"$h/bin/mlir-opt") then return h
+
+    on_path_in("mlir-opt", search) match
+        Some(found) ->
+            val bin = dir_of(found)
+
+            if bin.ends_with("/bin") then return dir_of(bin)
+        None -> ()
+
+    if homes.len > 0 then homes[0] else ""
+
+// The LLVM this environment names (`llvm_home_in`).
+llvm_home() -> string = llvm_home_in(get_or("NEX_LLVM_HOME", ""), LLVM_HOMES, get_or("PATH", ""))
+
+// The gfortran a `@fortran` program's runtime is found through: `given` (`NEX_GFORTRAN`) where it
+// is set; else `gfortran` on `search` (a `PATH`); else Homebrew's, which a missing one is reported
+// against.
+gfortran_in(given: string, search: string) -> string
+    if given != "" then return given
+
+    on_path_in("gfortran", search).unwrap_or("/opt/homebrew/bin/gfortran")
+
+// The gfortran this environment names (`gfortran_in`).
+gfortran_path() -> string = gfortran_in(get_or("NEX_GFORTRAN", ""), get_or("PATH", ""))
+
 // The toolchain from the environment, the runtime beside `exe` where `NEX_RUNTIME` does not name it.
 find_toolchain(exe: string) -> Result[Toolchain, string]
-    val bin = s"${get_or("NEX_LLVM_HOME", "/opt/homebrew/opt/llvm")}/bin"
+    val bin = s"${llvm_home()}/bin"
 
     if !exists(s"$bin/mlir-opt") then return Err(s"nex: no mlir-opt in $bin; set NEX_LLVM_HOME to an LLVM with MLIR")
 
@@ -84,8 +126,16 @@ mlir_of(file: string, fpe_trap: bool, opts: LoadOptions = LoadOptions(None, fals
 compile_file(file: string, out: string, work: string, tc: Toolchain, fpe_trap: bool, opts: LoadOptions = LoadOptions(None, false), links: []const string = []) -> Result[unit, string] =
     lower_module(mlir_of(file, fpe_trap, opts)?, out, work, tc, links)
 
-// The link inputs the module's `// nex.link` lines name: its externs' `@link`s.
-module_links(mlir: string) -> Buf[string]
+// Whether this machine links Apple frameworks.
+#if macos
+val FRAMEWORKS = true
+#else
+val FRAMEWORKS = false
+#endif
+
+// The link inputs the module's `// nex.link` lines name: its externs' `@link`s. A
+// `@link(framework = "…")` is refused where `frameworks` is false, as a framework is macOS's.
+module_links(mlir: string, frameworks: bool = FRAMEWORKS) -> Result[Buf[string], string]
     var out: Buf[string] = buf()
 
     for line in split(mlir, "\n")
@@ -95,10 +145,22 @@ module_links(mlir: string) -> Buf[string]
         val arg = line[12..]
 
         if arg.starts_with("-framework ")
+            if !frameworks then return Err(s"nex: `@link(framework = \"${arg[11..]}\")` names a macOS framework, and this platform has none; link the library itself with `@link(\"name\")`")
+
             out.push("-framework")
             out.push(arg[11..])
         else
             out.push(arg)
+
+    Ok(out)
+
+// A run-time search path for each search directory of `links` (`-Ldir`), so that a shared library
+// found at the link is found again when the program runs, as on macOS its install name does.
+run_paths(links: []const string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for a in links
+        if a.starts_with("-L") && a.len > 2 then out.push(s"-Wl,-rpath,${a[2..]}")
 
     out
 
@@ -303,8 +365,8 @@ mpi_link_options(mpi: Mpi) -> Buf[string]
     for a in mpi.link
         out.push(a)
 
-    for a in mpi.link
-        if a.starts_with("-L") && a.len > 2 then out.push(s"-Wl,-rpath,${a[2..]}")
+    for a in run_paths(mpi.link.view())
+        out.push(a)
 
     out
 
@@ -346,8 +408,11 @@ private find_mpirun() -> Result[string, string]
     Err("nex: --np runs the program as an MPI job, and there is no mpirun or mpiexec on PATH; load an MPI or set NEX_MPIRUN")
 
 // The file `name` in the first directory of `PATH` that has one.
-private on_path(name: string) -> Option[string]
-    for d in split(get_or("PATH", ""), ":")
+private on_path(name: string) -> Option[string] = on_path_in(name, get_or("PATH", ""))
+
+// `name` in the first directory of `search`, a colon-separated list, that has it.
+private on_path_in(name: string, search: string) -> Option[string]
+    for d in split(search, ":")
         if d != "" && exists(s"$d/$name") then return Some(s"$d/$name")
 
     None
@@ -402,18 +467,25 @@ lower_module(mlir: string, out: string, work: string, tc: Toolchain, links: []co
     for a in links
         args.push(a)
 
-    for a in module_links(mlir)
+    for a in run_paths(links)
+        args.push(a)
+
+    for a in module_links(mlir)?
         args.push(a)
 
     if uses_blas(mlir)
-        for a in blas_links()?
+        val blas = blas_links()?
+
+        for a in blas
+            args.push(a)
+
+        for a in run_paths(blas.view())
             args.push(a)
 
     args.push(UNUSED_CODE)
 
     if calls_fortran(mlir)
-        // The gfortran at `NEX_GFORTRAN`, else Homebrew's.
-        for a in fortran_runtime(get_or("NEX_GFORTRAN", "/opt/homebrew/bin/gfortran"))?
+        for a in fortran_runtime(gfortran_path())?
             args.push(a)
 
     if uses_mpi(mlir)

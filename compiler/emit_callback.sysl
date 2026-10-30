@@ -264,12 +264,23 @@ private callback_sig(t: Ty) -> &FnSig = base_of(t) match
     Fn(s) -> s
     _ -> FnSig(buf(), buf(), Void)
 
-// The lines defining `dst`, the complex `src` of `b`-bit parts as `ty`, the array or struct of its
-// parts C takes.
+// The lines defining `dst`, the complex `src` of `b`-bit parts as `ty`, the array, struct or vector
+// of its parts C takes (`c_complex_ty`).
 private c_complex_text(dst: string, src: string, ty: string, b: int) -> string
-    s"    ${dst}.re = complex.re $src : complex<f$b>\n    ${dst}.im = complex.im $src : complex<f$b>\n    ${dst}.u = llvm.mlir.undef : $ty\n    ${dst}.h = llvm.insertvalue ${dst}.re, ${dst}.u[0] : $ty\n    $dst = llvm.insertvalue ${dst}.im, ${dst}.h[1] : $ty\n"
+    var out = s"    ${dst}.re = complex.re $src : complex<f$b>\n    ${dst}.im = complex.im $src : complex<f$b>\n    ${dst}.u = llvm.mlir.undef : $ty\n"
 
-// The lines defining `dst`, the complex of `b`-bit parts from `src`, the array or struct `ty` of its
-// parts C gives.
+    if is_vector_text(ty)
+        out += s"    ${dst}.k0 = llvm.mlir.constant(0 : i32) : i32\n    ${dst}.k1 = llvm.mlir.constant(1 : i32) : i32\n"
+        out += s"    ${dst}.h = llvm.insertelement ${dst}.re, ${dst}.u[${dst}.k0 : i32] : $ty\n    $dst = llvm.insertelement ${dst}.im, ${dst}.h[${dst}.k1 : i32] : $ty\n"
+    else
+        out += s"    ${dst}.h = llvm.insertvalue ${dst}.re, ${dst}.u[0] : $ty\n    $dst = llvm.insertvalue ${dst}.im, ${dst}.h[1] : $ty\n"
+
+    out
+
+// The lines defining `dst`, the complex of `b`-bit parts from `src`, the array, struct or vector `ty`
+// of its parts C gives.
 private nex_complex_text(dst: string, src: string, ty: string, b: int) -> string
+    if is_vector_text(ty)
+        return s"    ${dst}.k0 = llvm.mlir.constant(0 : i32) : i32\n    ${dst}.k1 = llvm.mlir.constant(1 : i32) : i32\n    ${dst}.re = llvm.extractelement ${src}[${dst}.k0 : i32] : $ty\n    ${dst}.im = llvm.extractelement ${src}[${dst}.k1 : i32] : $ty\n    $dst = complex.create ${dst}.re, ${dst}.im : complex<f$b>\n"
+
     s"    ${dst}.re = llvm.extractvalue ${src}[0] : $ty\n    ${dst}.im = llvm.extractvalue ${src}[1] : $ty\n    $dst = complex.create ${dst}.re, ${dst}.im : complex<f$b>\n"

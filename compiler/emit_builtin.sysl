@@ -72,10 +72,27 @@ impl Emitter
 
             return ""
 
+        // The runtime calls the function as one of its environment giving nothing back. One that
+        // gives a value back is called through a thunk of that shape (`unit_thunk`): a value C
+        // returns in memory — an array's descriptor, on x86-64 — takes a hidden first argument
+        // the runtime's call would not pass.
         if name == "assert_traps"
             val f = self.ex(args[0])
-            val code = self.def(s"llvm.extractvalue $f[0] : $CLOSURE")
-            val env = self.def(s"llvm.extractvalue $f[1] : $CLOSURE")
+            val ret = args[0].ty match
+                Fn(sig) -> sig.ret
+                _ -> Ty.Void
+            var code = self.def(s"llvm.extractvalue $f[0] : $CLOSURE")
+            var env = self.def(s"llvm.extractvalue $f[1] : $CLOSURE")
+
+            if !is_void(ret)
+                val held = self.alloca(CLOSURE)
+
+                self.op(s"llvm.store $f, $held : $CLOSURE, !llvm.ptr")
+                val thunk = self.def(s"func.constant @\"${self.unit_thunk(span, ret)}\" : (!llvm.ptr) -> ()")
+
+                code = self.def(s"builtin.unrealized_conversion_cast $thunk : (!llvm.ptr) -> () to !llvm.ptr")
+                env = held
+
             val expected = if args.len() == 2 then self.ex(args[1]) else self.def("llvm.mlir.zero : !llvm.ptr")
 
             self.call("nex_assert_traps", s"$code, $env, $expected", "!llvm.ptr, !llvm.ptr, !llvm.ptr", "")
@@ -147,6 +164,18 @@ impl Emitter
 
         self.unsupported(span, s"`$name`")
     end builtin
+
+    // The function of one pointer, to a stored function value whose result is of type `ret`, that
+    // calls it and drops what it gives back: what `assert_traps` hands the runtime, which calls its
+    // function as `void (*)(void *)`.
+    unit_thunk(*self, span: Span, ret: Ty) -> string
+        val r = self.ty(span, ret)
+        val rb = if is_arr(ret) then self.memref_ty(span, ret) else r
+        val fty = s"(!llvm.ptr) -> ${result_text(rb)}"
+        val name = s"u.$rb"
+
+        self.declare(name, s"func.func private @\"$name\"(%p: !llvm.ptr) {\n    %c = llvm.load %p : !llvm.ptr -> $CLOSURE\n    %code = llvm.extractvalue %c[0] : $CLOSURE\n    %env = llvm.extractvalue %c[1] : $CLOSURE\n    %f = builtin.unrealized_conversion_cast %code : !llvm.ptr to $fty\n    ${if rb == "" then "" else "%v = "}func.call_indirect %f(%env) : $fty\n    func.return\n  }")
+        name
 
     // A C library function at `bits`: a `real16` computes in `real32` and rounds (DESIGN §2.1).
     libm(*self, name: string, operands: Buf[string], bits: int) -> string

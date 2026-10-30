@@ -14,6 +14,10 @@ import sysl.text.{join, replace_all, split}
 
 private val M = "def main() = ()\n"
 
+// The extension marks of a narrow C integer, where this machine's ABI widens one (`C_WIDENS`).
+private val SEXT = if C_WIDENS then " {llvm.signext}" else ""
+private val ZEXT = if C_WIDENS then " {llvm.zeroext}" else ""
+
 // -- callbacks --------------------------------------------------------------------------------------
 
 @test("a callback crosses through a trampoline of its C type, clang's widening and all; an extern passed bare is itself")
@@ -21,7 +25,7 @@ emit_callbacks()
     val m = emitted("extern def each(f: (int8, bool, c_ptr) -> complex, d: @data(f) c_ptr)\nextern def bare(f: (real) -> real)\nextern def cos(x: real): real\ndef main() =\n  val k: int8 = 2\n  each((a, b) -> if b and a > k then 1i else 0i)\n  bare(cos)\n").unwrap()
 
     assert(m.contains("func.func private @\"each\"(!llvm.ptr, !llvm.ptr)"), m)
-    assert(m.contains("(%c0: i8 {llvm.signext}, %c1: i1 {llvm.zeroext}, %c2: !llvm.ptr) -> (!llvm.struct<(f64, f64)>)"), m)
+    assert(m.contains(s"(%c0: i8${SEXT}, %c1: i1${ZEXT}, %c2: !llvm.ptr) -> (!llvm.struct<(f64, f64)>)"), m)
     assert(m.contains("func.call @nex_cb_begin()"), m)
     assert(m.contains("func.call @nex_cb_end()"), m)
     assert(m.contains("func.call @nex_cb_run("), m)
@@ -51,7 +55,7 @@ emit_extern_signatures()
 
     assert(m.starts_with("// nex.link -lm\n// nex.link -framework Accelerate\nmodule {\n"), m)
     assert(m.contains("func.func private @\"cexp\"(!llvm.array<2 x f64>) -> (!llvm.struct<(f64, f64)>)"), m)
-    assert(m.contains("func.func private @\"nf_mix\"(i8 {llvm.signext}, i16 {llvm.zeroext}, i1 {llvm.zeroext}, !llvm.array<2 x f32>, f16, !llvm.ptr, !llvm.ptr) -> (i1 {llvm.zeroext})"), m)
+    assert(m.contains(s"func.func private @\"nf_mix\"(i8${SEXT}, i16${ZEXT}, i1${ZEXT}, !llvm.array<2 x f32>, f16, !llvm.ptr, !llvm.ptr) -> (i1${ZEXT})"), m)
     assert(!m.contains("@\"mix\""), m)
 
 @test("an array parameter without @strided is gathered where C cannot address it, and given back after; a @strided one, or strip of one, never is")
@@ -83,7 +87,7 @@ emit_described()
     val decls = "extern def r(x: [*; ..], n: int8): int32\nextern def w(x: inout [*; ..])\n"
     val m = emitted(decls + "def main() =\n  val a = [1.0, 2.0, 3.0, 4.0]\n  var b = [1, 2, 3, 4]\n  var k = 1.5\n  print(r(a[4..1 by -2], 1))\n  print(r(2i, 2))\n  w(b[1..4 by 3])\n  w(k)\n  print(b)\n").unwrap()
 
-    assert(m.contains("func.func private @\"r\"(!llvm.ptr, i8 {llvm.signext}) -> (i32)"), m)
+    assert(m.contains(s"func.func private @\"r\"(!llvm.ptr, i8${SEXT}) -> (i32)"), m)
     assert(m.contains("func.func private @\"w\"(!llvm.ptr)"), m)
     assert(m.contains("!llvm.struct<(ptr, i64, i32, i32, i32, i32, array<1 x struct<(i64, i64)>>)>"), m)
     assert(m.contains("!llvm.struct<(ptr, i64, i32, i32, i32, i32, array<0 x struct<(i64, i64)>>)>"), m)
@@ -150,14 +154,20 @@ extern_abi_matches_clang()
     assert(checked >= 30, s"$checked")
 
 // The `define` or `declare` lines of LLVM IR `ir` that name a function `@nf_…`, each as its result,
-// name and parameter types, without `noundef`, parameter names or attribute groups.
+// name and parameter types, without `noundef`, parameter names or attribute groups. Also without
+// what clang writes on Linux and changes nothing at a call: `dso_local`, and `alignstack(8)` on a
+// complex's `[2 x double]`, the alignment its doubles already have on the stack.
 private declarations(ir: string, word: string) -> Buf[string]
     var out: Buf[string] = buf()
 
     for line in split(ir, "\n")
         if !line.starts_with(word) || !line.contains("@nf_") then continue
 
-        val text = replace_all(replace_all(line[word.len..], " noundef", ""), " local_unnamed_addr", "")
+        var text = line[word.len..]
+
+        for noise in [" noundef", " local_unnamed_addr", "dso_local ", " alignstack(8)"]
+            text = replace_all(text, noise, "")
+
         val close = text.last_index_of(")").unwrap()
 
         out.push(without_names(text[0..close]))
@@ -242,6 +252,9 @@ run_extern_command_links()
     val joined_after = capture(nex, ["run", src, s"-L${b.work}", "-lnexffi"], env = env, stderr = true).unwrap()
     val build = capture(nex, ["build", src, "-o", s"${b.work}/ffi", "-l", "nexffi", "-L", b.work], env = env, stderr = true).unwrap()
     val direct = capture(s"${b.work}/ffi", [], stderr = true).unwrap()
+    // The program's run-time search paths, as macOS's otool or Linux's readelf lists them.
+    val loads = if exists("/usr/bin/otool") then capture("/usr/bin/otool", ["-l", s"${b.work}/ffi"], stderr = true).unwrap().text
+                else capture("readelf", ["-d", s"${b.work}/ffi"], stderr = true).unwrap().text
     val unlinked = capture(nex, ["run", src], env = env, stderr = true).unwrap()
     val dangling = capture(nex, ["run", src, "-l"], env = env, stderr = true).unwrap()
 
@@ -250,6 +263,9 @@ run_extern_command_links()
     assert_eq(joined_after.text, "42\n")
     assert(build.status.ok(), build.err.unwrap_or(""))
     assert_eq(direct.text, "42\n")
+    // A `-L` directory is the program's run-time search path, which is how Linux finds a shared
+    // library there (`libnexffi.so` records no directory, where a dylib's install name does).
+    assert(loads.contains(b.work), loads)
     assert(unlinked.status == Status.Exited(1), s"${unlinked.status}")
     assert(unlinked.err.unwrap_or("").contains("nf_inc8"), unlinked.err.unwrap_or(""))
     assert(dangling.status == Status.Exited(1), s"${dangling.status}")
@@ -317,7 +333,7 @@ run_callbacks_leak_nothing()
 // The bench with both test libraries, the Fortran one built by gfortran; the link options. Without
 // gfortran the test skips, saying so.
 private fortran_bench() -> (Bench, Buf[string])
-    if gfortran().is_none() then skip("no gfortran at NEX_GFORTRAN or /opt/homebrew/bin/gfortran: the Fortran FFI tests compile testdata/ffi/nexfort.f90 with it")
+    if gfortran().is_none() then skip("no gfortran at NEX_GFORTRAN or on PATH: the Fortran FFI tests compile testdata/ffi/nexfort.f90 with it")
 
     val b = bench()
     val links = ffi_fixture(b)
@@ -353,8 +369,9 @@ run_fortran_runtime_linked()
     finish(b)
     assert(out.status.ok(), out.err.unwrap_or(""))
     assert_eq(out.text, "[[32.0, 3200.0]]\n6\n")
-    assert(unlinked.contains("_fdot_"), unlinked)
-    assert(absent.contains("_fnothere_"), absent)
+    // gfortran's symbol, with the leading underscore Mach-O adds and ELF does not.
+    assert(unlinked.contains("fdot_"), unlinked)
+    assert(absent.contains("fnothere_"), absent)
     assert(join(runtime.unwrap().view(), " ").contains("-lgfortran"), "")
     assert_eq(missing.unwrap_err(), "nex: the program calls Fortran (`@fortran`), which links gfortran's runtime, and there is no gfortran at /nonexistent/gfortran; install gfortran or set NEX_GFORTRAN")
 

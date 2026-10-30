@@ -1,0 +1,157 @@
+@tests
+
+// What nex asks of the machine it runs on, macOS or Linux, arm64 or x86-64: where LLVM and gfortran
+// are when the environment does not say (`llvm_home_in`, `gfortran_in`), the run-time search path
+// each `-L` directory becomes (`run_paths`), a macOS framework `@link` refused where there are none
+// (`module_links`), whether a narrow C integer is marked widened (`c_ext`), how a complex crosses C
+// by value (`c_complex_ty`), and how `assert_traps` hands the runtime its function. Each is a
+// function of what it is handed, so every platform's answer is checked on any.
+
+import nex.sh.sysl.nex.*
+import sysl.fs.{make_dir_all, make_temp_dir, remove_dir_all, write_text}
+import sysl.text.split
+
+#if macos
+private val ON_MACOS = true
+private val FIRST_HOME = "/opt/homebrew/opt/llvm"
+#else
+private val ON_MACOS = false
+private val FIRST_HOME = "/usr/lib/llvm-23"
+#endif
+
+#if aarch64 && linux
+private val ON_AARCH64_LINUX = true
+#else
+private val ON_AARCH64_LINUX = false
+#endif
+
+#if x86_64
+private val ON_X86_64 = true
+#else
+private val ON_X86_64 = false
+#endif
+
+// A scratch directory holding an empty `<home>/bin/<tool>` for each of `homes`.
+private fake_homes(homes: []const string, tool: string) -> string
+    val root = make_temp_dir("nex-platform").unwrap()
+
+    for h in homes
+        make_dir_all(s"$root/$h/bin").unwrap()
+        write_text(s"$root/$h/bin/$tool", "").unwrap()
+
+    root
+
+@test("NEX_LLVM_HOME wins; else the first home with mlir-opt; else above an mlir-opt on PATH; else the first home")
+platform_llvm_home()
+    val root = fake_homes(["apt", "brew", "module"], "mlir-opt")
+    make_dir_all(s"$root/empty").unwrap()
+
+    val given = llvm_home_in("/given/llvm", [s"$root/brew"], "")
+    val first = llvm_home_in("", [s"$root/empty", s"$root/apt", s"$root/brew"], "")
+    val on_path = llvm_home_in("", [s"$root/empty"], s"/nonexistent:$root/module/bin")
+    val nowhere = llvm_home_in("", [s"$root/empty", s"$root/apt-missing"], "/nonexistent")
+    // An `mlir-opt` not in a `bin/` directory says nothing about where LLVM's libraries are.
+    write_text(s"$root/empty/mlir-opt", "").unwrap()
+    val loose = llvm_home_in("", ["/nonexistent/llvm"], s"$root/empty")
+    val no_homes = llvm_home_in("", [], "")
+
+    remove_dir_all(root).unwrap()
+    assert_eq(given, "/given/llvm")
+    assert_eq(first, s"$root/apt")
+    assert_eq(on_path, s"$root/module")
+    assert_eq(nowhere, s"$root/empty")
+    assert_eq(loose, "/nonexistent/llvm")
+    assert_eq(no_homes, "")
+
+@test("the searched LLVM homes are Homebrew's first on macOS and apt.llvm.org's first on Linux")
+platform_llvm_homes_order()
+    assert_eq(LLVM_HOMES.len, 2)
+    assert_eq(LLVM_HOMES[0], FIRST_HOME)
+    assert_eq(LLVM_HOMES[1], if FIRST_HOME == "/usr/lib/llvm-23" then "/opt/homebrew/opt/llvm" else "/usr/lib/llvm-23")
+
+@test("NEX_GFORTRAN wins; else gfortran on PATH; else Homebrew's")
+platform_gfortran()
+    val root = fake_homes(["a", "b"], "gfortran")
+
+    val given = gfortran_in("/given/gfortran", s"$root/a/bin")
+    val first = gfortran_in("", s"/nonexistent:$root/b/bin:$root/a/bin")
+    val none = gfortran_in("", "/nonexistent:")
+
+    remove_dir_all(root).unwrap()
+    assert_eq(given, "/given/gfortran")
+    assert_eq(first, s"$root/b/bin/gfortran")
+    assert_eq(none, "/opt/homebrew/bin/gfortran")
+
+@test("each -L directory becomes a run-time search path; a bare -L, a -l and other options do not")
+platform_run_paths()
+    val paths = run_paths(["-L/opt/a", "-lfoo", "-L", "-Wl,-x", "-L/opt/b c", "-framework", "Accelerate"])
+
+    assert_eq(paths.len(), 2)
+    assert_eq(paths[0], "-Wl,-rpath,/opt/a")
+    assert_eq(paths[1], "-Wl,-rpath,/opt/b c")
+    assert_eq(run_paths([]).len(), 0)
+
+private val LINKED = "// nex.link -lnexffi\n// nex.link -framework Accelerate\nmodule {\n// nex.link -lnot_a_link\n}\n"
+
+@test("a framework @link links on macOS and is refused, naming it, where there are no frameworks")
+platform_framework_links()
+    val mac = module_links(LINKED, frameworks = true).unwrap()
+    val linux = module_links(LINKED, frameworks = false)
+    val plain = module_links("// nex.link -lm\nmodule {\n}\n", frameworks = false).unwrap()
+
+    assert_eq(mac.len(), 3)
+    assert_eq(mac[0], "-lnexffi")
+    assert_eq(mac[1], "-framework")
+    assert_eq(mac[2], "Accelerate")
+    assert_eq(linux.unwrap_err(), "nex: `@link(framework = \"Accelerate\")` names a macOS framework, and this platform has none; link the library itself with `@link(\"name\")`")
+    assert_eq(plain.len(), 1)
+    assert_eq(plain[0], "-lm")
+    assert_eq(FRAMEWORKS, ON_MACOS)
+
+@test("a narrow C integer or bool is marked widened where the ABI widens it (macOS, x86-64) and unmarked on AArch64 Linux")
+platform_c_extension()
+    for (t, mark) in [(Ty.Int(8, true), " {llvm.signext}"), (Ty.Int(16, true), " {llvm.signext}"), (Ty.Int(8, false), " {llvm.zeroext}"), (Ty.Int(16, false), " {llvm.zeroext}"), (Ty.Bool, " {llvm.zeroext}")]
+        assert_eq(c_ext(t, Mode.Read, widens = true), mark)
+        assert_eq(c_ext(t, Mode.Read, widens = false), "")
+        assert_eq(c_ext(t, Mode.Inout, widens = true), "")
+
+    for t in [Ty.Int(32, true), Ty.Int(64, false), Ty.Real(64), Ty.Real(32)]
+        assert_eq(c_ext(t, Mode.Read, widens = true), "")
+        assert_eq(c_ext(t, Mode.Read, widens = false), "")
+
+    assert_eq(C_WIDENS, !ON_AARCH64_LINUX)
+
+@test("assert_traps hands the runtime a function giving nothing back: one with a result goes through a thunk that drops it")
+platform_assert_traps_thunk()
+    val m = emitted("def fails() = assert(false, \"u\")\ndef main() =\n  val a = [1, 2, 3]\n  assert_traps(() -> a[1..10], \"bounds\")\n  assert_traps(() -> a[9], \"bounds\")\n  assert_traps(() -> s\"${a[7]}\", \"bounds\")\n  assert_traps(() -> fails(), \"u\")\n").unwrap()
+
+    // An array's descriptor, which x86-64 returns in memory through a hidden first argument.
+    assert(m.contains("func.func private @\"u.memref<?xi64>\"(%p: !llvm.ptr) {"), m)
+    assert(m.contains("%v = func.call_indirect %f(%env) : (!llvm.ptr) -> memref<?xi64>"), m)
+    assert(m.contains("func.func private @\"u.i64\"(%p: !llvm.ptr) {"), m)
+    assert(m.contains("func.func private @\"u.!llvm.ptr\"(%p: !llvm.ptr) {"), m)
+    // Four calls, one thunk per result type, and the function giving nothing back called as itself.
+    assert_eq(split(m, "func.call @nex_assert_traps(").len - 1, 4)
+    assert_eq(split(m, "func.func private @\"u.").len - 1, 3)
+
+@test("a complex crosses C by value as clang passes it: parts in an array or struct, a complex[real32] one vector on x86-64")
+platform_complex_by_value()
+    assert_eq(c_complex_ty(64, false, packed = false), "!llvm.array<2 x f64>")
+    assert_eq(c_complex_ty(64, true, packed = false), "!llvm.struct<(f64, f64)>")
+    assert_eq(c_complex_ty(32, false, packed = false), "!llvm.array<2 x f32>")
+    assert_eq(c_complex_ty(32, true, packed = false), "!llvm.struct<(f32, f32)>")
+    assert_eq(c_complex_ty(64, false, packed = true), "!llvm.array<2 x f64>")
+    assert_eq(c_complex_ty(64, true, packed = true), "!llvm.struct<(f64, f64)>")
+    assert_eq(c_complex_ty(32, false, packed = true), "vector<2xf32>")
+    assert_eq(c_complex_ty(32, true, packed = true), "vector<2xf32>")
+    assert_eq(COMPLEX32_PACKED, ON_X86_64)
+
+    // Every way a complex[real32] crosses — argument, result, a callback's parameter and result —
+    // spelled as this machine's ABI has it.
+    val m = emitted("extern def cf(z: complex[real32]): complex[real32]\nextern def twice(f: (complex[real32], c_ptr) -> complex[real32], data: @data(f) c_ptr, z: complex[real32]): complex[real32]\ndef main() =\n  val z: complex[real32] = 1.5 - 2i\n  print(cf(z))\n  print(twice(w -> w * z, z))\n").unwrap()
+    val c32 = c_complex_ty(32, false)
+
+    assert(m.contains(s"func.func private @\"cf\"($c32) -> (${c_complex_ty(32, true)})"), m)
+    assert(m.contains(s"%c0: $c32"), m)
+    assert_eq(m.contains("llvm.insertelement"), ON_X86_64)
+    assert_eq(m.contains("llvm.extractelement"), ON_X86_64)

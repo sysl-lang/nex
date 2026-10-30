@@ -38,10 +38,11 @@ private geom_file() -> (string, string) = ("geom/geom.nex", read_text(repo("test
 @test("an extern declared in a module is the C function of its own name, imported and called like a def")
 mod_run_extern()
     val b = bench()
-    val out = run_project(b, [("main.nex", "import cmath.{cbrt}\ndef main() = print(cbrt(27.0))\n"), ("cmath/libm.nex", "module cmath\n@link(\"m\")\nextern def cbrt(x: real): real\n")])
+    val out = run_project(b, [("main.nex", "import cmath.{cbrt}\ndef main() = print(cbrt(64.0))\n"), ("cmath/libm.nex", "module cmath\n@link(\"m\")\nextern def cbrt(x: real): real\n")])
 
+    // A cube root every libm answers exactly: glibc's `cbrt(27.0)` is one ulp above 3.
     finish(b)
-    assert_eq(out, "3.0\n")
+    assert_eq(out, "4.0\n")
 
 @test("a module shaped like `mpi` hands C any array or scalar through one generic def over a private [*; ..] extern")
 mod_run_extern_described()

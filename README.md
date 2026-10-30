@@ -25,8 +25,9 @@ interpreter with no toolchain (`nex run --interp`); both engines are held to the
 `testdata/corpus/` — the reference's 425 programs, each beside the exact output it must print — and
 the programs of `testdata/v2/`. Units of measure, `parallel`, the C and Fortran FFI, BLAS and LAPACK
 dispatch, assumed-rank descriptors and the embedding API are built. The `mpi` module is a preview.
-It is built and tested on macOS (Apple silicon) only; Linux has not been tried. `bench/RESULTS.md`
-has the performance against gfortran.
+It is developed on macOS (Apple silicon); Linux (`aarch64` and `x86_64`) is cross-built from there
+(`scripts/package.zsh --target`) and checked in Ubuntu 24.04 containers (`scripts/linux-check.zsh`),
+not yet on a cluster. `bench/RESULTS.md` has the performance against gfortran.
 
 ## Layout
 

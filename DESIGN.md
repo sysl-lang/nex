@@ -1778,7 +1778,8 @@ believes without proof.
   `--`, before or after the file. The command line's directories are searched before the program's
   `@link`s are linked, so a `@link("mylib")` finds `libmylib` in a `-L` directory.
 - **An argument or result that is an 8- or 16-bit integer or a `bool` is widened as clang widens
-  it** (sign- or zero-extended by the caller, as Apple's arm64 ABI requires), and every C
+  it** (sign- or zero-extended by the caller, and a result by the callee, as Apple's arm64 ABI and
+  x86-64's require; on AArch64 Linux, whose ABI leaves the upper bits unspecified, neither), and every C
   declaration nex makes is clang's declaration of the same prototype.
 - **`@pure` is what lets a call run anywhere order is not fixed**: a parallel body (§9.4) and an
   `@elemental` function call only `@pure` externs, directly or through any function they call.
@@ -1918,7 +1919,7 @@ product both times, no copy.
    an operand that is `transpose(X)`, `conj(transpose(X))` (BLAS's `T` and `C` flags), or a rank-2
    view whose unit stride is along the second axis rather than the first (a transposed layout).
 3. A BLAS library is linked: Accelerate on macOS (the run in `blas.mlir`), OpenBLAS elsewhere
-   *(unverified on Linux)*, through the LP64 (`int32`) interface. **A program whose `@` or
+   (`-lopenblas`, checked on Ubuntu 24.04), through the LP64 (`int32`) interface. **A program whose `@` or
    linear-algebra prelude calls BLAS or LAPACK links it with no flag**, and one that calls neither
    links none; `NEX_BLAS` names other link options in its place (`NEX_BLAS="-L/opt/openblas/lib
    -lopenblas"`). **Which library is the default is chosen once, by the runtime's `library`

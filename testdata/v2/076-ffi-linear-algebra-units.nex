@@ -3,9 +3,10 @@
 // read in the smaller unit. `inv` takes the reciprocal unit, `det` the unit to the matrix's order,
 // `chol` its square root; eigenvalues and singular values keep it, the factors that are rotations or
 // unit triangles are dimensionless. Each binding's type is written out, so the program compiles only
-// where the units come out as the table says. `strip` hands BLAS the numbers with no copy.
+// where the units come out as the table says. `strip` hands BLAS the numbers with no copy; `cblas_ddot`
+// needs no `@link`, as the program's linear algebra already links the platform's BLAS (Accelerate on
+// macOS, OpenBLAS on Linux).
 
-@link(framework = "Accelerate")
 extern def cblas_ddot(n: int32, x: [real], incx: int32, y: [real], incy: int32): real
 
 def r8(x: real): real = round(x * 1.0e8) / 1.0e8 + 0.0

@@ -2,10 +2,12 @@
 // arguments C's ABI on this target wants (DESIGN §10.2, §10.3).
 //
 // **A scalar crosses as itself**, with the extension clang gives it: an 8- or 16-bit integer or a
-// `bool`, as argument or result, is marked `signext` or `zeroext`, since Apple's arm64 ABI has the
-// caller widen it. **A complex crosses by value as clang passes `_Complex`**: an argument is an array
-// of its two parts, `[2 x double]`, which arm64 passes as a homogeneous floating-point aggregate in
-// two consecutive FP registers, and a result comes back as the struct `{double, double}`.
+// `bool`, as argument or result, is marked `signext` or `zeroext` where the machine's ABI widens it
+// (Apple's arm64, x86-64), and is unmarked on AArch64 Linux, whose ABI does not. **A complex
+// crosses by value as clang passes `_Complex`**: an argument is an array of its two parts,
+// `[2 x double]`, which arm64 passes as a homogeneous floating-point aggregate in two consecutive FP
+// registers, and a result comes back as the struct `{double, double}`; on x86-64 a
+// `complex[real32]` is one `<2 x float>` both ways (`c_complex_ty`).
 //
 // **Everything else crosses by pointer.** An `inout` scalar or struct is the address of its place; a
 // `@c` struct in read mode is the address of a copy; a `string` is its own NUL-terminated bytes.
@@ -218,7 +220,7 @@ impl Emitter
                         Str -> v
                         _ -> if x.fortran then self.fortran_temp(a.span, v, x.params[j])
                         else base_of(x.params[j]) match
-                            Complex(b) -> self.c_complex(v, b)
+                            Complex(b) -> self.c_complex(v, b, c_complex_ty(b, false))
                             _ -> v)
 
         for j in 0..<x.params.len()
@@ -294,7 +296,7 @@ impl Emitter
     // whose address crosses: a complex as its parts, a `bool` as a default `logical`.
     private fortran_temp(*self, span: Span, v: string, t: Ty) -> string
         val (w, ty) = base_of(t) match
-            Complex(b) -> (self.c_complex(v, b), s"!llvm.array<2 x f$b>")
+            Complex(b) -> (self.c_complex(v, b, s"!llvm.array<2 x f$b>"), s"!llvm.array<2 x f$b>")
             Bool -> (self.def(s"arith.extui $v : i1 to i32"), "i32")
             _ -> (v, self.ty(span, t))
         val slot = self.alloca(ty)
@@ -496,8 +498,10 @@ impl Emitter
     // Fortran `logical` true where it is not zero.
     c_value(*self, r: string, rt: string, ret: Ty) -> string = base_of(ret) match
         Complex(b) ->
-            val re = self.def(s"llvm.extractvalue $r[0] : $rt")
-            val im = self.def(s"llvm.extractvalue $r[1] : $rt")
+            val (re, im) = if is_vector_text(rt)
+                (self.def(s"llvm.extractelement $r[${self.def("llvm.mlir.constant(0 : i32) : i32")} : i32] : $rt"), self.def(s"llvm.extractelement $r[${self.def("llvm.mlir.constant(1 : i32) : i32")} : i32] : $rt"))
+            else
+                (self.def(s"llvm.extractvalue $r[0] : $rt"), self.def(s"llvm.extractvalue $r[1] : $rt"))
 
             self.def(s"complex.create $re, $im : complex<f$b>")
         Bool -> if rt == "i32" then self.def(s"arith.cmpi ne, $r, ${self.def("arith.constant 0 : i32")} : i32") else r
@@ -646,7 +650,7 @@ impl Emitter
         if mode == Inout then return "!llvm.ptr"
 
         base_of(t) match
-            Complex(b) -> s"!llvm.array<2 x f$b>"
+            Complex(b) -> c_complex_ty(b, false)
             Array(_, _) -> "!llvm.ptr"
             Nominal(_, _) -> "!llvm.ptr"
             Str -> "!llvm.ptr"
@@ -657,18 +661,43 @@ impl Emitter
 
     // The MLIR type of a result of type `t` as C gives it, `""` for none.
     c_result_ty(*self, span: Span, t: Ty) -> string = base_of(t) match
-        Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
+        Complex(b) -> c_complex_ty(b, true)
         _ -> self.ty(span, t)
 
-    // The complex `v` with parts of `b` bits as the array of its parts C takes.
-    c_complex(*self, v: string, b: int) -> string
-        val at = s"!llvm.array<2 x f$b>"
+    // The complex `v` with parts of `b` bits as `at`, the array or vector of its parts C takes.
+    c_complex(*self, v: string, b: int, at: string) -> string
         val re = self.def(s"complex.re $v : complex<f$b>")
         val im = self.def(s"complex.im $v : complex<f$b>")
         val u = self.def(s"llvm.mlir.undef : $at")
 
+        if is_vector_text(at)
+            val k0 = self.def("llvm.mlir.constant(0 : i32) : i32")
+            val k1 = self.def("llvm.mlir.constant(1 : i32) : i32")
+
+            return self.def(s"llvm.insertelement $im, ${self.def(s"llvm.insertelement $re, $u[$k0 : i32] : $at")}[$k1 : i32] : $at")
+
         self.def(s"llvm.insertvalue $im, ${self.def(s"llvm.insertvalue $re, $u[0] : $at")}[1] : $at")
 end Emitter
+
+// Whether a `float _Complex` crosses C by value packed in one vector register, as `<2 x float>`: the
+// x86-64 System V ABI's classification of its eight bytes as one SSE word. AArch64 passes it as a
+// homogeneous aggregate of two floats, each in a register of its own, as it does a `double _Complex`.
+#if x86_64
+val COMPLEX32_PACKED = true
+#else
+val COMPLEX32_PACKED = false
+#endif
+
+// The MLIR type a complex of `b`-bit parts crosses C as by value, a `result` or an argument, where a
+// `float _Complex` is `packed` (`COMPLEX32_PACKED`): an argument is the array of its parts, a result
+// the struct of them, which is how clang lowers both on AArch64 and a `double _Complex` on x86-64.
+c_complex_ty(b: int, result: bool, packed: bool = COMPLEX32_PACKED) -> string =
+    if b == 32 && packed then "vector<2xf32>"
+    elif result then s"!llvm.struct<(f$b, f$b)>"
+    else s"!llvm.array<2 x f$b>"
+
+// Whether an MLIR type's text is a vector's.
+is_vector_text(ty: string) -> bool = ty.starts_with("vector<")
 
 // A parameter of a wrapper, `%pN` of type `ty`, which the call passes `value` for.
 private wrapper_param(head: *Buf[string], ops: *Buf[string], tys: *Buf[string], value: string, ty: string) -> string
@@ -698,10 +727,20 @@ private same_root(a: TExpr, b: TExpr) -> bool = *a.kind match
         _ -> false
     _ -> false
 
-// The extension clang gives a C argument or result of type `t`: 8- and 16-bit integers and `bool`
-// are widened by the caller on arm64.
-c_ext(t: Ty, mode: Mode) -> string
-    if mode == Inout then return ""
+// Whether this machine's C ABI widens an 8- or 16-bit integer or a `bool` argument or result to 32
+// bits: Apple's arm64 and the x86-64 System V ABI do, the AArch64 procedure call standard Linux
+// follows does not, leaving the upper bits unspecified.
+#if aarch64 && !macos
+val C_WIDENS = false
+#else
+val C_WIDENS = true
+#endif
+
+// The extension clang gives a C argument or result of type `t` where `widens` (the machine's ABI,
+// `C_WIDENS`): 8- and 16-bit integers and `bool` are widened by the caller, and a result by the
+// callee. Where the ABI does not widen there is no extension, and the value is read at its width.
+c_ext(t: Ty, mode: Mode, widens: bool = C_WIDENS) -> string
+    if mode == Inout || !widens then return ""
 
     base_of(t) match
         Int(b, signed) -> if b < 32 then (if signed then " {llvm.signext}" else " {llvm.zeroext}") else ""

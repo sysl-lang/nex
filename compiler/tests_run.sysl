@@ -11,7 +11,6 @@
 import nex.sh.sysl.nex.*
 import sh.sysl.parsing.{Diagnostic, Source, source_of}
 import sysl.buf.{Buf, buf}
-import sysl.env.get_or
 import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
 import sysl.process.{Output, Status, Var, capture}
 import sysl.testing.{compiler, skip}
@@ -31,7 +30,7 @@ struct Bench
     seen: &Seen
 
 bench() -> Bench
-    val bin = s"${get_or("NEX_LLVM_HOME", "/opt/homebrew/opt/llvm")}/bin"
+    val bin = s"${llvm_home()}/bin"
 
     if !exists(s"$bin/mlir-opt") then skip(s"no mlir-opt in $bin")
 
@@ -82,21 +81,34 @@ ffi_fixture(b: Bench) -> Buf[string]
 // The gfortran the Fortran tests compile `testdata/ffi/nexfort.f90` with, as the driver finds it,
 // where there is one.
 gfortran() -> Option[string]
-    val g = get_or("NEX_GFORTRAN", "/opt/homebrew/bin/gfortran")
+    val g = gfortran_path()
 
     if exists(g) then Some(g) else None
 
-// The Fortran library of `testdata/ffi/nexfort.f90` built into the bench as `libnexfort.dylib`,
+// The Fortran library of `testdata/ffi/nexfort.f90` built into the bench as `libnexfort.dylib` (`.so`),
 // which names gfortran's runtime itself, as a Fortran library is shipped (`ffi_fixture`'s `-L`
 // finds it); false where there is no gfortran.
 fortran_fixture(b: Bench) -> bool
     val g = gfortran() match
         Some(g) -> g
         None -> return false
-    val out = capture(g, ["-O2", "-shared", repo("testdata/ffi/nexfort.f90"), "-o", s"${b.work}/libnexfort.dylib"], stderr = true).unwrap()
+    val out = capture(g, ["-O2", "-shared", "-fPIC", repo("testdata/ffi/nexfort.f90"), "-o", s"${b.work}/libnexfort.$SHARED"], stderr = true).unwrap()
 
     assert(out.status.ok(), out.err.unwrap_or(""))
     true
+
+// The shared libraries `exe` was linked against, as macOS's `otool -L` or Linux's `readelf -d`
+// lists them.
+linked_libraries(exe: string) -> string =
+    if exists("/usr/bin/otool") then capture("/usr/bin/otool", ["-L", exe], stderr = true).unwrap().text
+    else capture("readelf", ["-d", exe], stderr = true).unwrap().text
+
+// A shared library's file extension on this machine.
+#if macos
+val SHARED = "dylib"
+#else
+val SHARED = "so"
+#endif
 
 fail_with(message: string) -> never
     assert(false, message)

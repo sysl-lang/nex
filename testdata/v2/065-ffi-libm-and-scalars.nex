@@ -49,7 +49,8 @@ extern def nf_accumulate(x: real, total: inout real, count: inout integer)
 extern def nf_strlen(s: string): int32
 
 def main() =
-  print(cbrt(27.0))
+  // A cube root every libm answers exactly: glibc's `cbrt(27.0)` is one ulp above 3.
+  print(cbrt(64.0))
   print(hypot(3.0, 4.0))
   var e: int32 = 0
   val f = fraction_exponent(48.0, e)

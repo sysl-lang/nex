@@ -145,7 +145,8 @@ sysl test .
    It changes as the design needs (next section). The tools are driven through
    `sysl.process.capture`: a module goes to `mlir-opt` as a file in a `make_temp_dir` directory, or
    on its stdin through `Stdio.FromPath` or a `pipe` and `Stdio.FromFile`. LLVM is found at
-   `NEX_LLVM_HOME`, else Homebrew's `opt/llvm` (LLVM 23).
+   `NEX_LLVM_HOME`, else Homebrew's `opt/llvm` or apt.llvm.org's `/usr/lib/llvm-23` (LLVM 23), else
+   above an `mlir-opt` on `PATH`.
 5. **The runtime** (`runtime/`, a sysl archive from `sysl build-c`), linked into every program: printing every value as the
    reference spells it — reals as Java's `Double.toString` (`1.0E20`, `4.9E-324`), complex numbers,
    arrays read through `llvm.emit_c_interface` memref descriptors honouring their strides — plus the
@@ -632,6 +633,20 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       `-np 2` × `OMP_NUM_THREADS=4` with the same bits as at `-np 2` × 1.
     - **D5 — both MPIs and the ABI**: Open MPI 5 and MPICH 4.x in Linux CI containers, and an
       `mpi_abi.h` build where one is installed. *Exit*: the D1–D4 programs pass on each.
+
+    **Linux, where the cluster is.** Both Linux tarballs are cross-built from macOS
+    (`scripts/package.zsh --target aarch64-linux|x86_64-linux`, against a sysroot
+    `scripts/linux-sysroot.zsh` copies out of an Ubuntu 24.04 image) and checked in that image by
+    `scripts/linux-check.zsh`: the corpus on both engines, the perf oracle's checksums against
+    gfortran, OpenMP, OpenBLAS, gfortran's runtime and `testdata/mpi/` at `-np 4` under Open MPI 4.1.
+    nex's own suite (`sysl test .`) needs sysl on Linux, which has no release; sysl 0.8.6 cross-built
+    the same way runs it in the aarch64 container, where 729 of its 736 tests pass. The seven that do not
+    compare against values printed by Apple's libm and Accelerate, which glibc and OpenBLAS round
+    differently in the last place (`cbrt`, `tanh`, `asin`, the complex functions, a BLAS sum's
+    order): `tests_interp_kernels`, `tests_interp_parallel`, `tests_blas` (two), `tests_run_kernels`,
+    `tests_run_rounding`, `tests_run_units` — an item of its own, to make those oracles
+    platform-independent. Not yet run: a cluster, Slurm's `srun`, EFA, MPICH, and an x86_64 machine
+    (the x86_64 check runs under QEMU's emulation).
 
     *Exit for M14*: an MPI corpus (`testdata/mpi/`: 1-D and 2-D Jacobi with halo exchange, a
     distributed conjugate gradient, a parallel prefix, a ring and a master-worker) prints its `.out`

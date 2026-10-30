@@ -7,9 +7,8 @@
 // The same tests pin the library calls the driver is built from: a child's stdin from a path and from
 // a pipe this program wrote, a temporary directory, and a large text gathered in a `StrBuilder`.
 //
-// LLVM is found at `NEX_LLVM_HOME`, else Homebrew's; without `mlir-opt` there every test skips.
+// LLVM is found as the driver finds it (`llvm_home`); without `mlir-opt` there every test skips.
 
-import sysl.env.get_or
 import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
 import sysl.buf.{Buf, buf}
 import sysl.process.{Status, Stdio, Var, capture, pipe}
@@ -18,7 +17,7 @@ import sysl.text.{fields, split, str_builder}
 import sysl.time.monotonic
 
 private llvm_bin() -> string
-    val dir = s"${get_or("NEX_LLVM_HOME", "/opt/homebrew/opt/llvm")}/bin"
+    val dir = s"${llvm_home()}/bin"
 
     if !exists(s"$dir/mlir-opt") then skip(s"no mlir-opt in $dir")
     dir
