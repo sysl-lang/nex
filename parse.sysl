@@ -309,14 +309,13 @@ struct Parser
 
         if !self.accept("=") then return Ok(UnitDecl(name, None, None))
 
-        var factor: Option[Expr] = None
-        val m = self.toks.mark()
+        var factor: Option[string] = None
 
         self.tok(0) match
             Num(text) ->
                 if starts_unit(self.tok(1))
                     self.bump()
-                    factor = Some(number(self.toks.span_from(m), text, false)?)
+                    factor = Some(text)
             _ -> ()
 
         Ok(UnitDecl(name, factor, Some(self.unit_expr()?)))

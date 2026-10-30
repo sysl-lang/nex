@@ -18,6 +18,12 @@
 // Keeping them in a table is what lets a lambda whose parameter types come from its first call be
 // elaborated at that call, after the binding that holds it was built.
 //
+// **A unit of measure is in the types and nowhere else** (DESIGN §13.8). A `Measured` type says what
+// unit a value is in; mixing scales is a `TRescale` with its exact factor, and attaching, renaming or
+// removing a unit a `TUnitAs` that changes no number. Printing a value with a unit is already an
+// interpolation that spells the unit as text. So emission erases every type with `erase` and reads the
+// `TRescale` factors, and nothing else about units reaches it.
+//
 // **A struct or an enum is declared once, in `TProgram.decls`, and named by its type everywhere
 // else**: a field and a variant carry their position in that declaration beside their name, so a
 // later phase lays them out without looking a name up.
@@ -64,6 +70,14 @@ enum TKind
     // A conversion function applied to `value`; `traps` where the value can be out of the target's
     // range (a narrower integer, a change of signedness, a real to an integer).
     TConvert(value: TExpr, traps: bool)
+    // `value` in a unit of the same dimension and another scale: one multiplication by `factor`, the
+    // exact ratio of the two scales, which emission rounds once to the value's width (DESIGN §13.8).
+    // On an array value it multiplies every element.
+    TRescale(value: TExpr, factor: Ratio)
+    // `value` with a unit attached (`x<m>`), renamed to an equal unit (`to<N>(m)`), or removed
+    // (`strip(x)`): the number is unchanged, and the node's type says which. On an array value it
+    // is the same storage under another element type.
+    TUnitAs(value: TExpr)
     // `complex[realN](re, im)`: both parts already of the part type.
     TMakeComplex(re: TExpr, im: TExpr)
     // `z.re` or `z.im`.
@@ -212,6 +226,14 @@ struct TFun
     ret: Ty
     body: TExpr
 
+// `extern def name(params): ret`: a C function, its parameter types and modes and its result.
+struct TExtern
+    span: Span
+    name: string
+    params: Buf[Ty]
+    modes: Buf[Mode]
+    ret: Ty
+
 // `val a, b = 1, 2` at module level: one initializer, its tuple taken apart into the module-level
 // bindings `pat` names.
 struct TGlobalTuple
@@ -247,6 +269,7 @@ enum TDecl
     GlobalDecl(g: TGlobal)
     TupleGlobalDecl(g: TGlobalTuple)
     FunDecl(f: TFun)
+    ExternDecl(x: TExtern)
 
 struct TProgram
     // The structs and enums, then the other declarations, each in the order the source declares

@@ -1,0 +1,39 @@
+// Views over arrays that are allocated, written and freed many times: slices passed and returned
+// in a loop, reversed and strided windows, `inout` windows, slice assignment, a view kept while its
+// source is written, `origin` views read in place, and `rebase` copies. Nothing here may leak, and
+// nothing freed may be read again.
+
+def total(v: [integer]) = sum(v)
+
+def middle(v: [integer]) = v[2..end-1]
+
+def bump(v: inout [integer], by: integer) =
+  for k in 1..length(v)
+    v[k] += by
+
+def first(v: [integer]) = v[1]
+
+def main() =
+  var grand = 0
+  for round in 1..200
+    var a = fill(10, round)
+    bump(a[2..5], 1)
+    bump(a[.. by -3], 2)
+    a[6..8][2] = 0
+    a[..3] += a[8..]
+    val kept = a[1..4]
+    a[1..4] = 7
+    grand += total(kept) + total(middle(a)) + total(a[.. by -2])
+
+    val w = origin(a, -4)
+    grand += w[-4] + w[end] + first(rebase(w[-2..]))
+
+    var b = [3, 1, 4, 1, 5]
+    bump(b[.. by -1], round)
+    grand += total(b)
+
+    val m = reshape(linspace(1.0, 12.0, 12), (3, 4))
+    val g = origin(m, 0, 0)
+    grand += int64(sum(m[.. by -1, 2..3]) + g[1, 1] + sum(reverse(m, 2)[1, :]))
+
+  print(grand)

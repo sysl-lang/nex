@@ -1,0 +1,458 @@
+// Units of measure as the type checker follows them (DESIGN §13): exact rational arithmetic on scale
+// factors and exponents, the algebra of units, and the questions the elaborator asks of a type that
+// may carry one.
+//
+// **A unit is reduced, and keeps its spelling beside the reduction.** `dims` holds each base unit
+// and each unit parameter with its exponent, in one canonical order, so that `N` and `kg m / s^2`
+// compare equal; `factor` is the exact rational that relates the unit to that product of base units.
+// `spelling` holds the named units it was written with, which is what a type and a printed value
+// show: `1.0<mm> * 1.0<in>` is `real64<mm in>`. A base unit is its name, so a module's `unit m` and
+// the prelude's are one dimension.
+//
+// **A unit is erased before emission.** `erase` removes it from a type; the only trace it leaves in
+// the typed IR is a `TRescale`, one multiplication by a folded constant.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.join
+
+// A base unit or a unit parameter to a power, or a named unit to a power in a spelling.
+struct Power
+    name: string
+    param: bool
+    exp: Ratio
+
+// What a ratio becomes where it would not fit in 256 bits, or where an exact root does not exist.
+val INEXACT = Ratio(0, 0)
+
+val ONE_RATIO = Ratio(1, 1)
+
+private val MINUS_ONE = Ratio(-1, 1)
+
+// -- exact rationals --------------------------------------------------------------------------------
+
+private gcd(a: i256, b: i256) -> i256
+    var x = if a < 0 then -a else a
+    var y = if b < 0 then -b else b
+
+    while y != 0
+        val t = x % y
+
+        x = y
+        y = t
+
+    x
+
+// `n / d` in lowest terms, its denominator positive.
+ratio(n: i256, d: i256) -> Ratio
+    if d == 0 then return INEXACT
+
+    val g = gcd(n, d)
+    val s: i256 = if d < 0 then -1 else 1
+
+    Ratio(s * n / g, s * d / g)
+
+is_exact(r: Ratio) -> bool = r.den != 0
+
+ratio_eq(a: Ratio, b: Ratio) -> bool = a.num == b.num && a.den == b.den
+
+rmul(a: Ratio, b: Ratio) -> Ratio
+    if !is_exact(a) || !is_exact(b) then return INEXACT
+
+    val g1 = gcd(a.num, b.den)
+    val g2 = gcd(b.num, a.den)
+
+    (a.num / g1).checked_mul(b.num / g2) match
+        Some(n) -> (a.den / g2).checked_mul(b.den / g1) match
+            Some(d) -> ratio(n, d)
+            None -> INEXACT
+        None -> INEXACT
+
+rinv(a: Ratio) -> Ratio = if !is_exact(a) || a.num == 0 then INEXACT else ratio(a.den, a.num)
+
+rdiv(a: Ratio, b: Ratio) -> Ratio = rmul(a, rinv(b))
+
+radd(a: Ratio, b: Ratio) -> Ratio
+    if !is_exact(a) || !is_exact(b) then return INEXACT
+
+    val x = a.num.checked_mul(b.den)
+    val y = b.num.checked_mul(a.den)
+    val d = a.den.checked_mul(b.den)
+
+    if x.is_none() || y.is_none() || d.is_none() then return INEXACT
+
+    x.unwrap().checked_add(y.unwrap()) match
+        Some(n) -> ratio(n, d.unwrap())
+        None -> INEXACT
+
+// `b` to the power `q`, or `None` where it does not fit.
+private ipow(b: i256, q: i256) -> Option[i256]
+    var acc: i256 = 1
+    var k: i256 = 0
+
+    while k < q
+        acc = acc.checked_mul(b) match
+            Some(v) -> v
+            None -> return None
+        k += 1
+
+    Some(acc)
+
+// The whole `q`th root of `x >= 0`, where `x` has one.
+private iroot(x: i256, q: i256) -> Option[i256]
+    var lo: i256 = 0
+    var hi = x
+
+    while lo <= hi
+        val mid = lo + (hi - lo) / 2
+
+        ipow(mid, q) match
+            Some(v) ->
+                if v == x then return Some(mid)
+                if v < x then lo = mid + 1 else hi = mid - 1
+            None -> hi = mid - 1
+
+    None
+
+// A positive factor to a rational power, exactly, or `INEXACT` where the root is not rational:
+// `(1/1000000)^(1/2)` is `1/1000`, and `(1/1000)^(1/2)` has no exact value.
+rpow(a: Ratio, e: Ratio) -> Ratio
+    if !is_exact(a) || !is_exact(e) then return INEXACT
+    if ratio_eq(a, ONE_RATIO) || e.num == 0 then return ONE_RATIO
+
+    val p = if e.num < 0 then -e.num else e.num
+    var acc = ONE_RATIO
+    var k: i256 = 0
+
+    while k < p
+        acc = rmul(acc, a)
+
+        if !is_exact(acc) then return INEXACT
+
+        k += 1
+
+    if e.den != 1
+        val n = iroot(acc.num, e.den)
+        val d = iroot(acc.den, e.den)
+
+        if n.is_none() || d.is_none() then return INEXACT
+
+        acc = ratio(n.unwrap(), d.unwrap())
+
+    if e.num < 0 then rinv(acc) else acc
+end rpow
+
+private ten_pow(k: i256) -> Option[i256] = ipow(10, k)
+
+// The exact rational a decimal literal spells: `0.0254` is `127/5000`, `1.0e5` is `100000`.
+// `INEXACT` for anything else, a hexadecimal literal among them.
+decimal_ratio(text: string) -> Ratio
+    var n: i256 = 0
+    var places: i256 = 0
+    var point = false
+    var in_exp = false
+    var negative_exp = false
+    var e: i256 = 0
+
+    for c in text.bytes
+        if c == u8('_') then continue
+
+        val digit = c >= u8('0') && c <= u8('9')
+
+        if in_exp
+            if c == u8('-')
+                negative_exp = true
+            elif digit
+                e = e * 10 + i256(c - u8('0'))
+
+                if e > 1000 then return INEXACT
+            elif c != u8('+')
+                return INEXACT
+        elif c == u8('.')
+            point = true
+        elif c == u8('e') || c == u8('E')
+            in_exp = true
+        elif digit
+            n = n.checked_mul(10) match
+                Some(v) -> v + i256(c - u8('0'))
+                None -> return INEXACT
+
+            if point then places += 1
+        else
+            return INEXACT
+
+    val shift = (if negative_exp then -e else e) - places
+
+    if shift >= 0
+        ten_pow(shift) match
+            Some(m) -> n.checked_mul(m) match
+                Some(v) -> ratio(v, 1)
+                None -> INEXACT
+            None -> INEXACT
+    else
+        ten_pow(-shift) match
+            Some(d) -> ratio(n, d)
+            None -> INEXACT
+end decimal_ratio
+
+// A ratio as a real, for showing a factor; emission rounds it once itself.
+ratio_real(r: Ratio) -> real = real(r.num) / real(r.den)
+
+show_ratio(r: Ratio) -> string = if r.den == 1 then s"${r.num}" else s"${r.num}/${r.den}"
+
+// -- the algebra of units ---------------------------------------------------------------------------
+
+unit_one() -> Unit = Unit(buf(), ONE_RATIO, buf())
+
+private single(name: string, param: bool) -> Buf[Power]
+    var out: Buf[Power] = buf()
+
+    out.push(Power(name, param, ONE_RATIO))
+    out
+
+// A base unit, `unit m`: a dimension of its own, spelt as its name.
+base_unit(name: string) -> Unit = Unit(single(name, false), ONE_RATIO, single(name, false))
+
+// A unit parameter `U` of a function generic over units.
+param_unit(name: string) -> Unit = Unit(single(name, true), ONE_RATIO, single(name, true))
+
+// `u` given a name of its own: what `unit N = kg m / s^2` makes of its right-hand side.
+named(u: Unit, name: string) -> Unit = Unit(u.dims, u.factor, single(name, false))
+
+scaled(u: Unit, f: Ratio) -> Unit = Unit(u.dims, rmul(u.factor, f), u.spelling)
+
+// Whether `a` sorts before `b` in a reduction: base units by name, then unit parameters by name.
+private before(a: Power, b: Power) -> bool = if a.param != b.param then b.param else a.name < b.name
+
+// `p` multiplied into `out`: added to the exponent of the same unit, which drops out at zero, or
+// placed in canonical order where `sorted` and at the end where not.
+private add_power(out: *Buf[Power], p: Power, sorted: bool)
+    if p.exp.num == 0 then return
+
+    for k in 0..<out.len()
+        val q = out[k]
+
+        if q.name == p.name && q.param == p.param
+            val e = radd(q.exp, p.exp)
+
+            if e.num == 0 then out.remove(k) else out.set(k, Power(q.name, q.param, e))
+
+            return
+
+    if !sorted
+        out.push(p)
+        return
+
+    var at = out.len()
+
+    for k in 0..<out.len()
+        if before(p, out[k])
+            at = k
+            break
+
+    out.insert(at, p)
+end add_power
+
+// `xs` times `ys` to the power `k`.
+private merge(xs: Buf[Power], ys: Buf[Power], k: Ratio, sorted: bool) -> Buf[Power]
+    var out: Buf[Power] = buf()
+
+    for x in xs
+        out.push(x)
+
+    for y in ys
+        add_power(&out, Power(y.name, y.param, rmul(y.exp, k)), sorted)
+
+    out
+
+private scale(xs: Buf[Power], k: Ratio) -> Buf[Power]
+    var out: Buf[Power] = buf()
+
+    if k.num == 0 then return out
+
+    for x in xs
+        out.push(Power(x.name, x.param, rmul(x.exp, k)))
+
+    out
+
+unit_mul(a: Unit, b: Unit) -> Unit =
+    Unit(merge(a.dims, b.dims, ONE_RATIO, true), rmul(a.factor, b.factor), merge(a.spelling, b.spelling, ONE_RATIO, false))
+
+unit_div(a: Unit, b: Unit) -> Unit =
+    Unit(merge(a.dims, b.dims, MINUS_ONE, true), rdiv(a.factor, b.factor), merge(a.spelling, b.spelling, MINUS_ONE, false))
+
+unit_pow(a: Unit, k: Ratio) -> Unit = Unit(scale(a.dims, k), rpow(a.factor, k), scale(a.spelling, k))
+
+private powers_eq(xs: Buf[Power], ys: Buf[Power]) -> bool
+    if xs.len() != ys.len() then return false
+
+    for k in 0..<xs.len()
+        if xs[k].name != ys[k].name || xs[k].param != ys[k].param || !ratio_eq(xs[k].exp, ys[k].exp) then return false
+
+    true
+
+// Whether two units have the same dimension: the same base units and parameters to the same powers.
+same_dims(a: Unit, b: Unit) -> bool = powers_eq(a.dims, b.dims)
+
+unit_eq(a: Unit, b: Unit) -> bool = same_dims(a, b) && ratio_eq(a.factor, b.factor)
+
+is_dimensionless(u: Unit) -> bool = u.dims.len() == 0
+
+// The unit of a plain number: no dimension and no scale.
+is_one(u: Unit) -> bool = is_dimensionless(u) && ratio_eq(u.factor, ONE_RATIO)
+
+// Whether `u` mentions a unit parameter.
+has_param(u: Unit) -> bool
+    for p in u.dims
+        if p.param then return true
+
+    false
+
+// `u` with each unit parameter bound in `names`/`units` replaced by its unit.
+subst_unit(u: Unit, names: Buf[string], units: Buf[Unit]) -> Unit
+    var out = Unit(buf(), u.factor, buf())
+
+    for p in u.dims
+        if !p.param then add_power(&out.dims, p, true)
+
+    for p in u.spelling
+        if !p.param then add_power(&out.spelling, p, false)
+
+    for p in u.dims
+        if !p.param then continue
+
+        var bound = false
+
+        for k in 0..<names.len()
+            if names[k] == p.name
+                bound = true
+                out = unit_mul(out, unit_pow(units[k], p.exp))
+
+        if !bound
+            add_power(&out.dims, p, true)
+            add_power(&out.spelling, p, false)
+
+    out
+end subst_unit
+
+// -- spelling ---------------------------------------------------------------------------------------
+
+private power_text(name: string, e: Ratio) -> string =
+    if e.num == 1 && e.den == 1 then name elif e.den == 1 then s"${name}^${e.num}" else s"${name}^(${e.num}/${e.den})"
+
+// Powers as a unit is written: the positive ones side by side, then `/` and the negative ones,
+// parenthesised where there are several: `m/s^2`, `J/(mol K)`, `1/s`.
+private spell_powers(ps: Buf[Power]) -> string
+    var top: Buf[string] = buf()
+    var bottom: Buf[string] = buf()
+
+    for p in ps
+        if p.exp.num > 0 then top.push(power_text(p.name, p.exp))
+        if p.exp.num < 0 then bottom.push(power_text(p.name, Ratio(-p.exp.num, p.exp.den)))
+
+    val num = if top.len() == 0 then "1" else join(top.view(), " ")
+
+    if bottom.len() == 0 then return num
+
+    val den = join(bottom.view(), " ")
+
+    if bottom.len() > 1 then num + "/(" + den + ")" else num + "/" + den
+end spell_powers
+
+// A unit as it is written: `m/s^2`, `mm in`, `N`. One spelt with no names (a reduction that
+// cancelled them) shows its base units, behind its factor where that is not 1.
+spell(u: Unit) -> string
+    if u.spelling.len() > 0 then return spell_powers(u.spelling)
+    if ratio_eq(u.factor, ONE_RATIO) then return spell_powers(u.dims)
+
+    s"(${show_ratio(u.factor)}) ${spell_powers(u.dims)}"
+
+// The base units of a dimension, in canonical order, with the name of each one people say aloud.
+private val DIMENSIONS = [("m", "length"), ("kg", "mass"), ("s", "time"), ("A", "current"), ("K", "temperature"), ("mol", "amount of substance"), ("cd", "luminous intensity"), ("m^2", "area"), ("m^3", "volume"), ("m/s", "velocity"), ("m/s^2", "acceleration"), ("1/s", "frequency"), ("kg m/s", "momentum"), ("kg m/s^2", "force"), ("kg m^2/s^2", "energy"), ("kg m^2/s^3", "power"), ("kg/(m s^2)", "pressure"), ("kg/m^3", "density"), ("A s", "charge"), ("kg m^2/(A s^3)", "voltage"), ("kg m^2/(A^2 s^3)", "resistance")]
+
+// What a dimension is called: `length`, `force`, `dimensionless`, or its base units where it has
+// no common name (`m s`).
+dimension_name(u: Unit) -> string
+    if is_dimensionless(u) then return "dimensionless"
+
+    val t = spell_powers(u.dims)
+
+    for (dims, name) in DIMENSIONS
+        if dims == t then return name
+
+    t
+
+// -- types that may carry a unit --------------------------------------------------------------------
+
+has_unit(t: Ty) -> bool = t match
+    Measured(_, _) -> true
+    _ -> false
+
+// The unit of a value of type `t`; a type without one is dimensionless.
+unit_of(t: Ty) -> Unit = t match
+    Measured(_, u) -> *u
+    _ -> unit_one()
+
+// The number type under a unit.
+base_of(t: Ty) -> Ty = t match
+    Measured(b, _) -> *b
+    _ -> t
+
+// `base` in unit `u`; in the dimensionless unit of scale 1 it is plain `base` (`real<1>` is `real`).
+measured(base: Ty, u: Unit) -> Ty = if is_one(u) || is_error(base) then base else Measured(base, u)
+
+// Every element of an array carries the array's one unit (DESIGN §13.6), so these ask the question
+// of a scalar or of an array's element type alike.
+
+// Whether a scalar, or an array's elements, carry a unit.
+carries_unit(t: Ty) -> bool = has_unit(elem_of(t))
+
+// The unit of a scalar, or of each element of an array.
+elem_unit(t: Ty) -> Unit = unit_of(elem_of(t))
+
+// `t` with its unit removed: a scalar's number type, or an array of the same shape over it.
+stripped(t: Ty) -> Ty = with_elem(t, base_of(elem_of(t)))
+
+// `t` in unit `u`: a scalar, or an array whose elements are.
+with_unit(t: Ty, u: Unit) -> Ty = with_elem(t, measured(base_of(elem_of(t)), u))
+
+// `promotes` where a unit is involved: the same unit, and a base that promotes.
+unit_promotes(from: Ty, to: Ty) -> bool = unit_eq(unit_of(from), unit_of(to)) && promotes(base_of(from), base_of(to))
+
+// `common` where a unit is involved: two values of one dimension meet in the left one's unit.
+unit_common(a: Ty, b: Ty) -> Option[Ty]
+    if !same_dims(unit_of(a), unit_of(b)) then return None
+
+    common(base_of(a), base_of(b)) match
+        Some(c) -> Some(measured(c, unit_of(a)))
+        None -> None
+
+// Whether a value of `from` stands where `to` is expected once converted to `to`'s unit: one
+// dimension, another scale, a base that promotes (DESIGN §13.3).
+converts(from: Ty, to: Ty) -> bool =
+    (has_unit(from) || has_unit(to)) && same_dims(unit_of(from), unit_of(to)) && promotes(base_of(from), base_of(to))
+
+// The type `t` with every unit removed: what emission sees.
+erase(t: Ty) -> Ty = t match
+    Measured(b, _) -> erase(*b)
+    Array(elem, axes) -> Ty.Array(erase(*elem), axes)
+    Tuple(elems) -> Ty.Tuple(erase_all(elems))
+    Nominal(name, args) -> Nominal(name, erase_all(args))
+    Fn(sig) -> fn_type(erase_all(sig.params), sig.modes, erase(sig.ret))
+    _ -> t
+
+private erase_all(ts: Buf[Ty]) -> Buf[Ty]
+    var out: Buf[Ty] = buf()
+
+    for t in ts
+        out.push(erase(t))
+
+    out
+
+// `v` converted to unit `to` of its own dimension: a `TRescale` by the ratio of the two scales, or,
+// where the scales agree, a `TUnitAs` that only renames the unit. On an array both apply to every
+// element.
+rescaled(v: TExpr, to: Unit) -> TExpr
+    val f = rdiv(elem_unit(v.ty).factor, to.factor)
+    val ty = with_unit(v.ty, to)
+
+    if ratio_eq(f, ONE_RATIO) then texpr(v.span, ty, TUnitAs(v)) else texpr(v.span, ty, TRescale(v, f))

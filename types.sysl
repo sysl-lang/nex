@@ -32,17 +32,20 @@ enum Extent
     Named(name: string)
 
 // An exact rational, `num / den` in lowest terms with `den` positive: a unit's exponent or its
-// scale factor.
+// scale factor. 256 bits hold the prelude's factors and their products to the fifth power; a
+// factor that would not fit is `INEXACT` (`units.sysl`), which the elaborator refuses.
 struct Ratio
-    num: i64
-    den: i64
+    num: i256
+    den: i256
 
-// A unit of measure: an exponent over each of the seven SI base dimensions (m, kg, s, A, K, mol, cd,
-// in that order) and the exact factor that relates it to the coherent SI unit of that dimension
-// (`mm` is length to the power 1 with factor 1/1000).
+// A unit of measure (DESIGN §13): its base units and unit parameters with their exponents, the exact
+// factor that relates it to the product of those base units (`mm` is `m` to the power 1 with factor
+// 1/1000), and the named units it is spelt with, which are what it prints as. Two units are one unit
+// when `dims` and `factor` agree, whatever their spelling: `N` and `kg m / s^2`.
 struct Unit
-    exps: Buf[Ratio]
+    dims: Buf[Power]
     factor: Ratio
+    spelling: Buf[Power]
 
 enum Ty
     // `int8` … `int64` (`signed`) and `uint8` … `uint64`.
@@ -61,8 +64,10 @@ enum Ty
     Tuple(elems: Buf[Ty])
     // A struct or an enum, with its type arguments.
     Nominal(name: string, args: Buf[Ty])
-    // A generic parameter, `T: Numeric`, `R: Rank`, `U: Unit`.
-    Param(name: string, constraint: string)
+    // A generic type parameter, `T: Numeric`. In a generic's own signature it is a pattern a use
+    // infers an argument for; `bound` where it stands in the generic's body as it is checked, an
+    // abstract type of which nothing is known but what its constraint admits (DESIGN §2.6).
+    Param(name: string, constraint: string, bound: bool)
     Measured(base: &Ty, unit: &Unit)
     Error
 end Ty
@@ -75,8 +80,53 @@ fn_type(params: Buf[Ty], modes: Buf[Mode], ret: Ty) -> Ty = Fn(FnSig(params, mod
 
 // -- classification ---------------------------------------------------------------------------------
 
+// The kinds of type, one bit each: what a constraint admits (DESIGN §2.6) is a set of them, and a
+// type parameter is classified by its constraint's set. It is an integer only where every type its
+// constraint admits is one, numeric only where every one is numeric.
+val KIND_INT = 1
+val KIND_REAL = 2
+val KIND_COMPLEX = 4
+val KIND_BOOL = 8
+val KIND_STR = 16
+val KIND_OTHER = 32
+
+val KINDS_NUMERIC = KIND_INT | KIND_REAL | KIND_COMPLEX
+
+// The kinds a constraint admits; an unknown one admits nothing.
+constraint_kinds(c: string) -> int
+    if c == "Any" then return KINDS_NUMERIC | KIND_BOOL | KIND_STR | KIND_OTHER
+    if c == "Numeric" then return KINDS_NUMERIC
+    if c == "Integral" then return KIND_INT
+    if c == "Real" || c == "Ord" then return KIND_INT | KIND_REAL
+    if c == "Float" then return KIND_REAL
+    if c == "Complex" then return KIND_COMPLEX
+    if c == "Eq" then return KINDS_NUMERIC | KIND_BOOL | KIND_STR
+
+    0
+
+// The kinds a type may be: one for a concrete type, its constraint's for a type parameter.
+kinds_of(t: Ty) -> int = t match
+    Int(_, _) -> KIND_INT
+    Real(_) -> KIND_REAL
+    Complex(_) -> KIND_COMPLEX
+    Bool -> KIND_BOOL
+    Str -> KIND_STR
+    Param(_, c, _) -> constraint_kinds(c)
+    _ -> KIND_OTHER
+
+// Whether every type `t` may be is among `kinds`.
+private within(t: Ty, kinds: int) -> bool
+    val k = kinds_of(t)
+
+    k != 0 && (k | kinds) == kinds
+
+is_param(t: Ty) -> bool = t match
+    Param(_, _, _) -> true
+    _ -> false
+
 is_int(t: Ty) -> bool = t match
     Int(_, _) -> true
+    Param(_, _, _) -> kinds_of(t) == KIND_INT
     _ -> false
 
 is_array(t: Ty) -> bool = t match
@@ -93,16 +143,21 @@ is_signed(t: Ty) -> bool = t match
 
 is_real(t: Ty) -> bool = t match
     Real(_) -> true
+    Param(_, _, _) -> kinds_of(t) == KIND_REAL
     _ -> false
 
 is_complex(t: Ty) -> bool = t match
     Complex(_) -> true
+    Param(_, _, _) -> kinds_of(t) == KIND_COMPLEX
     _ -> false
 
-is_numeric(t: Ty) -> bool = is_int(t) || is_real(t) || is_complex(t)
+is_numeric(t: Ty) -> bool = within(t, KINDS_NUMERIC)
 
 // The integer and real types: the ones `<` orders.
-is_ordered(t: Ty) -> bool = is_int(t) || is_real(t)
+is_ordered(t: Ty) -> bool = within(t, KIND_INT | KIND_REAL)
+
+// The types `==` compares: the numeric ones, `bool` and `string`.
+is_equatable(t: Ty) -> bool = within(t, KINDS_NUMERIC | KIND_BOOL | KIND_STR)
 
 is_error(t: Ty) -> bool = t match
     Error -> true
@@ -180,8 +235,8 @@ ty_eq(a: Ty, b: Ty) -> bool = a match
     Nominal(an, aa) -> b match
         Nominal(bn, ba) -> an == bn && tys_eq(aa, ba)
         _ -> false
-    Param(an, _) -> b match
-        Param(bn, _) -> an == bn
+    Param(an, ac, ab) -> b match
+        Param(bn, bc, bb) -> an == bn && ac == bc && ab == bb
         _ -> false
     Measured(ab, au) -> b match
         Measured(bb, bu) -> ty_eq(*ab, *bb) && unit_eq(*au, *bu)
@@ -227,20 +282,13 @@ private axes_eq(xs: Buf[Extent], ys: Buf[Extent]) -> bool
     true
 end axes_eq
 
-private unit_eq(a: Unit, b: Unit) -> bool
-    if a.factor.num != b.factor.num || a.factor.den != b.factor.den then return false
-
-    for k in 0..<a.exps.len()
-        if a.exps[k].num != b.exps[k].num || a.exps[k].den != b.exps[k].den then return false
-
-    true
-
 // -- the lattice ------------------------------------------------------------------------------------
 
 // Whether a value of `from` may stand where `to` is expected: the same type, or a path along the
 // arrows of DESIGN §2.2. `Never`, and a type with `Error` anywhere in it, go anywhere.
 promotes(from: Ty, to: Ty) -> bool
     if is_wild(from) || has_error(from) || has_error(to) || ty_eq(from, to) then return true
+    if has_unit(from) || has_unit(to) then return unit_promotes(from, to)
 
     from match
         Int(fb, fs) -> to match
@@ -264,6 +312,7 @@ end promotes
 common(a: Ty, b: Ty) -> Option[Ty]
     if is_wild(a) then return Some(b)
     if is_wild(b) || ty_eq(a, b) then return Some(a)
+    if has_unit(a) || has_unit(b) then return unit_common(a, b)
 
     a match
         Int(ab, asg) -> b match
@@ -332,8 +381,8 @@ show_ty(t: Ty) -> string = t match
     Array(elem, axes) -> show_array(*elem, axes)
     Tuple(elems) -> "(" + show_tys(elems) + ")"
     Nominal(name, args) -> if args.len() == 0 then name else name + "[" + show_tys(args) + "]"
-    Param(name, _) -> name
-    Measured(base, unit) -> show_ty(*base) + "<" + show_unit(*unit) + ">"
+    Param(name, _, _) -> name
+    Measured(base, unit) -> show_ty(*base) + "<" + spell(*unit) + ">"
     Error -> "?"
 
 private show_tys(ts: Buf[Ty]) -> string
@@ -371,22 +420,3 @@ private show_array(elem: Ty, axes: Buf[Extent]) -> string
 
     if sugar then "[" + show_ty(elem) + "]" else "[" + show_ty(elem) + "; " + join(out.view(), ", ") + "]"
 end show_array
-
-private val BASE_UNITS = ["m", "kg", "s", "A", "K", "mol", "cd"]
-
-// A unit as its base dimensions, `m kg s^-2`, with its factor in front where it is not 1.
-private show_unit(u: Unit) -> string
-    var out: Buf[string] = buf()
-
-    if u.factor.num != 1 || u.factor.den != 1 then out.push(show_ratio(u.factor))
-
-    for k in 0..<u.exps.len()
-        val x = u.exps[k]
-
-        if x.num == 0 then continue
-
-        if x.num == 1 && x.den == 1 then out.push(BASE_UNITS[k]) else out.push(BASE_UNITS[k] + "^" + show_ratio(x))
-
-    if out.len() == 0 then "1" else join(out.view(), " ")
-
-private show_ratio(r: Ratio) -> string = if r.den == 1 then s"${r.num}" else s"(${r.num}/${r.den})"

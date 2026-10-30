@@ -1,0 +1,27 @@
+[1.0, 7.0, 1.0]
+[9.0, 7.0, 1.0]
+[2.0, 14.0, 2.0]
+[2, 2, 2, 2]
+4
+poly 3.0
+labels l4
+empty
+[1, 0]
+[1, 0, 0]
+[1, 0, 1]
+starta
+startab
+[1, 4]
+[z4, x, w]
+[1.0, 1.0, 1.0]
+[Tagged { id=1, marks=[1, 20], words=[a] }, Tagged { id=9, marks=[9], words=[nine] }]
+[Tagged { id=1, marks=[1, 2], words=[a] }, Tagged { id=2, marks=[3], words=[b4, c] }]
+[3]
+14
+40
+1 b4
+2 c
+1 z4
+2 x
+3 w
+[(z4, (1, z4)), (x, (2, x)), (w, (3, w))]

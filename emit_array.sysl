@@ -13,10 +13,18 @@
 // `return` gives is carried the same way, as one more entry past the locals.
 //
 // **An array that must live in memory** — one a lambda captures, which both the lambda and its
-// maker read and write, or a module-level binding — is a memref descriptor stored in its cell. Its
-// elements are storage the runtime allocates and nothing frees; reading it is a `to_tensor` of the
-// stored memref, and writing it materializes the new value into that storage (or, for a value of
-// another shape, into fresh storage whose descriptor replaces the old).
+// maker read and write, a module-level binding, or a part of a struct, tuple or enum — is an object
+// of the counted heap holding the memref descriptor of its storage, which it frees with itself; the
+// place holds the object's address and a count on it (`emit_own.sysl`), so an aggregate copied shares
+// it. Reading it pins the object for the statement and answers a `to_tensor` of the stored memref: a
+// view valid while the statement runs, copied where it is bound to an array local or returned, which
+// outlive the statement (`reads_storage`). Writing it materializes the new value into that storage
+// where the place is the object's only holder and the shape is unchanged, and otherwise into a new
+// object that replaces the old.
+//
+// **An array of non-numbers** — strings, functions, tuples, structs, enums — is never a tensor, since
+// a memref holds only numbers: it is an object of the counted heap holding its elements
+// (`emit_items.sysl`), a value held and counted as a string is.
 //
 // **Element-wise work is one `linalg.generic` per operation**, its body the scalar operation the
 // emitter already writes, over block arguments. Fusion is `linalg-fuse-elementwise-ops`' job, never
@@ -49,8 +57,22 @@ struct Nest
     results: Buf[string]
     carried: string
 
+// Whether `t` is an array of numbers or booleans: a tensor.
 is_arr(t: Ty) -> bool = t match
-    Array(_, _) -> true
+    Array(e, _) -> is_number(*e)
+    _ -> false
+
+// Whether `t` is an array of anything else: an object holding its elements (`emit_items.sysl`).
+is_items(t: Ty) -> bool = t match
+    Array(e, _) -> !is_number(*e)
+    _ -> false
+
+private is_number(t: Ty) -> bool = t match
+    Int(_, _) -> true
+    Real(_) -> true
+    Complex(_) -> true
+    Bool -> true
+    Measured(b, _) -> is_number(*b)
     _ -> false
 
 copy_strings(xs: Buf[string]) -> Buf[string]
@@ -157,34 +179,6 @@ impl Emitter
 
         self.def(s"tensor.empty(${joined(dims)}) : $t")
 
-    // Whether an aggregate of type `t` has an array among its parts, at any depth. Its storage would
-    // have to take part in the counted heap's ownership, which arrays do not yet. A type that holds
-    // itself is looked into a few levels deep, which is as far as an array can hide.
-    holds_array(*self, t: Ty, depth: int = 0) -> bool
-        if depth > 8 then return false
-
-        t match
-            Array(_, _) -> return true
-            Tuple(es) ->
-                for e in es
-                    if self.holds_array(e, depth + 1) then return true
-            Nominal(name, _) ->
-                self.struct_of(name) match
-                    Some(s) ->
-                        for f in s.fields
-                            if self.holds_array(f.ty, depth + 1) then return true
-                    None -> ()
-
-                self.enum_of(name) match
-                    Some(e) ->
-                        for v in e.variants
-                            for f in v.fields
-                                if self.holds_array(f.ty, depth + 1) then return true
-                    None -> ()
-            _ -> ()
-
-        false
-
     // -- index arithmetic -------------------------------------------------------------------------
 
     index_const(*self, n: usize) -> string = self.def(s"arith.constant $n : index")
@@ -224,8 +218,10 @@ impl Emitter
 
     // The 0-based tensor index of 1-based nex index `v` (of integer type `t`) on an axis of extent
     // `n`, trapping `out of bounds` outside `1..n`.
-    checked_index(*self, v: string, t: Ty, n: string) -> string
-        val w = self.widen64(v, bits_of(t), is_signed(t))
+    checked_index(*self, v: string, t: Ty, n: string) -> string = self.checked_at(self.widen64(v, bits_of(t), is_signed(t)), n)
+
+    // `checked_index` of an `i64` index.
+    checked_at(*self, w: string, n: string) -> string
         val z = self.def(s"arith.subi $w, %one : i64")
         val outside = self.def(s"arith.cmpi uge, $z, ${self.to_i64(n)} : i64")
 
@@ -444,15 +440,34 @@ impl Emitter
 
         v
 
-    // The tensor a stored array holds: its descriptor at `ptr` read as a memref.
-    load_array(*self, span: Span, ptr: string, t: Ty) -> string
-        val d = self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")
-        val m = self.def(s"builtin.unrealized_conversion_cast $d : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
+    // The tensor the stored array object `h` holds, the object pinned until the statement ends so
+    // that nothing the statement does frees the storage under it.
+    stored_view(*self, span: Span, h: string, t: Ty) -> string
+        self.pin(h, t, 1)
+        self.temps.push(Temp(h, t))
+
+        val m =self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")} : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
 
         self.def(s"bufferization.to_tensor $m restrict : ${self.memref_ty(span, t)} to ${self.tensor_ty(span, t)}")
 
-    // The tensor `v` stored at `ptr` in fresh storage.
+    // The tensor `v` stored into the place at `ptr` as a new object, the place's old one released.
     store_array(*self, span: Span, ptr: string, v: string, t: Ty)
+        if self.dirty
+            self.op(s"scf.if ${self.flowing()} {")
+            self.dirty = false
+            self.store_array(span, ptr, v, t)
+            self.dirty = true
+            self.op("}")
+            return
+
+        val h = self.boxed_array(span, v, t)
+        val old = self.def(s"llvm.load $ptr : !llvm.ptr -> !llvm.ptr")
+
+        self.op(s"llvm.store $h, $ptr : !llvm.ptr, !llvm.ptr")
+        self.release_ref(old)
+
+    // A new object of the counted heap holding the tensor `v` in fresh storage, with a count of 1.
+    boxed_array(*self, span: Span, v: string, t: Ty) -> string
         val r = rank_of(t)
         val d = self.desc_ty(r)
         val sizes = self.dims(span, v, t)
@@ -474,7 +489,10 @@ impl Emitter
             u = self.def(s"llvm.insertvalue $stride, $u[4, $k] : $d")
             stride = self.def(s"arith.muli $stride, ${self.to_i64(sizes[k])} : i64")
 
-        val p = self.call("nex_array_alloc", count, "i64", "!llvm.ptr")
+        self.external("nex_array_alloc", "i64", "!llvm.ptr")
+        self.external("nex_array_free", "!llvm.ptr", "")
+
+        val p = self.def(s"func.call @nex_array_alloc($count) : (i64) -> !llvm.ptr")
 
         u = self.def(s"llvm.insertvalue $p, $u[0] : $d")
         u = self.def(s"llvm.insertvalue $p, $u[1] : $d")
@@ -483,22 +501,56 @@ impl Emitter
         val m = self.def(s"builtin.unrealized_conversion_cast $u : $d to ${self.memref_ty(span, t)}")
 
         self.op(s"bufferization.materialize_in_destination $v in restrict writable $m : (${self.tensor_ty(span, t)}, ${self.memref_ty(span, t)}) -> ()")
-        self.effect(s"llvm.store $u, $ptr : $d, !llvm.ptr", "")
 
-    // The tensor `v`, of the shape the array stored at `ptr` has, written over its elements.
+        val free = self.def("func.constant @nex_array_free : (!llvm.ptr) -> ()")
+        val h = self.new_object((4 + 2 * r) * 8, self.def(s"builtin.unrealized_conversion_cast $free : (!llvm.ptr) -> () to !llvm.ptr"))
+
+        self.op(s"llvm.store $u, $h : $d, !llvm.ptr")
+        h
+
+    // The tensor `v`, of the shape the array stored at `ptr` has, written over its elements where the
+    // place is the only holder of its object, and otherwise stored as a new object.
     write_back(*self, span: Span, ptr: string, v: string, t: Ty)
-        val d = self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")
-        val m = self.def(s"builtin.unrealized_conversion_cast $d : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
+        if self.dirty
+            self.op(s"scf.if ${self.flowing()} {")
+            self.dirty = false
+            self.write_back(span, ptr, v, t)
+            self.dirty = true
+            self.op("}")
+            return
+
+        self.external("nex_count", "!llvm.ptr", "i64")
+
+        val h = self.def(s"llvm.load $ptr : !llvm.ptr -> !llvm.ptr")
+        val n = self.def(s"func.call @nex_count($h) : (!llvm.ptr) -> i64")
+        val holders = self.def(s"arith.subi $n, ${self.def(s"llvm.load ${self.pins_ptr(h, t)} : !llvm.ptr -> i64")} : i64")
+
+        self.op(s"scf.if ${self.def(s"arith.cmpi eq, $holders, %one : i64")} {")
+
+        val m = self.def(s"builtin.unrealized_conversion_cast ${self.def(s"llvm.load $h : !llvm.ptr -> ${self.desc_ty(rank_of(t))}")} : ${self.desc_ty(rank_of(t))} to ${self.memref_ty(span, t)}")
 
         self.op(s"bufferization.materialize_in_destination $v in restrict writable $m : (${self.tensor_ty(span, t)}, ${self.memref_ty(span, t)}) -> ()")
+        self.op("} else {")
+        self.store_array(span, ptr, v, t)
+        self.op("}")
+
+    // The word after a stored array's descriptor: how many of its counts are pins, held by
+    // statements reading it rather than by places.
+    pins_ptr(*self, h: string, t: Ty) -> string =
+        self.def(s"llvm.getelementptr $h[${3 + 2 * rank_of(t)}] : (!llvm.ptr) -> !llvm.ptr, i64")
+
+    // A pin on the stored array object `h` taken (`by` 1) or given back (`by` −1).
+    pin(*self, h: string, t: Ty, by: int)
+        val p = self.pins_ptr(h, t)
+
+        if by > 0 then self.retain_ref(h)
+        self.op(s"llvm.store ${self.def(s"arith.addi ${self.def(s"llvm.load $p : !llvm.ptr -> i64")}, ${self.def(s"arith.constant $by : i64")} : i64")}, $p : i64, !llvm.ptr")
+        if by < 0 then self.release_ref(h)
 
     // The array a place holds now.
     place_value(*self, e: TExpr) -> string = *e.kind match
         TLocal(id) -> if self.in_ssa(id) then self.read_array(e.span, id) else self.load(e.span, self.local_ptr(e.span, id), e.ty)
-        TGlobalRef(_) -> self.load(e.span, self.place_ptr(e), e.ty)
-        _ ->
-            self.later(e.span, "this place")
-            self.zero_array(e.span, e.ty)
+        _ -> self.load(e.span, self.place_ptr(e), e.ty)
 
     // The array place `e` rebound to `v`; `same_shape` where `v` has the shape it held, so stored
     // storage is written over rather than replaced.
@@ -514,10 +566,56 @@ impl Emitter
 
         if same_shape then self.write_back(e.span, p, v, e.ty) else self.store_array(e.span, p, v, e.ty)
 
+    // Local `id` bound to `v`, a value of `t` that may be a view of stored storage.
+    bind_value(*self, span: Span, id: usize, v: string, t: Ty)
+        if self.in_ssa(id)
+            self.arr.set(id, self.copied(span, v, t))
+            return
+
+        self.bind_local(span, id)
+        self.keep(span, self.local_ptr(span, id), v, self.prog.locals[id].ty)
+
+    // The value of `e`, an array, that outlives the statement: copied where it is a view of stored
+    // storage, which a later statement may write or free.
+    lasting(*self, e: TExpr) -> string
+        val v = self.ex(e)
+
+        if v != "" && self.reads_storage(e) then self.copied(e.span, v, e.ty) else v
+
+    // Whether the array `e` answers may be a view of an object's storage rather than a value of its
+    // own: a captured or module-level array, a part of an aggregate, or a choice of such.
+    reads_storage(*self, e: TExpr) -> bool = *e.kind match
+        TLocal(id) -> !self.in_ssa(id)
+        TGlobalRef(_) -> true
+        TField(_, _, _) -> true
+        TTupleField(_, _) -> true
+        TIf(_, a, b) ->
+            if self.reads_storage(a) then return true
+
+            b match
+                Some(x) -> self.reads_storage(x)
+                None -> false
+        TBlock(_, r) -> self.reads_storage(r)
+        TMatch(_, arms) ->
+            for arm in arms
+                if self.reads_storage(arm.body) then return true
+
+            false
+        TArray(op) ->
+            *op match
+                TView(t, _) -> self.reads_storage(t)
+                TShapeCheck(v) -> self.reads_storage(v)
+                TTransfer(v, d) -> !d.clones && self.reads_storage(v)
+                TIndex(_, _) -> true
+                _ -> false
+        _ -> false
+
     // -- array nodes ------------------------------------------------------------------------------
 
     // An array node's value.
     array(*self, e: TExpr, op: TArr) -> string
+        if is_items(array_of_node(e, op)) && !self.on_args(op) then return self.items_node(e, op)
+
         op match
             TIndex(target, subs) ->
                 if self.is_args(target) && subs.len() == 1
@@ -545,7 +643,8 @@ impl Emitter
                 val k = self.ends.len() - 1
                 val n = self.to_i64(self.dim(e.span, self.ends[k], self.end_tys[k], axis))
 
-                self.convert(e.span, n, INTEGER, e.ty, false)
+                // On an `origin` view the last index is its first index plus its extent less one.
+                self.convert(e.span, self.unshifted(n, self.end_shifts[k], axis - 1), INTEGER, e.ty, false)
             TElementwise(o, l, r) ->
                 var operands: Buf[TExpr] = buf()
 
@@ -580,7 +679,7 @@ impl Emitter
             TMatMul(l, r) -> self.matmul(e, l, r)
             TReduction(name, args, dim) -> self.reduction(e, name, args, dim)
             TBroadcast(v) -> self.unsupported(e.span, "a broadcast outside a slice assignment")
-            TOrigin(_, _) -> self.unsupported(e.span, "`origin`")
+            TOrigin(source, firsts) -> self.origin(source, firsts)
     end array
 
     // The scalar operation an element-wise operator applies.
@@ -656,6 +755,7 @@ impl Emitter
         var first_ty = out
         var ins: Buf[string] = buf()
         var in_tys: Buf[string] = buf()
+        var mismatch = ""
 
         for k in 0..<operands.len()
             if !is_arr(operands[k].ty) then continue
@@ -668,8 +768,10 @@ impl Emitter
                 for a in 1..r
                     val x = self.dim(span, first, first_ty, a)
                     val y = self.dim(span, vals[k], operands[k].ty, a)
+                    val ne = self.def(s"arith.cmpi ne, $x, $y : index")
 
-                    self.trap_if(self.def(s"arith.cmpi ne, $x, $y : index"), "shape mismatch")
+                    self.trap_if(ne, "shape mismatch")
+                    mismatch = if mismatch == "" then ne else self.def(s"arith.ori $mismatch, $ne : i1")
 
             ins.push(vals[k])
             in_tys.push(self.tensor_ty(span, operands[k].ty))
@@ -678,6 +780,24 @@ impl Emitter
 
         val empty = self.def(s"tensor.empty(${joined(self.dynamic_dims(span, first, first_ty, out))}) : $ot")
 
+        // Past the trap the shapes agree, but where both are known statically and differ, folding
+        // would meet an operation over mismatched operands; the operation is kept off that path.
+        if mismatch != ""
+            val v = self.fresh()
+
+            self.op(s"$v = scf.if $mismatch -> ($ot) {")
+            self.op(s"scf.yield $empty : $ot")
+            self.op("} else {")
+            self.op(s"scf.yield ${self.elementwise(span, out, operands, vals, ins, in_tys, empty, scalar)} : $ot")
+            self.op("}")
+            return v
+
+        self.elementwise(span, out, operands, vals, ins, in_tys, empty, scalar)
+
+    // The `linalg.generic` computing `scalar` over `ins` into `empty`.
+    private elementwise(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], ins: Buf[string], in_tys: Buf[string], empty: string, scalar: TExpr) -> string
+        val r = rank_of(out)
+        val ot = self.tensor_ty(span, out)
         val m = identity_map(r)
         var maps = m
 
@@ -710,7 +830,7 @@ impl Emitter
         self.op(s"linalg.yield $y : ${self.elem_ty(span, elem_of(out))}")
         self.op(s"} -> $ot")
         v
-    end mapped_values
+    end elementwise
 
     // `scalar` emitted with `frame` as the operands its `TChainOperand` leaves read, nothing having
     // left the statement yet.
@@ -937,29 +1057,27 @@ impl Emitter
     // `a[i, j]` read: one element.
     element(*self, e: TExpr, target: TExpr, subs: Buf[TSub]) -> string
         val tv = self.ex(target)
-        val idx = self.indices(e.span, tv, target.ty, subs)
+        val idx = self.indices(e.span, tv, target.ty, subs, self.shifts_of(target))
 
         if idx.len() == 0 then return self.zero_of(e.span, e.ty)
 
         self.def(s"tensor.extract $tv[${joined(idx)}] : ${self.tensor_ty(e.span, target.ty)}")
 
     // The checked tensor indices of an index list whose every subscript is an integer, tensor order;
-    // none where one is not.
-    indices(*self, span: Span, tv: string, t: Ty, subs: Buf[TSub]) -> Buf[string]
+    // none where one is not. `shifts` are an `origin` view's, by axis (`origin_shifts`).
+    indices(*self, span: Span, tv: string, t: Ty, subs: Buf[TSub], shifts: Buf[string]) -> Buf[string]
         var out: Buf[string] = buf()
 
-        self.ends.push(tv)
-        self.end_tys.push(t)
+        self.open_ends(tv, t, shifts)
 
         for k in 0..<subs.len()
             subs[k] match
-                TSubAt(i) -> out.push(self.checked_index(self.ex(i), i.ty, self.dim(span, tv, t, k + 1)))
+                TSubAt(i) -> out.push(self.checked_at(self.shifted(self.index64(i), shifts, k), self.dim(span, tv, t, k + 1)))
                 _ ->
                     self.later(span, "a slice here")
                     out.push(self.index_const(0))
 
-        self.ends.pop()
-        self.end_tys.pop()
+        self.close_ends()
 
         // Tensor order is nex's reversed.
         var rev: Buf[string] = buf()
@@ -972,21 +1090,21 @@ impl Emitter
         rev
 
     // The window an index list takes, per nex axis: its offset, its extent and its stride as
-    // `index` values, the integer subscripts with extent 1; all bounds checked.
-    window(*self, span: Span, tv: string, t: Ty, subs: Buf[TSub]) -> (Buf[string], Buf[string], Buf[string])
+    // `index` values, the integer subscripts with extent 1; all bounds checked. `shifts` are an
+    // `origin` view's, by axis.
+    window(*self, span: Span, tv: string, t: Ty, subs: Buf[TSub], shifts: Buf[string]) -> (Buf[string], Buf[string], Buf[string])
         var offs: Buf[string] = buf()
         var sizes: Buf[string] = buf()
         var strides: Buf[string] = buf()
 
-        self.ends.push(tv)
-        self.end_tys.push(t)
+        self.open_ends(tv, t, shifts)
 
         for k in 0..<subs.len()
             val n = self.dim(span, tv, t, k + 1)
 
             subs[k] match
                 TSubAt(i) ->
-                    offs.push(self.checked_index(self.ex(i), i.ty, n))
+                    offs.push(self.checked_at(self.shifted(self.index64(i), shifts, k), n))
                     sizes.push(self.index_const(1))
                     strides.push(self.index_const(1))
                 TSubAll ->
@@ -995,23 +1113,32 @@ impl Emitter
                     strides.push(self.index_const(1))
                 TSubWindow(lo_e, hi_e, inclusive, step_e) ->
                     val n64 = self.to_i64(n)
-                    val lo = lo_e match
-                        Some(x) -> self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
-                        None -> self.def("arith.constant 1 : i64")
-                    var hi = hi_e match
-                        Some(x) -> self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
-                        None -> n64
-
-                    if !inclusive && hi_e.is_some() then hi = self.def(s"arith.subi $hi, %one : i64")
-
-                    val step = step_e match
-                        Some(x) -> self.widen64(self.ex(x), bits_of(x.ty), is_signed(x.ty))
-                        None -> self.def("arith.constant 1 : i64")
                     val zero = self.def("arith.constant 0 : i64")
+                    val step = step_e match
+                        Some(x) -> self.index64(x)
+                        None -> self.def("arith.constant 1 : i64")
 
-                    if step_e.is_some()
-                        self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : i64"), "a slice stride of 0")
-                        self.trap_if(self.def(s"arith.cmpi slt, $step, $zero : i64"), "a negative slice stride is not compiled yet")
+                    if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : i64"), "a slice stride of 0")
+
+                    // The bounds are read in the direction of travel (DESIGN §5.4): the first is
+                    // where the walk starts, the second where it stops, and an open one is the end
+                    // of the axis the stride's direction gives it.
+                    val down = self.def(s"arith.cmpi slt, $step, $zero : i64")
+                    val start = lo_e match
+                        Some(x) -> self.shifted(self.index64(x), shifts, k)
+                        None -> self.def(s"arith.select $down, $n64, %one : i64")
+                    var stop = hi_e match
+                        Some(x) -> self.shifted(self.index64(x), shifts, k)
+                        None -> self.def(s"arith.select $down, %one, $n64 : i64")
+
+                    if !inclusive && hi_e.is_some()
+                        val back = self.def(s"arith.select $down, ${self.def("arith.constant -1 : i64")}, %one : i64")
+
+                        stop = self.def(s"arith.subi $stop, $back : i64")
+
+                    // The lowest and the highest index the window covers.
+                    val lo = self.def(s"arith.select $down, $stop, $start : i64")
+                    val hi = self.def(s"arith.select $down, $start, $stop : i64")
 
                     // Empty where `hi` is `lo − 1`; a window running further backward, or past
                     // either end of the axis, is out of bounds.
@@ -1028,17 +1155,17 @@ impl Emitter
                     // Past the traps every value below is in range; the selects keep them so where
                     // the traps are taken too, so no folding of them meets an invalid slice.
                     val skip = self.def(s"arith.ori $bad, $empty : i1")
-                    val stride = self.def(s"arith.select ${self.def(s"arith.cmpi sle, $step, $zero : i64")}, %one, $step : i64")
-                    val passes = self.def(s"arith.divsi ${self.def(s"arith.subi $hi, $lo : i64")}, $stride : i64")
+                    val stride = self.def(s"arith.select ${self.def(s"arith.cmpi eq, $step, $zero : i64")}, %one, $step : i64")
+                    val size = self.def(s"arith.select $down, ${self.def(s"arith.subi $zero, $stride : i64")}, $stride : i64")
+                    val passes = self.def(s"arith.divsi ${self.def(s"arith.subi $hi, $lo : i64")}, $size : i64")
                     val cnt = self.def(s"arith.select $skip, $zero, ${self.def(s"arith.addi $passes, %one : i64")} : i64")
-                    val first = self.def(s"arith.select $skip, $zero, $before : i64")
+                    val first = self.def(s"arith.select $skip, $zero, ${self.def(s"arith.subi $start, %one : i64")} : i64")
 
                     offs.push(self.def(s"arith.index_cast $first : i64 to index"))
                     sizes.push(self.def(s"arith.index_cast $cnt : i64 to index"))
                     strides.push(self.def(s"arith.index_cast $stride : i64 to index"))
 
-        self.ends.pop()
-        self.end_tys.pop()
+        self.close_ends()
         (offs, sizes, strides)
     end window
 
@@ -1064,11 +1191,16 @@ impl Emitter
     // A slice read as a value.
     view(*self, e: TExpr, target: TExpr, subs: Buf[TSub]) -> string
         val tv = self.ex(target)
-        val (offs, sizes, strides) = self.window(e.span, tv, target.ty, subs)
-        val dynamic = self.view_ty(e.ty)
-        val v = self.def(s"tensor.extract_slice $tv${self.slice_text(subs, offs, sizes, strides)} : ${self.tensor_ty(e.span, target.ty)} to ${self.tensor_ty(e.span, dynamic)}")
+        val (offs, sizes, strides) = self.window(e.span, tv, target.ty, subs, self.shifts_of(target))
 
-        self.shape_checked(e.span, v, dynamic, e.ty)
+        self.sliced(e.span, tv, target.ty, self.slice_text(subs, offs, sizes, strides), e.ty)
+
+    // `tensor.extract_slice` of `tv` (array type `t`) by the operands `slice`, as array type `to`.
+    sliced(*self, span: Span, tv: string, t: Ty, slice: string, to: Ty) -> string
+        val dynamic = self.view_ty(to)
+        val v = self.def(s"tensor.extract_slice $tv$slice : ${self.tensor_ty(span, t)} to ${self.tensor_ty(span, dynamic)}")
+
+        self.shape_checked(span, v, dynamic, to)
 
     // An array type with every axis dynamic, as an `extract_slice` with dynamic extents gives.
     view_ty(*self, t: Ty) -> Ty = Ty.Array(elem_of(t), dynamic_axes(rank_of(t)))
@@ -1077,8 +1209,16 @@ impl Emitter
 
     // `a[…] op= value`: one element or a window of the array place `target`, written in place.
     assign_index(*self, span: Span, op: string, target: TExpr, subs: Buf[TSub], value: TExpr)
-        val v = self.ex(value)
-        val cur = self.place_value(target)
+        if is_items(target.ty) then return self.items_assign(span, op, target, subs, value)
+
+        // A scalar that fills the window is evaluated once, as the scalar.
+        val v = *value.kind match
+            TArray(a) -> *a match
+                TBroadcast(s) -> self.ex(s)
+                _ -> self.ex(value)
+            _ -> self.ex(value)
+        var frames: Buf[Opened] = buf()
+        val cur = self.open_place(target, &frames)
         val tt = self.tensor_ty(span, target.ty)
         var whole = true
 
@@ -1088,7 +1228,7 @@ impl Emitter
                 _ -> whole = false
 
         if whole
-            val idx = self.indices(span, cur, target.ty, subs)
+            val idx = self.indices(span, cur, target.ty, subs, buf())
             var x = v
 
             if op != "="
@@ -1096,10 +1236,19 @@ impl Emitter
 
                 x = self.binary(span, op[0..<op.len - 1], old, v, elem_of(target.ty))
 
-            self.set_place(target, self.def(s"tensor.insert $x into $cur[${joined(idx)}] : $tt"), true)
+            if frames.len() > 0
+                var ones: Buf[string] = buf()
+
+                for _ in idx
+                    ones.push(self.index_const(1))
+
+                self.insert_through(span, frames, subs, backwards(idx), ones, ones, x, "")
+            else
+                self.set_place(target, self.def(s"tensor.insert $x into $cur[${joined(idx)}] : $tt"), true)
+
             return
 
-        val (offs, window_sizes, strides) = self.window(span, cur, target.ty, subs)
+        val (offs, window_sizes, strides) = self.window(span, cur, target.ty, subs, buf())
         var sizes = window_sizes
         var kept: Buf[string] = buf()
 
@@ -1188,13 +1337,15 @@ impl Emitter
 
             x = self.mapped_values(span, st, operands, vals, texpr(span, elem_of(st), self.scalar_op(bop, chain_leaf(oe, 0), chain_leaf(oe, 1))))
 
-        self.set_place(target, self.def(s"tensor.insert_slice $x into $cur$slice : $stt into $tt"), true)
+        if frames.len() > 0 then self.insert_through(span, frames, subs, offs, sizes, strides, x, stt)
+        else self.set_place(target, self.def(s"tensor.insert_slice $x into $cur$slice : $stt into $tt"), true)
     end assign_index
 
     // `a = v` or `a op= v` on a whole array place.
     assign_array(*self, span: Span, op: string, target: TExpr, value: TExpr)
         if op == "="
-            self.set_place(target, self.ex(value), false)
+            // A place in memory takes a copy of what it is given anyway.
+            self.set_place(target, if self.reads_storage(target) then self.ex(value) else self.lasting(value), false)
             return
 
         var operands: Buf[TExpr] = buf()
@@ -1285,7 +1436,7 @@ impl Emitter
 
     // `call` (`@f(args) : (types)`) of a function that hands back the `inout` arrays `back` after
     // its value: each place rebound to what the callee left in it. The value is answered.
-    call_handing_back(*self, span: Span, call: string, ret: Ty, back: Buf[TExpr]) -> string
+    call_handing_back(*self, span: Span, call: string, ret: Ty, back: Buf[Held]) -> string
         if self.dirty
             val ok = self.flowing()
 
@@ -1302,8 +1453,8 @@ impl Emitter
 
         if r != "" then tys.push(r)
 
-        for p in back
-            tys.push(self.ty(span, p.ty))
+        for h in back
+            tys.push(self.ty(span, h.place.ty))
 
         val v = self.fresh()
         val n = tys.len()
@@ -1313,7 +1464,7 @@ impl Emitter
         val first: usize = if r == "" then 0 else 1
 
         for k in 0..<back.len()
-            self.set_place(back[k], result_name(v, first + k, n), false)
+            self.close_place(span, back[k].place, result_name(v, first + k, n), back[k].frames, true)
 
         if r == "" then "" else self.own(result_name(v, 0, n), ret)
 

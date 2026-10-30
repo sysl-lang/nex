@@ -18,3 +18,11 @@ file	category	name
 017-reshape-and-flatten-at-rank-3	rank-N	`flatten` and `reshape` round trips at ranks 2 and 3, `transpose`, `shape`, `extents`, `@`
 018-static-shapes	rank-N	static shapes passed, combined, converted from dynamic ones, and the conversion that traps
 019-arrays-through-control-flow-and-calls	rank-N	arrays through branches, loops, `return`, `inout`, function values, captures and module level
+020-base-and-range	views	1-based indexing, inclusive and half-open windows, the legal empty windows and the traps (DESIGN §5.1, §5.2)
+021-negative-strides	views	negative strides read, written, passed and reversed along an axis (DESIGN §5.4)
+022-slices-of-places-and-inout-windows	views	writes through slices of places, `inout` windows, a read window beside a disjoint inout one (DESIGN §5.3, §8.2, §8.3)
+023-origin-and-rebase	views	offset views: a symmetric kernel, a ghost-cell grid, `end`, traps, captures and `rebase` (DESIGN §6.4)
+024-view-rules	views	a view copied into a var, returned, captured, at module level, kept when its source is written (DESIGN §6.2)
+025-arrays-inside-aggregates-are-values	prelude	an array in a struct, read into a local or returned, then the struct written; a module-level array copied, then written; arrays a `match` arm writes
+026-arrays-of-non-numbers	prelude	arrays of structs, strings and closures written through elements and shared by value; `enumerate`, `zip`; an array of strings in a struct
+027-rearranging-locating-and-reducing-along-a-computed-axis	prelude	`permute` written and computed, `reverse` on a computed axis, `dim =` computed, `minloc`/`maxloc` at ranks 1–3 and along an axis, `assert_approx` and the traps of each

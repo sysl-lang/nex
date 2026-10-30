@@ -1,0 +1,217 @@
+@tests
+
+// Units of measure (DESIGN §13): the types the elaborator gives values that carry a unit, the
+// rescalings it inserts where scales mix, and the diagnostics it gives where dimensions disagree. Each
+// rule is checked both ways.
+
+private val MAIN = "def main() = ()\n"
+
+private not_constant(at: string) -> string =
+    "error: `^` on a value with a unit needs a constant exponent, so that the result's unit is known (`x^2`, `x^(1/2)`); this base is real64<m>, so strip the unit to raise it to a computed power: `strip(x)^n` " + at
+
+// -- declaring units ----------------------------------------------------------------------------------
+
+@test("a literal carries its unit, and printing it spells the unit after the number")
+units_literal()
+    assert_eq(elaborated("def main() = print(9.81<m/s^2>)\n"), "(def main () void (print (s (strip:real64 9.81<m/s^2>) \" m/s^2\")))")
+    assert_eq(refused("def main() = print(1.0<zz>)\n"), "error: unknown unit `zz`; did you mean `Hz`? @1:24")
+
+@test("an integer literal with a unit is a real literal, and a literal takes its width from context")
+units_literal_adoption()
+    assert_eq(elaborated("def main() = print(12<in>)\n"), "(def main () void (print (s (strip:real64 12.0<in>) \" in\")))")
+    assert_eq(elaborated("def main() =\n  val a: real32<m> = 1.0<m>\n  print(a + 9.81<m>)\n"),
+        "(def main () void (block (val a#0:real32<m> (adopt:real32<m> 1.0)) (print (s (strip:real32 (+:real32<m> a#0 (adopt:real32<m> 9.81))) \" m\"))))")
+    assert_eq(refused("def main() = print(true<m>)\n"), "error: expected an expression, found ')' @1:27")
+
+@test("a module declares base, derived and scaled units, and the scales compose exactly")
+units_declarations()
+    assert_eq(elaborated("unit m\nunit mm = 0.001 m\nunit in = 25.4 mm\ndef main() = print(10.0<mm> + 1.0<in>)\n"),
+        "(def main () void (print (s (strip:real64 (+:real64<mm> 10.0<mm> (rescale:real64<mm> 25.4 1.0<in>))) \" mm\")))")
+    assert_eq(elaborated("unit furlong = 201.168 m\ndef main() = print(to<mi>(8.0<furlong>))\n"),
+        "(def main () void (print (s (strip:real64 (rescale:real64<mi> 0.125 8.0<furlong>)) \" mi\")))")
+    assert_eq(refused("unit a = b\nunit b = a\n" + MAIN), "error: the unit `a` is defined through itself: a -> b -> a @1:1")
+    assert_eq(refused("unit q = 0 m\n" + MAIN), "error: the scale of `q` is a positive decimal number: `unit in = 0.0254 m` @1:1")
+    assert_eq(refused("unit m\nunit m\n" + MAIN), "error: redeclaration of the unit `m` @2:1")
+
+@test("a module's base unit of a prelude name is the prelude's unit; another base unit is a dimension of its own")
+units_base_unit_is_the_preludes()
+    assert_eq(elaborated("unit m\ndef main() = print(to<m>(1.0<N> / 1.0<kg> * 1.0<s^2>))\n"),
+        "(def main () void (print (s (strip:real64 (unit:real64<m> (*:real64<N s^2/kg> (/:real64<N/kg> 1.0<N> 1.0<kg>) 1.0<s^2>))) \" m\")))")
+    assert_eq(refused("unit apple\ndef main() = print(1.0<apple> + 1.0<m>)\n"), "error: cannot add apple and m: apple and length are different dimensions @2:20")
+
+@test("a module's scaled unit shadows the prelude's of the same name")
+units_shadowing()
+    assert_eq(elaborated("unit in = 2.0 m\ndef main() = print(to<m>(1.0<in>))\n"), "(def main () void (print (s (strip:real64 (rescale:real64<m> 2.0 1.0<in>)) \" m\")))")
+    assert_eq(refused("unit in = 2.0 m\ndef main() = print(to<mm>(1.0<in>) + 1.0<s>)\n"), "error: cannot add mm and s: length and time are different dimensions @2:20")
+
+// -- arithmetic and conversion ------------------------------------------------------------------------
+
+@test("+, - and the comparisons take one dimension, converting the right operand to the left's unit")
+units_additive()
+    assert_eq(elaborated("def main() = print(1.0<ft> > 300.0<mm>)\n"), "(def main () void (print (>:bool 1.0<ft> (rescale:real64<ft> 0.0032808398950131233 300.0<mm>))))")
+    assert_eq(elaborated("def main() = print(1.0<m> == 1.0<m>)\n"), "(def main () void (print (==:bool 1.0<m> 1.0<m>)))")
+    assert_eq(elaborated("def main() = print(1.0<m> < 2.0<mm> < 3.0<in>)\n"),
+        "(def main () void (print (chain (operands 1.0<m> 2.0<mm> 3.0<in>) (< $1 (rescale:real64<m> 0.001 $2)) (< $2 (rescale:real64<mm> 25.4 $3)))))")
+    assert_eq(refused("def main() = print(1.0<m> + 1.0<s>)\n"), "error: cannot add m and s: length and time are different dimensions @1:20")
+    assert_eq(refused("def main() = print(1.0<m> % 1.0<mm>)\n"), "error: `%` needs two integers; found real64<m> and real64<mm> @1:20")
+
+@test("a bare literal is dimensionless, so it does not meet a value with a unit")
+units_bare_literal()
+    assert_eq(refused("def main() =\n  val x = 2.0<m>\n  print(x + 1.0)\n"), "error: cannot add m and a bare number: a bare literal is dimensionless; write it with its unit, `1.0<m>` @3:9")
+    assert_eq(refused("def main() =\n  val x = 2.0<m>\n  print(x > 0.0)\n"), "error: cannot compare m and a bare number: a bare literal is dimensionless; write it with its unit, `0.0<m>` @3:9")
+    assert_eq(elaborated("def main() =\n  val f: real<1> = 2.0\n  print(f)\n"), "(def main () void (block (val f#0:real64 2.0) (print f#0)))")
+
+@test("* and / combine units, keeping the names they were made from")
+units_multiplicative()
+    assert_eq(elaborated("def main() = print(3.0<m> / 2.0<s>)\n"), "(def main () void (print (s (strip:real64 (/:real64<m/s> 3.0<m> 2.0<s>)) \" m/s\")))")
+    assert_eq(elaborated("def main() = print(1.0<mm> * 1.0<in>)\n"), "(def main () void (print (s (strip:real64 (*:real64<mm in> 1.0<mm> 1.0<in>)) \" mm in\")))")
+    assert_eq(elaborated("def main() = print(2.0 * 3.0<m>)\n"), "(def main () void (print (s (strip:real64 (*:real64<m> 2.0 3.0<m>)) \" m\")))")
+    assert_eq(refused("def main() = print(sign(2.0<m>) + 1.0<m>)\n"), "error: cannot add a plain number and m: a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<m>` @1:20")
+
+@test("^ on a value with a unit takes an integer or a fraction of two integers")
+units_power()
+    assert_eq(elaborated("def main() =\n  val x = 3.0<m>\n  print(x^2)\n  print(x^-1)\n  print(x^(1/2))\n"),
+        "(def main () void (block (val x#0:real64<m> 3.0<m>) (print (s (strip:real64 (^:real64<m^2> x#0 2)) \" m^2\")) (print (s (strip:real64 (^:real64<1/m> x#0 -1)) \" 1/m\")) (print (s (strip:real64 (^:real64<m^(1/2)> x#0 (/:real64 (adopt:real64 1) (adopt:real64 2)))) \" m^(1/2)\"))))")
+    assert_eq(elaborated("def main() =\n  val x = 4.0<m^2>\n  print(x^(-1/2))\n"),
+        "(def main () void (block (val x#0:real64<m^2> 4.0<m^2>) (print (s (strip:real64 (^:real64<1/m> x#0 (/:real64 (adopt:real64 -1) (adopt:real64 2)))) \" 1/m\"))))")
+    assert_eq(elaborated("def main() = print(3.0<m>^2)\n"), "(def main () void (print (s (strip:real64 (^:real64<m^2> 3.0<m> 2)) \" m^2\")))")
+
+    assert_eq(refused("def main() =\n  val x = 3.0<m>\n  val n = 2\n  print(x^n)\n"), not_constant("@4:9"))
+    assert_eq(refused("def main() =\n  val x = 3.0<m>\n  print(x^2.0)\n"), not_constant("@3:9"))
+    assert_eq(refused("def main() =\n  val x = 3.0<m>\n  print(x^(1.0/2.0))\n"), not_constant("@3:9"))
+    assert_eq(refused("def main() =\n  val x = 3.0<m>\n  print(x^(1/0))\n"), not_constant("@3:9"))
+    assert_eq(refused("def main() =\n  val x = 3.0<m>\n  print(2.0^x)\n"), "error: an exponent is a plain number, and this one carries the unit m @3:13")
+
+@test("a unit whose scale has no exact root is refused")
+units_inexact_root()
+    assert_eq(elaborated("def main() = print(sqrt(4.0<m>))\n"), "(def main () void (print (s (strip:real64 (sqrt:real64<m^(1/2)> 4.0<m>)) \" m^(1/2)\")))")
+    assert_eq(refused("def main() = print(to<m^(1/2)>(1.0<mm^(1/2)>))\n"),
+        "error: the scale of this unit has no exact value: it is too large to hold, or the root of a scale that is not a perfect power @1:36")
+    assert_eq(refused("def main() = print(1.0<mm>^(1/2))\n"),
+        "error: the scale of this unit has no exact value: it is too large to hold, or the root of a scale that is not a perfect power @1:20")
+    assert_eq(refused("def main() = print(sqrt(4.0<mm>))\n"), "error: `sqrt` of mm has no exact scale; convert it to base units first: `sqrt(to<m>(x))` @1:20")
+
+@test("an expected type of the same dimension converts; of another dimension it is refused")
+units_expected_type()
+    assert_eq(elaborated("def main() =\n  val d: real<mm> = 1.0<in>\n  print(d)\n"), "(def main () void (block (val d#0:real64<mm> (rescale:real64<mm> 25.4 1.0<in>)) (print (s (strip:real64 d#0) \" mm\"))))")
+    assert_eq(elaborated("def f(x: real<m>): real<mm> = x\ndef main() = print(f(1.0<in>))\n"),
+        "(def f ((x#0 real64<m>)) real64<mm> (rescale:real64<mm> 1000.0 x#0))\n(def main () void (print (s (strip:real64 (call:real64<mm> f (rescale:real64<m> 0.0254 1.0<in>))) \" mm\")))")
+    assert_eq(refused("def main() =\n  var x = 1.0<m>\n  x += 1.0<mm>\n  x = 2.0<in>\n"), "ok")
+    assert_eq(refused("def main() =\n  val d: real<s> = 1.0<in>\n  print(d)\n"), "error: `d` must be real<s>, but this is real64<in>: length and time are different dimensions @2:20")
+    assert_eq(refused("def main() =\n  var x = 1.0<m>\n  x += 1.0<s>\n"), "error: cannot add m and s: length and time are different dimensions @3:3")
+    assert_eq(refused("def main() =\n  val x: real<m> = 1.0<m>\n  val y: real32<m> = x\n"), "error: `y` must be real32<m>, but this is real<m>: that would narrow it; convert it explicitly, `real32(...)` @3:22")
+
+@test("to<u>(x) converts within one dimension, by a rescale or, where the scales agree, a rename")
+units_to()
+    assert_eq(elaborated("def main() = print(to<mm>(1.0<in>))\n"), "(def main () void (print (s (strip:real64 (rescale:real64<mm> 25.4 1.0<in>)) \" mm\")))")
+    assert_eq(elaborated("def main() = print(to<N>(1.0<kg> * 1.0<m/s^2>))\n"),
+        "(def main () void (print (s (strip:real64 (unit:real64<N> (*:real64<kg m/s^2> 1.0<kg> 1.0<m/s^2>))) \" N\")))")
+    assert_eq(refused("def main() = print(to<s>(1.0<in>))\n"), "error: `to<s>` converts within one dimension: in is length, and s is time @1:20")
+    assert_eq(refused("def main() = print(to<mm>(2.0))\n"), "error: `to<mm>` converts within one dimension: 1 is dimensionless, and mm is length @1:20")
+    assert_eq(refused("def main() = print(to(2.0<m>))\n"), "error: `to` names the unit it converts to: `to<mm>(x)` @1:20")
+
+@test("imperial and US customary units convert exactly")
+units_imperial()
+    assert_eq(elaborated("def main() = print(to<lbf>(1.0<slug> * 1.0<ft/s^2>))\n"),
+        "(def main () void (print (s (strip:real64 (unit:real64<lbf> (*:real64<slug ft/s^2> 1.0<slug> 1.0<ft/s^2>))) \" lbf\")))")
+    assert_eq(elaborated("def main() = print(to<psi>(1.0<ksi>))\n"), "(def main () void (print (s (strip:real64 (rescale:real64<psi> 1000.0 1.0<ksi>)) \" psi\")))")
+    assert_eq(elaborated("def main() = print(to<in>(3.0<ft>))\n"), "(def main () void (print (s (strip:real64 (rescale:real64<in> 12.0 3.0<ft>)) \" in\")))")
+    assert_eq(refused("def main() = print(to<psi>(1.0<lbf>))\n"), "error: `to<psi>` converts within one dimension: lbf is force, and psi is pressure @1:20")
+
+@test("strip(x) gives the number in x's own unit")
+units_strip()
+    assert_eq(elaborated("def main() = print(strip(25.4<mm>))\n"), "(def main () void (print (strip:real64 25.4<mm>)))")
+    assert_eq(elaborated("def main() = print(strip(25.4))\n"), "(def main () void (print 25.4))")
+    assert_eq(refused("def main() = print(strip(1.0<m>, 2.0<m>))\n"), "error: `strip` takes one value @1:20")
+
+@test("<unit> is a postfix on any dimensionless operand, and is refused on one that carries a unit")
+units_postfix()
+    assert_eq(elaborated("def main() =\n  val y = 2.0\n  print(y<m>)\n  print((y + 1.0)<m>)\n  print(strip(y<m>)<s>)\n"),
+        "(def main () void (block (val y#0:real64 2.0) (print (s (strip:real64 (unit:real64<m> y#0)) \" m\")) (print (s (strip:real64 (unit:real64<m> (+:real64 y#0 1.0))) \" m\")) (print (s (strip:real64 (unit:real64<s> (strip:real64 (unit:real64<m> y#0)))) \" s\"))))")
+    assert_eq(elaborated("def main() = print(-3.0<m>)\n"), "(def main () void (print (s (strip:real64 (-:real64<m> 3.0<m>)) \" m\")))")
+    assert_eq(refused("def main() =\n  val x = 2.0<m>\n  print(x<s>)\n"), "error: this already carries the unit m; a value changes unit with `to<s>(x)` @3:9")
+
+@test("an interpolation spells the unit after the number")
+units_interpolation()
+    assert_eq(elaborated("def main() =\n  val x = 2.0<m>\n  print(s\"x = $x\")\n  print(f\"x = $x%.2f\")\n"),
+        "(def main () void (block (val x#0:real64<m> 2.0<m>) (print (s \"x = \" (strip:real64 x#0) \" m\")) (print (f \"x = \" ((strip:real64 x#0) %.2f) \" m\"))))")
+
+// -- prelude functions --------------------------------------------------------------------------------
+
+@test("sqrt halves the exponents; abs and floor keep the unit; sign gives a plain number")
+units_prelude_keep()
+    assert_eq(elaborated("def main() =\n  print(sqrt(4.0<m^2>))\n  print(abs(-2.0<m>))\n  print(sign(-2.0<m>))\n  print(floor(2.5<m>))\n"),
+        "(def main () void (block (print (s (strip:real64 (sqrt:real64<m> 4.0<m^2>)) \" m\")) (print (s (strip:real64 (abs:real64<m> (-:real64<m> 2.0<m>))) \" m\")) (print (sign:real64 (-:real64<m> 2.0<m>))) (print (s (strip:real64 (floor:real64<m> 2.5<m>)) \" m\"))))")
+    assert_eq(refused("def main() = print(sign(2.0<m>) * 1.0<m> + 1.0<s>)\n"), "error: cannot add m and s: length and time are different dimensions @1:20")
+    assert_eq(elaborated("def main() = print(arg(1.0i<V>))\n"), "(def main () void (print (arg:real64 (*:complex[real64]<V> (adopt:complex[real64] 1.0) i<V>))))")
+
+@test("the elementary functions take a dimensionless argument, rad and a scaled ratio among them")
+units_prelude_dimensionless()
+    assert_eq(elaborated("def main() = print(sin(0.5<rad>))\n"), "(def main () void (print (sin:real64 0.5)))")
+    assert_eq(elaborated("def main() = print(exp(1.0<mm/in>))\n"), "(def main () void (print (exp:real64 (rescale:real64 0.03937007874015748 1.0<mm/in>))))")
+    assert_eq(refused("def main() = print(sin(0.5<m>))\n"), "error: `sin` takes a dimensionless argument, and this is real64<m> (length); strip the unit to pass the number: `sin(strip(x))` @1:20")
+
+@test("min, max, hypot and atan2 take one dimension, converting the second argument")
+units_prelude_two()
+    assert_eq(elaborated("def main() = print(min(1.0<m>, 2.0<mm>))\n"), "(def main () void (print (s (strip:real64 (min:real64<m> 1.0<m> (rescale:real64<m> 0.001 2.0<mm>))) \" m\")))")
+    assert_eq(elaborated("def main() = print(atan2(1.0<m>, 2.0<mm>))\n"), "(def main () void (print (atan2:real64 1.0<m> (rescale:real64<m> 0.001 2.0<mm>))))")
+    assert_eq(elaborated("def main() = print(hypot(3.0<m>, 4.0<m>))\n"), "(def main () void (print (s (strip:real64 (hypot:real64<m> 3.0<m> 4.0<m>)) \" m\")))")
+    assert_eq(refused("def main() = print(min(1.0<m>, 2.0<s>))\n"), "error: `min` cannot combine m and s: length and time are different dimensions @1:20")
+    assert_eq(refused("def main() = print(hypot(3.0<m>, 4.0<s>))\n"), "error: `hypot` cannot combine m and s: length and time are different dimensions @1:20")
+
+@test("a real or complex conversion keeps the unit; an integer conversion of a measured value is refused")
+units_conversions()
+    assert_eq(elaborated("def main() = print(real32(2.0<m>))\n"), "(def main () void (print (s (strip:real32 (adopt:real32<m> 2.0)) \" m\")))")
+    assert_eq(elaborated("def main() = print(real32(2.0<mm>) + 1.0<in>)\n"),
+        "(def main () void (print (s (strip:real32 (+:real32<mm> (adopt:real32<mm> 2.0) (rescale:real32<mm> 25.4 (adopt:real32<in> 1.0)))) \" mm\")))")
+    assert_eq(elaborated("def main() = print(complex(2.0<m>))\n"), "(def main () void (print (s (strip:complex[real64] (adopt:complex[real64]<m> 2.0)) \" m\")))")
+    assert_eq(refused("def main() = print(int32(2.0<m>))\n"), "error: `int32(...)` gives an integer, which carries no unit; strip the unit first: `int32(strip(x))` @1:20")
+    assert_eq(refused("def main() = print(to_integer(2.0<m>))\n"), "error: `to_integer(...)` gives an integer, which carries no unit; strip the unit first: `to_integer(strip(x))` @1:20")
+
+@test("the parts of a complex value with a unit carry the unit")
+units_complex_parts()
+    assert_eq(elaborated("def main() =\n  val c = 1.0<V> + 2.0i<V>\n  print(c.re)\n"),
+        "(def main () void (block (val c#0:complex[real64]<V> (+:complex[real64]<V> (adopt:complex[real64]<V> 1.0) (*:complex[real64]<V> (adopt:complex[real64] 2.0) i<V>))) (print (s (strip:real64 (.re:real64<V> c#0)) \" V\"))))")
+    assert_eq(refused("def main() =\n  val c = 1.0<V> + 2.0i<V>\n  print(c.re + 1.0<A>)\n"), "error: cannot add V and A: voltage and current are different dimensions @3:9")
+
+// -- control flow and aggregates ----------------------------------------------------------------------
+
+@test("an if takes its first branch's unit, and the others convert to it")
+units_if()
+    assert_eq(elaborated("def main() =\n  val x = if true then 1.0<m> else 2.0<mm>\n  print(x)\n"),
+        "(def main () void (block (val x#0:real64<m> (if:real64<m> true 1.0<m> (rescale:real64<m> 0.001 2.0<mm>))) (print (s (strip:real64 x#0) \" m\"))))")
+    assert_eq(refused("def main() =\n  val x = if true then 1.0<m> else 2.0<s>\n  print(x)\n"), "error: the branches of this `if` differ: real64<m> and real64<s> @2:11")
+    assert_eq(refused("def main() =\n  val x = if true then 1.0<m> else 2.0\n  print(x)\n"), "error: the branches of this `if` differ: real64<m> and real64 @2:11")
+
+@test("a struct field, a tuple element and a lambda parameter carry a unit")
+units_aggregates()
+    assert_eq(elaborated("struct P\n  x: real<m>\ndef main() =\n  val p = P(1.0<in>)\n  print(p.x)\n"),
+        "(struct P (x real64<m>))\n(def main () void (block (val p#0:P (new:P (rescale:real64<m> 0.0254 1.0<in>))) (print (s (strip:real64 (.x:real64<m> p#0)) \" m\"))))")
+    assert_eq(elaborated("def main() =\n  val t = (1.0<m>, 2.0<s>)\n  print(t.1)\n"),
+        "(def main () void (block (val t#0:(real64<m>, real64<s>) (tuple:(real64<m>, real64<s>) 1.0<m> 2.0<s>)) (print (s (strip:real64 (.1:real64<m> t#0)) \" m\"))))")
+    assert_eq(elaborated("def main() =\n  val f = (x: real<m>) -> x * 2.0\n  print(f(1.0<in>))\n"),
+        "(def main () void (block (val f#1:(real64<m>) -> real64<m> (lambda 0)) (print (s (strip:real64 (call:real64<m> f#1 (rescale:real64<m> 0.0254 1.0<in>))) \" m\"))))\n(lambda 0 _ ((x#0 real64<m>)) real64<m> (captures) (*:real64<m> x#0 2.0))")
+    assert_eq(refused("struct P\n  x: real<m>\ndef main() = print(P(1.0<s>).x)\n"), "error: the field `x` must be real64<m>, but this is real64<s>: time and length are different dimensions @3:22")
+
+// -- generic units ------------------------------------------------------------------------------------
+
+@test("a function generic over a unit is checked once, its unit inferred from each call")
+units_generic()
+    assert_eq(elaborated("def sqr[U: Unit](x: real<U>): real<U^2> = x * x\ndef main() =\n  print(sqr(3.0<m>))\n  print(sqr(2.0))\n"),
+        "(def sqr ((x#0 real64<U>)) real64<U^2> (*:real64<U^2> x#0 x#0))\n(def main () void (block (print (s (strip:real64 (call:real64<m^2> sqr 3.0<m>)) \" m^2\")) (print (call:real64 sqr 2.0))))")
+    assert_eq(elaborated("def sqr[U: Unit](x: real<U>) = x * x\ndef main() = print(sqr(3.0<m>))\n"),
+        "(def sqr ((x#0 real64<U>)) real64<U^2> (*:real64<U^2> x#0 x#0))\n(def main () void (print (s (strip:real64 (call:real64<m^2> sqr 3.0<m>)) \" m^2\")))")
+    assert_eq(refused("def same[U: Unit](a: real<U>, b: real<U>): real<U> = a + b\ndef main() = print(same(1.0<m>, 2.0<mm>))\n"), "ok")
+    assert_eq(refused("def bad[U: Unit](x: real<U>): real<U> = x * x\n" + MAIN), "error: the result must be real64<U>, but this is real64<U^2>: U^2 and U are different dimensions @1:41")
+    assert_eq(refused("def same[U: Unit](a: real<U>, b: real<U>): real<U> = a + b\ndef main() = print(same(1.0<m>, 2.0<s>))\n"),
+        "error: argument `b` must be real<U>, but this is real64<s>: time and length are different dimensions @2:33")
+
+// -- C ------------------------------------------------------------------------------------------------
+
+@test("an extern takes and gives plain numbers; a unit in its signature or on its argument is refused")
+units_extern()
+    assert_eq(elaborated("extern def cbrt(x: real): real\ndef main() = print(cbrt(strip(8.0<m^3>)) * 1.0<m>)\n"),
+        "(extern cbrt (real64) -> real64)\n(def main () void (print (s (strip:real64 (*:real64<m> (call:real64 cbrt (strip:real64 8.0<m^3>)) 1.0<m>)) \" m\")))")
+    assert_eq(refused("extern def cbrt(x: real): real\ndef main() = print(cbrt(8.0<m^3>))\n"), "error: `cbrt` is an `extern`, whose parameters never carry a unit; pass the number: `cbrt(strip(x))` @2:25")
+    assert_eq(refused("extern def cbrt(x: real<m>): real\n" + MAIN), "error: an `extern` parameter never carries a unit: C takes the number, so declare it real64 and pass `strip(x)` @1:20")
+    assert_eq(refused("extern def cbrt(x: real): real<m>\n" + MAIN), "error: an `extern` result never carries a unit: declare it real64 and give the result its unit by multiplying, `cbrt(...) * 1.0<m>` @1:27")

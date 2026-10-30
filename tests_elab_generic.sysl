@@ -26,7 +26,7 @@ elab_generic_instances()
     assert_eq(elaborated(ID + MAIN), "(def main () void ())")
     assert_eq(elaborated(ID + "def main() = print(id(x = 2))\n"), "(def main () void (print (call:int64 id[int64] 2)))\n(def id[int64] ((x#0 int64)) int64 x#0)")
 
-@test("a constraint admits the types of DESIGN 2.6 at each use, and the body is checked at each instance")
+@test("a constraint admits the types of DESIGN 2.6 at each use, which is all a use checks")
 elab_generic_constraints()
     assert_eq(elaborated("def twice[T: Numeric](x: T): T = x + x\ndef main() =\n  print(twice(21))\n  print(twice(1.5))\n"),
         "(def main () void (block (print (call:int64 twice[int64] 21)) (print (call:real64 twice[real64] 1.5))))\n(def twice[int64] ((x#0 int64)) int64 (+:int64 x#0 x#0))\n(def twice[real64] ((x#1 real64)) real64 (+:real64 x#1 x#1))")
@@ -36,13 +36,44 @@ elab_generic_constraints()
     assert_eq(refused(MIN2 + "def main() = print(min2(1.0 + 2.0i, 1.0))\n"), "error: `min2` needs `T: Ord`, and complex[real64] is not Ord: Ord admits the integer and real types @2:20")
     assert_eq(refused("def half[T: Float](x: T): T = x / 2\ndef main() = print(half(3))\n"), "error: `half` needs `T: Float`, and int64 is not Float: Float admits the real types @2:20")
     assert_eq(refused("def n[T: Integral](x: T): T = x\ndef main() = print(n(3.0))\n"), "error: `n` needs `T: Integral`, and real64 is not Integral: Integral admits the integer types @2:20")
-    assert_eq(refused("def bad[T](x: T) = x + 1\ndef main() =\n  print(bad(1))\n  print(bad(\"s\"))\n"), "error: `+` needs numbers; found string and int64 (in `bad[string]`) @1:20")
-    // A type written with a type parameter names the instance's argument, not the parameter.
-    assert_eq(refused("def bad[T](x: T) =\n  val y: T = x\n  print(y + 1)\ndef main() = bad(\"s\")\n"), "error: `+` needs numbers; found string and int64 (in `bad[string]`) @3:9")
-    assert_eq(refused("def bad[T](x: [T]) =\n  val f = (z: (T, integer)) -> z + 1\ndef main() = bad([\"s\"])\n"), "error: `+` needs numbers; found (string, int64) and int64 (in `bad[string]`) @2:32")
-    assert_eq(refused("def bad[T](x: T, n: integer) = n + \"s\"\ndef main() = bad(1.5, 2)\n"), "error: `+` needs numbers; found integer and string (in `bad[real64]`) @1:32")
+    // A type parameter's own constraint admitting only what another's does satisfies it.
+    assert_eq(elaborated(MIN2 + "def lo[T: Float](a: T, b: T): T = min2(a, b)\ndef main() = print(lo(1.0, 2.0))\n"),
+        "(def main () void (print (call:real64 lo[real64] 1.0 2.0)))\n(def lo[real64] ((a#0 real64) (b#1 real64)) real64 (call:real64 min2[real64] a#0 b#1))\n(def min2[real64] ((a#2 real64) (b#3 real64)) real64 (if:real64 (<:bool a#2 b#3) a#2 b#3))")
+    assert_eq(refused(MIN2 + "def lo[T: Numeric](a: T, b: T): T = min2(a, b)\n" + MAIN),
+        "error: `min2` needs `T: Ord`, and `T: Numeric` may be a type that is not: Numeric admits the integer, real and complex types, and Ord admits the integer and real types @2:37")
     assert_eq(refused("def f[T: Foo](x: T) = x\n" + MAIN), "error: unknown constraint `Foo`; the constraints are Any, Numeric, Integral, Real, Float, Complex, Ord, Eq, Rank and Unit @1:1")
     assert_eq(refused("def f[T, T](x: T) = x\n" + MAIN), "error: redeclaration of `T` @1:1")
+
+@test("a generic's body is checked once, against its constraints, at its definition")
+elab_generic_checked_once()
+    // Never used, and still refused; used twice, and refused once, at the body, naming no instance.
+    assert_eq(refused("def bad[T](x: T) = x + 1\n" + MAIN), "error: `+` needs numbers; found T and int64 @1:20")
+    assert_eq(elaborated("def bad[T](x: T) = x + 1\ndef main() =\n  print(bad(1))\n  print(bad(\"s\"))\n"), "error: `+` needs numbers; found T and int64 @1:20")
+    assert_eq(refused("def bad[T](x: T) =\n  val y: T = x\n  print(y + 1)\n" + MAIN), "error: `+` needs numbers; found T and int64 @3:9")
+    assert_eq(refused("def bad[T](x: [T]) =\n  val f = (z: (T, integer)) -> z + 1\n" + MAIN), "error: `+` needs numbers; found (T, int64) and int64 @2:32")
+    assert_eq(refused("def bad[T](x: T, n: integer) = n + \"s\"\n" + MAIN), "error: `+` needs numbers; found integer and string @1:32")
+    assert_eq(refused(BOX + "def bad[T](b: Box[T]) = b.value + 1\n" + MAIN), "error: `+` needs numbers; found T and int64 @3:25")
+    // What each constraint allows: order only where it admits no complex type, `/` only where the
+    // quotient has one type, `==` only up to Eq, `div` and `%` only on Integral.
+    assert_eq(refused("def lt[T: Numeric](a: T, b: T): bool = a < b\n" + MAIN), "error: `<` orders integers and reals; `T: Numeric` admits complex numbers, which have no order @1:40")
+    assert_eq(refused("def half[T: Real](x: T): T = x / 2\n" + MAIN), "error: `/` gives real64 for two integers and their own type otherwise, and `T: Real` may be either; bound it by Float, or convert: `to_real(a) / b` @1:30")
+    assert_eq(refused("def same[T](a: T, b: T): bool = a == b\n" + MAIN), "error: `==` compares the values of a type parameter bounded by Eq or a narrower constraint, and `T: Any` is not @1:33")
+    assert_eq(refused("def m[T: Real](a: T, b: T): T = a % b\n" + MAIN), "error: `%` needs two integers; found T and T @1:33")
+    // A value of a type parameter meets its own type and the literals that can take it.
+    assert_eq(refused("def f[T: Real](x: T) = x * 2.5\n" + MAIN), "error: `*` cannot combine T and real64: a type parameter's value meets only its own type and the literals that can take it @1:24")
+    assert_eq(refused("def f[T: Numeric](x: T): real = x\n" + MAIN), "error: the result must be real64, but this is T: a type parameter's value is of that one type and widens to no other @1:33")
+    assert_eq(refused("def f[T: Complex](z: T) = abs(z)\n" + MAIN), "error: `abs` of a complex number is its real part's type, which `T: Complex` does not name @1:27")
+    assert_eq(elaborated("def half[T: Float](x: T): T = x / 2\ndef m[T: Integral](a: T, b: T): T = a % b + a div b\ndef main() =\n  val x: real32 = 3.0\n  print(half(x))\n  print(half(3.0))\n  print(m(7, 2))\n"),
+        "(def main () void (block (val x#0:real32 (adopt:real32 3.0)) (print (call:real32 half[real32] x#0)) (print (call:real64 half[real64] 3.0)) (print (call:int64 m[int64] 7 2))))\n(def half[real32] ((x#1 real32)) real32 (/:real32 x#1 (adopt:real32 2)))\n(def half[real64] ((x#2 real64)) real64 (/:real64 x#2 (adopt:real64 2)))\n(def m[int64] ((a#3 int64) (b#4 int64)) int64 (+:int64 (%:int64 a#3 b#4) (div:int64 a#3 b#4)))")
+    // A generic refused at its body is refused once, however it is reached; one that is not calls
+    // another before or after it is checked, and what the check needed elaborated reports itself.
+    assert_eq(elaborated("def ok[T](x: T) = bad(x)\ndef bad[T](x: T) = x + 1\ndef main() = ok(1)\n"), "error: `+` needs numbers; found T and int64 @2:20")
+    assert_eq(elaborated("def g[T](x: T) = h()\ndef h() = 1 + \"s\"\n" + MAIN), "error: `+` needs numbers; found int64 and string @2:11")
+    assert_eq(elaborated("def quad[T: Numeric](x: T): T = twice(twice(x))\ndef twice[T: Numeric](x: T) = x + x\ndef main() = print(quad(2))\n"),
+        "(def main () void (print (call:int64 quad[int64] 2)))\n(def quad[int64] ((x#0 int64)) int64 (call:int64 twice[int64] (call:int64 twice[int64] x#0)))\n(def twice[int64] ((x#1 int64)) int64 (+:int64 x#1 x#1))")
+    assert_eq(refused("struct OrdBox[T: Ord]\n  value: T\ndef f[T](x: T) = OrdBox(x)\n" + MAIN), "error: `OrdBox` needs `T: Ord`, and `T: Any` may be a type that is not: Any admits every type, and Ord admits the integer and real types @3:18")
+    // An argument decides only whether a literal fits it, and that is reported at the instance.
+    assert_eq(refused("def f[T: Integral](x: T): T = x + 300\ndef main() =\n  val b: int8 = 1\n  print(f(b))\n"), "error: 300 does not fit in int8 (in `f[int8]`) @1:35")
 
 @test("one type parameter given several numeric types takes their common type; a literal adopts it")
 elab_generic_widening()
@@ -81,13 +112,13 @@ elab_generic_uninferable()
 
 @test("a generic that would need ever larger instances of itself is refused, plain recursion is not")
 elab_generic_nontermination()
-    assert_eq(refused(BOX + "def f[T](x: T, n: integer): integer = if n == 0 then 0 else f(Box(x), n - 1)\ndef main() = print(f(1, 3))\n"),
-        "error: `f` would need ever larger instances of itself, f[Box[int64]] inside f[int64], and they would never end (in `f[int64]`) @3:61")
-    assert_eq(refused(BOX + "def f[T](x: T, n: integer): integer = if n == 0 then 0 else g(Box(x), n - 1)\ndef g[T](x: T, n: integer): integer = f(x, n)\ndef main() = print(f(1, 3))\n"),
-        "error: `f` would need ever larger instances of itself, f[Box[int64]] inside f[int64], and they would never end (in `g[Box[int64]]`) @4:39")
+    assert_eq(elaborated(BOX + "def f[T](x: T, n: integer): integer = if n == 0 then 0 else f(Box(x), n - 1)\ndef main() = print(f(1, 3))\n"),
+        "error: `f` would need ever larger instances of itself, f[Box[T]] inside f[T], and they would never end @3:61")
+    assert_eq(elaborated(BOX + "def f[T](x: T, n: integer): integer = if n == 0 then 0 else g(Box(x), n - 1)\ndef g[T](x: T, n: integer): integer = f(x, n)\ndef main() = print(f(1, 3))\n"),
+        "error: `f` would need ever larger instances of itself, f[Box[T]] inside f[T], and they would never end (in `g[Box[T]]`) @4:39")
     assert_eq(refused(BOX + "struct Grow[T]\n  next: [Grow[Box[T]]]\ndef main() =\n  val g: Grow[integer] = Grow([])\n"),
         "error: `Grow` would hold ever larger instances of itself, Grow[Box[int64]] inside Grow[int64], and has no size @4:10")
-    assert_eq(elaborated("def fact[T: Numeric](n: T): T = if n <= 1 then n else n * fact(n - 1)\ndef main() = print(fact(5))\n"),
+    assert_eq(elaborated("def fact[T: Real](n: T): T = if n <= 1 then n else n * fact(n - 1)\ndef main() = print(fact(5))\n"),
         "(def main () void (print (call:int64 fact[int64] 5)))\n(def fact[int64] ((n#0 int64)) int64 (if:int64 (<=:bool n#0 1) n#0 (*:int64 n#0 (call:int64 fact[int64] (-:int64 n#0 1)))))")
 
 // -- ranks ------------------------------------------------------------------------------------------
@@ -107,11 +138,21 @@ elab_generic_rank_errors()
     assert_eq(refused("def f[R: Rank](a: [real; R, :]) = ()\n" + MAIN), "error: a rank parameter is the whole shape of an array: `[T; R]` @1:19")
     assert_eq(refused("def f[R: Rank](a: R) = ()\n" + MAIN), "error: `R` is a rank, not a type; it is the shape of an array: `[T; R]` @1:19")
     assert_eq(refused("def f[R: Rank](a: [real; R]) = ()\ndef main() = f(1.0)\n"), "error: argument `a` must be [real64; R], but this is real64 @2:16")
-    assert_eq(refused("struct S[R: Rank]\n  a: [real; R]\n" + MAIN), "error: `R: Rank` stands for an array's rank, which only a function may take; a struct's or an enum's parameters are types @1:1")
+    // A body is checked at no particular rank: what depends on the rank is refused there.
+    assert_eq(refused("def f[R: Rank](a: [real; R]): real = a[1]\n" + MAIN), "error: an array of rank `R` takes no index list, whose length would be `R`; work on the whole array @1:38")
+    assert_eq(refused("def f[R: Rank](a: [real; R]): [real] = a\n" + MAIN), "error: the result must be [real64], but this is [real64; R]: `R` is a rank of its own, which no other shape is known to have @1:40")
+    assert_eq(refused("def f[R: Rank](a: [real; R], b: [real]) = a + b\n" + MAIN), "error: `+` combines arrays of one rank; `R` is a rank of its own, which no other shape is known to have @1:43")
+    assert_eq(refused("def f[R: Rank](a: [real; R]) = sum(a, dim = 1)\n" + MAIN), "error: `sum` with `dim` gives an array of rank `R` − 1, which no type names; reduce the whole array @1:45")
+    assert_eq(refused("def f[R: Rank](a: [real; R]) = minloc(a)\n" + MAIN), "error: `minloc` depends on its array's rank, which `R` leaves open; an array of rank `R` goes to whole-array operations, `map`, the reductions without `dim`, `extent`, `size`, `rank` and `flatten` @1:39")
+    assert_eq(elaborated("def f[T: Numeric, R: Rank](a: [T; R]): integer = extent(a, 2) + size(flatten(map(a, x -> x * 2)))\ndef main() = print(f([[1, 2], [3, 4]]))\n"),
+        "(def main () void (print (call:int64 f[int64, 2] (array:[int64; :, :] (array:[int64] 1 2) (array:[int64] 3 4)))))\n(def f[int64, 2] ((a#0 [int64; :, :])) int64 (+:int64 (extent:int64 a#0 2) (size:int64 (flatten:[int64] (map:[int64; :, :] a#0 (lambda 0))))))\n(lambda 0 _ ((x#1 int64)) int64 (captures) passed (*:int64 x#1 2))")
+    assert_eq(refused("struct S[R: Rank]\n  a: [real; R]\n" + MAIN),"error: `R: Rank` stands for an array's rank, which only a function may take; a struct's or an enum's parameters are types @1:1")
 
-@test("a unit parameter is the units' to elaborate")
+@test("a unit parameter beside a type parameter, or on a struct, is not elaborated yet")
 elab_generic_unit_parameter()
-    assert_eq(refused("def sqr[U: Unit](x: real) = x * x\n" + MAIN), "error: a unit parameter (`U: Unit`) is not elaborated yet @1:1")
+    assert_eq(refused("def sqr[U: Unit](x: real) = x * x\n" + MAIN), "ok")
+    assert_eq(refused("def f[T: Real, U: Unit](x: T, y: real<U>) = y\n" + MAIN), "error: a unit parameter (`U: Unit`) is not elaborated yet @1:1")
+    assert_eq(refused("struct S[U: Unit]\n  x: real<U>\n" + MAIN), "error: a unit parameter (`U: Unit`) is not elaborated yet @1:1")
 
 // -- structs and enums ------------------------------------------------------------------------------
 

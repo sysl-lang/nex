@@ -43,8 +43,9 @@ enum ParKind
     // `scalar` over the elements of `operands`, each an array of `out`'s shape or a value broadcast,
     // into a new array of type `out`.
     JMap(out: Ty, operands: Buf[TExpr], scalar: TExpr)
-    // The block partials of the reduction `name` over a rank-1 array of `et`, each a `t`.
-    JReduce(name: string, et: Ty, t: Ty)
+    // The block partials of the reduction `name` over the elements of an array of type `ft`, each a
+    // `t`.
+    JReduce(name: string, ft: Ty, t: Ty)
 
 // How a local of the function running a `parallel for` reaches its body.
 enum ParCap
@@ -180,7 +181,7 @@ impl Emitter
     elem_at(*self, p: string, k: string, mt: string) -> string =
         self.def(s"llvm.getelementptr $p[$k] : (!llvm.ptr, i64) -> !llvm.ptr, $mt")
 
-    // Storage for `count` (`i64`) values of `t`, which `nex_array_free` gives back.
+    // Storage for `count` (`i64`) values of `t`, which `nex_storage_free` gives back.
     partials(*self, span: Span, t: Ty, count: string) -> string
         val z = self.def("llvm.mlir.zero : !llvm.ptr")
         val bytes = self.def(s"llvm.ptrtoint ${self.elem_at(z, count, self.mem_ty(span, t))} : !llvm.ptr to i64")
@@ -627,7 +628,7 @@ impl Emitter
         self.op(s"scf.yield ${self.red_combine(span, r.op, t, start, self.load(span, p, t))} : $rt")
         self.op("}")
         self.keep(span, place, res, t)
-        self.call("nex_array_free", p, "!llvm.ptr", "")
+        self.call("nex_storage_free", p, "!llvm.ptr", "")
 
     // -- `parallel` expressions -------------------------------------------------------------------
 
@@ -646,14 +647,19 @@ impl Emitter
         fields.push(self.desc_ty(rank_of(out)))
         env_vals.push(d)
 
+        var arrays: Buf[string] = buf()
+        var types: Buf[Ty] = buf()
+        var slots: Buf[usize] = buf()
+
         for k in 0..<operands.len()
             val t = operands[k].ty
 
             if is_arr(t)
-                val (_, od) = self.par_out(span, vals[k], t, false)
-
+                arrays.push(vals[k])
+                types.push(t)
+                slots.push(fields.len())
                 fields.push(self.desc_ty(rank_of(t)))
-                env_vals.push(od)
+                env_vals.push("")
             else
                 fields.push(self.mem_ty(span, t))
                 env_vals.push(self.to_mem(vals[k], t))
@@ -662,7 +668,7 @@ impl Emitter
         val n = self.par_jobs.len()
 
         self.par_jobs.push(ParJob(ParKind.JMap(out, operands, scalar), fields, buf()))
-        self.run_region(n, env)
+        self.launch_reading(span, n, env, fields, arrays, types, slots)
         self.def(s"bufferization.to_tensor $a restrict writable : ${self.memref_ty(span, out)} to ${self.tensor_ty(span, out)}")
 
     // The code of map job `n`: this worker's share of the output's elements, in storage order.
@@ -737,33 +743,39 @@ impl Emitter
         self.end(s"  func.func private @\"p.$n\"(%env: !llvm.ptr, %w: i64, %nw: i64)")
     end map_code
 
-    // Under `parallel`: the reduction `name` over the rank-1 tensor `f` of `et`, giving a `t`, its
-    // blocks reduced by the threads of a region and combined after it in the tree the sequential
-    // reduction uses.
-    reduce_kernel(*self, span: Span, name: string, f: string, et: Ty, t: Ty) -> string
-        val ft = Ty.Array(et, dynamic_axes(1))
+    // Under `parallel`: the reduction `name` over every element of the tensor `f` of array type `ft`,
+    // in storage order, giving a `t`: its blocks reduced by the threads of a region and combined after
+    // it in the tree the sequential reduction uses.
+    reduce_kernel(*self, span: Span, name: string, f: string, ft: Ty, t: Ty) -> string
         val rt = self.ty(span, t)
-        val n = self.to_i64(self.dim(span, f, ft, 1))
-        val nb = self.def(s"arith.ceildivsi $n, ${self.def(s"arith.constant $PAR_BLOCK : i64")} : i64")
+        var count = self.index_const(1)
+
+        for d in self.dims(span, f, ft)
+            count = self.def(s"arith.muli $count, $d : index")
+
+        val nb = self.def(s"arith.ceildivsi ${self.to_i64(count)}, ${self.def(s"arith.constant $PAR_BLOCK : i64")} : i64")
         val p = self.partials(span, t, nb)
-        val (_, d) = self.par_out(span, f, ft, false)
         var fields: Buf[string] = buf()
         var vals: Buf[string] = buf()
 
-        fields.push(self.desc_ty(1))
+        fields.push(self.desc_ty(rank_of(ft)))
         fields.push("!llvm.ptr")
-        vals.push(d)
+        vals.push("")
         vals.push(p)
 
         val env = self.env_of(fields, vals)
         val job = self.par_jobs.len()
+        var arrays: Buf[string] = buf()
+        var types: Buf[Ty] = buf()
 
-        self.par_jobs.push(ParJob(ParKind.JReduce(name, et, t), fields, buf()))
-        self.run_region(job, env)
+        var slots: Buf[usize] = buf()
 
-        val op = TRedOp.RBuiltin(name)
-
-        self.tree(span, p, nb, op, t)
+        arrays.push(f)
+        types.push(ft)
+        slots.push(0)
+        self.par_jobs.push(ParJob(ParKind.JReduce(name, ft, t), fields, buf()))
+        self.launch_reading(span, job, env, fields, arrays, types, slots)
+        self.tree(span, p, nb, TRedOp.RBuiltin(name), t)
 
         val r = self.fresh()
 
@@ -772,21 +784,59 @@ impl Emitter
         self.op("} else {")
         self.op(s"scf.yield ${self.load(span, p, t)} : $rt")
         self.op("}")
-        self.call("nex_array_free", p, "!llvm.ptr", "")
+        self.call("nex_storage_free", p, "!llvm.ptr", "")
 
         if name == "norm2" then self.def(s"math.sqrt $r : $rt") else r
 
+    // Region `n` run through a launcher that takes the arrays `arrays` (of types `types`), which the
+    // region only reads, and fills fields `slots` of the environment with their buffers: the call is
+    // their last use, so no buffer is freed or reused while the threads read it.
+    launch_reading(*self, span: Span, n: usize, env: string, fields: Buf[string], arrays: Buf[string], types: Buf[Ty], slots: Buf[usize])
+        if arrays.len() == 0
+            self.run_region(n, env)
+            return
+
+        val outer = self.body
+        val dirty = self.dirty
+        var params: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+
+        self.body = str_builder()
+        self.dirty = false
+
+        for k in 0..<arrays.len()
+            val tt = self.tensor_ty(span, types[k])
+
+            params.push(s"%t$k: $tt")
+            tys.push(tt)
+
+            val (_, d) = self.par_out(span, s"%t$k", types[k], false)
+
+            self.op(s"llvm.store $d, ${self.env_at("%env", env_ty(fields), slots[k])} : ${fields[slots[k]]}, !llvm.ptr")
+
+        self.run_region(n, "%env")
+        self.op("func.return")
+        self.funcs.push(s"  func.func private @\"q.$n\"(%env: !llvm.ptr, ${joined(params)}) {\n")
+        self.funcs.push(self.body.finish())
+        self.funcs.push("  }\n\n")
+        self.body = outer
+        self.dirty = dirty
+        self.op(s"func.call @\"q.$n\"($env, ${joined(arrays)}) : (!llvm.ptr, ${joined(tys)}) -> ()")
+
     // The code of reduction job `n`: this worker's share of the blocks, each reduced sequentially from
     // the identity into its partial.
-    reduce_code(*self, n: usize, job: ParJob, name: string, et: Ty, t: Ty)
+    reduce_code(*self, n: usize, job: ParJob, name: string, ft: Ty, t: Ty)
         val span = Span(0, 0)
 
         self.begin(Void, texpr(span, Void, TLiteral(VoidVal, false)))
 
-        val ft = Ty.Array(et, dynamic_axes(1))
         val (_, f) = self.par_in(span, self.env_get(job.fields, 0), ft, false)
         val p = self.env_get(job.fields, 1)
-        val count = self.dim(span, f, ft, 1)
+        var count = self.index_const(1)
+
+        for d in self.dims(span, f, ft)
+            count = self.def(s"arith.muli $count, $d : index")
+
         val block = self.index_const(PAR_BLOCK)
         val nb = self.to_i64(self.def(s"arith.ceildivui $count, $block : index"))
         val (blo, bhi) = self.share(nb, "%w", "%nw")
@@ -796,7 +846,7 @@ impl Emitter
 
         val lo = self.def(s"arith.muli $iv, $block : index")
         val hi = self.def(s"arith.minui ${self.def(s"arith.addi $lo, $block : index")}, $count : index")
-        val partial = self.reduce_range(span, name, f, et, t, lo, hi)
+        val partial = self.reduce_range(span, name, f, ft, t, lo, hi)
 
         self.store(span, self.elem_at(p, self.to_i64(iv), self.mem_ty(span, t)), partial, t)
         self.op("}")
@@ -810,7 +860,7 @@ impl Emitter
         job.kind match
             JLoop(e) -> self.loop_code(n, job, e)
             JMap(out, operands, scalar) -> self.map_code(n, job, out, operands, scalar)
-            JReduce(name, et, t) -> self.reduce_code(n, job, name, et, t)
+            JReduce(name, ft, t) -> self.reduce_code(n, job, name, ft, t)
 end Emitter
 
 // The MLIR type of an environment of `fields`.

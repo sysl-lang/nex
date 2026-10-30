@@ -1,0 +1,80 @@
+// A slice of a place is a place (DESIGN §5.3, §8.2): writes through slices of slices, compound and
+// broadcast ones, an `inout` parameter given a window of a vector or a column of a matrix, a
+// reversed or strided window, windows of an `inout` parameter forwarded, a read-mode window beside
+// a disjoint `inout` one (§8.3 rule 2), a window that must keep its shape, and window bounds trapping.
+
+def bump(v: inout [integer], by: integer) =
+  for k in 1..length(v)
+    v[k] += by
+
+def axpy(alpha: integer, x: [integer], y: inout [integer]) =
+  for k in 1..length(y)
+    y[k] += alpha * x[k]
+
+def grow(v: inout [integer]) =
+  v = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+def halves(v: inout [integer]) =
+  val e = length(v) div 2
+  bump(v[..e], 100)
+  bump(v[e+1..], -100)
+
+def poke(v: inout [integer], lo: integer, i: integer) =
+  v[lo..lo + 1][i] = 5
+
+def main() =
+  var a = [1, 2, 3, 4, 5, 6, 7, 8]
+  a[2..4][1] = 99
+  print(a)
+  a[2..7 by 2][2..3][1] = -4
+  print(a)
+  a[3..][2..3] = [30, 40]
+  print(a)
+  a[..4][2..] += 1
+  print(a)
+  a[5..][..2] = 0
+  print(a)
+
+  var m = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+  m[2..3, :][1, 2..] = [50, 60]
+  print(m)
+  m[:, 3][end] = -9
+  print(m)
+
+  var v = [1, 2, 3, 4, 5, 6]
+  bump(v[2..4], 10)
+  print(v)
+  bump(v[.. by -2], 1000)
+  print(v)
+  bump(v[1..3][2..], 7)
+  print(v)
+  halves(v)
+  print(v)
+
+  var g = [[1, 2], [3, 4], [5, 6]]
+  bump(g[:, 2], 10)
+  bump(g[2, :], 100)
+  print(g)
+
+  var y = [1, 1, 1, 1, 1, 1, 1, 1]
+  axpy(2, y[1..4], y[5..8])
+  print(y)
+  axpy(10, y[5..], y[..4])
+  print(y)
+  val e = 3
+  axpy(1, y[..e], y[e+1..2*e])
+  print(y)
+
+  grow(v)
+  print(length(v))
+  var w = [1, 2, 3, 4, 5]
+  assert_traps(() -> grow(w[2..3]), "shape mismatch")
+  print("an inout window handed back in another shape traps")
+
+  var z1 = [1, 2, 3]
+  var z2 = [1, 2, 3]
+  var z3 = [1, 2, 3]
+  assert_traps(() -> bump(z1[2..4], 1), "out of bounds")
+  assert_traps(() -> poke(z2, 0, 1), "out of bounds")
+  assert_traps(() -> poke(z3, 1, 3), "out of bounds")
+  print("windows of places are checked as windows of values are")

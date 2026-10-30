@@ -65,6 +65,6 @@ array_alloc(bytes: long) -> *u8
 
 // Storage from `nex_array_alloc` given back: the block partials of a parallel reduction, whose
 // lifetime the compiler knows.
-@export("nex_array_free")
-array_free(p: *u8)
+@export("nex_storage_free")
+storage_free(p: *u8)
     free(p)

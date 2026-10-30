@@ -12,8 +12,16 @@
 
 import sysl.buf.{Buf, buf}
 import sysl.math.max
-import sysl.text.split
+import sysl.text.{split, str_builder}
 import sh.sysl.parsing.Span
+
+// A `match` case written aside: its head, its operations, the array values as it leaves them and its
+// value (`""` for none).
+struct Case
+    head: string
+    text: string
+    arr: Buf[string]
+    value: string
 
 impl Emitter
     struct_of(*self, name: string) -> Option[TStruct]
@@ -40,8 +48,6 @@ impl Emitter
     // -- types ------------------------------------------------------------------------------------
 
     agg_ty(*self, span: Span, t: Ty) -> string
-        if self.holds_array(t) then self.later(span, s"an array inside a struct, tuple or enum (${show_ty(t)})")
-
         t match
             Tuple(es) -> return self.fields_ty(span, es)
             Nominal(name, _) ->
@@ -66,13 +72,7 @@ impl Emitter
 
         s"!llvm.struct<($out)>"
 
-    payload_ty(*self, span: Span, fields: Buf[FieldInfo]) -> string
-        var ts: Buf[Ty] = buf()
-
-        for f in fields
-            ts.push(f.ty)
-
-        self.fields_ty(span, ts)
+    payload_ty(*self, span: Span, fields: Buf[FieldInfo]) -> string = self.fields_ty(span, field_types(fields))
 
     // A bound on the size of a stored `t` in 8-byte words. No field is aligned to more than 8 bytes,
     // so the fields' words added up bound a struct; an enum is its tag's word and its largest
@@ -81,8 +81,6 @@ impl Emitter
         t match
             Complex(b) -> return if b == 64 then 2 else 1
             Fn(_) -> return 2
-            // A stored array is its memref descriptor (`emit_array.sysl`).
-            Array(_, axes) -> return 3 + 2 * axes.len()
             Tuple(es) -> return self.words_of(es)
             Nominal(name, _) ->
                 self.struct_of(name) match
@@ -198,76 +196,111 @@ impl Emitter
         // The elaborator matches nothing but an enum.
         val en = self.enum_ty(st).unwrap()
         val idx = self.tag_index(s, self.ty(e.span, st))
-        val r = if rt == "" then "" else self.fresh()
-
-        self.op(if rt == "" then s"scf.index_switch $idx" else s"$r = scf.index_switch $idx -> $rt")
-
         var fallback: Option[TArm] = None
+        // Each case is written aside, since what it yields is known only once every case is: its
+        // value, and every array value held as an SSA value that some case changes.
+        val outer = self.body
+        val before = copy_strings(self.arr)
+        var cases: Buf[Case] = buf()
 
         for arm in arms
             arm.pat match
                 PVariant(_, tag, binds) ->
                     val fields = en.variants[tag].fields
 
-                    self.op(s"case $tag {")
+                    self.body = str_builder()
+                    self.arr = copy_strings(before)
                     self.dirty = entry
 
                     if fields.len() > 0
                         val p = self.payload(s, st, fields)
                         val pt = self.payload_ty(e.span, fields)
+                        // A view a binding takes of a stored array is the case's own.
+                        val m = self.mark()
 
                         for k in 0..<binds.len()
                             binds[k] match
-                                Some(id) ->
-                                    self.bind_local(e.span, id)
-                                    self.keep(e.span, self.local_ptr(e.span, id), self.field(p, pt, k, fields[k].ty), fields[k].ty)
+                                Some(id) -> self.bind_value(e.span, id, self.field(p, pt, k, fields[k].ty), fields[k].ty)
                                 None -> ()
 
-                    self.arm_end(arm.body, e.ty, rt)
+                        self.release_from(m)
+
+                    val v = if rt == "" then self.region(arm.body) else self.region_value(arm.body, e.ty)
+
+                    cases.push(Case(s"case $tag", self.body.finish(), copy_strings(self.arr), if rt == "" then "" else v))
                 PAny(_) -> if fallback.is_none() then fallback = Some(arm)
 
-        self.op("default {")
+        self.body = str_builder()
+        self.arr = copy_strings(before)
         self.dirty = entry
 
-        fallback match
+        // Where every variant has its arm the tag is never another, and the default yields zeros.
+        val dv = fallback match
             Some(arm) ->
                 self.bind_whole(e.span, arm.pat, s, st)
-                self.arm_end(arm.body, e.ty, rt)
-            None ->
-                // Every variant has its arm; the tag is never another.
-                if rt == "" then self.op("scf.yield") else self.yield_value("", e.ty)
-                self.op("}")
+                if rt == "" then self.region(arm.body) else self.region_value(arm.body, e.ty)
+            None -> ""
+
+        cases.push(Case("default", self.body.finish(), copy_strings(self.arr), dv))
+        self.body = outer
+
+        var ids: Buf[usize] = buf()
+
+        for k in 0..<before.len()
+            if before[k] == "" then continue
+
+            for c in cases
+                if c.arr[k] != before[k]
+                    ids.push(k)
+                    break
+
+        var tys: Buf[string] = buf()
+
+        for id in ids
+            tys.push(self.tensor_ty(e.span, self.carried_ty(id)))
+
+        if rt != "" then tys.push(rt)
+
+        val n = tys.len()
+        val r = self.fresh()
+
+        self.op(s"${result_def(r, n)}scf.index_switch $idx${if n == 0 then "" else s" -> ${joined(tys)}"}")
+
+        for c in cases
+            self.op(s"${c.head} {")
+            self.body.push(c.text)
+
+            var vals: Buf[string] = buf()
+
+            for id in ids
+                vals.push(c.arr[id])
+
+            if rt != "" then vals.push(if c.value == "" then self.zero_of(e.span, e.ty) else c.value)
+            self.op(if n == 0 then "scf.yield" else s"scf.yield ${joined(vals)} : ${joined(tys)}")
+            self.op("}")
+
+        self.arr = before
+
+        for k in 0..<ids.len()
+            self.arr.set(ids[k], result_name(r, k, n))
 
         self.dirty = entry
-        if r == "" then "" else self.own(r, e.ty)
+        if rt == "" then "" else self.own(result_name(r, n - 1, n), e.ty)
     end match_expr
 
     // `name -> ...`: the whole value bound.
     bind_whole(*self, span: Span, pat: TPat, s: string, t: Ty)
         pat match
-            PAny(Some(id)) ->
-                self.bind_local(span, id)
-                self.keep(span, self.local_ptr(span, id), s, t)
+            PAny(Some(id)) -> self.bind_value(span, id, s, t)
             _ -> ()
 
-    // An arm's body as its case's region, yielding its value of `t` (MLIR type `rt`).
-    arm_end(*self, body: TExpr, t: Ty, rt: string)
-        if rt == ""
-            self.region(body)
-            self.op("scf.yield")
-        else
-            self.yield_value(self.region_value(body, t), t)
-
-        self.op("}")
 
     // -- destructuring ----------------------------------------------------------------------------
 
     // `val a, (b, _) = v`: each name bound to its element of `v`, of type `t`.
     destructure(*self, span: Span, pat: TBind, v: string, t: Ty)
         pat match
-            BLocal(id) ->
-                self.bind_local(span, id)
-                self.keep(span, self.local_ptr(span, id), v, self.prog.locals[id].ty)
+            BLocal(id) -> self.bind_value(span, id, v, t)
             BGlobal(name) -> self.keep(span, self.global_storage(span, name, t), v, t)
             BSkip -> ()
             BTuple(elems) ->
@@ -315,6 +348,14 @@ impl Emitter
     targets(*self, span: Span, target: TTarget, v: string, t: Ty, ptrs: *Buf[string], vals: *Buf[string], tys: *Buf[Ty])
         target match
             TPlace(place) ->
+                // An array local held as a value is rebound at once: the right side is whole already.
+                *place.kind match
+                    TLocal(id) ->
+                        if self.in_ssa(id)
+                            self.arr.set(id, self.copied(span, v, t))
+                            return
+                    _ -> ()
+
                 ptrs.push(self.place_ptr(place))
                 vals.push(v)
                 tys.push(t)
@@ -327,6 +368,106 @@ impl Emitter
                         for k in 0..<elems.len()
                             self.targets(span, elems[k], self.field(v, m, k, es[k]), es[k], ptrs, vals, tys)
                     _ -> self.later(span, s"assigning a ${show_ty(t)} to a list of places")
+
+    // -- equality ---------------------------------------------------------------------------------
+
+    // `a == b` or `a != b` on two structs, tuples or enums of type `t`, field by field.
+    aggregate_compare(*self, span: Span, op: string, a: string, b: string, t: Ty) -> string
+        val eq = self.aggregate_equal(span, a, b, t)
+
+        if op == "==" then eq else self.not(eq)
+
+    // Whether the aggregates `a` and `b` of type `t` are equal: every field equal, and for an enum
+    // the same variant first.
+    aggregate_equal(*self, span: Span, a: string, b: string, t: Ty) -> string
+        if self.holds_array(t) then return self.unsupported(span, s"`==` on a struct, tuple or enum holding an array (${show_ty(t)})")
+
+        val m = self.ty(span, t)
+
+        t match
+            Tuple(es) -> return self.fields_equal(span, a, b, m, es)
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) -> return self.fields_equal(span, a, b, m, field_types(s.fields))
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) -> return self.variants_equal(span, a, b, t, e)
+                    None -> ()
+            _ -> ()
+
+        self.unsupported(span, s"`==` on ${show_ty(t)}")
+
+    // Whether an aggregate of type `t` has an array among its parts, at any depth. No struct or enum
+    // holds itself (DESIGN §11.4), so the walk ends.
+    holds_array(*self, t: Ty) -> bool
+        t match
+            Array(_, _) -> return true
+            Tuple(es) ->
+                for e in es
+                    if self.holds_array(e) then return true
+            Nominal(name, _) ->
+                self.struct_of(name) match
+                    Some(s) ->
+                        for f in s.fields
+                            if self.holds_array(f.ty) then return true
+                    None -> ()
+
+                self.enum_of(name) match
+                    Some(e) ->
+                        for v in e.variants
+                            for f in v.fields
+                                if self.holds_array(f.ty) then return true
+                    None -> ()
+            _ -> ()
+
+        false
+
+    // Field by field, each compared as `==` compares its type, the results anded.
+    fields_equal(*self, span: Span, a: string, b: string, m: string, ts: Buf[Ty]) -> string
+        var all = self.def("arith.constant true")
+
+        for k in 0..<ts.len()
+            val eq = self.binary(span, "==", self.field(a, m, k, ts[k]), self.field(b, m, k, ts[k]), ts[k])
+
+            all = self.def(s"arith.andi $all, $eq : i1")
+
+        all
+
+    // The same tag, then the payloads of that variant compared field by field.
+    variants_equal(*self, span: Span, a: string, b: string, t: Ty, e: TEnum) -> string
+        val m = self.ty(span, t)
+        val ta = self.def(s"llvm.extractvalue $a[0] : $m")
+        val tb = self.def(s"llvm.extractvalue $b[0] : $m")
+        val same = self.def(s"arith.cmpi eq, $ta, $tb : i64")
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if $same -> (i1) {")
+
+        val s = self.fresh()
+
+        self.op(s"$s = scf.index_switch ${self.tag_index(a, m)} -> i1")
+
+        for tag in 0..<e.variants.len()
+            val fields = e.variants[tag].fields
+
+            self.op(s"case $tag {")
+
+            val eq = if fields.len() == 0 then self.def("arith.constant true")
+                     else self.fields_equal(span, self.payload(a, t, fields), self.payload(b, t, fields), self.payload_ty(span, fields), field_types(fields))
+
+            self.op(s"scf.yield $eq : i1")
+            self.op("}")
+
+        self.op("default {")
+        self.op(s"scf.yield ${self.def("arith.constant true")} : i1")
+        self.op("}")
+        self.op(s"scf.yield $s : i1")
+        self.op("} else {")
+        self.op(s"scf.yield $same : i1")
+        self.op("}")
+        r
+    end variants_equal
 
     // -- printing ---------------------------------------------------------------------------------
 
@@ -397,3 +538,11 @@ impl Emitter
         self.later(span, s"printing ${show_ty(t)}")
     end put_aggregate
 end Emitter
+
+private field_types(fields: Buf[FieldInfo]) -> Buf[Ty]
+    var out: Buf[Ty] = buf()
+
+    for f in fields
+        out.push(f.ty)
+
+    out

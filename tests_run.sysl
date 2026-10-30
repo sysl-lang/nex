@@ -22,10 +22,6 @@ private val V2_INDEX = from_utf8(embed("testdata/v2/index.tsv")).unwrap()
 // The categories PLAN.md's M3 counts.
 private val M3_CATEGORIES = ["top-level bindings + print", "scalar arithmetic", "comparison + logical", "chained comparison", "chained comparisons", "control flow", "blocks + scoping", "top-level initialization", "compound assignment", "functions", "string interpolation", "const fn calls", "inout by-ref"]
 
-// The programs of those categories that need an array whose elements are not scalars, which the
-// emitter does not compile yet: 058 an array of tuples (`enumerate`), 060 an array of closures.
-private val WAITING = ["058-for-with-tuple-destructuring-on-enumerate-xs", "060-array-of-lambdas-each-closure-fits-in-16-byte-slots"]
-
 // A scratch directory and the toolchain, the runtime built into it by the compiler running the tests.
 struct Bench
     work: string
@@ -138,13 +134,13 @@ corpus_run(categories: []const string) -> CorpusRun
     finish(b)
     r
 
-@test("every program of PLAN.md's M3 corpus categories prints its .out, but for those waiting on arrays")
+@test("every program of PLAN.md's M3 corpus categories prints its .out")
 run_m3_corpus()
     val r = corpus_run(M3_CATEGORIES[..])
 
     assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
-    assert_eq(join(r.waiting.view(), "\n"), join(WAITING[..], "\n"))
-    assert_eq(r.passed, 151)
+    assert_eq(join(r.waiting.view(), "\n"), "")
+    assert_eq(r.passed, 153)
 
 @test("every program of testdata/v2 prints its .out")
 run_v2()
@@ -163,7 +159,7 @@ run_v2()
 
     finish(b)
     assert(failed.len() == 0, join(failed.view(), "\n"))
-    assert_eq(passed, 19)
+    assert_eq(passed, 27)
 
 @test("a trap nothing catches writes its message to standard error after what was printed, and aborts")
 run_uncaught_trap()
@@ -253,8 +249,9 @@ run_fpe_trap()
 
 @test("a program needing what the emitter does not compile yet is refused with a diagnostic naming it")
 emit_refuses_what_waits()
-    assert_eq(emitted("def main() =\n  val xs = [1, 2]\n  print(enumerate(xs))\n").err().unwrap_or(""), "error: `enumerate` on an array is not compiled yet @3:9")
-    assert_eq(emitted("def f(x: integer) = x\ndef main() =\n  val g = f\n  print(g(2))\n  print([f])\n").err().unwrap_or(""), "error: an array of (int64) -> int64 is not compiled yet @5:9")
+    assert_eq(emitted("def main() =\n  print([[\"a\", \"b\"], [\"c\", \"d\"]])\n").err().unwrap_or(""), "error: an array of string of rank 2 is not compiled yet @2:9")
+    assert_eq(emitted("def main() =\n  val xs = [\"a\", \"b\"]\n  print(map(xs, x -> x + \"!\"))\n").err().unwrap_or(""), "error: `map` on an array of string is not compiled yet @3:9")
+    assert_eq(emitted("def main() =\n  val xs = [\"a\", \"b\", \"c\"]\n  print(xs[2..3])\n").err().unwrap_or(""), "error: this operation on an array of string is not compiled yet @3:9")
 
 @test("the module names every symbol with a prefix no C name has, and makes main the only public function")
 emit_symbols()
@@ -329,7 +326,11 @@ run_command()
     val build = capture(nex, ["build", src, "-o", s"${b.work}/hello"], env = env, stderr = true).unwrap()
     val direct = capture(s"${b.work}/hello", ["world"], stderr = true).unwrap()
     val run = capture(nex, ["run", src, "--", "there", "again"], env = env, stderr = true).unwrap()
-    val refused = capture(nex, ["run", "testdata/corpus/058-for-with-tuple-destructuring-on-enumerate-xs.nex"], env = env, stderr = true).unwrap()
+    val waiting = s"${b.work}/waiting.nex"
+
+    write_text(waiting, "def main() =\n  print([[\"a\"], [\"b\"]])\n").unwrap()
+
+    val refused = capture(nex, ["run", waiting], env = env, stderr = true).unwrap()
 
     finish(b)
     assert(build.status.ok(), build.err.unwrap_or(""))
@@ -338,7 +339,7 @@ run_command()
     assert_eq(run.text, "hello there\n")
     assert(run.status == Status.Exited(2), s"${run.status}")
     assert(refused.status == Status.Exited(1), s"${refused.status}")
-    assert(refused.err.unwrap_or("").contains("`enumerate` on an array is not compiled yet"), refused.err.unwrap_or(""))
+    assert(refused.err.unwrap_or("").contains("an array of string of rank 2 is not compiled yet"), refused.err.unwrap_or(""))
 
 @test("a chained comparison evaluates each operand once, left to right, and stops at the first false link")
 run_chain_once()

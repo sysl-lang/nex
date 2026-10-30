@@ -54,7 +54,7 @@ array_common(a: Ty, b: Ty) -> Option[Ty]
     val ea = elem_of(a)
     val eb = elem_of(b)
 
-    val e = if ty_eq(ea, eb) then ea else (if is_numeric(ea) && is_numeric(eb) then common(ea, eb).unwrap_or(Error) else Error)
+    val e = if ty_eq(ea, eb) then ea else (if is_numeric(base_of(ea)) && is_numeric(base_of(eb)) then common(ea, eb).unwrap_or(Error) else Error)
 
     if is_error(e) then return None
 
@@ -142,6 +142,12 @@ impl Elab
             self.fail(span, s"${what} combines arrays of one rank; these have rank ${xs.len()} and rank ${ys.len()}")
             return None
 
+        self.rank_clash(xs, ys) match
+            Some(why) ->
+                self.fail(span, s"${what} combines arrays of one rank; ${why}")
+                return None
+            None -> ()
+
         var out: Buf[Extent] = buf()
 
         for k in 0..<xs.len()
@@ -189,8 +195,19 @@ impl Elab
             self.fail(value_span(v), s"${head}: its rank is ${xs.len()}, not ${ys.len()}")
             return texpr(v.span, Error, TInvalid)
 
-        if !promotes(from, to)
-            val why = if is_numeric(from) && is_numeric(to) then s": that would narrow it; convert it explicitly, `${show_ty(to)}(...)`" else ""
+        self.rank_clash(xs, ys) match
+            Some(why) ->
+                self.fail(value_span(v), s"${head}: ${why}")
+                return texpr(v.span, Error, TInvalid)
+            None -> ()
+
+        if !promotes(from, to) && !converts(from, to)
+            var why = ""
+
+            if (has_unit(from) || has_unit(to)) && is_numeric(base_of(from)) && is_numeric(base_of(to))
+                why = unit_note(texpr(v.span, from, TInvalid), to)
+            elif is_numeric(from) && is_numeric(to)
+                why = s": that would narrow it; convert it explicitly, `${show_ty(to)}(...)`"
 
             self.fail(value_span(v), head + why)
             return texpr(v.span, Error, TInvalid)
@@ -218,6 +235,9 @@ impl Elab
         val wanted = want match
             Some(t) -> if is_array(t) && !has_error(t) then Some(t) else None
             None -> None
+
+        // A written type that was refused has been reported already.
+        if elems.len() == 0 && want.is_some() && has_error(want.unwrap()) then return self.invalid(span)
 
         if elems.len() == 0
             wanted match
@@ -256,20 +276,33 @@ impl Elab
                 vals.push(Some(v))
 
         // A literal element that cannot take the others' type (`2.5` beside integers) widens it.
-        val elem = shared match
+        var elem = shared match
             Some(t) ->
-                if class != NOT_LITERAL && is_numeric(t) then common(t, adoption(class, t).unwrap_or(default_of(class))).unwrap_or(t) else t
+                val b = base_of(t)
+
+                if class != NOT_LITERAL && is_numeric(b) then measured(common(b, adoption(class, b).unwrap_or(default_of(class))).unwrap_or(b), unit_of(t)) else t
             None -> default_of(class)
+
+        for k in 0..<leaves.len()
+            if vals[k].is_none()
+                val c = self.literal_class(leaves[k])
+
+                vals.set(k, Some(self.elab(leaves[k], Some(adoption(c, elem).unwrap_or(default_of(c))))))
+
+        // With no type expected, the elements are in the unit of the first one that carries a unit, and
+        // the others of its dimension are converted to it (DESIGN §13.3).
+        if wanted.is_none() && is_numeric(base_of(elem))
+            for x in vals
+                val t = elem_of(x.unwrap().ty)
+
+                if has_unit(t)
+                    elem = measured(base_of(elem), unit_of(t))
+                    break
 
         var items: Buf[TExpr] = buf()
 
         for k in 0..<leaves.len()
-            val v = vals[k] match
-                Some(v) -> v
-                None ->
-                    val c = self.literal_class(leaves[k])
-
-                    self.elab(leaves[k], Some(adoption(c, elem).unwrap_or(default_of(c))))
+            val v = vals[k].unwrap()
 
             items.push(if is_array(v.ty) then self.coerce(v, with_elem(v.ty, elem), "an item of this array") else self.coerce(v, elem, "an element of this array"))
 
@@ -290,10 +323,15 @@ impl Elab
             Some(s) ->
                 if is_wild(s) || ty_eq(s, t) then return Some(t)
 
-                if is_numeric(s) && is_numeric(t)
+                if is_numeric(base_of(s)) && is_numeric(base_of(t))
+                    // Elements of one dimension meet in the first one's unit (DESIGN §13.3).
                     common(s, t) match
                         Some(c) -> return Some(c)
                         None -> ()
+
+                    if has_unit(s) || has_unit(t)
+                        self.fail(span, units_differ("the elements of this array differ:", texpr(span, s, TInvalid), texpr(span, t, TInvalid)))
+                        return Some(Error)
 
                 self.fail(span, s"the elements of this array differ: ${show_ty(s)} and ${show_ty(t)}")
                 Some(Error)
@@ -414,6 +452,12 @@ impl Elab
                 self.fail(base.span, s"this is ${self.shown(base)} and cannot be indexed")
                 return self.invalid(span)
 
+        self.rank_param_of(base.ty) match
+            Some(r) ->
+                self.fail(span, s"an array of rank `${r}` takes no index list, whose length would be `${r}`; work on the whole array")
+                return self.invalid(span)
+            None -> ()
+
         if indices.len() > axes.len()
             self.fail(span, s"this array has rank ${axes.len()}, and ${indices.len()} subscripts are given")
             return self.invalid(span)
@@ -510,12 +554,14 @@ impl Elab
         val ea = elem_of(a.ty)
         val eb = elem_of(b.ty)
 
-        if !is_relational(op) && (!is_numeric(ea) && !is_wild(ea) || !is_numeric(eb) && !is_wild(eb))
+        if !is_relational(op) && (!is_numeric(base_of(ea)) && !is_wild(ea) || !is_numeric(base_of(eb)) && !is_wild(eb))
             self.fail(span, s"element-wise `${op}` needs numbers; found ${self.shown(a)} and ${self.shown(b)}")
             return self.invalid(span)
 
-        val sa = texpr(a.span, ea, TInvalid)
-        val sb = texpr(b.span, eb, TInvalid)
+        // The scalar form is typed over one element of each array; a scalar operand stands as itself,
+        // so a constant exponent and a bare literal are seen as written.
+        val sa = if is_array(a.ty) then texpr(a.span, ea, TInvalid) else a
+        val sb = if is_array(b.ty) then texpr(b.span, eb, TInvalid) else b
         val s = if op == "^" then self.power_of(span, sa, sb) else self.apply(span, op, sa, sb)
 
         if is_error(s.ty) then return self.invalid(span)
@@ -535,7 +581,7 @@ impl Elab
     // `-a` on numbers, `not a` on bools, element by element.
     elementwise_unary(*self, span: Span, op: string, v: TExpr) -> TExpr
         val e = elem_of(v.ty)
-        val fits = if op == "not" then ty_eq(e, Bool) else is_numeric(e)
+        val fits = if op == "not" then ty_eq(e, Bool) else is_numeric(base_of(e))
 
         if !fits && !is_error(e)
             self.fail(span, s"`${op}` needs ${if op == "not" then "bools" else "numbers"}; found ${self.shown(v)}")
@@ -580,12 +626,18 @@ impl Elab
         val ea = elem_of(a.ty)
         val eb = elem_of(b.ty)
 
-        if !is_numeric(ea) || !is_numeric(eb)
+        if !is_numeric(base_of(ea)) || !is_numeric(base_of(eb))
             self.fail(span, s"`@` needs numbers; found ${self.shown(a)} and ${self.shown(b)}")
             return self.invalid(span)
 
-        val c = self.common_of(span, "@", ea, eb) match
+        // The operands meet in one number type and keep their units, whose product is the result's
+        // (DESIGN §13.6).
+        val n = self.common_of(span, "@", base_of(ea), base_of(eb)) match
             Some(t) -> t
+            None -> return self.invalid(span)
+
+        val u = self.exact(span, unit_mul(unit_of(ea), unit_of(eb))) match
+            Some(u) -> u
             None -> return self.invalid(span)
 
         val xs = axes_of(a.ty)
@@ -601,9 +653,10 @@ impl Elab
         if xs.len() == 2 then out.push(xs[0])
         if ys.len() == 2 then out.push(ys[1])
 
+        val c = measured(n, u)
         val ty = if out.len() == 0 then c else Ty.Array(c, out)
 
-        texpr(span, ty, TArray(TMatMul(promote(a, with_elem(a.ty, c)), promote(b, with_elem(b.ty, c)))))
+        texpr(span, ty, TArray(TMatMul(promote(a, with_elem(a.ty, measured(n, unit_of(ea)))), promote(b, with_elem(b.ty, measured(n, unit_of(eb)))))))
     end matmul
 
     // -- elemental calls --------------------------------------------------------------------------
@@ -620,6 +673,24 @@ impl Elab
         val ty = with_elem(v.ty, target)
 
         if is_error(from) then return self.invalid(span)
+
+        // A real or complex conversion keeps the unit; an integer one is refused (DESIGN §13.3).
+        if has_unit(from)
+            if is_int(target)
+                self.fail(span, s"`${name}(...)` gives integers, which carry no unit; strip the unit first: `${name}(strip(a))`")
+                return self.invalid(span)
+
+            if is_complex(base_of(from)) && !is_complex(target)
+                self.fail(v.span, s"a complex number does not convert to ${show_ty(target)}: take `.re` (or `abs`, `arg`) first")
+                return self.invalid(span)
+
+            val kept = with_unit(with_elem(v.ty, target), unit_of(from))
+
+            if ty_eq(base_of(from), target) then return v
+            if promotes(base_of(from), target) then return texpr(span, kept, TPromote(v))
+
+            return texpr(span, kept, TArray(TElementalConvert(v, false)))
+
         if ty_eq(from, target) then return v
         if promotes(from, target) then return texpr(span, ty, TPromote(v))
 
