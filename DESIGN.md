@@ -1144,6 +1144,18 @@ gives each thread its own copy of every local the body binds, its loop counter a
 | `parallel` element-wise or `map` | the thread's run of the result's elements, in storage order, each computed by the scalar operation over the operands' elements |
 | `parallel sum`, `product`, `minval`, `maxval`, `dot` | the thread's run of blocks, each reduced as the sequential reduction reduces it; after the region the same tree |
 
+**A whole element-wise expression is one region.** Under `parallel`, the operators, elemental
+calls, conversions and widenings of an element-wise expression are fused into one scalar computation
+over the arrays and values at its leaves, so `parallel 0.5 * x + y` reads `x` and `y` once each and
+builds no array in between. `and` and `or` are not fused into: their operands are computed whole,
+as without `parallel`. A reduction's operand is fused the same way: `parallel sum(x * y)` and
+`parallel dot(x, y)` compute each product as its block reduces it and never build the array of
+products; the blocks and the tree are unchanged, so the bits are those of the sequential reduction.
+**`y = parallel e`, where `y` is a local array that `e` reads at the element it computes, writes `y`'s
+own buffer in place**: each element is read before it is written, and no other element is read, so
+nothing is allocated. Bufferization copies the buffer first only where something else still holds
+`y`'s old value.
+
 **Arrays cross as buffers.** A local the body reads crosses as its address. An array crosses as a
 memref descriptor, through a *launcher*: a private function that takes every array the region
 reaches as a tensor argument, gives back each one the body writes, fills their fields of the
@@ -1154,7 +1166,9 @@ first only where the caller still needs its old value or the call also reads it.
 written array is a `restrict writable` tensor over that buffer, written back over it at the end,
 which bufferization turns into nothing. An array a lambda captures is held in a cell as a counted
 object; one the body writes crosses as that object's own buffer, written in place, after the cell
-is given a copy of its own if anything else (a `val` sharing it, §8.4) still holds the object. The
+is given a copy of its own if anything else (a `val` sharing it, §8.4) still holds the object. A
+lambda made inside the body that captures that array captures the cell, so it reads the object the
+body writes: the iteration's own elements as the iteration has written them so far. The
 result of a `parallel` element-wise expression is a buffer allocated before the region and freed by
 the deallocation pipeline.
 
