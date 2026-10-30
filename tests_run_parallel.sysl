@@ -160,6 +160,54 @@ par_run_no_leaks_or_races()
     assert_eq(guarded.text, expected)
     assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
 
+// An axpy over arrays of any length, as a loop and as a `parallel for`, the second's body region
+// `p.0`; and a call of each that reads `x` past its end.
+private val AXPY = "def axpy(a: real, x: [real], y: inout [real]) =\n  for i in 1..length(y) do y[i] = a * x[i] + y[i]\n\ndef paxpy(a: real, x: [real], y: inout [real]) =\n  parallel for i in 1..length(y) do y[i] = a * x[i] + y[i]\n\ndef short_x(par: bool) =\n  val x: [real] = ones(9000)\n  var y: [real] = ones(10001)\n  if par then paxpy(0.5, x, y) else axpy(0.5, x, y)\n\ndef main() =\n  val x: [real] = linspace(0.0, 1.0, 10001)\n  var y: [real] = ones(10001)\n  axpy(0.5, x, y)\n  paxpy(0.5, x, y)\n  print(y[10001])\n  print(y[5000])\n  print(sum(y))\n  assert_traps(() -> short_x(false), \"out of bounds\")\n  assert_traps(() -> short_x(true), \"out of bounds\")\n  print(\"trapped\")\n"
+
+// The text of function `name` in the LLVM IR `ir`, from its `define` to its closing brace.
+private function_ir(ir: string, name: string) -> string
+    for chunk in split(ir, "\ndefine ")
+        if chunk.contains(s"@$name(") || chunk.contains(s"@\"$name\"(") then return split(chunk, "\n}\n")[0]
+
+    ""
+
+@test("a unit-step parallel for over arrays of any length vectorizes, as its sequential twin does")
+par_emit_vectorizes()
+    val m = emitted(AXPY) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+
+    val b = bench()
+    val ir = optimized_ir(m, b.work, b.tc) match
+        Ok(ir) -> ir
+        Err(e) -> fail_with(e)
+
+    finish(b)
+
+    // A trap never returns, so a failed bounds check leaves the loop and LLVM hoists the checks out.
+    assert(m.contains("func.func private @nex_trap(!llvm.ptr) attributes {llvm.passthrough = [\"noreturn\", \"nounwind\"]}"), m)
+
+    val region = function_ir(ir, "p.0")
+    val sequential = function_ir(ir, "n.axpy")
+
+    assert(region.contains(" x double>"), region)
+    assert(sequential.contains(" x double>"), sequential)
+
+@test("a vectorized loop, parallel or not, computes what the scalar one did and still traps out of bounds")
+par_run_vectorized_bits_and_traps()
+    val b = bench()
+    val exe = s"${b.work}/axpy"
+
+    build(b, AXPY, exe)
+
+    for t in THREADS
+        val out = run_with(exe, t)
+
+        assert(out.status.ok(), s"on $t threads: ${out.status}\n${out.err.unwrap_or("")}")
+        assert_eq(out.text, "2.0\n1.4999000000000002\n15001.499999999998\ntrapped\n")
+
+    finish(b)
+
 @test("a parallel body writing a module-level array, or reducing a counted value, is refused by the emitter")
 par_emit_refusals()
     assert_eq(emitted("var g: [real] = zeros(4)\ndef main() =\n  parallel for i in 1..4\n    g[i] = 1.0\n").err().unwrap_or(""),
