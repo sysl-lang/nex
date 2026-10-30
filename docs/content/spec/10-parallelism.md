@@ -446,3 +446,41 @@ binding option, so that ranks do not share cores. If the program also calls a th
 that library's thread count so that, at any moment, only `parallel` or only BLAS is using a rank's
 cores. Results do not depend on the split: changing the number of threads per rank does not change
 a reduction's bits.
+
+## 10.8 Many nodes: the `mpi` module
+
+`parallel` uses the cores of one node. A program that runs across a cluster imports `mpi`, the
+module nex ships: every process, a **rank**, runs the same `main`, and data moves only where the
+program moves it.
+
+```nex
+import mpi.*
+
+def main() =
+  val me = rank()
+  barrier()
+  print(s"rank ${me} of ${size()}")
+```
+
+| name | what it is |
+|---|---|
+| `world()` | every rank of the job, a `Comm` |
+| `self()` | this rank alone |
+| `rank(comm = world())` | this process's rank in `comm`, counted from 0 |
+| `size(comm = world())` | how many ranks `comm` holds |
+| `barrier(comm = world())` | waits until every rank of `comm` has reached it |
+| `no_rank` | the rank a send or receive to which does nothing (`MPI_PROC_NULL`) |
+
+`import mpi.*` makes `rank` and `size` the module's, so `rank(a)` and `size(a)` of an array are then
+refused; a program that needs both writes `import mpi` and calls `mpi.rank()`.
+
+**Starting and ending are implicit.** Importing `mpi` makes the program initialise MPI before its
+module-level bindings and finalise it after `main` returns. A trap nothing catches, or `stop n` with
+`n` not 0, writes its message with the rank in front (`rank 2: trap: index out of bounds`) and ends
+the whole job, so the other ranks never hang waiting for the one that failed.
+
+**MPI programs run compiled.** The interpreter never calls C, so `nex run --interp` refuses a
+program importing `mpi` at the `import`. `nex run --np 4 program.nex` runs it as a 4-rank job
+([Command Line](/tooling/01-cli/)); `nex build` writes an executable you start with your cluster's
+`mpirun` or `srun`. The program links the cluster's MPI — the `mpicc` that `module load` puts on
+`PATH`, or the one `NEX_MPICC` names — and one built against Open MPI runs under Open MPI.

@@ -1,7 +1,7 @@
 @tests
 
-// MPI reached through `extern def` alone (DESIGN §10), before nex ships an `mpi` module (DESIGN §9.6):
-// what the FFI already carries to Open MPI or MPICH, and where it stops. The programs run under
+// MPI reached through `extern def` alone (DESIGN §10), without the `mpi` module nex ships (DESIGN §9.6,
+// `tests_mpi_module.sysl`): what the FFI carries to Open MPI or MPICH, and where it stops. The programs run under
 // `mpirun -np N`, and skip, saying so, where there is no `mpirun` or no MPI library to link.
 
 import nex.sh.sysl.nex.*

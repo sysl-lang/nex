@@ -843,7 +843,7 @@ struct Elab
 
             lambdas.push(TLambda(x.name, x.params, x.ret, caps, x.body, x.escapes, copies))
 
-        TProgram(decls, self.locals, lambdas, self.loops, self.tests, self.mods.test_build)
+        TProgram(decls, self.locals, lambdas, self.loops, self.tests, self.mods.test_build, self.mods.mpi)
     end program
 end Elab
 

@@ -1,0 +1,259 @@
+@tests
+
+// The `mpi` module nex ships (DESIGN §9.6), compiled engine only: the shim compiled by the found MPI,
+// the job joined before anything runs and left after `main`, a trap or a failing `stop` ending the
+// whole job with the rank in front of its message, `nex run --np` and `nex test --np`, and the
+// interpreter's refusal. The jobs run under the launcher the driver finds and skip, saying so, where
+// there is no MPI or no launcher; each has a timeout, so a job that hangs fails instead.
+
+import nex.sh.sysl.nex.*
+import sysl.buf.{Buf, buf}
+import sysl.env.get_or
+import sysl.fs.{make_dir_all, symlink, write_text}
+import sysl.process.{Output, Status, Var, capture}
+import sysl.slices.sort
+import sysl.testing.{compiler, skip}
+import sysl.text.{join, split}
+
+// How long a job may take before it counts as hung.
+private val JOB_TIMEOUT = 120000
+
+private val HELLO = "import mpi.*\n\ndef main() =\n  val me = rank()\n  barrier()\n  print(s\"rank ${me} of ${size()}\")\n"
+
+// The program `text` written into the bench as `<case>.nex` and compiled to `<case>`; its path.
+private built(b: Bench, text: string, case: string) -> string
+    val src = s"${b.work}/$case.nex"
+    val exe = s"${b.work}/$case"
+
+    write_text(src, text).unwrap()
+
+    compile_file(src, exe, b.work, b.tc, false) match
+        Ok(_) -> ()
+        Err(e) -> fail_with(e)
+
+    exe
+
+// The bench, skipping where there is no MPI to link or no launcher to run a job with.
+private mpi_bench() -> Bench
+    val b = bench()
+
+    find_mpi() match
+        Ok(_) -> ()
+        Err(e) -> skip(e)
+
+    mpi_launcher(1) match
+        Ok(_) -> ()
+        Err(e) -> skip(e)
+
+    b
+
+// The program at `exe` run as an `np`-rank job.
+private job(exe: string, np: int, args: []const string = []) -> Output
+    var line = mpi_launcher(np).unwrap()
+
+    line.push(exe)
+
+    for a in args
+        line.push(a)
+
+    capture(line[0], line.view()[1..], stderr = true, timeout = JOB_TIMEOUT).unwrap()
+
+// A job's standard output, its lines sorted: the ranks print in no fixed order.
+private sorted_lines(text: string) -> string
+    var ls: Buf[string] = buf()
+
+    for l in split(text, "\n")
+        if l != "" then ls.push(l)
+
+    sort(ls.view())
+    join(ls.view(), "\n")
+
+private hello_lines(np: int) -> string
+    var ls: Buf[string] = buf()
+
+    for r in 0..<np
+        ls.push(s"rank $r of $np")
+
+    join(ls.view(), "\n")
+
+// -- the job ----------------------------------------------------------------------------------------
+
+@test("each rank of a job at -np 1, 2, 4 and 7 knows its rank, counted from 0, and the job's size")
+mpi_hello_ranks()
+    val b = mpi_bench()
+    val exe = built(b, HELLO, "hello")
+    var outs: Buf[(int, Output)] = buf()
+
+    for np in [1, 2, 4, 7]
+        outs.push((np, job(exe, np)))
+
+    finish(b)
+
+    for (np, out) in outs
+        assert(out.status.ok(), s"-np $np: ${out.status}\n${out.err.unwrap_or("")}")
+        assert_eq(sorted_lines(out.text), hello_lines(np))
+
+@test("a program importing mpi run with no launcher is a job of one rank, and `mpi.x` names the module's `x` beside the array `rank` and `size`")
+mpi_single_rank_without_launcher()
+    val b = mpi_bench()
+    val exe = built(b, "import mpi\n\nval me = mpi.rank()\n\ndef main() =\n  val a = [[1, 2], [3, 4]]\n  print(s\"${me} ${mpi.size(mpi.world())} ${mpi.size(mpi.self())} ${rank(a)} ${size(a)} ${mpi.no_rank < 0 or mpi.no_rank >= mpi.size()}\")\n  mpi.barrier(mpi.self())\n", "single")
+    val out = capture(exe, [], stderr = true, timeout = JOB_TIMEOUT).unwrap()
+    val four = job(exe, 4)
+
+    finish(b)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "0 1 1 2 4 true\n")
+    assert(four.status.ok(), four.err.unwrap_or(""))
+    assert_eq(sorted_lines(four.text), "0 4 1 2 4 true\n1 4 1 2 4 true\n2 4 1 2 4 true\n3 4 1 2 4 true")
+
+@test("a trap on rank 2 of a 4-rank job ends the whole job, with `rank 2:` in front of its message and a non-zero status, while the other ranks wait in a barrier")
+mpi_trap_ends_the_job()
+    val b = mpi_bench()
+    val exe = built(b, "import mpi.*\n\ndef main() =\n  val xs = [1, 2, 3]\n  if rank() == 2 then print(xs[rank() + 5])\n  barrier()\n  print(\"after\")\n", "trap")
+    val out = job(exe, 4)
+    // A trap caught by `assert_traps` is the rank's own business and ends nothing.
+    val caught = job(built(b, "import mpi.*\n\ndef main() =\n  val xs = [1, 2, 3]\n  assert_traps(() -> print(xs[rank() + 5]))\n  barrier()\n  if rank() == 0 then print(\"after\")\n", "caught"), 4)
+
+    finish(b)
+
+    val err = out.err.unwrap_or("")
+
+    assert(out.status != Status.TimedOut, "the job hung")
+    assert(!out.status.ok(), s"${out.status}")
+    assert(err.contains("rank 2: trap: index out of bounds\n"), err)
+    assert(!err.contains("rank 0: trap") && !err.contains("rank 1: trap") && !err.contains("rank 3: trap"), err)
+    assert(!out.text.contains("after"), out.text)
+    assert(caught.status.ok(), caught.err.unwrap_or(""))
+    assert_eq(caught.text, "after\n")
+
+@test("`stop n` with n not zero on one rank ends the whole job with `rank 1: stop 3`; `stop 0` ends only that rank's part, after the others' last collective")
+mpi_stop_ends_the_job()
+    val b = mpi_bench()
+    val failing = job(built(b, "import mpi.*\n\ndef main() =\n  if rank() == 1 then stop 3\n  barrier()\n  print(\"after\")\n", "stop_failing"), 4)
+    val clean = job(built(b, "import mpi.*\n\ndef main() =\n  barrier()\n  print(s\"rank ${rank()}\")\n  if rank() == 1 then stop 0\n  print(s\"rank ${rank()} returns\")\n", "stop_clean"), 3)
+
+    finish(b)
+
+    val err = failing.err.unwrap_or("")
+
+    assert(failing.status != Status.TimedOut, "the job hung")
+    assert(!failing.status.ok(), s"${failing.status}")
+    assert(err.contains("rank 1: stop 3\n"), err)
+    assert(!failing.text.contains("after"), failing.text)
+    assert(clean.status.ok(), clean.err.unwrap_or(""))
+    assert_eq(sorted_lines(clean.text), "rank 0\nrank 0 returns\nrank 1\nrank 2\nrank 2 returns")
+
+// -- the build --------------------------------------------------------------------------------------
+
+@test("only a program importing mpi joins a job: its module says `// nex.mpi` and its `main` calls the shim first; a program without one names neither")
+mpi_only_where_imported()
+    val b = bench()
+    val plain = s"${b.work}/plain.nex"
+    val with_mpi = s"${b.work}/with_mpi.nex"
+
+    write_text(plain, "def main() =\n  val a = [1, 2, 3]\n  print(size(a))\n").unwrap()
+    write_text(with_mpi, "import mpi.{rank}\n\ndef main() = print(rank())\n").unwrap()
+
+    val p = mlir_of(plain, false).unwrap()
+    val m = mlir_of(with_mpi, false).unwrap()
+
+    finish(b)
+    assert(!uses_mpi(p), p)
+    assert(!p.contains("nex_mpi"), p)
+    assert(uses_mpi(m), m)
+    assert(m.contains("func.call @nex_mpi_init()"), m)
+    // Before every module-level binding: the call follows the arguments' and precedes the rest.
+    assert(m.index_of("func.call @nex_set_args").unwrap() < m.index_of("func.call @nex_mpi_init()").unwrap(), m)
+    assert(m.index_of("func.call @nex_mpi_init()").unwrap() < m.index_of("func.call @\"nex_mpi_proc_null\"").unwrap(), m)
+
+@test("`import mpi` names the module nex ships even where a directory `mpi` stands beside the program; its shim's externs are private to it")
+mpi_is_the_shipped_module()
+    val b = bench()
+    val dir = s"${b.work}/proj"
+
+    make_dir_all(s"$dir/mpi").unwrap()
+    write_text(s"$dir/mpi/other.nex", "module mpi\n\ndef rank(): integer = 99\n").unwrap()
+    write_text(s"$dir/main.nex", "import mpi.{rank, world}\n\ndef main() = print(rank(world()))\n").unwrap()
+    write_text(s"$dir/missing.nex", "import mpi.{nex_mpi_rank}\n\ndef main() = ()\n").unwrap()
+
+    val good = load(s"$dir/main.nex")
+    val missing = load(s"$dir/missing.nex")
+
+    finish(b)
+    assert(good.is_ok(), good.err().unwrap_or(""))
+    assert(good.unwrap().program.mpi.is_some(), "")
+    assert(missing.err().unwrap_or("").contains("the module `mpi` has no public member `nex_mpi_rank`"), missing.err().unwrap_or(""))
+
+@test("the interpreter refuses a program importing mpi where it imports it, with no word about the module's own externs; a program importing none has no MPI")
+mpi_not_interpreted_where_imported()
+    val b = bench()
+    val dir = s"${b.work}/proj"
+
+    make_dir_all(s"$dir/util").unwrap()
+    write_text(s"$dir/util/u.nex", "module util\n\nimport mpi.*\n\ndef me(): integer = rank()\n").unwrap()
+    write_text(s"$dir/main.nex", "import util.{me}\n\ndef main() = print(me())\n").unwrap()
+    write_text(s"$dir/plain.nex", "def main() = print(1)\n").unwrap()
+
+    val l = load(s"$dir/main.nex").unwrap()
+    val plain = load(s"$dir/plain.nex").unwrap()
+    val diags = interpretable(l.program)
+    val shown = l.project.render(diags)
+
+    finish(b)
+    assert_eq(diags.len(), 1)
+    assert_eq(diags[0].message, "`mpi` is not interpreted: the interpreter never calls C, so a program importing `mpi` runs compiled")
+    assert(shown.contains("util/u.nex:3:1"), shown)
+    assert(plain.program.mpi.is_none(), "")
+    assert_eq(interpretable(plain.program).len(), 0)
+
+// -- the command ------------------------------------------------------------------------------------
+
+@test("`nex run --np N` and `nex test --np N` run under the found launcher, NEX_MPIRUN or srun in a Slurm allocation; --np is checked, and an MPI that cannot be found is named")
+mpi_command_np()
+    val b = mpi_bench()
+    val nex = s"${b.work}/nex"
+    val made = capture(compiler(), ["build", repo("compiler"), "-o", nex], stderr = true).unwrap()
+
+    assert(made.status.ok(), made.err.unwrap_or(""))
+
+    val env = [Var("NEX_RUNTIME", b.tc.runtime)]
+    val src = s"${b.work}/hello.nex"
+    val tests = s"${b.work}/tests.nex"
+    // `srun` here is `echo`, which shows the command line it was given.
+    val fake = s"${b.work}/fake"
+
+    write_text(src, HELLO).unwrap()
+    write_text(tests, "import mpi.*\n\n@test\ndef test_size() = assert_eq(size(), 3)\n\n@test\ndef test_rank_two_traps() =\n  val xs = [1, 2, 3]\n  if rank() == 2 then print(xs[4])\n  barrier()\n\ndef main() = ()\n").unwrap()
+    make_dir_all(fake).unwrap()
+    symlink("/bin/echo", s"$fake/srun").unwrap()
+
+    val run2 = capture(nex, ["run", "--np", "2", src], env = env, stderr = true, timeout = JOB_TIMEOUT).unwrap()
+    val tested = capture(nex, ["test", tests, "--np", "3"], env = env, stderr = true, timeout = JOB_TIMEOUT).unwrap()
+    val alone = capture(nex, ["test", tests], env = env, stderr = true, timeout = JOB_TIMEOUT).unwrap()
+    val chosen = capture(nex, ["run", "--np", "2", src, "--", "x"], env = [Var("NEX_RUNTIME", b.tc.runtime), Var("NEX_MPIRUN", "/bin/echo launched")], stderr = true).unwrap()
+    val slurm = capture(nex, ["run", "--np", "5", src], env = [Var("NEX_RUNTIME", b.tc.runtime), Var("SLURM_JOB_ID", "1"), Var("PATH", s"$fake:${get_or("PATH", "")}")], stderr = true).unwrap()
+    val zero = capture(nex, ["run", "--np", "0", src], env = env, stderr = true).unwrap()
+    val word = capture(nex, ["run", "--np", "two", src], env = env, stderr = true).unwrap()
+    val both = capture(nex, ["run", "--interp", "--np", "2", src], env = env, stderr = true).unwrap()
+    val interp = capture(nex, ["run", "--interp", src], env = env, stderr = true).unwrap()
+    val wrong_cc = capture(nex, ["run", src], env = [Var("NEX_RUNTIME", b.tc.runtime), Var("NEX_MPICC", "/no/such/mpicc")], stderr = true).unwrap()
+    // A `PATH` of an empty directory holds no mpicc and no pkg-config.
+    make_dir_all(s"${b.work}/empty").unwrap()
+
+    val no_mpi = capture(nex, ["run", src], env = [Var("NEX_RUNTIME", b.tc.runtime), Var("PATH", s"${b.work}/empty")], stderr = true).unwrap()
+
+    finish(b)
+    assert(run2.status.ok(), run2.err.unwrap_or(""))
+    assert_eq(sorted_lines(run2.text), "rank 0 of 2\nrank 1 of 2")
+    assert(tested.status == Status.Exited(1), s"${tested.status}")
+    assert_eq(tested.text, "FAIL test_rank_two_traps: rank 2: index out of bounds\n1 passed, 1 failed\n")
+    assert_eq(alone.text, "FAIL test_size: rank 0: assert_eq failed\n1 passed, 1 failed\n")
+    assert(chosen.text.starts_with("launched -n 2 /") && chosen.text.ends_with("/program x\n"), chosen.text)
+    // `echo` reads the `-n` it is given first as its own option, and writes no newline.
+    assert(slurm.text.starts_with("5 /") && slurm.text.ends_with("/program"), slurm.text)
+    assert_eq(zero.err.unwrap_or(""), "nex: --np takes a number of ranks, at least 1, not 0\n")
+    assert_eq(word.err.unwrap_or(""), "nex: --np takes a number of ranks, not `two`\n")
+    assert_eq(both.err.unwrap_or(""), "nex: --np runs the compiled program as an MPI job, and --interp runs it in this process; give one\n")
+    assert(interp.err.unwrap_or("").contains("`mpi` is not interpreted"), interp.err.unwrap_or(""))
+    assert_eq(wrong_cc.err.unwrap_or(""), "nex: the program imports `mpi`, and NEX_MPICC names no compiler: /no/such/mpicc\n")
+    assert(no_mpi.err.unwrap_or("").starts_with("nex: the program imports `mpi`, which links an MPI, and none was found"), no_mpi.err.unwrap_or(""))

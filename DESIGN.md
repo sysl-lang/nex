@@ -1230,7 +1230,8 @@ moves only where the program moves it.
 **MPI is compiled-engine only.** The interpreter never calls C (§16), so a program importing `mpi`
 is refused where it imports it: *"`mpi` is not interpreted: the interpreter never calls C, so a
 program importing `mpi` runs compiled"* — the wording of the refusal of an `extern` (`interp.sysl`)
-with the module named.
+with the module named. `import mpi` always names the module nex ships, never a directory `mpi`
+beside the program.
 
 #### 9.6.1 What `extern def` reaches today
 
@@ -1303,8 +1304,11 @@ def main() =
 its module-level bindings are initialised and `MPI_Finalize` after `main` returns or `stop` runs,
 as a Fortran coarray program has; `init` and `finalize` are not functions the program calls.
 `stop n` with `n ≠ 0` on any rank, and a trap nothing catches, call `MPI_Abort(world, status)` after
-writing the message with the rank in front (`rank 3: trap: index 11 out of bounds 1..10`), so one
-rank's failure ends the job instead of hanging the others in their next collective.
+writing the message with the rank in front (`rank 3: trap: index 11 out of bounds 1..10`; `stop n`'s
+is `rank 3: stop n`), so one rank's failure ends the job instead of hanging the others in their next
+collective. The status is `n` for `stop n` and 134 for a trap, a process ended by `abort`'s. `stop 0`
+ends only its own rank's part, through `MPI_Finalize`, which waits for the other ranks to reach
+theirs.
 
 **Communicators** are values of type `Comm`: `world()`, `self()`, `split(comm, color, key = rank())`
 (`MPI_Comm_split`; a color of `no_color` takes the rank out), `dup(comm)`, `split_shared(comm)`
@@ -1445,10 +1449,16 @@ providing less traps at start-up with the level it gave.
 (what `module load openmpi` or `module load mpich` puts there), asked for its flags —
 `mpicc --showme:compile` / `--showme:link` for Open MPI, `mpicc -compile_info` / `-link_info` for
 MPICH — else `pkg-config` of `ompi-c` or `mpich`. A program importing `mpi` without one is refused at
-the link, naming what was looked for, as a `@fortran` program without gfortran is (§10.6).
+the link, naming what was looked for, as a `@fortran` program without gfortran is (§10.6). Each `-L`
+directory of the link is also the program's run-time search path, so the executable runs without the
+environment `module load` gave the build. A program that does not import `mpi` links no MPI and no
+shim.
 
-**One binary is built for one MPI.** The module's shim — a small C file that includes the found
-`mpi.h`, compiled with its flags when the program links — turns handles into what nex can hold:
+**One binary is built for one MPI.** The module's shim (`mpi/nex_mpi.c`, beside the module's nex
+text `mpi/mpi.nex`, both part of nex) — a small C file that includes the found `mpi.h`, compiled by
+the found `mpicc` (by clang with `pkg-config`'s flags where that found the MPI) and kept in nex's cache
+directory under a key of its text, the compiler and its flags, so each MPI compiles it once — turns
+handles into what nex can hold:
 `MPI_Comm_c2f` integers (an `int32` inside `Comm` and the datatype cache) and the predefined
 constants read from the header, so nex declares no implementation's numbers. A binary is for the
 MPI it was linked against, as a Fortran or C MPI program is. **Where `mpi_abi.h` is found** (MPI
@@ -1458,8 +1468,11 @@ library path, as the ABI intends.
 
 **Launching.** `nex build` writes an ordinary executable, launched as every MPI program is:
 `mpirun -np 64 ./heat` or, in a Slurm batch script, `srun ./heat`. `nex run --np N file.nex` builds
-and runs it under `mpirun -np N` (`NEX_MPIRUN` overrides the launcher; inside a Slurm allocation —
-`SLURM_JOB_ID` set — it is `srun -n N`). `nex test --np N` runs each test as an N-rank job. A program
+and runs it under `mpirun -n N`, the `mpirun` beside the found `mpicc`, else `mpirun` or `mpiexec` on
+`PATH` (`NEX_MPIRUN`, split at its spaces, overrides the launcher, and `-n N` follows it; inside a
+Slurm allocation — `SLURM_JOB_ID` set — it is `srun -n N`). `nex test --np N` runs each test as an
+N-rank job, and a test that traps on a rank fails with the rank in front of its message (`FAIL t:
+rank 2: index out of bounds`). `--np` is not `--interp`'s, which never starts a job. A program
 importing `mpi` run without a launcher is a single rank (`MPI_Init` gives a world of one), which is
 how it runs in the playground's compiled mode and in `nex test` without `--np`.
 

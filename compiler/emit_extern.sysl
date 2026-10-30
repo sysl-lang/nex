@@ -83,8 +83,9 @@ impl Emitter
 
         None
 
-    // The `// nex.link` lines for every extern's `@link`, each once, and `// nex.fortran` where an
-    // extern is `@fortran`, for which the driver links gfortran's runtime.
+    // The `// nex.link` lines for every extern's `@link`, each once, `// nex.fortran` where an
+    // extern is `@fortran`, for which the driver links gfortran's runtime, and `// nex.mpi` where the
+    // program imports `mpi`, for which it compiles the module's shim and links the found MPI.
     link_lines(*self) -> string
         var seen: Buf[string] = buf()
         var fortran = false
@@ -108,6 +109,7 @@ impl Emitter
 
         if fortran then out += "// nex.fortran\n"
         if contains_text(self.declared, BLAS_MARK) then out += "// nex.blas\n"
+        if self.prog.mpi.is_some() then out += "// nex.mpi\n"
 
         out
 

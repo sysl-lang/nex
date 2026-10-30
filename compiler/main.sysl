@@ -7,17 +7,19 @@
 // whose names contain the substring after the file where one is given (`test_runner.sysl`).
 // `--fpe-trap` makes real division by zero, invalid operations and overflow trap (DESIGN §2.5);
 // `--prelude-path <dir>` names the source prelude's directory (`modules.sysl`); `-L dir` and
-// `-l lib` add a library search directory and a library to the link (DESIGN §10.1). Options may
-// stand anywhere before `--`.
+// `-l lib` add a library search directory and a library to the link (DESIGN §10.1). `run --np N`
+// and `test --np N` run the program, or each test, as an N-rank MPI job under the launcher the
+// driver finds (`mpi_launcher`, DESIGN §9.6.7). Options may stand anywhere before `--`.
 
 import nex.sh.sysl.nex.*
 import nex_runtime.sh.sysl.nex_runtime.uncaught_text
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, read_bytes, remove_dir_all}
 import sysl.process.run
+import sysl.text.parse_int
 import sh.sysl.parsing.source
 
-private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run | test> [--fpe-trap] [--interp] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
+private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run | test> [--fpe-trap] [--interp] [--np ranks] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
 
 main(args: []string)
     if args.len < 3
@@ -27,6 +29,8 @@ main(args: []string)
     val command = args[1]
     var fpe_trap = false
     var interp = false
+    // `--np N`: how many ranks the program runs as, under an MPI launcher; 0 for none.
+    var np = 0
     var prelude_flag: Option[string] = None
     var file = ""
     // The substring `test` selects by.
@@ -47,13 +51,14 @@ main(args: []string)
             fpe_trap = true
         elif a == "--interp" && (command == "run" || command == "test")
             interp = true
-        elif a == "-o" || a == "-L" || a == "-l" || a == "--prelude-path"
+        elif a == "-o" || a == "-L" || a == "-l" || a == "--prelude-path" || (a == "--np" && (command == "run" || command == "test"))
             if k + 1 >= args.len then fail(s"nex: `$a` needs a value\n$usage")
 
             k += 1
 
             if a == "-o" then out = args[k]
             elif a == "--prelude-path" then prelude_flag = Some(args[k])
+            elif a == "--np" then np = ranks_of(args[k])
             else links.push(a + args[k])
         elif a.starts_with("-L") || a.starts_with("-l")
             links.push(a)
@@ -76,6 +81,8 @@ main(args: []string)
 
     val opts = LoadOptions(prelude, false)
 
+    if np > 0 && interp then fail("nex: --np runs the compiled program as an MPI job, and --interp runs it in this process; give one")
+
     if command == "emit"
         mlir_of(file, fpe_trap, opts) match
             Ok(text) -> prints(text)
@@ -85,7 +92,7 @@ main(args: []string)
     if command == "test"
         val ran = if interp then run_tests_interpreted(file, prelude, filter, fpe_trap)
                   else find_toolchain(args[0]) match
-                      Ok(tc) -> run_tests(file, prelude, filter, tc, fpe_trap)
+                      Ok(tc) -> run_tests(file, prelude, filter, tc, fpe_trap, np)
                       Err(m) -> fail(m)
 
         val r = ran match
@@ -114,7 +121,22 @@ main(args: []string)
             Ok(p) -> p
             Err(m) -> fail(m)
 
-        val status = run(exe, program_args.view())
+        // Under `--np`, the program is the launcher's argument.
+        var line: Buf[string] = buf()
+
+        if np > 0
+            line = mpi_launcher(np) match
+                Ok(l) -> l
+                Err(m) ->
+                    _ = remove_dir_all(work)
+                    fail(m)
+
+        line.push(exe)
+
+        for a in program_args
+            line.push(a)
+
+        val status = run(line[0], line.view()[1..])
 
         _ = remove_dir_all(work)
 
@@ -190,6 +212,16 @@ private interpret_file(file: string, opts: LoadOptions, program_args: []const st
             eprints(uncaught_text(message))
             exit(134)
         Err(ds) -> fail(l.project.render(ds))
+
+// `--np`'s value: a count of ranks, at least 1.
+private ranks_of(text: string) -> int
+    val n = parse_int(text) match
+        Ok(n) -> n
+        Err(_) -> fail(s"nex: --np takes a number of ranks, not `$text`")
+
+    if n < 1 then fail(s"nex: --np takes a number of ranks, at least 1, not $n")
+
+    n
 
 private fail(text: string) -> never
     eprints(text)

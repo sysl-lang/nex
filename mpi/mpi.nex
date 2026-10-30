@@ -1,0 +1,40 @@
+module mpi
+
+// The `mpi` module nex ships (DESIGN §9.6): a cluster's processes, each a rank running the same
+// `main`. Importing it is what makes a program an MPI program: `MPI_Init_thread` runs before the
+// module-level bindings are initialised and `MPI_Finalize` after `main` returns or `stop 0` runs; a
+// trap nothing catches, or `stop n` with `n ≠ 0`, writes its message with the rank in front and ends
+// the whole job with `MPI_Abort`.
+//
+// Everything here that touches MPI goes through the shim, `nex_mpi.c`, compiled against the found
+// `mpi.h`: a communicator crosses as its Fortran handle (`MPI_Comm_c2f`), an `int32` every MPI gives,
+// and a predefined constant is read from the header, so nothing here is one implementation's number.
+
+// A communicator: a group of ranks that talk among themselves.
+struct Comm
+  handle: int32
+
+private extern def nex_mpi_world(): int32
+private extern def nex_mpi_self(): int32
+private extern def nex_mpi_rank(comm: int32): integer
+private extern def nex_mpi_size(comm: int32): integer
+private extern def nex_mpi_barrier(comm: int32)
+private extern def nex_mpi_proc_null(): integer
+
+// Every rank of the job.
+def world(): Comm = Comm(nex_mpi_world())
+
+// This rank alone.
+def self(): Comm = Comm(nex_mpi_self())
+
+// The rank to send to or receive from that does nothing: `MPI_PROC_NULL`.
+val no_rank: integer = nex_mpi_proc_null()
+
+// This process's rank in `comm`, from 0 to `size(comm) - 1`.
+def rank(comm: Comm = world()): integer = nex_mpi_rank(comm.handle)
+
+// How many ranks `comm` holds.
+def size(comm: Comm = world()): integer = nex_mpi_size(comm.handle)
+
+// Waits until every rank of `comm` has reached it.
+def barrier(comm: Comm = world()) = nex_mpi_barrier(comm.handle)

@@ -17,7 +17,7 @@ module sh.sysl.nex
 // nothing the frames between hold is lost.
 //
 // **It never calls C** (PLAN.md): a program declaring an `extern` is refused, and runs on the
-// compiled engine alone. Printing, formatting and the words of every trap are the runtime's sysl
+// compiled engine alone; so is one importing `mpi`, refused where it imports it. Printing, formatting and the words of every trap are the runtime's sysl
 // functions, which the compiled program calls through C, so the two engines write the same bytes.
 //
 // What the interpreter does not run yet it refuses before running anything: every construct it meets
@@ -370,6 +370,14 @@ impl Interp
         var globals: Buf[TGlobal] = buf()
         var tuples: Buf[TGlobalTuple] = buf()
         var funs: Buf[TFun] = buf()
+
+        // An MPI program is refused where it imports `mpi`, and only there: the module's own externs
+        // are what that refusal is about.
+        self.prog.mpi match
+            Some(span) ->
+                self.diags.push(error(span, "`mpi` is not interpreted: the interpreter never calls C, so a program importing `mpi` runs compiled"))
+                return buf()
+            None -> ()
 
         for _ in 0..<self.prog.locals.len()
             self.slot.push(-1)

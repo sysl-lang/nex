@@ -762,12 +762,17 @@ struct Emitter
         out.finish()
     end whole_module
 
-    // The C `main`: the arguments set aside, every module-level binding initialized before anything
-    // reads it, the program's `main` called and what it printed written out.
+    // The C `main`: the arguments set aside, an MPI program's `MPI_Init_thread`, every module-level
+    // binding initialized before anything reads it, the program's `main` called and what it printed
+    // written out.
     entry_point(*self, globals: Buf[TGlobal], tuples: Buf[TGlobalTuple])
         self.begin(Void, texpr(Span(0, 0), Void, TLiteral(VoidVal, false)))
 
         self.call("nex_set_args", "%argc, %argv", "i32, !llvm.ptr", "")
+
+        // An MPI program joins its job before anything else runs (DESIGN §9.6.2); `nex_finish`, and
+        // `stop`, end its part in it.
+        if self.prog.mpi.is_some() then self.call("nex_mpi_init", "", "", "")
 
         for k in init_order(self.prog, globals, tuples)
             val m = self.mark()

@@ -7,7 +7,8 @@ module sh.sysl.nex
 // reads every `.nex` file in the directory `a/b` beside it, all of them one module. `nex test` also
 // reads every module directory under the root, imported or not, since a test module is what nothing
 // imports. A source prelude, when one is found, is the module `prelude`, which every other module
-// sees without an import.
+// sees without an import. **`import mpi` names the module nex ships** (`mpi/mpi.nex`, DESIGN §9.6),
+// whose text is part of nex rather than a directory beside the program.
 //
 // **Every file is placed in one text**, one after another, and parsed where it stands in it, so a
 // span is a span of the project: which file, and so which module, a declaration belongs to is read
@@ -57,6 +58,8 @@ struct Modules
     qualified: Buf[ImportName]
     // Whether this is a script a host loads (DESIGN §16.1), which needs no `main`.
     script: bool
+    // Where the program first imports the `mpi` module nex ships, if it does (DESIGN §9.6).
+    mpi: Option[Span]
 
     // Whether there is one module and no source prelude, where every name is its own.
     single(self) -> bool = self.names.len() == 1 && self.prelude.is_none()
@@ -95,7 +98,7 @@ single_module() -> Modules
     names.push("")
     test_only.push(false)
 
-    Modules(names, test_only, buf(), None, false, buf(), buf(), buf(), buf(), false)
+    Modules(names, test_only, buf(), None, false, buf(), buf(), buf(), buf(), false, None)
 
 // The name a value of a struct or an enum is printed with: its own, without its module's path.
 display_name(internal: string) -> string
@@ -196,7 +199,7 @@ elaborate_project(p: Project) -> Result[TProgram, string]
 // The program whose root module is the file `entry`, every module it imports, and under
 // `test_build` every module directory beneath it; or why the entry itself could not be read.
 load_project(entry: string, opts: LoadOptions) -> Result[Project, string]
-    var l = Loader(parent_dir(entry), opts, buf(), buf(), buf(), buf(), buf(), buf())
+    var l = Loader(parent_dir(entry), opts, buf(), buf(), buf(), buf(), buf(), buf(), None)
 
     l.add_module("")
     l.read_file(entry, 0)?
@@ -235,6 +238,12 @@ parent_dir(file: string) -> string
 
     if dir == "" then "/" else dir
 
+// The `mpi` module nex ships (DESIGN §9.6): its path, the name its diagnostics give its file, and
+// its text.
+val MPI_MODULE = "mpi"
+private val MPI_FILE = "<nex>/mpi/mpi.nex"
+private val MPI_SOURCE = embed("../../../mpi/mpi.nex")
+
 private is_source_name(name: string) -> bool = name.ends_with(".nex") || name.ends_with(".lnex")
 
 // Whether a directory's name can be a module path's segment: a nex name.
@@ -259,6 +268,8 @@ private struct Loader
     parsed: Buf[Option[Program]]
     deferred: Buf[Deferred]
     edges: Buf[Edge]
+    // The `mpi` module nex ships, once an import has read it.
+    shipped_mpi: Option[usize]
 
     add_module(*self, path: string) -> usize
         self.names.push(path)
@@ -276,6 +287,10 @@ private struct Loader
             Ok(b) -> b
             Err(e) -> return Err(s"nex: cannot read ${name}: ${e}")
 
+        self.read_text(name, bytes, m)
+
+    // A file's bytes, named `name`, as a file of module `m`.
+    read_text(*self, name: string, bytes: []const u8, m: usize) -> Result[unit, string]
         val doc = source(name, bytes)
         val src = program_text(doc) match
             Ok(s) -> s
@@ -307,8 +322,24 @@ private struct Loader
                 Ok(_) -> ()
                 Err(e) -> self.deferred.push(Deferred(file, span, e))
 
-    // The module `path` names, read from its directory if it has not been.
+    // The module `path` names, read from its directory if it has not been. `mpi` is the module nex
+    // ships, whatever directories stand beside the program.
     module_named(*self, path: string, file: usize, span: Span) -> Option[usize]
+        if path == MPI_MODULE
+            self.shipped_mpi match
+                Some(m) -> return Some(m)
+                None -> ()
+
+            val m = self.add_module(path)
+
+            self.shipped_mpi = Some(m)
+
+            self.read_text(MPI_FILE, MPI_SOURCE, m) match
+                Ok(_) -> ()
+                Err(e) -> self.deferred.push(Deferred(file, span, e))
+
+            return Some(m)
+
         self.find_module(path) match
             Some(m) -> return Some(m)
             None -> ()
@@ -379,6 +410,10 @@ private struct Loader
             if !is_module_segment(n) || !is_dir(sub) then continue
 
             val mpath = if path == "" then n else s"${path}.${n}"
+
+            // `mpi` is the module nex ships, never a directory's.
+            if mpath == MPI_MODULE then continue
+
             var has_source = false
 
             entries(sub) match
@@ -459,7 +494,15 @@ private struct Loader
                     diags.push(error(Span(e.span.start + base, e.span.end + base), s"`${self.names[e.to]}` is a test module (`@test module`), which only `nex test` builds"))
 
         val prelude = if self.opts.prelude.is_some() then self.find_module("prelude") else None
-        val mods = Modules(self.names, self.test_only, ranges, prelude, self.opts.test_build, buf(), buf(), buf(), buf(), false)
+        var mpi: Option[Span] = None
+
+        for e in self.edges
+            if mpi.is_none() && self.shipped_mpi.map((s) -> s == e.to).unwrap_or(false)
+                val base = ranges[e.file].start
+
+                mpi = Some(Span(e.span.start + base, e.span.end + base))
+
+        val mods = Modules(self.names, self.test_only, ranges, prelude, self.opts.test_build, buf(), buf(), buf(), buf(), false, mpi)
 
         Project(text, file_names, mods, Program(decls), diags)
     end finish

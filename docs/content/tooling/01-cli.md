@@ -14,6 +14,20 @@ Compiles the program to a native binary and runs it. Standard output is the prog
 run-time error (an out-of-range index, an integer overflow that traps) prints its message and exits
 non-zero.
 
+```
+nex run --np 4 heat.nex
+```
+
+runs a program importing `mpi` as a 4-rank MPI job ([Parallelism](/spec/10-parallelism/)): under
+`mpirun -n 4`, the `mpirun` of the MPI the program links; under `srun -n 4` inside a Slurm allocation
+(`SLURM_JOB_ID` set); or under the launcher `NEX_MPIRUN` names, which is given `-n 4` after its own
+words (`NEX_MPIRUN="mpirun --oversubscribe"`). Without `--np` such a program is a job of one rank.
+A rank that traps, or stops with a status other than 0, writes its message with its rank in front
+(`rank 2: trap: index out of bounds`) and ends the whole job.
+
+The MPI is the one `NEX_MPICC` names, else `mpicc` on `PATH`, else what `pkg-config` knows as
+`ompi-c` or `mpich`. A program that does not import `mpi` links none.
+
 ## 1.2 nex build
 
 ```
@@ -50,7 +64,8 @@ non-zero when any failed. A trap inside a test fails that test only; the others 
 nex test axpy
 ```
 
-runs only the tests whose names contain the given substring.
+runs only the tests whose names contain the given substring. `nex test --np 4` runs each test as a
+4-rank MPI job, and a test that traps on a rank fails with the rank in front of its message.
 
 ```nex
 @test
