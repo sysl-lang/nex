@@ -171,6 +171,16 @@ struct UnitBindings
 // `t` with the bound unit parameters replaced by their units.
 subst_ty(t: Ty, b: UnitBindings) -> Ty = if carries_unit(t) then with_unit(t, subst_unit(elem_unit(t), b.names, b.units)) else t
 
+// The names of the prelude's units, which a literal may be written against (`10mm`) in any program.
+prelude_unit_names() -> Buf[string]
+    var names: Buf[string] = buf()
+
+    lex(source_of("prelude", PRELUDE_UNITS)) match
+        Ok(toks) -> declared_units(toks.view(), &names)
+        Err(_) -> ()
+
+    names
+
 impl Elab
     // -- declarations -----------------------------------------------------------------------------
 

@@ -23,7 +23,7 @@ import sysl.env.get
 import sysl.fs.{entries, is_dir, read_bytes}
 import sysl.slices.sort
 import sysl.text.{join, split}
-import sh.sysl.parsing.{Diagnostic, Source, Span, error, full_report, source}
+import sh.sysl.parsing.{Diagnostic, Source, Span, Spanned, error, full_report, source}
 
 // Where one file's text stands in the project's text, and its module.
 struct FileRange
@@ -418,12 +418,29 @@ private struct Loader
         val all = source(file_names[0], text.view())
         var per_file: Buf[Program] = buf()
 
+        // Every file is lexed before any is parsed, since a unit any of them declares may be written
+        // against a literal in all of them (`10mm`).
+        var lexed: Buf[Option[Buf[Spanned[Tok]]]] = buf()
+        var units = prelude_unit_names()
+
         for r in ranges
-            parse_file(all, r.start, r.end) match
-                Ok(p) -> per_file.push(p)
+            lex_file(all, r.start, r.end) match
+                Ok(toks) ->
+                    declared_units(toks.view(), &units)
+                    lexed.push(Some(toks))
                 Err(d) ->
                     diags.push(d)
-                    per_file.push(Program(buf()))
+                    lexed.push(None)
+
+        for toks in lexed
+            toks match
+                Some(t) ->
+                    parse_tokens(all, t, units) match
+                        Ok(p) -> per_file.push(p)
+                        Err(d) ->
+                            diags.push(d)
+                            per_file.push(Program(buf()))
+                None -> per_file.push(Program(buf()))
 
         val order = self.module_order(&diags, ranges)
         var decls: Buf[Decl] = buf()

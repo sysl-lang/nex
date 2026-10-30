@@ -135,7 +135,8 @@ rounding: `a = x * a` with `a: [real32]` is refused, and `a = real32(x) * a` or
 ### 2.3 Literals and prelude constants
 
 An unsuffixed literal takes its type from its context; nex has no literal suffixes, because a suffix
-such as `1.0f32` would read as juxtaposition (`1.0 * f32`, ref §4.4).
+such as `1.0f32` would read as juxtaposition (`1.0 * f32`, ref §4.4). The one name a literal is
+written against that is not a multiplication is a unit's: `10mm` is `10<mm>` (§13.2).
 
 - **With an expected type** (an annotated binding, a parameter, a typed element or field): the
   literal is that type. An integer literal outside the target's range is a compile error
@@ -1850,9 +1851,10 @@ unit psi = lbf / in^2
   the same factor. `N` and `kg m / s^2` are one unit, `Hz` and `1/s` are one, and so are `J` and
   `N m` (as in SI, torque and energy are not told apart). `mm` and `m` have the same **dimension**
   and different factors: two units, convertible (§13.3).
-- **Unit names live in their own namespace** and appear only inside `<…>` and in `unit`
-  declarations, so a variable named `m`, `s` or `g` does not clash with the unit, and the keyword
-  `in` is an ordinary unit name there (`2.0<in>`). A module's own `unit` declaration of a prelude
+- **Unit names live in their own namespace** and appear only inside `<…>`, in `unit`
+  declarations and directly after a numeric literal (`10mm`, §13.2), so a variable named `m`, `s`
+  or `g` does not clash with the unit, and the keyword `in` is an ordinary unit name there
+  (`2.0<in>`, `2in`). A module's own `unit` declaration of a prelude
   unit's name shadows it in that module, as any prelude name may be shadowed. `ms` is the
   millisecond; the metre-second is `m s`.
 - **A base unit is its name.** A module's `unit m` declares the same dimension the prelude's `m`
@@ -1865,6 +1867,7 @@ unit psi = lbf / in^2
 | Form | Example |
 |---|---|
 | a literal | `9.81<m/s^2>`, `2.0<in>`, `1.0e5<Pa>` |
+| a literal in one unit, shorthand | `10mm`, `2.5in`, `1e5Pa`, `-3mm` |
 | a real type | `real<m>`, `real32<m/s>`, `real16<Pa>` |
 | a complex type | `complex<V>`, `complex[real32]<ohm>` |
 | an array type | `[real<m>; :, :]`, `[real32<Pa>; 3, 3]`, `[complex<V>]` |
@@ -1893,6 +1896,23 @@ unit psi = lbf / in^2
   | `2pi<rad>` | `2 * (pi<rad>)` |
   | `(a + b)<m>`, `strip(y)<m>` | a unit on the parenthesised operand, on the call |
   | `if x<m> then …` | a unit: `then` cannot begin an operand |
+
+- **A unit's name written directly against a decimal literal, with no space, is that literal in
+  that unit**: `10mm` is `10<mm>`, `2.5in` is `2.5<in>`, `1e5Pa` (the exponent first, then the
+  unit) is `1e5<Pa>`. It is one operand, so it reads exactly as the bracketed form does: `-10mm` is
+  `-(10mm)`, `10mm^2` is `(10mm)^2`, `2 * 10mm` is `2 * (10mm)`, and `0mm < x < 1cm` is a chained
+  comparison.
+  - **One name is the whole unit.** A compound unit is bracketed, `9.81<m/s^2>`: in `9.81m/s^2` the
+    `s` is a value, divided by. A bracket after the name is a compile error (`10mm<in>`), since the
+    literal already has its unit.
+  - **The name is a unit's when the program has one by that name**: the prelude's (§13.9) or one a
+    `unit` declaration makes in any module, before or after the literal. Any other name is what the
+    literal multiplies (§4.4), so `2x`, `2pi`, `2e` and `2i` (§12) are products as before; the
+    prelude has no unit `i`, `e` or `pi`.
+  - **In that position the unit wins over a value of the same name**: with a local `m`, `3m` is three
+    metres, and `3 * m` (or `3 m`, with the space) multiplies by the local.
+  - **Only a decimal literal takes one.** A hex, binary or octal literal's digits may be letters
+    (`0x10cd` is one number), so a unit's name against one is a compile error: `0x10<mm>`.
 
 - **The checker accepts an annotation only on a dimensionless operand**: it attaches a unit to a
   number. An operand that already carries a unit is a compile error pointing to `to<u>(x)`, which

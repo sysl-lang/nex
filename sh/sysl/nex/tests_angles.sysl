@@ -24,6 +24,13 @@ angles_convert()
     assert_eq(refused("def main() = print(1.0<deg> + 1.0<m>)\n"), "error: cannot add deg and m: angle and length are different dimensions @1:20")
     assert_eq(refused("def main() = print(to<m>(1.0<deg>))\n"), "error: `to<m>` converts within one dimension: deg is angle, and m is length @1:20")
 
+@test("the angle units are written against a literal like any prelude unit")
+angles_shorthand()
+    assert_eq(elaborated("def main() = print(30deg + 0.5rad)\n"),
+        "(def main () void (print (s (strip:real64 (+:real64<deg> 30.0<deg> (rescale:real64<deg> 57.29577951308232 0.5<rad>))) \" deg\")))")
+    assert_eq(elaborated("def main() = print(to<arcmin>(1turn))\n"), "(def main () void (print (s (strip:real64 (rescale:real64<arcmin> 21600.0 1.0<turn>)) \" arcmin\")))")
+    assert_eq(refused("def main() = print(30deg + 1)\n"), "error: cannot add deg and a bare number: " + bare("1", "@1:20"))
+
 @test("a power of π is exact through a whole power and refused through a root")
 angles_pi_powers()
     assert_eq(elaborated("def main() = print(to<rad^2>(1.0<deg^2>))\n"),
