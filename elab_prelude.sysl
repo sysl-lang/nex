@@ -15,6 +15,9 @@ import sh.sysl.parsing.Span
 
 private val REDUCTIONS = ["sum", "product", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot"]
 
+// The prelude functions an array of a rank parameter's rank may be given.
+private val RANK_GENERIC = ["sum", "product", "minval", "maxval", "any", "all", "count", "norm2", "map", "extent", "size", "rank", "flatten"]
+
 private is_reduction(name: string) -> bool
     for r in REDUCTIONS
         if r == name then return true
@@ -132,7 +135,9 @@ impl Elab
         if name == "extent" || name == "reverse"
             if pos.len() != 2 && !(name == "reverse" && pos.len() == 1) then return self.arity(span, name, if name == "extent" then "an array and an axis" else "an array and an optional axis")
 
-            if pos.len() == 2 then out.push(self.axis(pos[1], r, "an axis"))
+            // An axis of an array whose rank is a rank parameter is checked where the rank is known.
+            if pos.len() == 2
+                out.push(if self.rank_param_of(a.ty).is_some() then self.check(pos[1], INTEGER, "an axis") else self.axis(pos[1], r, "an axis"))
 
             if name == "reverse" then return reversed(span, a, out)
 
@@ -206,6 +211,19 @@ impl Elab
     // An argument that must be an array.
     array_arg(*self, name: string, e: Expr) -> TExpr
         val v = self.infer(e)
+
+        // An array whose rank is a rank parameter goes only where the rank does not matter (DESIGN §3.4).
+        self.rank_param_of(v.ty) match
+            Some(r) ->
+                var whole = false
+
+                for n in RANK_GENERIC
+                    if n == name then whole = true
+
+                if !whole
+                    self.fail(e.span, s"`${name}` depends on its array's rank, which `${r}` leaves open; an array of rank `${r}` goes to whole-array operations, `map`, the reductions without `dim`, `extent`, `size`, `rank` and `flatten`")
+                    return self.invalid(e.span)
+            None -> ()
 
         if is_array(v.ty) || is_error(v.ty) then return v
 
@@ -429,6 +447,12 @@ impl Elab
 
                 texpr(span, ty, TArray(TReduction(name, args, None)))
             Some(d) ->
+                self.rank_param_of(a.ty) match
+                    Some(rp) ->
+                        self.fail(d.span, s"`${name}` with `dim` gives an array of rank `${rp}` − 1, which no type names; reduce the whole array")
+                        return self.invalid(span)
+                    None -> ()
+
                 val k = self.axis(d, r, "`dim`")
                 var kept: Buf[Extent] = buf()
                 val written = int_written(d)

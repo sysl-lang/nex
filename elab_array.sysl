@@ -142,6 +142,12 @@ impl Elab
             self.fail(span, s"${what} combines arrays of one rank; these have rank ${xs.len()} and rank ${ys.len()}")
             return None
 
+        self.rank_clash(xs, ys) match
+            Some(why) ->
+                self.fail(span, s"${what} combines arrays of one rank; ${why}")
+                return None
+            None -> ()
+
         var out: Buf[Extent] = buf()
 
         for k in 0..<xs.len()
@@ -188,6 +194,12 @@ impl Elab
         if xs.len() != ys.len()
             self.fail(value_span(v), s"${head}: its rank is ${xs.len()}, not ${ys.len()}")
             return texpr(v.span, Error, TInvalid)
+
+        self.rank_clash(xs, ys) match
+            Some(why) ->
+                self.fail(value_span(v), s"${head}: ${why}")
+                return texpr(v.span, Error, TInvalid)
+            None -> ()
 
         if !promotes(from, to) && !converts(from, to)
             var why = ""
@@ -439,6 +451,12 @@ impl Elab
             _ ->
                 self.fail(base.span, s"this is ${self.shown(base)} and cannot be indexed")
                 return self.invalid(span)
+
+        self.rank_param_of(base.ty) match
+            Some(r) ->
+                self.fail(span, s"an array of rank `${r}` takes no index list, whose length would be `${r}`; work on the whole array")
+                return self.invalid(span)
+            None -> ()
 
         if indices.len() > axes.len()
             self.fail(span, s"this array has rank ${axes.len()}, and ${indices.len()} subscripts are given")
