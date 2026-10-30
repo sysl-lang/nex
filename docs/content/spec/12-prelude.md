@@ -75,6 +75,7 @@ of its argument (an integer argument to a transcendental function gives `real64`
 | `sinh`, `cosh`, `tanh` | hyperbolic functions | `SINH`, `COSH`, `TANH` |
 | `asinh`, `acosh`, `atanh` | inverse hyperbolic functions | `ASINH`, `ACOSH`, `ATANH` |
 | `hypot(x, y)` | √(x² + y²) without intermediate overflow | `HYPOT` |
+| `fma(a, b, c)` | `a * b + c` rounded once, elemental over reals; `a * b` and `c` share a dimension, and the result has it; integers and complex numbers are refused | `IEEE_FMA` |
 | `floor(x)`, `ceil(x)` | round down, round up | `FLOOR`, `CEILING` |
 | `round(x)` | round to nearest, halves away from zero | `ANINT` |
 | `trunc(x)` | round toward zero | `AINT` |

@@ -96,6 +96,21 @@ impl Emitter
 
             return v
 
+        if name == "fma"
+            val bits = bits_of(base_of(t))
+            val p = self.ex(args[0])
+            val q = self.ex(args[1])
+            val r = self.ex(args[2])
+
+            // A `real16` is fused at `real64`, where the product of two halves is exact, and then
+            // rounded to a half: the one rounding that matters (DESIGN §7.3).
+            val at = if bits == 16 then 64 else bits
+            val lift = (v: string) -> if bits == 16 then self.def(s"arith.extf $v : f16 to f64") else v
+            val fused = self.def(s"math.fma ${lift(p)}, ${lift(q)}, ${lift(r)} : f$at")
+            val out = if bits == 16 then self.def(s"arith.truncf $fused : f64 to f16") else fused
+
+            return self.fpe_check3(out, p, q, r, bits)
+
         val x = self.ex(args[0])
 
         if name == "abs" then return self.abs(span, x, args[0].ty)

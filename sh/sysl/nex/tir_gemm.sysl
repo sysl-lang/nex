@@ -1,0 +1,187 @@
+module sh.sysl.nex
+
+// An assignment that is one BLAS update (DESIGN §10.4): `c = alpha * (a @ b) + beta * c`, in the
+// spellings that section lists, written to `c` where it lies by one `?gemm` (or `?gemv`) with `beta`.
+// Both engines recognize it here, from the typed IR alone, so they take the same path and round
+// alike.
+//
+// **What is recognized**: the target is a `var` local of `real32`, `real64` or complex elements that
+// no lambda captures; the value is the sum, in either order, of a product term and a term of the
+// target, or the statement is `c += <product term>`. A product term is `a @ b`, `s * (a @ b)` or
+// `(a @ b) * s`; a term of the target is `c`, `s * c` or `c * s`; each `s` is a scalar of the
+// element's number type, of any expression. Neither operand of `@` may read `c`: `c = a @ c + c`
+// would have BLAS read the storage it writes, so it takes the general path.
+//
+// **What the engines do with it**: the leaves — the product, the target and the scalars — are
+// evaluated once, in the order written, the product as its two operands. Where the product goes to
+// BLAS, `c` is written by the update. Where it does not, the value is `scalar` over the leaves, the
+// product computed inline: the element-wise expression as written, rounded as written.
+
+import sysl.buf.{Buf, buf}
+
+struct GemmUpdate
+    // The local written.
+    target: TExpr
+    // The `@` node's operands, as written.
+    lhs: TExpr
+    rhs: TExpr
+    // The value's leaves in the order written, and its element as a scalar over them
+    // (`TChainOperand(k)` reads leaf `k`).
+    leaves: Buf[TExpr]
+    scalar: TExpr
+    // The leaf that is the product, and those that are `alpha` and `beta` where they are written.
+    at: usize
+    alpha: Option[usize]
+    beta: Option[usize]
+
+// `target op value` as one BLAS update, where it is one.
+gemm_update(p: TProgram, op: string, target: TExpr, value: TExpr) -> Option[GemmUpdate]
+    val id = *target.kind match
+        TLocal(id) -> id
+        _ -> return None
+
+    if !plain_var(p, id) || !gemm_element(elem_of(target.ty)) || !is_arr(target.ty) then return None
+
+    if op == "+="
+        if !product_term(value) then return None
+
+        var g = GemmUpdate(target, value, value, buf(), value, 0, None, None)
+        val c = g.leaf(target)
+        val t = g.term(value, true)
+
+        return g.finish(id, value.span, elem_of(target.ty), c, t)
+
+    if op != "=" then return None
+
+    val (l, r) = sum_of(value)?
+
+    var g = GemmUpdate(target, value, value, buf(), value, 0, None, None)
+
+    if product_term(l) && target_term(r, id)
+        val x = g.term(l, true)
+        val y = g.term(r, false)
+
+        return g.finish(id, value.span, elem_of(value.ty), x, y)
+
+    if product_term(r) && target_term(l, id)
+        val x = g.term(l, false)
+        val y = g.term(r, true)
+
+        return g.finish(id, value.span, elem_of(value.ty), x, y)
+
+    None
+
+impl GemmUpdate
+    // `e` as a leaf: its operand's position.
+    private leaf(*self, e: TExpr) -> TExpr
+        self.leaves.push(e)
+        chain_leaf(e, self.leaves.len() - 1)
+
+    // The product term (`product`) or the target's term `e` as a scalar over new leaves, the scalar's
+    // and the product's positions noted.
+    private term(*self, e: TExpr, product: bool) -> TExpr
+        val (l, r) = scaled(e) match
+            Some(pair) -> pair
+            None ->
+                if product then self.at = self.leaves.len()
+
+                return self.leaf(e)
+
+        val first = self.leaves.len()
+        val a = self.leaf(l)
+        val b = self.leaf(r)
+        val array_first = is_arr(l.ty)
+
+        if product
+            self.at = if array_first then first else first + 1
+            self.alpha = Some(if array_first then first + 1 else first)
+        else
+            self.beta = Some(if array_first then first + 1 else first)
+
+        texpr(e.span, elem_of(e.ty), TBinary("*", a, b))
+
+    // The value `x + y` over the leaves, where neither operand of `@` reads the local `id` and the
+    // scalars are of the element type `et`.
+    private finish(*self, id: usize, span: sh.sysl.parsing.Span, et: Ty, x: TExpr, y: TExpr) -> Option[GemmUpdate]
+        val (l, r) = *self.leaves[self.at].kind match
+            TArray(a) -> *a match
+                TMatMul(l, r) -> (l, r)
+                _ -> return None
+            _ -> return None
+
+        var ids: Buf[usize] = buf()
+
+        ids.push(id)
+
+        if reads_locals(l, ids)[0] || reads_locals(r, ids)[0] then return None
+        if !self.of_element(self.alpha, et) || !self.of_element(self.beta, et) then return None
+
+        self.lhs = l
+        self.rhs = r
+        self.scalar = texpr(span, et, TBinary("+", x, y))
+        Some(*self)
+
+    // Whether leaf `k`, where there is one, is a number of the element type `et`, so BLAS takes it as
+    // `alpha` or `beta` as it is.
+    private of_element(self, k: Option[usize], et: Ty) -> bool = k match
+        Some(i) -> ty_eq(base_of(self.leaves[i].ty), base_of(et))
+        None -> true
+end GemmUpdate
+
+// Whether local `id` is a `var` that no lambda captures: its value is its own, held by nothing else.
+private plain_var(p: TProgram, id: usize) -> bool
+    p.locals[id].kind match
+        LVar -> ()
+        _ -> return false
+
+    for l in p.lambdas
+        for c in l.captures
+            if c == id then return false
+
+    true
+
+// Whether BLAS has routines for elements of `t`: `real32`, `real64` and the two complex types.
+gemm_element(t: Ty) -> bool = base_of(t) match
+    Real(b) -> b == 32 || b == 64
+    Complex(b) -> b == 32 || b == 64
+    _ -> false
+
+private is_product(e: TExpr) -> bool = *e.kind match
+    TArray(a) -> *a match
+        TMatMul(_, _) -> true
+        _ -> false
+    _ -> false
+
+// `a @ b`, `s * (a @ b)` or `(a @ b) * s`.
+private product_term(e: TExpr) -> bool
+    if is_product(e) then return true
+
+    scaled(e) match
+        Some((l, r)) -> (is_product(r) && !is_arr(l.ty)) || (is_product(l) && !is_arr(r.ty))
+        None -> false
+
+// `c`, `s * c` or `c * s` for the local `id`.
+private target_term(e: TExpr, id: usize) -> bool
+    if is_local(e, id) then return true
+
+    scaled(e) match
+        Some((l, r)) -> (is_local(r, id) && !is_arr(l.ty)) || (is_local(l, id) && !is_arr(r.ty))
+        None -> false
+
+// The operands of an element-wise `*`.
+private scaled(e: TExpr) -> Option[(TExpr, TExpr)] = *e.kind match
+    TArray(a) -> *a match
+        TElementwise(o, l, r) -> if o == "*" then Some((l, r)) else None
+        _ -> None
+    _ -> None
+
+// The operands of an element-wise `+`.
+private sum_of(e: TExpr) -> Option[(TExpr, TExpr)] = *e.kind match
+    TArray(a) -> *a match
+        TElementwise(o, l, r) -> if o == "+" then Some((l, r)) else None
+        _ -> None
+    _ -> None
+
+private is_local(e: TExpr, id: usize) -> bool = *e.kind match
+    TLocal(k) -> k == id
+    _ -> false

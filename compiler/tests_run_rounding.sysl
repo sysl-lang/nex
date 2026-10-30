@@ -1,0 +1,80 @@
+@tests
+
+// Every multiply rounded before the add it feeds (DESIGN §2.5), on both engines, wherever the
+// interpreter or the runtime does the arithmetic in sysl: a sysl expression `a * b + c` is one fused
+// multiply-add on a machine that has one, so each product there is bound to a `val` or rounded through
+// a call first. The compiled program's MLIR is never contracted, and `ran` holds the two engines to
+// one output.
+//
+// Each input is chosen so that the fused and the unfused answers differ. With `x = 1 + 2^-29` and
+// `c = 1 + 2^-28`, `x * x` is `1 + 2^-28 + 2^-58`, which rounds to `c` on its own: `x * x - c` is zero
+// unfused and `2^-58` fused, and the programs scale it by 2^58 so that the fused one prints as 1. At
+// `real32` the same is `x = 1 + 2^-12`, `c = 1 + 2^-11` and 2^24; at `real16`, `1 + 2^-6`, `1 + 2^-5`
+// and 2^12. The complex functions and the rescale use inputs found by computing both roundings: each
+// printed value below is the unfused one, and the fused one differs from it in the last bit.
+
+private val HEAD = "def main() =\n  val x = 1.0 + 1.0 / 536870912.0\n  val c = 1.0 + 1.0 / 268435456.0\n  val big = 288230376151711744.0\n"
+
+@test("a scalar product is rounded before the sum it feeds: +=, -=, a * b - c, -c + a * b, complex * and /, on both engines")
+run_rounding_scalars()
+    val b = bench()
+    val program = HEAD + "  var s = -c\n  s += x * x\n  print(s * big)\n  var t = c\n  t -= x * x\n  print(t * big)\n  print((x * x - c) * big)\n" +
+                  "  print((-c + x * x) * big)\n  print(complex(x, 1.0) * complex(x, c))\n  print(complex(x, -c) / complex(x, 1.0))\n" +
+                  "  val zs = [complex(x, 1.0), complex(1.0, x)]\n  val ws = [complex(x, c), complex(-c, x)]\n  print(zs * ws)\n" +
+                  "  print([complex(x, -c)] / [complex(x, 1.0)])\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "0.0\n0.0\n0.0\n0.0\n0.0+2.0000000074505806i\n0.0-1.0000000018626451i\n" +
+                        "[0.0+2.0000000074505806i, -2.0000000074505806-3.725290298461914E-9i]\n[0.0-1.0000000018626451i]\n")
+
+@test("a product summed by @, dot, sum or an element-wise expression is rounded first, serial and parallel, on both engines")
+run_rounding_products()
+    val b = bench()
+    val program = HEAD + "  val p = [1.0, x]\n  val q = [-c, x]\n  print(p @ q * big)\n  print(dot(p, q) * big)\n  print(sum(p * q) * big)\n" +
+                  "  val ps = parallel sum(p * q)\n  print(ps * big)\n  val pd = parallel dot(p, q)\n  print(pd * big)\n" +
+                  "  print((p * q + [c, -c]) * big)\n  val e = parallel p * q + [c, -c]\n  print(e * big)\n  print(([x, x] * [x, x] - [c, c]) * big)\n" +
+                  "  val m = [[1.0, x], [1.0, x]]\n  val n = [[-c, -c], [x, x]]\n  print(m @ n * big)\n  print(m @ q * big)\n  print(p @ n * big)\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "0.0\n0.0\n0.0\n0.0\n0.0\n[0.0, 0.0]\n[0.0, 0.0]\n[0.0, 0.0]\n[[0.0, 0.0], [0.0, 0.0]]\n[0.0, 0.0]\n[0.0, 0.0]\n")
+
+@test("the complex functions round each product on its own: abs, sqrt, log and ^, on both engines")
+run_rounding_complex_functions()
+    val b = bench()
+    // `abs` is `big * sqrt(q * q + 1)`, fused 1.0770329614269007, 1.5620499351813308 and
+    // 2.692582403567252 for these three; `^`'s angle `re(w) arg z + im(w) log |z|` fused is a last bit
+    // off for both bases.
+    val program = "def main() =\n  print(abs(complex(1.0, 0.4)))\n  print(abs(complex(1.0, 1.2)))\n  print(abs([complex(1.0, 2.5)]))\n" +
+                  "  print(sqrt(complex(1.0, 1.2)))\n  print(log(complex(1.0, 0.4)))\n  print(complex(2.0, 0.5) ^ complex(0.3, 0.7))\n" +
+                  "  print(complex(2.0, 2.1) ^ complex(0.3, 0.7))\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "1.077032961426901\n1.562049935181331\n[2.6925824035672523]\n1.1318237352126281+0.5301178808441246i\n" +
+                        "0.07421000255913679+0.3805063771123649i\n0.8754956448595156+0.5734910730889731i\n0.42957049972306427+0.6520115040343514i\n")
+
+@test("a value rescaled to another unit is rounded before it is added, on both engines")
+run_rounding_rescale()
+    val b = bench()
+    // `1 m + k cm` is `1 + k * 0.01`: fused, 1.1399999999999999, 1.3600000000000001 and 1.3800000000000001.
+    val out = ran(b, "def main() =\n  print(1.0<m> + 14.0<cm>)\n  print(1.0<m> + [36.0, 38.0]<cm>)\n")
+
+    finish(b)
+    assert_eq(out.text, "1.1400000000000001 m\n[1.3599999999999999, 1.38] m\n")
+
+@test("at real32 and real16 too: +=, complex *, @, sum of products and abs, on both engines")
+run_rounding_narrow()
+    val b = bench()
+    // `abs(1 + 2.4i)` at `real32` fused is 2.6.
+    val program = "def main() =\n  val x32: real32 = 1.0 + 1.0 / 4096.0\n  val c32: real32 = 1.0 + 1.0 / 2048.0\n  var s32: real32 = -c32\n  s32 += x32 * x32\n" +
+                  "  print(s32 * 16777216.0)\n  val z32: complex[real32] = x32 + 1i\n  val w32: complex[real32] = x32 + 1i * c32\n  print(z32 * w32)\n" +
+                  "  val p32: [real32] = [1.0, x32]\n  val q32: [real32] = [-c32, x32]\n  print(p32 @ q32 * 16777216.0)\n  print(sum(p32 * q32) * 16777216.0)\n" +
+                  "  val a32: complex[real32] = 1 + 2.4i\n  print(abs(a32))\n" +
+                  "  val x16: real16 = 1.0 + 1.0 / 64.0\n  val c16: real16 = 1.0 + 1.0 / 32.0\n  var s16: real16 = -c16\n  s16 += x16 * x16\n  print(s16 * 4096.0)\n" +
+                  "  val p16: [real16] = [1.0, x16]\n  val q16: [real16] = [-c16, x16]\n  print(p16 @ q16 * 4096.0)\n  print(sum(p16 * q16) * 4096.0)\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "0.0\n0.0+2.0009766i\n0.0\n0.0\n2.6000001\n0.0\n0.0\n0.0\n")

@@ -59,6 +59,42 @@ la_products()
     assert_eq(rows_of(la_product(column([1.0, 1.0, 1.0]), true, Op.NoTrans, a, false, Op.ConjTrans).unwrap()), "6 / 15")
     assert_eq(la_dot(column([1.0, 2.0, 3.0]).col(0), column([4.0, 5.0, 6.0]).col(0)).unwrap(), 32.0)
 
+@test("an update writes alpha times the product plus beta times c into c, in every shape, and refuses a c without the product's extents")
+la_updates()
+    val a = matrix(2, 3, (i, j) -> real((i - 1) * 3 + j))
+    val b = matrix(3, 2, (i, j) -> if i == 3 || i == j then 1.0 else 0.0)
+    val c = matrix(2, 2, (i, j) -> real(10 * i + j))
+
+    // 2 · [[4, 5], [10, 11]] + 3 · [[11, 12], [21, 22]].
+    la_update(2.0, a, false, Op.NoTrans, b, false, Op.NoTrans, 3.0, c).unwrap()
+    assert_eq(rows_of(c), "41 46 / 83 88")
+
+    val y = column([1.0, 2.0])
+
+    la_update(1.0, a, false, Op.NoTrans, column([1.0, 1.0, 1.0]), true, Op.NoTrans, 1.0, y).unwrap()
+    assert_eq(rows_of(y), "7 / 17")
+
+    val v = column([1.0, 1.0, 1.0])
+
+    la_update(1.0, column([1.0, 2.0]), true, Op.NoTrans, a, false, Op.NoTrans, -1.0, v).unwrap()
+    assert_eq(rows_of(v), "8 / 11 / 14")
+
+    val w = column([1.0, 1.0])
+
+    la_update(1.0, column([1.0, 1.0, 1.0]), true, Op.NoTrans, a, false, Op.ConjTrans, 2.0, w).unwrap()
+    assert_eq(rows_of(w), "8 / 17")
+
+    // A beta of zero leaves c unread, as BLAS specifies: a NaN there is gone.
+    val n = matrix(2, 2, (i, j) -> if i == 1 && j == 1 then 0.0 / 0.0 else 0.0)
+
+    la_update(1.0, a, false, Op.NoTrans, b, false, Op.NoTrans, 0.0, n).unwrap()
+    assert_eq(rows_of(n), "4 5 / 10 11")
+
+    assert_eq(la_update(1.0, a, false, Op.NoTrans, b, false, Op.NoTrans, 1.0, matrix(2, 3, (i, j) -> 0.0)).unwrap_err(), SHAPE_MISMATCH)
+    assert_eq(la_update(1.0, a, false, Op.NoTrans, b, false, Op.NoTrans, 1.0, matrix(3, 2, (i, j) -> 0.0)).unwrap_err(), SHAPE_MISMATCH)
+    assert_eq(la_update(1.0, a, false, Op.NoTrans, column([1.0, 1.0, 1.0]), true, Op.NoTrans, 1.0, column([1.0])).unwrap_err(), SHAPE_MISMATCH)
+    assert_eq(la_update(1.0, a, false, Op.NoTrans, a, false, Op.NoTrans, 1.0, c).unwrap_err(), SHAPE_MISMATCH)
+
 @test("the runtime's inout forms answer LAPACK's info, refuse storage too small, and work where the arrays lie")
 la_in_place()
     var store: []real = [0.0; 16]

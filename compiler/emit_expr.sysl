@@ -367,6 +367,28 @@ impl Emitter
         self.trap_if(self.def(s"arith.andi $r_inf, $fin : i1"), REAL_OVERFLOW)
         r
 
+    // The same for a result of three operands: invalid where it is NaN and none of them is, an
+    // overflow where it is infinite and all of them are finite.
+    fpe_check3(*self, r: string, a: string, b: string, c: string, bits: int) -> string
+        if !self.fpe_trap then return r
+
+        val t = s"f$bits"
+        val inf = self.real_const(1.0 / 0.0, bits)
+        val r_nan = self.def(s"arith.cmpf uno, $r, $r : $t")
+        val ab_ordered = self.def(s"arith.cmpf ord, $a, $b : $t")
+        val ordered = self.def(s"arith.andi $ab_ordered, ${self.def(s"arith.cmpf ord, $c, $c : $t")} : i1")
+
+        self.trap_if(self.def(s"arith.andi $r_nan, $ordered : i1"), REAL_INVALID)
+
+        val r_inf = self.def(s"arith.cmpf oeq, ${self.def(s"math.absf $r : $t")}, $inf : $t")
+        val a_fin = self.def(s"arith.cmpf olt, ${self.def(s"math.absf $a : $t")}, $inf : $t")
+        val b_fin = self.def(s"arith.cmpf olt, ${self.def(s"math.absf $b : $t")}, $inf : $t")
+        val c_fin = self.def(s"arith.cmpf olt, ${self.def(s"math.absf $c : $t")}, $inf : $t")
+        val fin = self.def(s"arith.andi ${self.def(s"arith.andi $a_fin, $b_fin : i1")}, $c_fin : i1")
+
+        self.trap_if(self.def(s"arith.andi $r_inf, $fin : i1"), REAL_OVERFLOW)
+        r
+
     complex_binary(*self, op: string, a: string, b: string, bits: int) -> string
         val c = s"complex<f$bits>"
         val f = s"f$bits"
@@ -698,9 +720,13 @@ impl Emitter
         // The elements of arrays of numbers lent as `inout` scalars, which are written back after it.
         var elements: Buf[ElementLent] = buf()
 
+        // The place word of each `inout` array argument, which cross after the arguments (DESIGN §8.4).
+        var words = ""
+
         self.lend_roots(args)
 
-        for a in args
+        for k in 0..<args.len()
+            val a = args[k]
             var v = ""
             var t = ""
 
@@ -712,7 +738,27 @@ impl Emitter
 
                         v = self.open_lent(place, &frames, &root)
                         t = self.ty(a.span, place.ty)
-                        back.push(Held(place, frames, root))
+
+                        var word = self.lent_word(place, frames, root)
+                        var slot = ""
+                        var reroot = ""
+
+                        *place.kind match
+                            TLocal(id) ->
+                                // A call through a function value cannot hand back an array of another
+                                // shape, so where the place is held in SSA form it lends a slot for it.
+                                if !is_fn_ref(callee) && root.m == "" && frames.len() == 0 && self.par_buffer(place) == ""
+                                    slot = self.zeroed_alloca("!llvm.ptr")
+                                    self.guards.push(Guard(slot, "nex_release_slot"))
+                                    word = self.def(s"arith.select ${self.def(s"llvm.icmp \"eq\" $word, ${self.null_word()} : !llvm.ptr")}, $slot, $word : !llvm.ptr")
+
+                                var seen: Buf[string] = buf()
+
+                                if self.in_ssa(id) && self.places[id] != "" && self.passes_on(callee, k, &seen) then reroot = self.places[id]
+                            _ -> ()
+
+                        words += s", $word"
+                        back.push(Held(place, frames, root, slot, reroot))
                     elif self.is_items_window(place)
                         val l = self.items_lend(a.span, place)
 
@@ -737,6 +783,11 @@ impl Emitter
 
             vals += v
             tys += t
+
+        vals += words
+
+        for _ in back
+            tys += ", !llvm.ptr"
 
         val result = self.call_with(span, callee, args, vals, tys, ret, back)
 

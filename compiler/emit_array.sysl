@@ -1605,6 +1605,8 @@ impl Emitter
 
     // `a = v` or `a op= v` on a whole array place.
     assign_array(*self, span: Span, op: string, target: TExpr, value: TExpr)
+        if self.gemm_assign(span, op, target, value) then return
+
         if op == "="
             if self.par_assign(target, value) || self.fused_assign(target, value) || self.matmul_assign(target, value) then return
 
@@ -1615,7 +1617,22 @@ impl Emitter
                 None -> ()
 
             // A place in memory takes a copy of what it is given anyway.
-            self.set_place(target, if self.reads_storage(target) then self.ex(value) else self.lasting(value), false)
+            val v = if self.reads_storage(target) then self.ex(value) else self.lasting(value)
+
+            // A parameter a lambda captures keeps the shape of a window it was lent.
+            *target.kind match
+                TLocal(id) ->
+                    if self.places[id] != ""
+                        val cur = self.place_value(target)
+                        var other = self.def("arith.constant false")
+
+                        for a in 1..rank_of(target.ty)
+                            other = self.def(s"arith.ori $other, ${self.def(s"arith.cmpi ne, ${self.dim(span, v, target.ty, a)}, ${self.dim(span, cur, target.ty, a)} : index")} : i1")
+
+                        self.trap_if(self.def(s"arith.andi $other, ${self.is_window_word(self.places[id])} : i1"), SHAPE_MISMATCH)
+                _ -> ()
+
+            self.set_place(target, v, false)
             return
 
         var operands: Buf[TExpr] = buf()
@@ -1686,6 +1703,12 @@ impl Emitter
                 args.push(s"%a$k")
                 tys.push(self.param_ty(span, params[k]))
 
+        for k in 0..<params.len()
+            if self.inout_array(params[k])
+                head.push(s"%p$k: !llvm.ptr")
+                args.push(s"%p$k")
+                tys.push("!llvm.ptr")
+
         val r = self.ty(span, ret)
         val first: usize = if r == "" then 0 else 1
         var count = first
@@ -1695,15 +1718,30 @@ impl Emitter
 
         text += s"    ${result_def("%r", count)}func.call @\"$code\"(${joined(args)}) : (${joined(tys)}) -> ${result_text(self.results_text(span, params, ret))}\n"
 
-        // Each `inout` array as the call left it, over the caller's buffer.
+        // Each `inout` array as the call left it, over the caller's buffer where it has the shape that
+        // has; one of another shape the callee has stored in the place its word names already.
         var next = first
 
         for k in 0..<params.len()
             if !self.inout_array(params[k]) then continue
 
             val t = self.prog.locals[params[k]].ty
+            val x = result_name("%r", next, count)
+            var same = s"%same${k}_0"
 
-            text += s"    bufferization.materialize_in_destination ${result_name("%r", next, count)} in restrict writable %a$k : (${self.tensor_ty(span, t)}, ${self.boundary_ty(span, t)}) -> ()\n"
+            text += s"    $same = arith.constant true\n"
+
+            for a in 0..<rank_of(t)
+                text += s"    %i${k}_$a = arith.constant $a : index\n"
+                text += s"    %x${k}_$a = tensor.dim $x, %i${k}_$a : ${self.tensor_ty(span, t)}\n"
+                text += s"    %y${k}_$a = memref.dim %a$k, %i${k}_$a : ${self.boundary_ty(span, t)}\n"
+                text += s"    %e${k}_$a = arith.cmpi eq, %x${k}_$a, %y${k}_$a : index\n"
+                text += s"    %same${k}_${a + 1} = arith.andi $same, %e${k}_$a : i1\n"
+                same = s"%same${k}_${a + 1}"
+
+            text += s"    scf.if $same {\n"
+            text += s"      bufferization.materialize_in_destination $x in restrict writable %a$k : (${self.tensor_ty(span, t)}, ${self.boundary_ty(span, t)}) -> ()\n"
+            text += "    }\n"
             next += 1
 
         val value = result_name("%r", 0, count)
@@ -1755,9 +1793,49 @@ impl Emitter
         val first: usize = if r == "" then 0 else 1
 
         for k in 0..<back.len()
-            self.close_place(span, back[k].place, result_name(v, first + k, n), back[k].frames, true, back[k].root)
+            val h = back[k]
+            var x = result_name(v, first + k, n)
+
+            if h.slot != "" then x = self.from_slot(span, h.slot, x, h.place.ty)
+            if h.reroot != "" then x = self.from_place(span, h.reroot, x, h.place.ty)
+
+            self.close_place(span, h.place, x, h.frames, true, h.root)
 
         if r == "" then "" else self.own(result_name(v, 0, n), ret)
+
+    // The array `x` a call through a function value handed back, unless the callee stored one of
+    // another shape in the slot `slot` lent for it: then a copy of that, the slot emptied.
+    from_slot(*self, span: Span, slot: string, x: string, t: Ty) -> string
+        val tt = self.tensor_ty(span, t)
+        val h = self.def(s"llvm.load $slot : !llvm.ptr -> !llvm.ptr")
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if ${self.def(s"llvm.icmp \"ne\" $h, ${self.null_word()} : !llvm.ptr")} -> ($tt) {")
+
+        val c = self.copied(span, self.rooted(span, slot, t, false), t)
+
+        self.op(s"llvm.store ${self.null_word()}, $slot : !llvm.ptr, !llvm.ptr")
+        self.release_ref(h)
+        self.op(s"scf.yield $c : $tt")
+        self.op("} else {")
+        self.op(s"scf.yield $x : $tt")
+        self.op("}")
+        r
+
+    // The array `x` a call handed back for the caller's own `inout` array parameter, whose place word
+    // is `p`: where that names storage holding an array, the callee left the parameter's array there,
+    // and the parameter goes on as that array's buffer, so its later writes land where the caller's
+    // caller sees them.
+    from_place(*self, span: Span, p: string, x: string, t: Ty) -> string
+        val tt = self.tensor_ty(span, t)
+        val r = self.fresh()
+
+        self.op(s"$r = scf.if ${self.holds_array(p)} -> ($tt) {")
+        self.op(s"scf.yield ${self.rooted(span, p, t, true)} : $tt")
+        self.op("} else {")
+        self.op(s"scf.yield $x : $tt")
+        self.op("}")
+        r
 
     // A function that calls the code of a function value, `(code, env, args…)`, where `args` hold
     // `inout` arrays: each crosses as a tensor and goes to the code as its buffer, written in place,
@@ -1800,6 +1878,13 @@ impl Emitter
                 borrowed_tys.push("")
                 crossed.push(s"%x$k")
                 crossed_tys.push(t)
+
+        // The place word of each `inout` array, after the arguments.
+        for k in 0..<args.len()
+            if borrowed_tys[k] != ""
+                head.push(s"%q$k: !llvm.ptr")
+                crossed.push(s"%q$k")
+                crossed_tys.push("!llvm.ptr")
 
         val r = self.ty(span, ret)
         val rb = if is_arr(ret) then self.memref_ty(span, ret) else r

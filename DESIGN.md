@@ -205,6 +205,11 @@ be an array, the other then an array of the same shape or a scalar that broadcas
 - Real arithmetic is IEEE at its own width: `real32` operations are `f32` operations, never computed
   in `f64` and rounded (`precision.mlir`: `0.1 * 3` in `real32`, widened to `real64` to print, is
   `0.30000001192092896`).
+- **nex never contracts `a * b + c` into a fused multiply-add.** Each real operation rounds at its
+  own width, so the two engines agree bit for bit and a result does not depend on whether the
+  machine has a fused instruction. The compiled engine emits plain `fmul` and `fadd`, with no
+  `contract` flag and no `llvm.fmuladd`. A fused operation happens only where the source asks for it:
+  `fma(a, b, c)` (§7.3).
 - **Real arithmetic does not trap by default.** `1.0 / 0.0` is `inf`, `0.0 / 0.0` is `nan`, and an
   overflow is `±inf`, as IEEE specifies. `nex build --fpe-trap` (and `nex run --fpe-trap`) traps on
   real division by zero, invalid operations and overflow instead, like gfortran's
@@ -798,10 +803,21 @@ threshold it is a BLAS call (§10.4).
 
 **Every prelude scalar math function is elemental** — `sqrt`, `exp`, `log`, `sin`, `cos`, `tan` and
 the rest of the elementary functions, `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `sign`,
-`hypot`, `atan2`, `min`, `max`: applied to an array of any rank it applies element by element and
+`hypot`, `atan2`, `fma`, `min`, `max`: applied to an array of any rank it applies element by element and
 returns an array of the same shape, and it fuses into the surrounding expression's loop nest like an
 operator (§7.1). `sqrt(a) + 1.0` is one loop. Arguments of a several-argument elemental function broadcast
 as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps every element.
+
+**`fma(a, b, c)` is `a * b + c` rounded once**, as Fortran 2023's `ieee_fma` and C's `fma` are, and
+is elemental like the rest, its three arguments broadcasting as an operator's do. It takes reals of
+one width (the widest of its arguments; a literal adopts it). **`real16` is fused in `real64`**, where
+the product of two halves is exact, and the sum rounded once to a half. **Units follow `+` and `*`**:
+`a` and `b` combine as in `a * b`, `c` must have that product's dimension and is converted to its
+unit as `+` converts a right operand, and the result has it. **An integer argument is refused**
+(there is nothing to round) **and so is a complex one**, since a complex product and sum have no
+single rounding; write the two operations. Under `--fpe-trap` it traps an overflow (an infinite
+result from three finite operands) and an invalid operation (a NaN from three non-NaN operands).
+`fma` is the only fused operation: `a * b + c` is never contracted (§2.5).
 
 **A user function opts in with `@elemental`**: `@elemental def f(x: real) = …`. Its body obeys the
 parallel-body rules of §9.4 — no `inout` parameters, no writes to module variables, no I/O except
@@ -963,16 +979,34 @@ argument's buffer disappears, the function returns nothing and writes the caller
 (`parallel.mlir`, `axpy`). Kept public, the same function returns its argument and the deallocation
 pipeline clones it: a whole-array copy per call. Inside the callee, assigning the whole parameter an
 array of the shape it has (`v = v * s`, `v += 1`) copies the computed value over the argument's
-buffer; only an array of another shape rebinds the parameter, and reaches the caller when the call
-returns.
+buffer; only an array of another shape rebinds the parameter.
+
+Beside each `inout` array crosses its **place word**, a pointer saying where a rebinding goes: the
+address of the storage the caller holds the array in (below), null where the caller holds it in SSA
+form, or the window mark where the argument is a window, which cannot take another shape. Rebinding
+the parameter to an array of another shape traps at once on the window mark (*"shape mismatch"*, as a
+window assigned an array of another shape anywhere does); with an address, it stores the new array
+there, and the parameter goes on as that array's buffer, so the callee's later writes land where the
+caller sees them; with null, the new array is the parameter's and reaches the caller when the call
+returns. A function passing its own parameter on whole passes its own place word, and where the
+callee can rebind it (it assigns it whole, a lambda captures it, or it passes it on to one that can,
+or to a function value), goes on afterwards as the array its place then holds.
 
 The callee writes where the caller can see each write as it is made, so a trap leaves them there. An
 array the caller holds in storage — a `var` a lambda captures, a module-level `var`, a field of a
 struct `var` — is first made the only holder of its buffer (copied where another holder shares it or
 the statement around the call is reading it, as a loop over it does), and that buffer itself is what
-the call is lent, whole or as a window; after the call the handed-back value is that buffer, or, where
-the callee rebound the parameter to another shape, a new one stored into the place. An array in SSA
-form needs nothing: a trap leaves its function's frame, and nothing reads it again.
+the call is lent, whole or as a window, with the place's address as its place word; after the call
+the handed-back value is that buffer, or, where the callee rebound the parameter to another shape, a
+new one stored into the place. An array in SSA form needs nothing: a trap leaves its function's frame,
+and nothing reads it again.
+
+An `inout` array parameter a lambda captures (§8.3 rule 4) is held in storage as a captured local
+is. Where its place word is an address, that storage is the caller's own place; otherwise the callee
+boxes a copy of the argument in a slot of its frame, writes it there, and hands it back when it
+returns. That slot also keeps the argument's buffer, and a trap that leaves the callee writes the
+copy back over it, so a window's writes before the trap stay written there too. The lambda carries
+the place word beside the parameter's place and treats a rebinding as the parameter's function does.
 
 A scalar `inout` is a pointer argument. An element of an array of numbers passed `inout` (`a[i]`,
 `m[:, j][i]`) is a value in its array's tensor: its indices are evaluated and bounds-checked once
@@ -986,9 +1020,11 @@ else has storage of its own and crosses as its address. An `inout` slice argumen
 a row, a strided or reversed window and a line of a rank-3 array each reach the callee as a
 `memref.subview` of the caller's buffer, with no allocation and no copy, in a `parallel for` body as
 in sequential code. A call through a function value (a local `def`, a lambda, a `val` bound to a
-function, a parameter of function type) passes an `inout` array as its buffer: the code behind the
-value writes it in place and returns only its value, so the same window is written where it lies
-there too.
+function, a parameter of function type) passes an `inout` array as its buffer and its place word: the
+code behind the value writes it in place and returns only its value, so the same window is written
+where it lies there too. Such a call cannot hand back an array of another shape, so where the place
+word would be null it lends a slot of the caller's frame instead, and takes a copy of what the callee
+stored there, if anything, as the place's new array.
 
 ---
 
@@ -1851,12 +1887,38 @@ complex: nex's `@` does not conjugate). `x @ conj(transpose(Y))`, which `gemv` h
 `gemm` with `x` as one row. With static extents the decision is made at compile time; with dynamic
 ones the compiler emits both paths and a run-time test, both writing one result buffer made before
 the test; the test stays in the emitted code because the small path is a `linalg` operation inline. Operands that fail §10.3's stride rules are copied first, and so is a matrix whose column
-stride is less than its row count. **`C = A @ B` assigned to a local `C` that neither operand names
-writes `C`'s own buffer** where, when it runs, `C` has the product's extents and lies dense from its
-first element; otherwise the product gets a new buffer. Where `C`'s old value is still read (`val
-keep = C`), bufferization copies it first. The prelude's `dot(x, y)` is a reduction (§9.2.1), reproducible
-and never dispatched; `x @ y` is the product and dispatches. `C = alpha * (A @ B) + beta * C`
-assigned to the same `C` is one `gemm` with `beta` (**PROPOSED**).
+stride is less than its row count. The prelude's `dot(x, y)` is a reduction (§9.2.1), reproducible
+and never dispatched; `x @ y` is the product and dispatches.
+
+**`C = A @ B` assigned to a local `C` that neither operand names writes `C`'s own buffer** where,
+when it runs, `C` has the product's extents and lies dense from its first element; otherwise the
+product gets a new buffer. Where `C`'s old value is still read (`val keep = C`), bufferization copies
+it first.
+
+**`C = alpha * (A @ B) + beta * C` is one BLAS update**, `gemm` with `alpha` and `beta` (`gemv` where
+`B` or `A` is a vector), writing `C` where it lies with no buffer for the product. The forms
+recognized are an assignment to a `var` local `C` of `real32`, `real64` or complex elements that no
+lambda captures, whose value is the sum, in either order, of
+
+- a product term: `A @ B`, `alpha * (A @ B)` or `(A @ B) * alpha`, and
+- a term of `C`: `C`, `beta * C` or `C * beta`,
+
+and the compound `C += P` for a product term `P`. `alpha` and `beta` are scalars of `C`'s number type,
+any expression (a literal, a variable, a call); an operand written `transpose(X)` or
+`conj(transpose(X))` keeps its flag. Each operand is evaluated once, in the order written. **Where
+an operand of `@` reads `C`** (`C = A @ C + C`, `C = C[1..2, :] @ B + C`) BLAS would read the storage
+it writes, so the statement takes the general path: the product made, then the sum. Any other
+spelling — a difference, three terms, `C` on a slice, a captured `C` — is the general path too.
+
+The update goes to BLAS exactly where the product alone would, by the rules above; with dynamic
+extents both paths are emitted under the run-time test. **Below the threshold the statement is the
+expression as written**: the product computed inline, then `alpha * P + beta * C` element by
+element, each operation rounded as written, as an unrecognized statement would be. Through BLAS the
+update rounds as the library's `gemm` does: `alpha` scales the sum, then `beta * C` is added, and as
+BLAS specifies, a `beta` of zero leaves `C`'s old elements unread (a NaN there does not reach the
+result) and an `alpha` of zero leaves `A` and `B` unread. Both engines make the same call
+(`la_update` in the runtime), so they answer bit for bit alike. Where `C` has not the product's
+extents the statement traps *"shape mismatch"* on either path.
 
 **A BLAS result may differ in the last bits from the `linalg` path**, since it sums in a different
 order. Every corpus matrix is far below the threshold. A build flag disables dispatch
@@ -2650,6 +2712,8 @@ unit psi = lbf / in^2
 
 ### 13.4 Prelude functions
 
+- `fma(a, b, c)` types `a * b` as `*` does and takes `c` as `+` takes a right operand: `c` must have the
+  product's dimension, is converted to its unit, and the result has that unit (§7.3).
 - `sqrt` halves every exponent: `sqrt(a)` for `a: real<m^2>` is `real<m>`.
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.

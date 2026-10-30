@@ -76,6 +76,11 @@ it is never computed in 64 bits and rounded afterwards. Overflow gives infinity 
 operation gives NaN, as IEEE specifies; these are values, not traps. Real division by zero gives an
 infinity (`1.0 / 0.0` is `inf`, `0.0 / 0.0` is `nan`); only integer division by zero traps.
 
+**Each real operation rounds on its own.** nex never contracts `a * b + c` into a fused multiply-add:
+the product is rounded, then the sum, on every machine and in both engines, so a result does not
+depend on whether the machine has a fused instruction. A fused multiply-add happens only where the
+source writes `fma(a, b, c)` (§12).
+
 `nex build --fpe-trap` turns the three IEEE exceptions that usually mean a bug — division by zero,
 an invalid operation and overflow — into traps, like gfortran's `-ffpe-trap=zero,invalid,overflow`
 ([Command Line](/tooling/01-cli/)).

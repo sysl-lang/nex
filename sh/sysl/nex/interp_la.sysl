@@ -25,7 +25,7 @@ module sh.sysl.nex
 // `transpose(A) @ A` differently in the last bits when both operands are the same address.
 
 import nex_runtime.sh.sysl.nex_runtime.{SHAPE_MISMATCH, la_chol, la_chol_inplace, la_det, la_dot, la_eig, la_eigh, la_eigvals, la_inv, la_lstsq, la_lu, la_lu_inplace,
-                                        la_product, la_qr, la_qr_inplace, la_solve, la_solve_inplace, la_svd, la_svdvals}
+                                        la_product, la_qr, la_update, la_qr_inplace, la_solve, la_solve_inplace, la_svd, la_svdvals}
 import sh.sysl.blas.{MatrixView, Op}
 import sh.sysl.lapack.Scalar
 import sysl.buf.{Buf, buf}
@@ -241,6 +241,39 @@ private product_in[T: Scalar + Elem](x: &Arr, fx: Op, y: &Arr, fy: Op, vector: b
             Err(m) -> trapped(m)
 
     matrix_answer(la_product(a, xv, fx, b, yv, fy), vector)
+
+// `dst = alpha * (op(x) @ op(y)) + beta * dst` through BLAS, in the element type of kind `kind`, `dst`
+// written where it lies; `alpha` and `beta` are `VVoid` where they are one.
+private blas_update(kind: int, alpha: Value, x: &Arr, fx: Op, y: &Arr, fy: Op, beta: Value, dst: &Arr) -> Answer = kind match
+    0 -> update_in[f32](alpha, x, fx, y, fy, beta, dst)
+    1 -> update_in[real](alpha, x, fx, y, fy, beta, dst)
+    2 -> update_in[Cx[f32]](alpha, x, fx, y, fy, beta, dst)
+    _ -> update_in[Cx[real]](alpha, x, fx, y, fy, beta, dst)
+
+private update_in[T: Scalar + Elem](alpha: Value, x: &Arr, fx: Op, y: &Arr, fy: Op, beta: Value, dst: &Arr) -> Answer
+    val c = crossing[T](dst)
+    val r = la_update(scalar_in[T](alpha), crossing[T](x), x.ext.len() == 1, fx, crossing[T](y), y.ext.len() == 1, fy, scalar_in[T](beta), c)
+
+    r match
+        Ok(_) ->
+            put_matrix(dst, c)
+            Ok(VVoid)
+        Err(m) -> trapped(m)
+
+// The scalar `v` as an element of `T`; one where it is `VVoid`.
+private scalar_in[T: Scalar + Elem](v: Value) -> T = v match
+    VVoid -> T.one()
+    _ -> T.unboxed(v)
+
+// The scalar leaf `k` of `vals`, where there is one, else `VVoid`.
+private scale(vals: Buf[Value], k: Option[usize]) -> Value = k match
+    Some(i) -> vals[i]
+    None -> VVoid
+
+// The local a `TLocal` node reads.
+private local_of(e: TExpr) -> usize = *e.kind match
+    TLocal(id) -> id
+    _ -> 0
 
 // -- crossing --------------------------------------------------------------------------------------
 
@@ -489,6 +522,73 @@ impl Interp
             val b = arr_of(g(c)?)
 
             if flagged || reaches_blas(a, b) then blas_product(kind, a, fx, b, fy, vector) else inline(a, b)
+
+    // `g`, an assignment that is one BLAS update (DESIGN §10.4), as `compiler/emit_blas.sysl`'s
+    // `gemm_assign` computes it: every leaf evaluated once, in the order written; where the product
+    // goes to BLAS, the target written by the runtime's `la_update` where it lies — copied first
+    // where its storage is shared or is not handed over in place; else the value as written over the
+    // product made inline.
+    gemm_assign(*self, g: GemmUpdate) -> Code
+        val et = elem_or(g.leaves[g.at].ty)
+        val kind = la_kind(et)
+        val inline = inline_kernel(et).unwrap()
+        val (x, fx) = la_operand(g.lhs)
+        val (y, fy) = la_operand(g.rhs)
+        val flagged = fx != Op.NoTrans || fy != Op.NoTrans
+        var codes: Buf[Code] = buf()
+        var arrays: Buf[bool] = buf()
+
+        for k in 0..<g.leaves.len()
+            if k == g.at
+                codes.push(self.lent(x))
+                codes.push(self.lent(y))
+            else
+                codes.push(self.lent(g.leaves[k]))
+
+            arrays.push(is_array(g.leaves[k].ty))
+
+        val base = self.next
+
+        self.next += g.leaves.len()
+        self.chains.push(base)
+
+        val body = self.ex(g.scalar)
+
+        self.chains.pop()
+
+        val s = self.slot_of(local_of(g.target))
+        val at = g.at
+        val alpha = g.alpha
+        val beta = g.beta
+        val out = elem_of(g.target.ty)
+
+        (c) ->
+            var vals: Buf[Value] = buf()
+            var a = arr_of(VVoid)
+            var b = arr_of(VVoid)
+
+            for k in 0..<codes.len()
+                val f = codes[k]
+                val v = f(c)?
+
+                if k == at then a = arr_of(v)
+                elif k == at + 1 then b = arr_of(v)
+                else vals.push(v)
+
+                if k == at then vals.push(VVoid)
+
+            if flagged || reaches_blas(a, b)
+                val cur = arr_of(c.v[s])
+                val dst = if cur.store.shared || !lies_in_place(cur) then arr_of(copy_of(cur)) else cur
+
+                blas_update(kind, scale(vals, alpha), a, fx, b, fy, scale(vals, beta), dst)?
+                c.v.set(s, VArr(dst))
+                return Ok(VVoid)
+
+            vals.set(at, inline(a, b)?)
+            c.v.set(s, mapped_over(c, vals, arrays, base, body, out)?)
+            Ok(VVoid)
+    end gemm_assign
 
     // A call of the linear-algebra prelude (DESIGN §10.5).
     linear_algebra(*self, name: string, args: Buf[TExpr]) -> Code

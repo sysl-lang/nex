@@ -66,16 +66,38 @@ stored_inout_lent_in_place()
     assert_eq(occurrences(lambda, "memref.copy"), 3)
     assert_eq(occurrences(lambda, "memref.alloc"), 0)
 
-// A callee rebinding its `inout` parameter to an array of another shape cannot write that into the
-// caller's buffer, and hands it back only when it returns.
-@test("a callee's rebinding of its inout parameter to another shape stays when a trap ends the call",
-      ignore: "an inout array crosses as a buffer the callee writes, which cannot take an array of another shape until the call returns")
+// A callee rebinding its `inout` parameter to an array of another shape stores it in the place its
+// caller lent, so the trap that ends the call leaves it there (DESIGN §8.4).
+@test("a callee's rebinding of its inout parameter to another shape stays when a trap ends the call")
 rebinding_kept_through_a_trap()
     val b = bench()
     val out = ran(b, "def regrow(v: inout [integer]) =\n  v[1] = 8\n  v = [5, 6, 7]\n  assert(false, \"boom\")\n\ndef main() =\n  var q = [1, 2, 3, 4]\n  assert_traps(() -> regrow(q), \"boom\")\n  print(q)\n")
 
     finish(b)
     assert_eq(out.text, "[5, 6, 7]\n")
+
+// A function passing its `inout` array on whole, to a callee that can neither rebind it nor reach it
+// through its place, hands the callee its own place word and takes back the buffer it lent: no check
+// of the place, no copy. Passed to one that rebinds it, the function goes on as the array stored in
+// its place, where its caller sees its later writes.
+@test("passing an inout array on to a callee that cannot rebind it copies nothing and checks no place")
+forwarding_costs_nothing()
+    val b = bench()
+    val text = "def bump(v: inout [integer]) =\n  for k in 1..length(v)\n    v[k] += 1\n\ndef regrow(v: inout [integer]) =\n  v = [7, 8]\n\ndef twice(v: inout [integer]) =\n  bump(v)\n  bump(v[2..])\n\ndef again(v: inout [integer]) =\n  regrow(v)\n  bump(v)\n\ndef main() =\n  var a = fill(4, 1)\n  twice(a)\n  print(a)\n  again(a)\n  print(a)\n"
+    val m = emitted(text).unwrap()
+    val twice = split(split(m, "@\"n.twice\"(")[1], "func.func")[0]
+    val again = split(split(m, "@\"n.again\"(")[1], "func.func")[0]
+    val buffers = lowered_until(b, m, "buffer-deallocation-pipeline")
+    val out = ran(b, text)
+
+    finish(b)
+    assert_eq(out.text, "[2, 3, 3, 3]\n[8, 9]\n")
+    assert(!twice.contains("llvm.ptrtoint"), twice)
+    assert(again.contains("llvm.ptrtoint"), again)
+    val lent = split(split(buffers, "func.func private @n.twice(")[1], "func.func")[0]
+
+    assert_eq(occurrences(lent, "memref.copy"), 0)
+    assert_eq(occurrences(lent, "bufferization.clone"), 0)
 
 // One-shot bufferization copies the read window before the call, though the two windows are
 // constants that cannot overlap (`experiments/mlir/disjoint-read-inout.mlir`).

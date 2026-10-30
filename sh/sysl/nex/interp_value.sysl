@@ -252,6 +252,19 @@ private[nex] fpe_checked(r: real, a: real, b: real, fpe: bool) -> Answer
 
     Ok(VReal(r))
 
+// The same for a result computed from three operands.
+private[nex] fpe_checked3(r: real, a: real, b: real, c: real, fpe: bool) -> Answer
+    if fpe
+        if is_nan(r) && !is_nan(a) && !is_nan(b) && !is_nan(c) then return trapped(REAL_INVALID)
+        if magnitude(r) == INFINITY && magnitude(a) < INFINITY && magnitude(b) < INFINITY && magnitude(c) < INFINITY then return trapped(REAL_OVERFLOW)
+
+    Ok(VReal(r))
+
+// `a * b + c` rounded once, at `bits` bits. A `real16` is fused at `real64`: the product of two
+// halves is exact there, and rounding the sum to a half afterwards is the one rounding that matters.
+private[nex] fused_multiply_add(a: real, b: real, c: real, bits: int) -> real =
+    if bits == 32 then real(f32(a).mul_add(f32(b), f32(c))) else rnd(a.mul_add(b, c), bits)
+
 // `a op b` on reals of `bits` bits.
 private[nex] real_op(op: string, bits: int, fpe: bool) -> Option[Op2]
     if op == "+" then return Some((a, b) -> real_arith(real_of(a), real_of(b), 0, bits, fpe))
