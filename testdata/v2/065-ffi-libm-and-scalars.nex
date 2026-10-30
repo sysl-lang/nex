@@ -1,0 +1,86 @@
+// C functions called through `extern def` (DESIGN §10.1, §10.2): libm's by their own names and one
+// under another (`@symbol`), one writing through an `inout` scalar, and the test library's at every
+// scalar width, each argument and result crossing as clang passes it — 8- and 16-bit integers and
+// `bool` widened by the caller, more narrow arguments than there are registers, `real16` and
+// `real32` in floating-point registers, `inout` scalars and a string by pointer.
+
+@link("m")
+extern def cbrt(x: real): real
+
+@link("m")
+extern def hypot(x: real, y: real): real
+
+@link("m")
+@symbol("frexp")
+extern def fraction_exponent(x: real, e: inout int32): real
+
+@link("m")
+@pure
+extern def erf(x: real): real
+
+@link("m")
+extern def sqrtf(x: real32): real32
+
+@link("nexffi")
+extern def nf_neg8(x: int8): int8
+@link("nexffi")
+extern def nf_inc8(x: uint8): uint8
+@link("nexffi")
+extern def nf_neg16(x: int16): int16
+@link("nexffi")
+extern def nf_inc16(x: uint16): uint16
+@link("nexffi")
+extern def nf_mul64(a: int64, b: int64): int64
+@link("nexffi")
+extern def nf_xor32(a: uint32, b: uint32): uint32
+@link("nexffi")
+extern def nf_not(b: bool): bool
+@link("nexffi")
+extern def nf_halve32(x: real32): real32
+@link("nexffi")
+extern def nf_twice16(x: real16): real16
+@link("nexffi")
+extern def nf_narrow_sum(a: int8, b: uint8, c: int16, d: uint16, e: bool, f: int8, g: uint8, h: int16, i: uint16, j: bool, k: int8): int64
+@link("nexffi")
+extern def nf_divmod(a: int32, b: int32, q: inout int32, r: inout int32)
+@link("nexffi")
+extern def nf_accumulate(x: real, total: inout real, count: inout integer)
+@link("nexffi")
+extern def nf_strlen(s: string): int32
+
+def main() =
+  print(cbrt(27.0))
+  print(hypot(3.0, 4.0))
+  var e: int32 = 0
+  val f = fraction_exponent(48.0, e)
+  print(s"$f $e")
+  print(erf(0.0))
+  print(sqrtf(2.25))
+
+  print(nf_neg8(-128))
+  print(nf_neg8(5))
+  print(nf_inc8(255))
+  print(nf_neg16(-300))
+  print(nf_inc16(65535))
+  print(nf_mul64(3000000000, 3))
+  print(nf_xor32(4294967295, 255))
+  print(nf_not(true))
+  print(nf_not(false))
+  print(nf_halve32(3.0))
+  print(nf_twice16(1.5))
+  print(nf_narrow_sum(-1, 255, -1000, 65535, true, -128, 1, 2, 3, false, 127))
+
+  var q: int32 = 0
+  var r: int32 = 0
+  nf_divmod(17, 5, q, r)
+  print(s"$q $r")
+
+  var total = 0.0
+  var count = 0
+  for x in [1.5, 2.5, 3.0] do nf_accumulate(x, total, count)
+  print(s"$total $count")
+
+  print(nf_strlen("hello"))
+  val greeting = "hi " + "there"
+  print(nf_strlen(greeting))
+  print(nf_strlen(s"$greeting, ${count}!"))

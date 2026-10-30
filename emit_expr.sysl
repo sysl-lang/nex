@@ -654,6 +654,13 @@ impl Emitter
     // -- calls ------------------------------------------------------------------------------------
 
     call_value(*self, span: Span, callee: TExpr, args: Buf[TExpr], ret: Ty) -> string
+        *callee.kind match
+            TFnRef(name) ->
+                self.find_extern(name) match
+                    Some(x) -> return self.extern_call(span, x, args, ret)
+                    None -> ()
+            _ -> ()
+
         var vals = ""
         var tys = ""
         // The `inout` array arguments, which the call hands back.

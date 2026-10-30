@@ -1220,6 +1220,18 @@ search directory; `@link(framework = "…")` is a **PROPOSED** spelling. A progr
 extern links the gfortran runtime automatically. An `extern` function is assumed to have effects (I/O, global state) unless declared `@pure`, which the checker
 believes without proof.
 
+- **The attributes of an `extern def` are `@link`, `@symbol`, `@pure` and `@fortran`**; any other
+  is an error, as is `@symbol` given twice. **Two externs may not name one C symbol**: the C
+  function has one signature.
+- **`-L dir` and `-l lib`** (or `-Ldir`, `-llib`) may stand anywhere on the command line before
+  `--`, before or after the file. The command line's directories are searched before the program's
+  `@link`s are linked, so a `@link("mylib")` finds `libmylib` in a `-L` directory.
+- **An argument or result that is an 8- or 16-bit integer or a `bool` is widened as clang widens
+  it** (sign- or zero-extended by the caller, as Apple's arm64 ABI requires), and every C
+  declaration nex makes is clang's declaration of the same prototype.
+- **`@pure` is what lets a call run anywhere order is not fixed**: a parallel body (§9.4) and an
+  `@elemental` function call only `@pure` externs, directly or through any function they call.
+
 ### 10.2 What crosses
 
 | nex parameter | C sees |
@@ -1230,7 +1242,7 @@ believes without proof.
 | `complex[real32]`, `complex[real64]` | `float _Complex`, `double _Complex`, **by value** |
 | `bool` | `bool` (`_Bool`) |
 | `inout` scalar | a pointer to it (`int32_t *info`) |
-| `string` | `const char *`, a NUL-terminated copy valid for the call |
+| `string` (read mode only) | `const char *` to the string's own NUL-terminated UTF-8, valid for the call |
 | `[T; …]` read mode | `const T *` to the first element of the window |
 | `[T; …]` `inout` | `T *` to the first element; C's writes land in the caller's array |
 | a `@c` struct, read mode or `inout` | `const S *` / `S *` to the struct, laid out as C lays it out |
@@ -1241,12 +1253,21 @@ believes without proof.
 **Complex scalars cross by value.** nex mirrors clang's ABI for `_Complex` on each target, so
 `double _Complex` arguments and results agree with C: on arm64 a complex is a homogeneous
 floating-point aggregate in two consecutive FP registers; on x86-64 System V it is two SSE values
-(a `complex[real64]` in two SSE registers, a `complex[real32]` packed in one). Complex **arrays**
-cross as pointers, whose interleaved (re, im) layout is C99's and BLAS's *(unverified for complex)*.
+(a `complex[real64]` in two SSE registers, a `complex[real32]` packed in one). On arm64 an argument
+is passed as clang passes it, the array of its two parts (`[2 x double]`), so arguments past the
+eight FP registers go on the stack whole, and a result comes back as the struct of its parts.
+Complex **arrays** cross as pointers to interleaved (re, im) pairs, C99's layout.
 
 **`@c` structs cross by reference.** A struct declared `@c` has C's field order, alignment and
-padding, and passes as a pointer (`const S *` in read mode, `S *` as `inout`). A struct **by value**
-does not cross yet (§15).
+padding, and passes as a pointer (`const S *` in read mode, `S *` as `inout`). A read-mode struct
+is passed as a copy, so a C function that writes it changes nothing of the caller's. A `@c` struct
+holds only numbers, `bool` and other `@c` structs, and is not generic; `@c` is the one attribute a
+struct takes. A struct **by value** does not cross yet (§15).
+
+**What else is refused**: an `inout` string, an array of anything but numbers or `bool`, a struct
+not declared `@c`, a tuple or an enum as a parameter; a string, an array or a struct as a result.
+`c_ptr` is a type only an `extern` declaration names, only as a `@data(f)` parameter whose `f` is a
+parameter of function type of the same extern, and never `inout`.
 
 No array is returned from C. A read-mode array argument is a promise that C does not write it; the
 compiler cannot check that, and a C function that breaks it breaks value semantics.
@@ -1292,11 +1313,24 @@ C receives a pointer and nothing else, so what the pointer means must be agreed:
 
 The prelude gives the numbers C needs: `stride(a, k)`, the element stride of axis `k`, and
 `ld(m) = stride(m, 2)` for rank 2 (**PROPOSED** names). Every copy here is silent, like an
-auto-clone.
+auto-clone. `@strided` may mark an array parameter of any rank, and passes the view as it lies at
+every rank. A copy is to a dense column-major block, so a copied rank-2 view's leading dimension is
+its own row count.
+
+**Whether a copy is needed is decided at run time**, from the strides of the array as it lies, since
+a parameter or a computed slice step is not known at compile time; where they are (a dense local, a
+constant), the test folds away. **An `inout` window is written where it lies**: C gets a pointer into
+the buffer of the window's root (the outermost array of the place), so its leading dimension is the
+root's, and a value that shares the root keeps its elements — the root is copied whole first,
+every stride kept, exactly where value semantics needs it. `strip` of a measured array is the same
+array and copies nothing.
 
 **Lowering.** The pointer is `memref.extract_aligned_pointer_as_index` plus the offset from
 `memref.extract_strided_metadata`; the leading dimension is the stride of the memref's first
-dimension, which is nex's second axis (§3.2). `blas.mlir` calls `cblas_dgemm` from Accelerate on a
+dimension, which is nex's second axis (§3.2). A call with an `inout` array goes through a wrapper
+function taking each root as a tensor, so that bufferization sees an ordinary call writing an
+`inout` argument; the window is a `memref.subview` of the root's buffer. A copy is made and given
+back by the runtime (`nex_c_gather`, `nex_c_scatter`) from the memref descriptor. `blas.mlir` calls `cblas_dgemm` from Accelerate on a
 whole matrix and on the view `Big[2..3, :]` (offset 1, leading dimension 4) and gets the same
 product both times, no copy.
 

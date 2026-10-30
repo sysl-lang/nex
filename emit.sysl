@@ -709,7 +709,8 @@ struct Emitter
                 TupleGlobalDecl(g) -> tuples.push(g)
                 StructDecl(_) -> ()
                 EnumDecl(_) -> ()
-                ExternDecl(x) -> self.later(x.span, "an `extern` declaration")
+                // Declared where it is first called (`emit_extern.sysl`).
+                ExternDecl(_) -> ()
 
         // Each lambda and each parallel region's code is emitted after the function that makes it,
         // and may make more.
@@ -738,6 +739,7 @@ struct Emitter
 
         var out = str_builder()
 
+        out.push(self.link_lines())
         out.push("module {\n")
         out.push(self.top.finish())
         out.push("\n")

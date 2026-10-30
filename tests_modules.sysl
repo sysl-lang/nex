@@ -74,6 +74,16 @@ private run_project(b: Bench, files: []const (string, string), prelude: Option[s
 
 // -- loading and resolving ---------------------------------------------------------------------------
 
+@test("an extern declared in a module is the C function of its own name, imported and called like a def")
+mod_extern()
+    val b = bench()
+    val out = run_project(b, [("main.nex", "import cmath.{cbrt}\ndef main() = print(cbrt(27.0))\n"), ("cmath/libm.nex", "module cmath\n@link(\"m\")\nextern def cbrt(x: real): real\n")])
+
+    finish(b)
+    assert_eq(out, "3.0\n")
+    assert_eq(project_refused([("main.nex", "import cmath.{cbrt}\nextern def cbrt2(x: real): real\n@symbol(\"cbrt\")\nextern def mine(x: real): real\ndef main() = print(cbrt(27.0))\n"), ("cmath/libm.nex", "module cmath\nextern def cbrt(x: real): real\n")]),
+        "error: `mine` and `cbrt` both name the C symbol `cbrt` @main.nex:3:1")
+
 @test("a program of one file is the root module, its names its own")
 mod_single_file()
     assert_eq(elab_project(project([("main.nex", "def main() = print(42)\n")])), "(def main () void (print 42))")

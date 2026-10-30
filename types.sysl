@@ -69,6 +69,8 @@ enum Ty
     // abstract type of which nothing is known but what its constraint admits (DESIGN §2.6).
     Param(name: string, constraint: string, bound: bool)
     Measured(base: &Ty, unit: &Unit)
+    // `c_ptr`, C's `void *`: opaque, legal only in an `extern` declaration (DESIGN §10.2.1).
+    CPtr
     Error
 end Ty
 
@@ -241,6 +243,9 @@ ty_eq(a: Ty, b: Ty) -> bool = a match
     Measured(ab, au) -> b match
         Measured(bb, bu) -> ty_eq(*ab, *bb) && unit_eq(*au, *bu)
         _ -> false
+    CPtr -> b match
+        CPtr -> true
+        _ -> false
     Error -> b match
         Error -> true
         _ -> false
@@ -383,6 +388,7 @@ show_ty(t: Ty) -> string = t match
     Nominal(name, args) -> if args.len() == 0 then name else name + "[" + show_tys(args) + "]"
     Param(name, _, _) -> name
     Measured(base, unit) -> show_ty(*base) + "<" + spell(*unit) + ">"
+    CPtr -> "c_ptr"
     Error -> "?"
 
 private show_tys(ts: Buf[Ty]) -> string
