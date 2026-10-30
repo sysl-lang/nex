@@ -125,7 +125,7 @@ struct Emitter
         v
 
     // The zero of `t`: what a branch that never yields stands in with, where its region must yield.
-    zero_of(*self, span: Span, t: Ty) -> string = t match
+    zero_of(*self, span: Span, t: Ty) -> string = base_of(t) match
         Int(b, _) -> self.def(s"arith.constant 0 : i$b")
         Real(b) -> self.real_const(0.0, b)
         Complex(b) -> self.complex_const(self.real_const(0.0, b), self.real_const(0.0, b), b)
@@ -250,7 +250,7 @@ struct Emitter
     // -- types ------------------------------------------------------------------------------------
 
     // A value's MLIR type; `""` for `void` and `never`, which have no value.
-    ty(*self, span: Span, t: Ty) -> string = t match
+    ty(*self, span: Span, t: Ty) -> string = base_of(t) match
         Int(b, _) -> s"i$b"
         Real(b) -> s"f$b"
         Complex(b) -> s"complex<f$b>"
@@ -268,13 +268,13 @@ struct Emitter
 
     // The type a value of `t` is stored as, in memory and inside an aggregate: a complex as a struct
     // of its parts.
-    mem_ty(*self, span: Span, t: Ty) -> string = t match
+    mem_ty(*self, span: Span, t: Ty) -> string = base_of(t) match
         Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
         Array(_, _) -> self.desc_ty(rank_of(t))
         _ -> self.ty(span, t)
 
     // A value of `t` read in its stored form.
-    from_mem(*self, v: string, t: Ty) -> string = t match
+    from_mem(*self, v: string, t: Ty) -> string = base_of(t) match
         Complex(b) ->
             val m = s"!llvm.struct<(f$b, f$b)>"
             val re = self.def(s"llvm.extractvalue $v[0] : $m")
@@ -284,7 +284,7 @@ struct Emitter
         _ -> v
 
     // A value of `t` in its stored form.
-    to_mem(*self, v: string, t: Ty) -> string = t match
+    to_mem(*self, v: string, t: Ty) -> string = base_of(t) match
         Complex(b) ->
             val m = s"!llvm.struct<(f$b, f$b)>"
             val re = self.def(s"complex.re $v : complex<f$b>")

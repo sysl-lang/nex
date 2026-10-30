@@ -1,0 +1,51 @@
+// Conversions between the prelude's imperial and SI units: each is one multiplication by the exact
+// ratio of the two factors, rounded once to the operand's width (DESIGN §13.3, §13.8).
+
+struct Beam
+  length: real<ft>
+  load: real<lbf>
+
+def area(w: real<m>, h: real<m>) = w * h
+
+def main() =
+  print(to<mm>(1.0<in>))
+  print(to<m>(3.0<ft>))
+  print(to<km>(1.0<mi>))
+  print(to<kg>(10.0<lb>))
+  print(to<N>(1.0<lbf>))
+  print(to<kPa>(100.0<psi>))
+  print(to<kW>(1.0<hp>))
+  print(to<m^3>(1.0<usgal>))
+  print(to<in>(25.4<mm>))
+  print(to<psi>(1.0<MPa>))
+  print(to<lbf>(1.0<kN>))
+
+  // Mixed scales meet in the left operand's unit.
+  print(1.0<ft> + 6.0<in>)
+  print(1.0<m> - 1.0<ft>)
+  print(1.0<ft> > 300.0<mm>)
+  print(1.0<ft> < 300.0<mm>)
+  print(min(1.0<m>, 1.0<yd>))
+  print(max(1.0<m>, 1.0<yd>))
+
+  // An expected type converts: a binding, an argument, an `if` branch.
+  val d: real<mm> = 1.0<in>
+  print(d)
+  print(area(1.0<ft>, 1.0<ft>))
+  val c = true
+  print(if c then 2.0<m> else 50.0<cm>)
+  print(if not c then 2.0<m> else 50.0<cm>)
+
+  // real32 and complex values convert at their own width.
+  val w: real32<in> = 2.0<in>
+  print(to<mm>(w))
+  val z: complex<in> = 1.0<in> + 2i<in>
+  print(to<mm>(z))
+
+  // A value with a unit inside a tuple, a struct and an interpolation prints its unit.
+  print((to<m>(1.0<ft>), 2.0<s>))
+  val b = Beam(12.0<ft>, 500.0<lbf>)
+  print(b)
+  print(s"span ${to<m>(b.length)}, load ${to<kN>(b.load)}")
+  print(abs(-3.0<in>))
+  print(-to<cm>(1.0<in>))

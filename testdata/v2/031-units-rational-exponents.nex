@@ -1,0 +1,28 @@
+// Units with rational exponents (DESIGN §13.2, §13.3): a square root halves every exponent, and a
+// unit to a fractional power converts between scales whose factors have exact roots.
+
+unit hm = 100 m
+
+def root[U: Unit](x: real<U>): real<U^(1/2)> = x^(1/2)
+
+def main() =
+  val a = 16.0<m^2>
+  print(sqrt(a))
+  print(a^(1/2))
+  print(a^(-1/2))
+  print(root(9.0<s^2>))
+  print(root(2.0<m>))
+
+  // Converting a fractional power converts by the root of the factor's ratio.
+  print(to<cm^(1/2)>(4.0<m^(1/2)>))
+  print(to<m^(1/2)>(3.0<hm^(1/2)>))
+  print(to<m^(3/2)>(1.0<hm^(3/2)>))
+  print(to<m>(sqrt(4.0<hm^2>)))
+  print(1.0<m^(1/2)> + 10.0<cm^(1/2)>)
+  print(2.0<m^(1/2)> * 3.0<m^(1/2)>)
+
+  // A noise density in V/Hz^(1/2), and a diffusion length.
+  val density = 4.0e-3<V/Hz^(1/2)>
+  print(density * sqrt(100.0<Hz>))
+  val diffusivity = 1.0e-4<m^2/s>
+  print(to<mm>(sqrt(diffusivity * 25.0<s>)))

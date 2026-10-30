@@ -78,7 +78,7 @@ impl Emitter
     // so the fields' words added up bound a struct; an enum is its tag's word and its largest
     // variant's.
     words(*self, t: Ty) -> usize
-        t match
+        base_of(t) match
             Complex(b) -> return if b == 64 then 2 else 1
             Fn(_) -> return 2
             // A stored array is its memref descriptor (`emit_array.sysl`).
