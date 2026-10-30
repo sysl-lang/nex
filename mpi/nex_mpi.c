@@ -180,11 +180,55 @@ static int counted(const char *name, int64_t n) {
     return (int) n;
 }
 
+/* The runtime's: how deep the catches around the caller are nested (0 outside every one). */
+extern int32_t nex_catch_depth(void);
+
+/* The scratch memory a call holds, with the catch depth it was taken at, so that a trap caught by
+ * an `assert_traps` frees what the abandoned calls held (`unwound`). Memory is taken by `allocated`
+ * and given back by `free`, which removes it here. */
+typedef struct scratch {
+    void *memory;
+    int32_t depth;
+} scratch;
+
+static scratch *held = NULL;
+static int held_count = 0;
+static int held_cap = 0;
+
 static void *allocated(int64_t bytes) {
     void *p = malloc(bytes > 0 ? (size_t) bytes : 1);
 
     if (p == NULL) TRAP("mpi: out of memory for %lld bytes", (long long) bytes);
+
+    if (held_count == held_cap) {
+        held_cap = held_cap == 0 ? 16 : 2 * held_cap;
+        held = realloc(held, (size_t) held_cap * sizeof *held);
+
+        if (held == NULL) TRAP("mpi: out of memory for %d scratch buffers", held_cap);
+    }
+
+    held[held_count++] = (scratch){p, nex_catch_depth()};
     return p;
+}
+
+/* `free` of memory `allocated` gave, or of any other memory, which is not held here. */
+static void released(void *p) {
+    for (int k = held_count - 1; k >= 0; k--) {
+        if (held[k].memory != p) continue;
+
+        memmove(&held[k], &held[k + 1], (size_t) (held_count - k - 1) * sizeof *held);
+        held_count--;
+        break;
+    }
+
+    (free)(p);
+}
+
+#define free(p) released(p)
+
+/* Every scratch buffer taken inside the catch at depth `depth` or deeper, given back. */
+static void scratch_released(int32_t depth) {
+    while (held_count > 0 && held[held_count - 1].depth >= depth) (free)(held[--held_count].memory);
 }
 
 /* -- buffers ---------------------------------------------------------------------------------- */
@@ -1062,9 +1106,6 @@ void nex_mpi_sendrecv(const nex_desc *x, int64_t to, int64_t send_tag, const nex
 
 /* -- the exchange block ----------------------------------------------------------------------- */
 
-/* The runtime's: how deep the catches around the caller are nested (0 outside every one). */
-extern int32_t nex_catch_depth(void);
-
 /* One request an `exchange` block posted: for a receive, the element count its array holds. */
 typedef struct posted {
     MPI_Request request;
@@ -1202,7 +1243,8 @@ void nex_mpi_landed(const nex_desc *x) { (void) x; }
 void nex_mpi_held(const nex_desc *x) { (void) x; }
 
 /* A trap leaving the catch at depth `depth`: every block opened inside it has its requests
- * cancelled and completed before the trap frees the arrays they use. */
+ * cancelled and completed before the trap frees the arrays they use, and the scratch memory the
+ * abandoned calls held is given back. */
 static void unwound(int32_t depth) {
     /* A trap inside a `parallel` region is caught by its own thread, whose catches are its own. */
     if (!pthread_equal(pthread_self(), joining_thread)) return;
@@ -1220,6 +1262,8 @@ static void unwound(int32_t depth) {
         free(codes);
         free(k.posts);
     }
+
+    scratch_released(depth);
 }
 
 /* -- the reductions of a distributed vector --------------------------------------------------- */
