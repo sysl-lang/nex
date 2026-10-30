@@ -1,0 +1,127 @@
+@tests
+
+// The fused multiply-add (DESIGN §2.5, §7.3): `fma(a, b, c)` is `a * b + c` rounded once, on both
+// engines, and nothing else is: `a * b + c` written out is two roundings, in the emitted IR and in the
+// numbers a machine with a fused instruction gives.
+//
+// Each case below is chosen so that the fused and the unfused answers differ in the last bit: with
+// `a = 1 + e` and `b = 1 - e` the exact product is `1 - e^2`, which is half an ulp below one for the
+// `e` of each width and so rounds to one on its own, and `c = -1` then cancels it to zero; fused, the
+// answer is `-e^2`.
+
+import sysl.text.split
+
+// `1 + e` times `1 - e` minus one, fused and not, at each width. `e` is 2^-27, 2^-13 and 2^-6, and the
+// results are scaled by 2^54, 2^26 and 2^12 so that the fused one prints as -1.
+private val ROUNDINGS = "def main() =\n  val e = 1.0 / 134217728.0\n  val a = 1.0 + e\n  val b = 1.0 - e\n" +
+                        "  print(fma(a, b, -1.0) * 18014398509481984.0)\n  print(a * b - 1.0)\n  print(fma(a, b, -1.0) == a * b - 1.0)\n" +
+                        "  val e32: real32 = 1.0 / 8192.0\n  val a32: real32 = 1.0 + e32\n  val b32: real32 = 1.0 - e32\n" +
+                        "  print(fma(a32, b32, -1.0) * 67108864.0)\n  print(a32 * b32 - 1.0)\n" +
+                        "  val e16: real16 = 1.0 / 64.0\n  val a16: real16 = 1.0 + e16\n  val b16: real16 = 1.0 - e16\n" +
+                        "  print(fma(a16, b16, -1.0) * 4096.0)\n  print(a16 * b16 - 1.0)\n" +
+                        "  print(fma(2.0, 3.0, 4.0))\n  print(fma(2, 3.5, 1))\n"
+
+@test("fma rounds once at real64, real32 and real16, where a * b + c rounds twice, on both engines")
+run_fma_single_rounding()
+    val b = bench()
+    val out = ran(b, ROUNDINGS)
+
+    finish(b)
+    assert_eq(out.text, "-1.0\n0.0\nfalse\n-1.0\n0.0\n-1.0\n0.0\n10.0\n8.0\n")
+
+@test("fma is elemental: arrays of every argument, scalars broadcast, and the result's shape is the arrays'")
+run_fma_elemental()
+    val b = bench()
+    val program = "def main() =\n  val e = 1.0 / 134217728.0\n  val xs = [1.0 + e, 2.0, 3.0]\n  val ys = [1.0 - e, 0.5, 4.0]\n" +
+                  "  val all = fma(xs, ys, [-1.0, -1.0, -1.0])\n  print(all[1] * 18014398509481984.0)\n  print(all[2])\n  print(all[3])\n" +
+                  "  val c = fma(xs, ys, -1.0)\n  print(c[1] * 18014398509481984.0)\n  print(length(c))\n" +
+                  "  val s = fma(2.0, xs, ys)\n  print(s[2])\n  print(s[3])\n" +
+                  "  val t = fma(xs, 2.0, 1.0)\n  print(t[3])\n" +
+                  "  val v: [real32] = [1.5, 2.0]\n  val w = fma(v, v, 0.25)\n  print(w[1])\n  print(w[2])\n" +
+                  "  val m = [[1.0, 2.0], [3.0, 4.0]]\n  val n = fma(m, m, m)\n  print(n[2, 2])\n  print(sum(fma(m, 2.0, -1.0)))\n" +
+                  "  print(sum(fma(xs, ys, 0.0) + 1.0))\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "-1.0\n0.0\n11.0\n-1.0\n3\n4.5\n10.0\n7.0\n2.5\n4.25\n20.0\n16.0\n17.0\n")
+
+@test("fma carries units: a * b combines them, c is converted to the product's unit, the result has it")
+run_fma_units()
+    val b = bench()
+    val program = "def main() =\n  print(strip(fma(2.0<m>, 3.0<m>, 1.0<m^2>)))\n  print(fma(2.0<m>, 3.0<s>, 1.0<m s>))\n  print(fma(2.0<N>, 3.0<m>, 4.0<J>))\n" +
+                  "  print(fma([1.0, 2.0]<m>, 2.0<s>, [1.0, 1.0]<m s>))\n"
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(out.text, "7.0\n7.0 m s\n10.0 N m\n[3.0, 5.0] m s\n")
+
+@test("fma overflows and invalid operations trap under --fpe-trap and are IEEE without it, on both engines")
+run_fma_fpe()
+    val b = bench()
+    val program = "def main() =\n  val big = 1.0e308\n  print(fma(big, 10.0, 0.0))\n  print(fma(big, 10.0, -big))\n  print(fma(inf, 0.0, 1.0))\n"
+    val quiet = ran(b, program)
+    val over = ran(b, "def main() =\n  val big = 1.0e308\n  print(fma(big, 10.0, 0.0))\n", fpe_trap = true)
+    val invalid = ran(b, "def main() =\n  print(fma(inf, 0.0, 1.0))\n", fpe_trap = true)
+    val finite = ran(b, "def main() =\n  val big = 1.0e308\n  print(fma(big, 2.0, -big) == big)\n  print(fma(1.0e154, 1.0e154, 1.0) > 0.0)\n", fpe_trap = true)
+
+    finish(b)
+    assert_eq(quiet.text, "inf\ninf\nnan\n")
+    assert_eq(over.err.unwrap_or(""), "trap: floating-point overflow\n")
+    assert_eq(invalid.err.unwrap_or(""), "trap: floating-point invalid operation\n")
+    assert_eq(finite.text, "true\ntrue\n")
+
+// The text of function `name` in the LLVM IR `ir`, from its `define` to its closing brace.
+private function_ir(ir: string, name: string) -> string
+    for chunk in split(ir, "\ndefine ")
+        if chunk.contains(s"@$name(") || chunk.contains(s"@\"$name\"(") then return split(chunk, "\n}\n")[0]
+
+    ""
+
+// A multiply-add loop with a product and a sum written apart, over data for which fusing them would
+// change the answer.
+private val MADD = "def madd(x: [real], z: [real], y: inout [real]) =\n  for i in 1..length(y) do y[i] = x[i] * z[i] + y[i]\n\n" +
+                   "def main() =\n  val e = 1.0 / 134217728.0\n  val x: [real] = [1.0 + e, 3.0]\n  val z: [real] = [1.0 - e, 0.5]\n  var y: [real] = [-1.0, -1.0]\n" +
+                   "  madd(x, z, y)\n  print(y[1])\n  print(y[2])\n"
+
+@test("a * b + c is never contracted into a fused multiply-add: two roundings in the result and no fma in the optimized IR")
+run_no_contraction()
+    val b = bench()
+    val out = ran(b, MADD)
+    val m = emitted(MADD) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+    val ir = optimized_ir(m, b.work, b.tc) match
+        Ok(ir) -> ir
+        Err(e) -> fail_with(e)
+
+    finish(b)
+    assert_eq(out.text, "0.0\n0.5\n")
+
+    val body = function_ir(ir, "n.madd")
+
+    assert(body.contains("fmul"), body)
+    assert(body.contains("fadd"), body)
+    assert(!body.contains("fmuladd"), body)
+    assert(!body.contains("llvm.fma"), body)
+    assert(!body.contains("contract"), body)
+    assert(!body.contains("fast"), body)
+
+@test("fma lowers to the fused instruction on its own: llvm.fma in the optimized IR, at each width")
+run_fma_lowers()
+    val b = bench()
+    val program = "def f(x: [real], y: [real], z: [real]) = fma(x, y, z)\ndef g(x: [real32], y: [real32], z: [real32]) = fma(x, y, z)\ndef h(x: [real16], y: [real16], z: [real16]) = fma(x, y, z)\n" +
+                  "def main() =\n  val x: [real] = [1.0, 2.0]\n  print(f(x, x, x)[2])\n  val y: [real32] = [1.0, 2.0]\n  print(g(y, y, y)[2])\n  val z: [real16] = [1.0, 2.0]\n  print(h(z, z, z)[2])\n"
+    val m = emitted(program) match
+        Ok(m) -> m
+        Err(e) -> fail_with(e)
+    val ir = optimized_ir(m, b.work, b.tc) match
+        Ok(ir) -> ir
+        Err(e) -> fail_with(e)
+
+    finish(b)
+
+    for name in ["n.f", "n.g", "n.h"]
+        val body = function_ir(ir, name)
+
+        assert(body.contains("@llvm.fma."), s"$name: $body")
+        assert(!body.contains("fmul"), s"$name: $body")

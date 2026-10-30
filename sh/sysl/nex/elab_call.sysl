@@ -24,7 +24,7 @@ private val REAL_FUNCTIONS = ["sqrt", "cbrt", "exp", "log", "log2", "log10", "si
 // Those of them that also take a complex and give one.
 private val COMPLEX_FUNCTIONS = ["sqrt", "exp", "log", "sin", "cos", "tan"]
 
-private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "min", "max", "assert", "assert_eq", "to_real", "to_integer", "to_complex"]
+private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "fma", "min", "max", "assert", "assert_eq", "to_real", "to_integer", "to_complex"]
 
 // The prelude's array functions (DESIGN §4.2, §4.3, §7.4), which come with arrays, and the
 // assertions over arrays and lambdas.
@@ -465,6 +465,82 @@ impl Elab
         out
     end unified
 
+    // `fma(a, b, c)`: `a * b + c` rounded once (DESIGN §7.3). It takes reals of one width, the width of
+    // the widest, literals adopting it; `a` and `b` combine their units as `*` does and `c` must be a
+    // measure of the product's dimension, converted to its unit as `+` converts its right operand.
+    // An array argument makes it elemental, the scalars broadcasting.
+    fused_multiply_add(*self, span: Span, args: Buf[Expr]) -> TExpr
+        if args.len() != 3 then return self.arity(span, "fma", "three values")
+
+        val reported = self.diags.len()
+        var vals: Buf[Option[TExpr]] = buf()
+        var shared: Option[Ty] = None
+
+        for a in args
+            if self.literal_class(a) != NOT_LITERAL
+                vals.push(None)
+            else
+                val v = self.infer(a)
+
+                if is_error(v.ty) then return self.invalid(span)
+
+                shared = shared match
+                    Some(t) -> self.common_of(span, "fma", t, base_of(elem_of(v.ty)))
+                    None -> Some(base_of(elem_of(v.ty)))
+                vals.push(Some(v))
+
+        if self.diags.len() != reported then return self.invalid(span)
+
+        var out: Buf[TExpr] = buf()
+
+        for k in 0..<3
+            out.push(vals[k] match
+                Some(v) -> v
+                None ->
+                    val class = self.literal_class(args[k])
+
+                    self.elab(args[k], shared match
+                        Some(t) -> Some(adoption(class, t).unwrap_or(default_of(class)))
+                        None -> None))
+
+        var w = base_of(elem_of(out[0].ty))
+
+        for k in 1..<3
+            w = self.common_of(span, "fma", w, base_of(elem_of(out[k].ty))).unwrap_or(Error)
+
+        if is_error(w) then return self.invalid(span)
+
+        if is_complex(w)
+            self.fail(span, s"`fma` takes reals: a complex product and sum have no single rounding, so write the two operations; these are ${show_ty(out[0].ty)}, ${show_ty(out[1].ty)} and ${show_ty(out[2].ty)}")
+            return self.invalid(span)
+
+        if !is_real(w)
+            self.fail(span, s"`fma` takes reals, and an integer has no rounding to fuse; these are ${show_ty(out[0].ty)}, ${show_ty(out[1].ty)} and ${show_ty(out[2].ty)}")
+            return self.invalid(span)
+
+        val ua = elem_unit(out[0].ty)
+        val ub = elem_unit(out[1].ty)
+        val uc = elem_unit(out[2].ty)
+        val (xa, xb) = self.product_units(ua, ub, false)
+        val u = unit_mul(xa, xb)
+
+        if self.exact(span, u).is_none() then return self.invalid(span)
+
+        if !same_dims(u, uc)
+            self.fail(span, s"`fma` adds `c` to the product `a * b`, which is ${spell(u)}, and `c` is ${show_ty(out[2].ty)}")
+            return self.invalid(span)
+
+        out.set(0, promote(out[0], with_elem(out[0].ty, measured(w, xa))))
+        out.set(1, promote(out[1], with_elem(out[1].ty, measured(w, xb))))
+        out.set(2, promote(out[2], with_elem(out[2].ty, measured(w, u))))
+
+        val ret = measured(w, u)
+
+        if any_array(out) then return self.elemental(span, "fma", out, ret)
+
+        texpr(span, ret, TBuiltin("fma", out))
+    end fused_multiply_add
+
     builtin(*self, span: Span, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
         for a in args
             *a.kind match
@@ -503,6 +579,8 @@ impl Elab
             if any_array(out) then return self.elemental(span, name, out, ty)
 
             return texpr(span, ty, TBuiltin(name, out))
+
+        if name == "fma" then return self.fused_multiply_add(span, args)
 
         if name == "atan2" || name == "hypot"
             if args.len() != 2 then return self.arity(span, name, "two values")
