@@ -25,7 +25,7 @@ package {
   sysl    = "0.7.9"
 }
 
-workspace = ["compiler", "runtime"]
+workspace = ["compiler", "runtime", "examples/embed"]
 
 // The perf oracle's kernels: nex programs and their C and Fortran twins, which no sysl build compiles.
 exclude = ["bench"]

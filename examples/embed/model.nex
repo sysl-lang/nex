@@ -1,0 +1,17 @@
+// A model the `embed` host builds: its solids are the host's, made and measured through the host's
+// functions, and its lengths are in whichever units are convenient — the host is handed millimetres.
+
+@host struct Solid
+
+@host extern def box(w: real<mm>, h: real<mm>, d: real<mm>): Solid
+@host extern def moved(s: Solid, by: [real<mm>; 3]): Solid
+@host extern def volume(s: Solid): real<mm^3>
+
+var wall = 2.0<mm>
+
+def build(width: real<in>, count: integer): real<mm^3> =
+  var total = 0.0<mm^3>
+  for k in 1..count
+    val b = moved(box(width, 10.0<mm>, wall), [k * 1.0<in>, 0.0<mm>, 0.0<mm>])
+    total += volume(b)
+  total

@@ -344,3 +344,10 @@ run_fortran_leak_nothing()
 
     for r in reports
         assert(r.contains(": 0 leaks for 0 total leaked bytes."), r)
+
+@test("a compiled program has no host, so a `@host` function or type is refused by the compiler; the embedded interpreter runs it")
+emit_host_refused()
+    assert_eq(emitted("@host extern def box(w: real): real\ndef main() =\n  print(box(1.0))\n").err().unwrap_or(""),
+              "error: `box` is a host function, which a program embedding nex gives; a compiled program has no host, so this one runs interpreted, embedded @1:1")
+    assert_eq(emitted("@host struct Solid\n@host extern def make(): Solid\ndef main() =\n  val s = make()\n  print(s == s)\n").err().unwrap_or(""),
+              "error: `Solid` is a host type, which a program embedding nex gives; a compiled program has no host, so this one runs interpreted, embedded @1:1\nerror: `make` is a host function, which a program embedding nex gives; a compiled program has no host, so this one runs interpreted, embedded @2:1")

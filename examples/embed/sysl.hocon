@@ -1,0 +1,21 @@
+// A sysl program hosting nex: a toy geometry kernel that gives a nex script its `Solid` type and the
+// functions that make and measure solids, loads `model.nex`, and calls the script's `build`.
+//
+//     sysl build examples/embed -o embed
+//     ./embed examples/embed/model.nex
+//     ./embed examples/embed/model.nex --reload 100
+
+package {
+  name    = "embed"
+  version = "0.0.1"
+  sysl    = "0.7.9"
+}
+
+dependencies {
+  nex { workspace = true }
+}
+
+requires {
+  os   = true
+  heap = true
+}

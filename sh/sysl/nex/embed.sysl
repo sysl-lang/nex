@@ -3,9 +3,9 @@ module sh.sysl.nex
 // The embedding API (DESIGN §16): what a sysl program uses to host nex scripts on the interpreter.
 //
 //     var host = new_host()
+//     val solid = host.give_type("Solid", (id) -> kernel.release(id))
 //
-//     host.give_type("Solid", (id) -> kernel.release(id))
-//     host.give("box", (args) -> Ok(host.handle("Solid", kernel.make_box(real_of_value(args[0])))))
+//     host.give("box", (args) -> Ok(solid.handle(kernel.make_box(args[0]))))
 //
 //     val script = load_script(text, "model.nex", host)?
 //
@@ -120,6 +120,10 @@ struct HostType
     name: string
     release: &Fn(long) -> unit
 
+    // The host's object `id` as a value nex holds, released through `release` when the last holder
+    // lets go.
+    handle(self, id: long) -> NexValue = NHandle(HostHandle(self.name, id, self.release))
+
 // What the host gives the scripts it loads: functions and types, each under the name a script
 // declares it by (`@host extern def`, `@host struct`).
 struct Host
@@ -129,16 +133,14 @@ struct Host
     give(*self, name: string, f: &Fn(Buf[NexValue]) -> Result[NexValue, string])
         self.functions.push(HostFn(name, f))
 
-    give_type(*self, name: string, release: &Fn(long) -> unit)
-        self.types.push(HostType(name, release))
+    // The host type `name`, its objects released through `release`; what it answers makes them.
+    // A host function makes its objects through the `HostType` rather than the `Host`, which holds
+    // the function, so that the two do not hold each other.
+    give_type(*self, name: string, release: &Fn(long) -> unit) -> HostType
+        val t = HostType(name, release)
 
-    // The object `id` of the host type `type_name` as a value nex holds, released through the type's
-    // `release` when the last holder lets go.
-    handle(self, type_name: string, id: long) -> NexValue
-        for t in self.types
-            if t.name == type_name then return NHandle(HostHandle(type_name, id, t.release))
-
-        NHandle(HostHandle(type_name, id, (n) -> ()))
+        self.types.push(t)
+        t
 
 new_host() -> Host = Host(buf(), buf())
 
