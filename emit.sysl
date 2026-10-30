@@ -140,7 +140,7 @@ struct Emitter
         v
 
     // The zero of `t`: what a branch that never yields stands in with, where its region must yield.
-    zero_of(*self, span: Span, t: Ty) -> string = t match
+    zero_of(*self, span: Span, t: Ty) -> string = base_of(t) match
         Int(b, _) -> self.def(s"arith.constant 0 : i$b")
         Real(b) -> self.real_const(0.0, b)
         Complex(b) -> self.complex_const(self.real_const(0.0, b), self.real_const(0.0, b), b)
@@ -265,7 +265,7 @@ struct Emitter
     // -- types ------------------------------------------------------------------------------------
 
     // A value's MLIR type; `""` for `void` and `never`, which have no value.
-    ty(*self, span: Span, t: Ty) -> string = t match
+    ty(*self, span: Span, t: Ty) -> string = base_of(t) match
         Int(b, _) -> s"i$b"
         Real(b) -> s"f$b"
         Complex(b) -> s"complex<f$b>"
@@ -283,13 +283,13 @@ struct Emitter
 
     // The type a value of `t` is stored as, in memory and inside an aggregate: a complex as a struct
     // of its parts, an array as the address of the object holding it (`emit_array.sysl`).
-    mem_ty(*self, span: Span, t: Ty) -> string = t match
+    mem_ty(*self, span: Span, t: Ty) -> string = base_of(t) match
         Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
         Array(_, _) -> "!llvm.ptr"
         _ -> self.ty(span, t)
 
     // A value of `t` read in its stored form; an array of numbers as a view pinned for the statement.
-    from_mem(*self, v: string, t: Ty) -> string = t match
+    from_mem(*self, v: string, t: Ty) -> string = base_of(t) match
         Complex(b) ->
             val m = s"!llvm.struct<(f$b, f$b)>"
             val re = self.def(s"llvm.extractvalue $v[0] : $m")
@@ -300,7 +300,7 @@ struct Emitter
         _ -> v
 
     // A value of `t` in its stored form; an array of numbers as a new object the statement owns.
-    to_mem(*self, v: string, t: Ty) -> string = t match
+    to_mem(*self, v: string, t: Ty) -> string = base_of(t) match
         Array(_, _) -> if is_arr(t) then self.own_ref(self.boxed_array(Span(0, 0), v, t)) else v
         Complex(b) ->
             val m = s"!llvm.struct<(f$b, f$b)>"

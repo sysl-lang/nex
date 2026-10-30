@@ -26,6 +26,11 @@ file	category	name
 025-arrays-inside-aggregates-are-values	prelude	an array in a struct, read into a local or returned, then the struct written; a module-level array copied, then written; arrays a `match` arm writes
 026-arrays-of-non-numbers	prelude	arrays of structs, strings and closures written through elements and shared by value; `enumerate`, `zip`; an array of strings in a struct
 027-rearranging-locating-and-reducing-along-a-computed-axis	prelude	`permute` written and computed, `reverse` on a computed axis, `dim =` computed, `minloc`/`maxloc` at ranks 1–3 and along an axis, `assert_approx` and the traps of each
+028-equality-of-aggregates-holding-arrays	prelude	`==` and `!=` on structs, tuples and enums holding arrays of numbers, booleans and strings at ranks 1 and 2, nested; shapes that differ are unequal; `nan` (DESIGN §11.4)
+030-units-imperial-and-si	units	imperial and SI conversions, mixed scales, expected types, real32 and complex, units printed inside aggregates
+031-units-rational-exponents	units	square roots and rational powers of units, and conversions between scales with exact roots
+032-units-through-the-language	units	values with units at module level, through compound assignment, loops, `match`, closures, function values and destructuring
+033-units-on-arrays	units	arrays with units converted element by element, through arithmetic, reductions, products, writes, loops and a generic function
 060-parallel-for-writes-owned-elements	parallel	a `parallel for` writing the element or column each iteration owns, over one and two clauses, with steps, inner loops, `cycle` and an `inout` array parameter
 061-parallel-reductions-over-every-operator	parallel	a reduction over `+ * min max and or`, `minloc`/`maxloc` with ties across blocks, a user operator (Kahan), a complex sum, a module-level variable, an empty loop and an overflow trap
 062-parallel-expressions-agree-with-sequential	parallel	`parallel` sums, products, extremes, `dot`, element-wise expressions, `map` and `dim =` reductions equal to the sequential ones bit for bit; the pairwise tree against a naive loop

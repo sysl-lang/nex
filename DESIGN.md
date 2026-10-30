@@ -1712,7 +1712,9 @@ unit psi = lbf / in^2
   (**PROPOSED**), and otherwise it is a compile error that suggests `strip`.
 - `print` and string interpolation show the unit after the value, separated by a space: with
   `val g = 9.81<m/s^2>`, `print(g)` prints `9.81 m/s^2`. The unit is spelled as the type carries it,
-  in a form that reads back as the same unit (`8.314 J/(mol K)`). An array prints its elements and
+  in a form that reads back as the same unit (`8.314 J/(mol K)`). A complex value's unit follows
+  both parts (`25.4+50.8i mm`), and inside a tuple or a struct each value with a unit is followed by
+  its own (`(0.3048 m, 2.0 s)`, `Beam { length=12.0 ft }`). An array prints its elements and
   then its unit once (**PROPOSED**). A dimensionless value prints as it always has.
 
 ### 13.5 Generic units
@@ -1778,7 +1780,8 @@ Units exist only in the type checker and are erased before MLIR is emitted, so a
 compiles to the same code as the same program without them. **Mixing scales costs one
 multiplication by a constant**: the ratio of two exact factors, rounded once to the operand's width
 at compile time — the same single rounding a hand conversion makes. Where no scales are mixed, no
-conversion is emitted.
+conversion is emitted. The multiplication is an ordinary one: a conversion past the width's range is
+an infinity, or the overflow trap under `--fpe-trap` (§2.5).
 
 ### 13.9 The prelude units
 

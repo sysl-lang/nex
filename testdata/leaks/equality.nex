@@ -1,0 +1,40 @@
+struct Grid
+  cells: [real]
+
+struct Board
+  name: string
+  m: [integer; :, :]
+
+struct Stack
+  grids: [Grid]
+  labels: [string]
+
+enum Field =
+  Samples(xs: [real])
+  Matrix(m: [integer; :, :], names: [string])
+  Blank
+
+def grid(n: integer) = Grid([1.0 * n, 2.0])
+
+def field(n: integer): Field =
+  if n % 3 == 0 then Samples([1.0 * n])
+  elif n % 3 == 1 then Matrix([[n, 2], [3, 4]], [s"m$n"])
+  else Blank
+
+def main() =
+  var equal = 0
+  for n in 1..6
+    val s = Stack([grid(n), grid(n + 1)], [s"a$n", "b"])
+    if s == Stack([grid(n), grid(n + 1)], [s"a$n", "b"]) then equal += 1
+    if s != Stack([grid(n)], [s"a$n", "b"]) then equal += 1
+    if s == Stack([grid(n), grid(n + 2)], [s"a$n", "b"]) then equal += 100
+    val b = Board(s"b$n", [[n, n], [n, n]])
+    if b == Board(s"b$n", [[n, n], [n, n]]) then equal += 1
+    if b == Board(s"b$n", [[n, n, n]]) then equal += 100
+    if field(n) == field(n) then equal += 1
+    if field(n) == field(n + 1) then equal += 100
+    if n % 3 != 2 and field(n) == field(n + 3) then equal += 100
+    val t = (s"t$n", grid(n), [s"x$n"])
+    if t == (s"t$n", grid(n), [s"x$n"]) then equal += 1
+    if t == (s"t$n", grid(n), [s"y$n"]) then equal += 100
+  print(equal)
