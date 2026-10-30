@@ -16,6 +16,7 @@
 // of an `if` do.
 
 import sysl.buf.{Buf, buf}
+import sysl.text.join
 import sh.sysl.parsing.{Span, nearest_name}
 
 // A struct as written, and its fields once their types are resolved. A generic one is reported at
@@ -550,8 +551,8 @@ impl Elab
                     out.push(self.bind_pattern(elems[k], tys[k], kind, members))
 
                 BTuple(out)
-            PatternKind.Variant(_, args) ->
-                self.fail(pat.span, "a variant pattern stands only in a `match` arm")
+            PatternKind.Variant(n, args) ->
+                self.fail(pat.span, s"a binding cannot test which variant a value is; take `${n}` apart with `match`")
 
                 var out: Buf[TBind] = buf()
 
@@ -577,6 +578,88 @@ impl Elab
             out.push(Error)
 
         out
+
+    // -- tuple assignment -------------------------------------------------------------------------
+
+    // `a, b = b, a`: the right side is evaluated whole before anything is stored, and then each
+    // element is stored into its target, left to right (DESIGN §11.4).
+    assign_tuple(*self, span: Span, target: Expr, value: Expr) -> TExpr
+        val t = self.targets(target)
+
+        // A place written twice in one list is refused, since the first store would be lost.
+        val places = target_places(target)
+
+        for k in 1..<places.len()
+            for j in 0..<k
+                if show_expr(places[j]) == show_expr(places[k])
+                    self.fail(places[k].span, "this place is already a target of this assignment; the first store to it would be lost")
+                    break
+
+        texpr(span, Void, TAssignTuple(t, self.stored(t, value)))
+
+    private targets(*self, e: Expr) -> TTarget
+        *e.kind match
+            ExprKind.Tuple(elems) ->
+                var out: Buf[TTarget] = buf()
+
+                for x in elems
+                    out.push(self.targets(x))
+
+                TTargets(out)
+            Name(n) -> if n == "_" then TDrop else TPlace(self.place(e))
+            _ -> TPlace(self.place(e))
+
+    // The right side of a tuple assignment, in the types of its targets. Written as a tuple, it
+    // converts element by element as a tuple built in place does; a tuple value is stored as it is.
+    private stored(*self, t: TTarget, value: Expr) -> TExpr
+        t match
+            TPlace(p) -> return self.check(value, p.ty, "the value")
+            TDrop ->
+                val v = self.infer(value)
+
+                if is_void(v.ty) then self.fail(value.span, "this element would hold nothing: this is void")
+
+                return v
+            TTargets(ts) ->
+                *value.kind match
+                    ExprKind.Tuple(elems) ->
+                        if elems.len() == ts.len()
+                            var out: Buf[TExpr] = buf()
+                            var tys: Buf[Ty] = buf()
+
+                            for k in 0..<elems.len()
+                                val v = self.stored(ts[k], elems[k])
+
+                                out.push(v)
+                                tys.push(v.ty)
+
+                            return texpr(value.span, Ty.Tuple(tys), TTuple(out))
+                    _ -> ()
+
+        val v = self.infer(value)
+
+        if !self.fits(value.span, t, v.ty)
+            self.fail(value.span, s"these targets hold ${show_targets(t)}, and this is ${show_ty(v.ty)}; a tuple value is stored as it is, without widening")
+
+        v
+    end stored
+
+    // Whether a tuple value of type `ty` can be stored into the targets `t` without converting it.
+    // A value of the wrong shape is reported here, an element of the wrong type by the caller.
+    private fits(*self, span: Span, t: TTarget, ty: Ty) -> bool
+        if is_wild(ty) then return true
+
+        t match
+            TPlace(p) -> is_wild(p.ty) || ty_eq(p.ty, ty)
+            TDrop -> true
+            TTargets(ts) ->
+                val tys = self.element_types(span, ts.len(), ty)
+                var ok = true
+
+                for k in 0..<ts.len()
+                    if !self.fits(span, ts[k], tys[k]) then ok = false
+
+                ok
 
     // -- match ------------------------------------------------------------------------------------
 
@@ -751,7 +834,7 @@ impl Elab
 
                 ArmShape(Some(j), n, binds, ftys, true)
             PatternKind.Tuple(_) ->
-                self.fail(pat.span, "a `match` arm's pattern is a variant, a name or `_`")
+                self.fail(pat.span, "a `match` arm's pattern is a variant, a name or `_`; a tuple is taken apart by `val a, b = …`")
 
                 var tys: Buf[Ty] = buf()
                 val names = pattern_names(pat)
@@ -895,5 +978,30 @@ private join_names(names: Buf[string]) -> string
 
     for k in 1..<names.len()
         out = out + (if k == names.len() - 1 then " and " else ", ") + names[k]
+
+    out
+
+// `(real64, (int64, _))`: the types a list of targets holds.
+private show_targets(t: TTarget) -> string = t match
+    TPlace(p) -> show_ty(p.ty)
+    TDrop -> "_"
+    TTargets(elems) ->
+        var out: Buf[string] = buf()
+
+        for x in elems
+            out.push(show_targets(x))
+
+        "(" + join(out.view(), ", ") + ")"
+
+// The places a list of targets stores into, left to right, without the `_`s.
+private target_places(e: Expr) -> Buf[Expr]
+    var out: Buf[Expr] = buf()
+
+    *e.kind match
+        ExprKind.Tuple(elems) ->
+            for x in elems
+                out.extend(target_places(x).view())
+        Name(n) -> if n != "_" then out.push(e)
+        _ -> out.push(e)
 
     out

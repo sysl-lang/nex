@@ -888,6 +888,10 @@ impl Elab
     end place
 
     assign(*self, span: Span, op: string, target: Expr, value: Expr) -> TExpr
+        *target.kind match
+            ExprKind.Tuple(_) -> return self.assign_tuple(span, target, value)
+            _ -> ()
+
         val p = self.place(target)
 
         if op == "=" then return texpr(span, Void, TAssign(op, p, self.check(value, p.ty, "the value")))

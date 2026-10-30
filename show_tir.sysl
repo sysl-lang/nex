@@ -195,6 +195,7 @@ show_texpr(p: TProgram, e: TExpr) -> string
 
             s"(${word} ${local_name(p, id)}:${show_ty(p.locals[id].ty)} ${show_texpr(p, init)})"
         TAssign(op, target, value) -> s"(${op} ${show_texpr(p, target)} ${show_texpr(p, value)})"
+        TAssignTuple(target, value) -> s"(= ${show_target(p, target)} ${show_texpr(p, value)})"
         TReturn(v) -> v match
             Some(x) -> s"(return ${show_texpr(p, x)})"
             None -> "(return)"
@@ -245,6 +246,18 @@ private show_bind(p: TProgram, b: TBind) -> string = b match
 
         for x in elems
             out.push(show_bind(p, x))
+
+        "(" + join(out.view(), " ") + ")"
+
+// `(a#0 (p#1.x _))`: where a tuple assignment stores each element.
+private show_target(p: TProgram, t: TTarget) -> string = t match
+    TPlace(place) -> show_texpr(p, place)
+    TDrop -> "_"
+    TTargets(elems) ->
+        var out: Buf[string] = buf()
+
+        for x in elems
+            out.push(show_target(p, x))
 
         "(" + join(out.view(), " ") + ")"
 
