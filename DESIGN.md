@@ -1158,13 +1158,25 @@ is given a copy of its own if anything else (a `val` sharing it, §8.4) still ho
 result of a `parallel` element-wise expression is a buffer allocated before the region and freed by
 the deallocation pipeline.
 
-**Counts are atomic in every program.** Strings, cells and closure environments are counted
-objects, and a parallel body may copy and drop one shared from outside — an outer string read, an
-outer closure called — on several threads at once. The runtime changes every count with one atomic
-add (`release` with acquire-release ordering, so the thread that frees an object sees every other
-thread's last use of it); uncontended that costs what the plain add did, so there is no second,
-non-atomic kind of count to keep apart. A reduction variable of a type that holds a count (a string
-built by a user operator) is not compiled yet.
+**Counts are atomic while a parallel region runs, and plain otherwise.** Strings, cells and closure
+environments are counted objects, and a parallel body may copy and drop one shared from outside —
+an outer string read, an outer closure called — on several threads at once. From the start of a
+region to its end the runtime changes every count with one atomic add (`release` with
+acquire-release ordering, so the thread that frees an object sees every other thread's last use of
+it); before and after, only one thread runs, and the region's start and end order its plain changes
+against the threads', so a plain add is enough. Measured on a loop that only copies and drops
+strings, closures and a struct holding both, an atomic count costs about a sixth of the loop's time
+even uncontended (PLAN.md, M9), which is why the plain one is kept: the sequential program, and the
+sequential parts of a parallel one, do not pay for threads they are not running. A reduction
+variable of a type that holds a count (a string built by a user operator) is not compiled yet.
+
+**A failed check leaves the loop.** The runtime function a trap calls is declared never to return,
+so a bounds check inside a loop is a branch out of it that LLVM may hoist; with the index moving by
+a known step, the loop vectorizes. A clause's first value and step spelled as literals are constants
+in the region's code rather than fields of its environment, so `parallel for i in 1..n` over
+contiguous arrays vectorizes as the sequential loop does, and one thread runs it as fast. An array
+still crosses with dynamic strides: LLVM checks for a unit stride once before the loop and
+vectorizes the unit-stride case, so a contiguous array needs no layout of its own.
 
 **Which pipeline a program gets is decided by the program, not by a flag.** A program that contains
 a `parallel` construct anywhere holds an `omp.parallel`, so its pass list gains

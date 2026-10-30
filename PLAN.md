@@ -373,6 +373,28 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
    (the OpenMP lowering of each is proved here or reported); and on this machine at
    `OMP_NUM_THREADS=4` the perf oracle's axpy, dot and point-distance kernels written with `parallel`
    run at least 2.5× faster than their sequential builds.
+
+   *Measured* (Apple M5 Pro, 6 performance cores; 100 sweeps of n = 10⁷; wall time of the whole
+   program, median of 9 runs, min–max beside it, on a shared machine at load 7–12):
+
+   | kernel | sequential | `parallel`, 1 thread | 4 threads | 6 threads |
+   |---|---|---|---|---|
+   | axpy, `parallel for` | 186 (178–196) | 183 (180–193) | 156 (154–164) | 130 (128–150) |
+   | axpy, `gfortran -O2 [-fopenmp]` | 182 (181–191) | 262 (261–272) | 167 (162–182) | 141 (132–163) |
+   | dot, `parallel dot` | 725 (713–748) | 790 (782–809) | 329 (324–366) | 250 (245–285) |
+
+   Before the region's traps were declared never to return and its literal steps made constants,
+   one thread of the axpy ran 499 ms against a sequential 335 (neither vectorized). axpy at
+   n = 10⁷ is bound by memory bandwidth: gfortran's own `!$omp parallel do` gains 1.1× at 4 threads,
+   so the 2.5× bar is out of reach for axpy at this size on this machine, and nex's parallel axpy
+   is at gfortran's. dot keeps each 4096-element block in order (§9.2.1), so its additions do not
+   vectorize and it scales with threads instead: 2.2× at 4.
+
+   *Count cost* (`nex_retain`/`nex_release`; a loop of 3·10⁷ passes that copies and drops two
+   strings, a closure and a struct holding both, no allocation; median of 5, four rounds): atomic
+   counts 2438–2822 ms, plain 2066–2179, plain-unless-a-region-runs (what the runtime does) 2215–2276.
+   Atomic costs 13–18%, the region check 4–7%. A loop that builds its strings (3·10⁶ passes) shows
+   no difference: 813 / 819 ms, the allocation dominates.
 10. **M10 — FFI, Fortran interop, BLAS and LAPACK.** `extern def`, `@link`, `@symbol`, `@strided`,
     `@pure`; arrays and views crossing per DESIGN §10.3 (with the copies it requires); **complex
     scalars by value** mirroring clang's ABI per target (arm64 HFA in two FP registers, x86-64 SysV

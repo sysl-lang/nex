@@ -1,7 +1,19 @@
 // A parallel body reading an outer string and calling an outer closure on every thread, each
-// iteration building and dropping strings: the counts change on several threads at once.
+// iteration building and dropping strings: the counts change on several threads at once. Counts are
+// atomic only while a region runs, so the strings shared before, inside, between and after regions
+// are each freed once.
 
 def tag(s: string, k: integer): string = s"$s-$k"
+
+def shared_count(name: string, n: integer, fail_at: integer): integer =
+  var total = 0
+  parallel for i in 1..n reduce total: +
+    val a = tag(name, i)
+    val b = s"$name:$i"
+    val c = a + b
+    if c == "" then cycle
+    total += 1000 div (i - fail_at)
+  total
 
 def main() =
   val name = s"shared${3 * 7}"
@@ -17,3 +29,21 @@ def main() =
   print(total)
   print(name)
   print(f(1))
+  var kept = ""
+  for i in 1..1000
+    kept = tag(name, i)
+  print(kept)
+  print(shared_count(name, 20000, -1))
+  print(f(2))
+
+  // Nothing but copies of one string and one closure on every thread.
+  var copies = 0
+  parallel for i in 1..200000 reduce copies: +
+    val a = name
+    val b = a
+    val g = f
+    val h = g
+    if b != "" and i > 0 then copies += 1
+  print(copies)
+  print(name)
+  print(f(3))

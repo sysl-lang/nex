@@ -11,13 +11,28 @@
 // returned value) and releases it where that keeping ends; a null reference is accepted and ignored
 // by both, since a slot nothing was stored into yet holds zero.
 //
-// **Counts are atomic.** Code a `parallel` region runs on several threads may retain and release one
-// object together — a string an iteration reads from outside the loop, a lambda's environment — so
-// every count changes by one indivisible add (DESIGN §9.4). Uncontended, that costs about what the
-// plain add did; only an object two threads really share pays for the shared cache line.
+// **Counts are atomic while a parallel region runs, and plain otherwise** (DESIGN §9.5). Code a region
+// runs on several threads may retain and release one object together — a string an iteration reads
+// from outside the loop, a lambda's environment — so while one runs every count changes by one
+// indivisible add. Outside a region only one thread runs, and the start and end of a region order
+// every plain change before it and after it against the threads', so a plain add is enough there;
+// an atomic one costs a count-heavy loop about a sixth of its time even uncontended.
 
 import sysl.raw.ptr_cast
-import sysl.sync.{AcqRel, Relaxed}
+import sysl.sync.{AcqRel, Atomic, Relaxed}
+
+// How many parallel regions are running: a count rather than a flag, so a region started inside
+// another's thread leaves the outer one's counts atomic when it ends.
+private var regions = Atomic[i32](0)
+
+// A parallel region starts: counts change atomically until it ends.
+regions_begin()
+    _ = regions.add(1, AcqRel)
+
+regions_end()
+    _ = regions.sub(1, AcqRel)
+
+private threaded() -> bool = regions.load(Relaxed) != 0
 
 @needs(os)
 extern calloc(n: usize, size: usize) -> *u8
@@ -50,7 +65,10 @@ retain(p: *u8)
 
     val h = header(p)
 
-    if h.count >= 0 then atomic_add(&h.count, 1, Relaxed)
+    if h.count < 0 then return
+
+    if threaded() then atomic_add(&h.count, 1, Relaxed)
+    else h.count += 1
 
 @export("nex_release")
 release(p: *u8)
@@ -62,7 +80,13 @@ release(p: *u8)
 
     // The thread that takes the count from 1 to 0 frees the object, after every other thread's last
     // use of it (the acquire half of `AcqRel`).
-    if atomic_sub(&h.count, 1, AcqRel) > 1 then return
+    if threaded()
+        if atomic_sub(&h.count, 1, AcqRel) > 1 then return
+    else
+        h.count -= 1
+
+        if h.count > 0 then return
+
     if h.drop != null then h.drop(p)
 
     free(ptr_cast(h))

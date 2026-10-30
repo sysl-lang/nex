@@ -376,6 +376,19 @@ impl Emitter
 
         (self.widen64(lo, bits, signed), self.widen64(step, bits, signed), count)
 
+    // In a region's code, a clause's first value or step as `i64`: a constant where the source spells
+    // it as an integer literal (an absent step is 1), else field `k` of the environment.
+    known_or_field(*self, e: Option[TExpr], fields: Buf[string], k: usize) -> string
+        val known = e match
+            None -> Some(i128(1))
+            Some(x) -> *x.kind match
+                TLiteral(IntVal(v), _) -> if v <= 9223372036854775807 then Some(v) else None
+                _ -> None
+
+        known match
+            Some(v) -> self.def(s"arith.constant $v : i64")
+            None -> self.env_get(fields, k)
+
     // The code of `parallel for` job `n`: this worker's share of the iterations, or of the blocks
     // where the loop reduces.
     loop_code(*self, n: usize, job: ParJob, e: TExpr)
@@ -395,9 +408,12 @@ impl Emitter
         var counts: Buf[string] = buf()
         var f = 0
 
-        for _ in clauses
-            los.push(self.env_get(job.fields, f))
-            steps.push(self.env_get(job.fields, f + 1))
+        // A first value or step the source spells as a literal is a constant here rather than a field
+        // read: with a constant step LLVM sees an index moving by a known amount, hoists the bounds
+        // checks of the elements it reaches out of the loop and vectorizes it.
+        for c in clauses
+            los.push(self.known_or_field(Some(c.lo), job.fields, f))
+            steps.push(self.known_or_field(c.step, job.fields, f + 1))
             counts.push(self.env_get(job.fields, f + 2))
             f += 3
 

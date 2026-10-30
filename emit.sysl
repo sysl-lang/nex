@@ -182,9 +182,13 @@ struct Emitter
         self.declared.push(name)
         self.top.push(s"  $text\n")
 
-    // A runtime or C function, by its C name.
+    // A runtime or C function, by its C name. One that never returns says so, so LLVM treats the path
+    // through a failed check as leaving the loop it is in: the check can then be hoisted out of the
+    // loop and the loop vectorized.
     external(*self, name: string, params: string, result: string)
-        self.declare(name, s"func.func private @$name($params)${arrow(result)}")
+        val never = if never_returns(name) then " attributes {llvm.passthrough = [\"noreturn\", \"nounwind\"]}" else ""
+
+        self.declare(name, s"func.func private @$name($params)${arrow(result)}$never")
 
     call(*self, name: string, args: string, params: string, result: string) -> string
         self.external(name, params, result)
@@ -793,6 +797,9 @@ struct Emitter
 end Emitter
 
 val CLOSURE = "!llvm.struct<(ptr, ptr)>"
+
+// The runtime functions that never return: each traps or ends the program.
+private never_returns(name: string) -> bool = name == "nex_trap" || name == "nex_trap_owned" || name == "nex_trap_complex_div_zero" || name == "nex_stop"
 
 // The program as an MLIR module, or why it cannot be compiled.
 emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
