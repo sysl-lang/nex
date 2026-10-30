@@ -193,12 +193,6 @@ units_aggregates()
         "(def main () void (block (val f#1:(real64<m>) -> real64<m> (lambda 0)) (print (s (strip:real64 (call:real64<m> f#1 (rescale:real64<m> 0.0254 1.0<in>))) \" m\"))))\n(lambda 0 _ ((x#0 real64<m>)) real64<m> (captures) (*:real64<m> x#0 2.0))")
     assert_eq(refused("struct P\n  x: real<m>\ndef main() = print(P(1.0<s>).x)\n"), "error: the field `x` must be real64<m>, but this is real64<s>: time and length are different dimensions @3:22")
 
-@test("an array whose elements carry a unit is not elaborated yet")
-units_arrays_later()
-    assert_eq(refused("def main() =\n  val a = [1.0<m>, 2.0<m>]\n"), "error: an array whose elements carry a unit is not elaborated yet @2:11")
-    assert_eq(refused("def main() =\n  val a: [real<m>] = []\n"), "error: an array whose elements carry a unit is not elaborated yet @2:10")
-    assert_eq(refused("def main() =\n  val a = [1.0, 2.0]\n  print(a * 1.0<m>)\n"), "error: an array whose elements carry a unit is not elaborated yet @3:9")
-
 // -- generic units ------------------------------------------------------------------------------------
 
 @test("a function generic over a unit is checked once, its unit inferred from each call")

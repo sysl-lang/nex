@@ -67,10 +67,10 @@ private literal_type(class: int, want: Option[Ty]) -> Ty = want match
 private some_adoption(class: int, other: Ty) -> Option[Ty] = Some(adoption(class, other).unwrap_or(default_of(class)))
 
 // The widening of `v` to `to`, as a node, where it is not already of that type; a value in another
-// unit of `to`'s dimension is converted to `to`'s unit first.
+// unit of `to`'s dimension is converted to `to`'s unit first, element by element on an array.
 promote(v: TExpr, to: Ty) -> TExpr =
     if ty_eq(v.ty, to) || is_wild(v.ty) || has_error(v.ty) || has_error(to) then v
-    elif converts(v.ty, to) && !unit_eq(unit_of(v.ty), unit_of(to)) then promote(rescaled(v, unit_of(to)), to)
+    elif converts(elem_of(v.ty), elem_of(to)) && !unit_eq(elem_unit(v.ty), elem_unit(to)) then promote(rescaled(v, elem_unit(to)), to)
     else texpr(v.span, to, TPromote(v))
 
 // Two operands, each elaborated.

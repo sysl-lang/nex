@@ -405,10 +405,12 @@ impl Elab
             for k in 0..<out.len()
                 out.set(k, promote(out[k], with_elem(out[k].ty, ty)))
 
-            if any_array(out) then return self.elemental(span, name, out, ty)
-
             // `atan2` gives an angle, dimensionless whatever its arguments' one unit (DESIGN §13.4).
-            return texpr(span, if name == "atan2" then base_of(ty) else ty, TBuiltin(name, out))
+            val result = if name == "atan2" then base_of(ty) else ty
+
+            if any_array(out) then return self.elemental(span, name, out, result)
+
+            return texpr(span, result, TBuiltin(name, out))
 
         if args.len() != 1 then return self.arity(span, name, "one value")
 
@@ -419,6 +421,19 @@ impl Elab
 
         if is_error(v.ty) then return texpr(span, Error, TBuiltin(name, out))
         if has_unit(v.ty) then return self.measured_builtin(span, name, v)
+
+        // On an array whose elements carry a unit, the scalar rule over one element types the result
+        // and says what the argument becomes: a dimensionless one with a scale is brought to scale 1.
+        if is_array(v.ty) && carries_unit(v.ty)
+            val s = self.measured_builtin(span, name, texpr(v.span, elem_of(v.ty), TInvalid))
+
+            if is_error(s.ty) then return self.invalid(span)
+
+            *s.kind match
+                TBuiltin(_, xs) -> out.set(0, promote(v, with_elem(v.ty, xs[0].ty)))
+                _ -> ()
+
+            return self.elemental(span, name, out, s.ty)
 
         if is_array(v.ty)
             val r = self.scalar_result(span, name, elem_of(v.ty))

@@ -346,25 +346,7 @@ impl Elab
 
     // A whole-array reduction, or one along `dim` to rank R − 1 (DESIGN §7.4).
     reduction(*self, span: Span, name: string, pos: Buf[Expr], dim: Option[Expr]) -> TExpr
-        if name == "dot"
-            if pos.len() != 2 then return self.arity(span, name, "two vectors")
-
-            val out = self.unified(span, name, pos)
-
-            for k in 0..<2
-                if rank_of(out[k].ty) != 1 && !is_error(out[k].ty)
-                    self.fail(pos[k].span, s"`dot` takes two vectors (rank 1); this is ${self.shown(out[k])}")
-                    return self.invalid(span)
-
-            val ty = elem_of(out[0].ty)
-
-            if !is_numeric(ty) && !is_error(ty)
-                self.fail(span, s"`dot` needs numbers; these are ${self.shown(out[0])}")
-                return self.invalid(span)
-
-            if self.shape_meet(span, "`dot`", axes_of(out[0].ty), axes_of(out[1].ty)).is_none() then return self.invalid(span)
-
-            return texpr(span, ty, TArray(TReduction(name, out, None)))
+        if name == "dot" then return self.dot(span, pos)
 
         if (name == "minloc" || name == "maxloc") && pos.len() == 3 then return self.location_outside(span, name)
         if pos.len() != 1 then return self.arity(span, name, "one array, and optionally `dim =` the axis to reduce along")
@@ -373,7 +355,9 @@ impl Elab
 
         if is_error(a.ty) then return self.invalid(span)
 
-        val e = elem_of(a.ty)
+        // The checks are on the number type; the unit is carried after them.
+        val u = elem_unit(a.ty)
+        val e = base_of(elem_of(a.ty))
         val r = rank_of(a.ty)
         var need = ""
         var per = e
@@ -410,6 +394,35 @@ impl Elab
 
         args.push(a)
 
+        // `sum`, `minval`, `maxval` and `norm2` keep the unit; `product` raises it to the number of
+        // elements it multiplies, which must be static (DESIGN §13.4).
+        val axes = axes_of(a.ty)
+
+        if name == "sum" || name == "minval" || name == "maxval" || name == "norm2"
+            per = measured(per, u)
+        elif name == "product" && !is_one(u)
+            // Along `dim =`, the axis must be written as a literal so the elaborator knows which it is.
+            val along = dim match
+                Some(d) -> int_written(d).unwrap_or(0)
+                None -> -1
+            var n: i256 = 1
+            var known = along != 0
+
+            for j in 0..<r
+                if along > 0 && i128(j + 1) != along then continue
+
+                axes[j] match
+                    Fixed(x) -> n = n * i256(x)
+                    _ -> known = false
+
+            if !known
+                self.fail(span, s"`product` of ${self.shown(a)} has the unit ${spell(u)} to the power of the number of elements it multiplies, and that number is not static; strip the unit to multiply the numbers: `product(strip(a))`")
+                return self.invalid(span)
+
+            per = self.exact(span, unit_pow(u, ratio(n, 1))) match
+                Some(pu) -> measured(per, pu)
+                None -> return self.invalid(span)
+
         dim match
             None ->
                 val ty = if (name == "minloc" || name == "maxloc") && r >= 2 then Ty.Tuple(ints(r)) else per
@@ -419,7 +432,6 @@ impl Elab
                 val k = self.axis(d, r, "`dim`")
                 var kept: Buf[Extent] = buf()
                 val written = int_written(d)
-                val axes = axes_of(a.ty)
 
                 for j in 0..<r
                     written match
@@ -430,6 +442,46 @@ impl Elab
 
                 texpr(span, ty, TArray(TReduction(name, args, Some(k))))
     end reduction
+
+    // `dot(x, y)`: two vectors of one extent, met in one number type; their units multiply
+    // (DESIGN §13.6).
+    dot(*self, span: Span, pos: Buf[Expr]) -> TExpr
+        if pos.len() != 2 then return self.arity(span, "dot", "two vectors")
+
+        var out: Buf[TExpr] = buf()
+
+        for p in pos
+            out.push(self.infer(p))
+
+        for k in 0..<2
+            if is_error(out[k].ty) then return self.invalid(span)
+
+            if rank_of(out[k].ty) != 1
+                self.fail(pos[k].span, s"`dot` takes two vectors (rank 1); this is ${self.shown(out[k])}")
+                return self.invalid(span)
+
+            if !is_numeric(base_of(elem_of(out[k].ty)))
+                self.fail(span, s"`dot` needs numbers; these are ${self.shown(out[k])}")
+                return self.invalid(span)
+
+        val ea = elem_of(out[0].ty)
+        val eb = elem_of(out[1].ty)
+
+        val n = self.common_of(span, "dot", base_of(ea), base_of(eb)) match
+            Some(t) -> t
+            None -> return self.invalid(span)
+
+        val u = self.exact(span, unit_mul(unit_of(ea), unit_of(eb))) match
+            Some(u) -> u
+            None -> return self.invalid(span)
+
+        if self.shape_meet(span, "`dot`", axes_of(out[0].ty), axes_of(out[1].ty)).is_none() then return self.invalid(span)
+
+        for k in 0..<2
+            out.set(k, promote(out[k], with_unit(with_elem(out[k].ty, n), elem_unit(out[k].ty))))
+
+        texpr(span, measured(n, u), TArray(TReduction("dot", out, None)))
+    end dot
 
     // -- higher-order functions -------------------------------------------------------------------
 
