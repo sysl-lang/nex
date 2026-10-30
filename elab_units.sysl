@@ -311,7 +311,7 @@ impl Elab
     annotate(*self, span: Span, value: Expr, u: UnitExpr, want: Option[Ty]) -> TExpr
         *value.kind match
             Name(n) ->
-                if n == "to" && self.lookup_local(n).is_none() && self.find_top(n).is_none()
+                if n == "to" && self.lookup_local(n).is_none() && self.find_top(self.global(value.span, n)).is_none()
                     self.fail(span, "`to<u>` converts the value it is called on: `to<mm>(x)`")
                     return self.invalid(span)
             _ -> ()

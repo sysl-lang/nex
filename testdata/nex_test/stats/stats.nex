@@ -1,0 +1,9 @@
+module stats
+
+def mean(a: integer, b: integer) = (a + b) div 2
+
+private def half(x: integer) = x div 2
+
+// A test in the module itself sees its private declarations.
+@test
+def test_half() = assert_eq(half(8), 4)

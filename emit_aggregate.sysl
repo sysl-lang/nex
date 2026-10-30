@@ -12,7 +12,7 @@
 
 import sysl.buf.{Buf, buf}
 import sysl.math.max
-import sysl.text.{split, str_builder}
+import sysl.text.str_builder
 import sh.sysl.parsing.Span
 
 // A `match` case written aside: its head, its operations, the array values as it leaves them and its
@@ -531,7 +531,7 @@ impl Emitter
             Nominal(name, _) ->
                 self.struct_of(name) match
                     Some(s) ->
-                        self.put_text(sink, s"${split(s.name, "[")[0]} { ")
+                        self.put_text(sink, s"${display_name(s.name)} { ")
 
                         for k in 0..<s.fields.len()
                             if k > 0 then self.put_text(sink, ", ")

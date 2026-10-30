@@ -98,6 +98,11 @@ lex(src: Source) -> Result[Buf[Spanned[Tok]], Diagnostic] = lex_from(scan(src), 
 lex_within(src: Source, from: usize, to: usize) -> Result[Buf[Spanned[Tok]], Diagnostic] =
     lex_from(Scanner(src.bytes[0..<to], from), false)
 
+// The tokens of one whole file whose text stands between `from` and `to` in `src`, the text of a
+// project's every file, so that every token's span says which file it is in.
+lex_file(src: Source, from: usize, to: usize) -> Result[Buf[Spanned[Tok]], Diagnostic] =
+    lex_from(Scanner(src.bytes[0..<to], from), true)
+
 private lex_from(start: Scanner, at_head: bool) -> Result[Buf[Spanned[Tok]], Diagnostic]
     var s = start
     var lay = layout()

@@ -97,7 +97,9 @@ impl Elab
         self.agg.enums.push(EnumSrc(d, name, tparams.len() > 0, variants, buf()))
 
         for j in 0..<variants.len()
-            if self.declare(d.span, variants[j].name) then self.agg.variants.push(VariantRef(variants[j].name, owner, j))
+            val v = self.own_name(d, variants[j].name)
+
+            if self.declare(d.span, v) then self.agg.variants.push(VariantRef(v, owner, j))
 
     // `val a, b = ...` at module level: each name a module-level binding, all elaborated together.
     collect_group(*self, d: Decl, kind: BindKind, pat: Pattern, typ: Option[Type], init: Expr)
@@ -107,7 +109,11 @@ impl Elab
 
         var members: Buf[usize] = buf()
 
-        for n in pattern_names(pat)
+        for p in pattern_names(pat)
+            val n = self.own_name(d, p)
+
+            self.note_private(d, n)
+
             if self.declare(d.span, n)
                 members.push(self.globals.len())
                 self.tops.push(Top(n, TopValue(self.globals.len())))
@@ -290,7 +296,7 @@ impl Elab
     // element by element, or a variant's name, which a generic enum's needs.
     takes_context(self, e: Expr) -> bool = *e.kind match
         Tuple(_) -> true
-        Name(n) -> self.find_variant(n).is_some()
+        Name(n) -> self.find_variant(self.global(e.span, n)).is_some()
         _ -> false
 
     // The type a struct's or an enum's name denotes; `Error` for a generic one, which `resolve_type`
@@ -310,14 +316,18 @@ impl Elab
 
         for d in self.prog.decls
             *d.kind match
-                Struct(name, _, _) ->
+                Struct(n, _, _) ->
+                    val name = self.own_name(d, n)
+
                     self.find_struct(name) match
                         Some(k) ->
                             val s = self.agg.structs[k]
 
                             if !s.generic && s.decl.span.start == d.span.start then out.push(StructDecl(TStruct(d.span, name, s.fields)))
                         None -> ()
-                Enum(name, _, _) ->
+                Enum(n, _, _) ->
+                    val name = self.own_name(d, n)
+
                     self.find_enum(name) match
                         Some(k) ->
                             val e = self.agg.enums[k]
@@ -455,7 +465,7 @@ impl Elab
 
         val ty = self.lookup_local(n) match
             Some(id) -> self.locals[id].ty
-            None -> self.find_top(n) match
+            None -> self.find_top(self.global(receiver.span, n)) match
                 Some(TopValue(k)) -> if self.gstate[k] == Working then return false else self.global_type(k, receiver.span)
                 _ -> return false
 
@@ -603,10 +613,12 @@ impl Elab
             PatternKind.Name(n) ->
                 if members.len() == 0 then return BLocal(self.declare_local(pat.span, n, ty, kind))
 
-                for k in members
-                    if self.globals[k].name == n then self.gty.set(k, ty)
+                val g = self.mods.qualify(self.mods.module_at(pat.span.start), n)
 
-                BGlobal(n)
+                for k in members
+                    if self.globals[k].name == g then self.gty.set(k, ty)
+
+                BGlobal(g)
             Wildcard -> BSkip
             PatternKind.Tuple(elems) ->
                 val tys = self.element_types(pat.span, elems.len(), ty)
@@ -858,7 +870,7 @@ impl Elab
                             None -> ()
                     None -> ()
 
-                if self.find_variant(n).is_some()
+                if self.find_variant(self.global(pat.span, n)).is_some()
                     self.wrong_variant(pat.span, owner, sty, n)
                     return ArmShape(None, n, buf(), buf(), false)
 
@@ -924,7 +936,7 @@ impl Elab
             Some(e) -> e
             None -> return
 
-        self.find_variant(n) match
+        self.find_variant(self.global(span, n)) match
             Some(v) -> self.fail(span, s"`${n}` is a variant of `${self.agg.enums[v.owner].name}`, and this value is ${show_ty(sty)}")
             None ->
                 var names: Buf[string] = buf()
