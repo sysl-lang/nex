@@ -1,0 +1,26 @@
+// The perf oracle's parallel dot kernel (PLAN.md): `dot.nex` as a `parallel for` with a `+`
+// reduction, run with `OMP_NUM_THREADS` set to the performance-core count. The sum's order depends
+// on the thread count, so the checksum agrees with the twin's to rounding, not bit for bit. Prints
+// nanoseconds per pass, then a checksum; `parallel-dot.f90` is its twin.
+
+extern def clock_gettime_nsec_np(clock: int32): uint64
+
+def main() =
+  val n = 10000000
+  val reps = 50
+  var x: [real] = zeros(n)
+  var y: [real] = zeros(n)
+  for i in 1..n
+    x[i] = 1.0 / i
+    y[i] = 1.0 * (i % 7)
+  var s = 0.0
+  val start = clock_gettime_nsec_np(4)
+  for r in 1..reps
+    var t = 0.0
+    parallel for i in 1..n reduce t: +
+      t += x[i] * y[i]
+    s = s + t
+    x[1] = 1.0 + s * 1.0e-30
+  val done = clock_gettime_nsec_np(4)
+  print((done - start) / reps)
+  print(s)

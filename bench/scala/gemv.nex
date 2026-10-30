@@ -1,0 +1,21 @@
+// gemv.nex for the Scala reference's AOT backend: the work of ../gemv.nex, 0-based, timed from
+// outside. Its loops are blocks, not `do` lines, and avoid `i`, which the reference reads as the
+// imaginary unit in a `do` line.
+
+def main() =
+  val n = 4000
+  var a = fill((n, n), 0.0)
+  var x = fill(n, 0.0)
+  var y = fill(n, 0.0)
+  for q in 0..n
+    x[q] = to_real((q + 1) % 5) - 2.0
+    for p in 0..n
+      a[p, q] = 1.0 / to_real(p + q + 2)
+  for r in 0..20
+    for p in 0..n
+      y[p] = 0.0
+    for q in 0..n
+      val xq = x[q]
+      for p in 0..n
+        y[p] = y[p] + a[p, q] * xq
+  print(sum(y))

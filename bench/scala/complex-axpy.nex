@@ -1,0 +1,16 @@
+// complex-axpy.nex for the Scala reference's AOT backend: the work of ../complex-axpy.nex, 0-based,
+// timed from outside.
+
+def main() =
+  val n = 10000000
+  val a = 1.0e-3 + 2.0e-3 * i
+  var x = fill(n, 0.0 + 0i)
+  var y = fill(n, 0.0 + 0i)
+  for k in 0..n
+    x[k] = 1.0 / to_real(k + 1) + 0.5 * i
+    y[k] = to_real((k + 1) % 7) + 1.0 * i
+  for r in 0..50
+    y = a * x + y
+  val s = sum(y)
+  print(s.re)
+  print(s.im)
