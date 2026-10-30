@@ -961,16 +961,34 @@ argument's buffer disappears, the function returns nothing and writes the caller
 (`parallel.mlir`, `axpy`). Kept public, the same function returns its argument and the deallocation
 pipeline clones it: a whole-array copy per call. Inside the callee, assigning the whole parameter an
 array of the shape it has (`v = v * s`, `v += 1`) copies the computed value over the argument's
-buffer; only an array of another shape rebinds the parameter, and reaches the caller when the call
-returns.
+buffer; only an array of another shape rebinds the parameter.
+
+Beside each `inout` array crosses its **place word**, a pointer saying where a rebinding goes: the
+address of the storage the caller holds the array in (below), null where the caller holds it in SSA
+form, or the window mark where the argument is a window, which cannot take another shape. Rebinding
+the parameter to an array of another shape traps at once on the window mark (*"shape mismatch"*, as a
+window assigned an array of another shape anywhere does); with an address, it stores the new array
+there, and the parameter goes on as that array's buffer, so the callee's later writes land where the
+caller sees them; with null, the new array is the parameter's and reaches the caller when the call
+returns. A function passing its own parameter on whole passes its own place word, and where the
+callee can rebind it (it assigns it whole, a lambda captures it, or it passes it on to one that can,
+or to a function value), goes on afterwards as the array its place then holds.
 
 The callee writes where the caller can see each write as it is made, so a trap leaves them there. An
 array the caller holds in storage — a `var` a lambda captures, a module-level `var`, a field of a
 struct `var` — is first made the only holder of its buffer (copied where another holder shares it or
 the statement around the call is reading it, as a loop over it does), and that buffer itself is what
-the call is lent, whole or as a window; after the call the handed-back value is that buffer, or, where
-the callee rebound the parameter to another shape, a new one stored into the place. An array in SSA
-form needs nothing: a trap leaves its function's frame, and nothing reads it again.
+the call is lent, whole or as a window, with the place's address as its place word; after the call
+the handed-back value is that buffer, or, where the callee rebound the parameter to another shape, a
+new one stored into the place. An array in SSA form needs nothing: a trap leaves its function's frame,
+and nothing reads it again.
+
+An `inout` array parameter a lambda captures (§8.3 rule 4) is held in storage as a captured local
+is. Where its place word is an address, that storage is the caller's own place; otherwise the callee
+boxes a copy of the argument in a slot of its frame, writes it there, and hands it back when it
+returns. That slot also keeps the argument's buffer, and a trap that leaves the callee writes the
+copy back over it, so a window's writes before the trap stay written there too. The lambda carries
+the place word beside the parameter's place and treats a rebinding as the parameter's function does.
 
 A scalar `inout` is a pointer argument. An element of an array of numbers passed `inout` (`a[i]`,
 `m[:, j][i]`) is a value in its array's tensor: its indices are evaluated and bounds-checked once
@@ -984,9 +1002,11 @@ else has storage of its own and crosses as its address. An `inout` slice argumen
 a row, a strided or reversed window and a line of a rank-3 array each reach the callee as a
 `memref.subview` of the caller's buffer, with no allocation and no copy, in a `parallel for` body as
 in sequential code. A call through a function value (a local `def`, a lambda, a `val` bound to a
-function, a parameter of function type) passes an `inout` array as its buffer: the code behind the
-value writes it in place and returns only its value, so the same window is written where it lies
-there too.
+function, a parameter of function type) passes an `inout` array as its buffer and its place word: the
+code behind the value writes it in place and returns only its value, so the same window is written
+where it lies there too. Such a call cannot hand back an array of another shape, so where the place
+word would be null it lends a slot of the caller's frame instead, and takes a copy of what the callee
+stored there, if anything, as the place's new array.
 
 ---
 

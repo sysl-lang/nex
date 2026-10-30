@@ -409,7 +409,9 @@ The argument to an `inout` parameter is a **place** rooted in something mutable:
 | a slice | `scale(m[:, j], 2.0)`, `scale(a[1..n by 2], -1.0)` |
 
 A slice argument borrows exactly that window of the array and the callee writes it in place. Column
-`j` of `m` is scaled where it lies; the rest of `m` is untouched. An element may be taken through
+`j` of `m` is scaled where it lies; the rest of `m` is untouched. A window keeps its shape: a callee
+assigning its parameter an array of another shape traps there, with *"shape mismatch"*, where a
+whole array would take the new array and its caller would see it. An element may be taken through
 any number of slices (`a[2..][k]`, `m[:, j][i]`, `a[.. by -1][1]`), and its indices are evaluated
 once and checked against the array's bounds before the call starts, so an index out of bounds traps
 before the callee runs. The same holds for an `extern` taking a scalar `inout` or a `[*; ..]`

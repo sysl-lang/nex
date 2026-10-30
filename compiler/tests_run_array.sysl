@@ -96,10 +96,11 @@ inout_array_no_copy()
 
     finish(b)
     // As emitted the callee hands its array back; bufferized, that result is gone.
-    assert(m.contains("@\"n.zero_first\"(%a0: tensor<?xi64>) -> tensor<?xi64>"), m)
+    // The place word crosses beside the buffer (DESIGN §8.4).
+    assert(m.contains("@\"n.zero_first\"(%a0: tensor<?xi64>, %p0: !llvm.ptr) -> tensor<?xi64>"), m)
     assert_eq(occurrences(buffers, "memref.copy"), 0)
-    assert(buffers.contains("func.func private @n.zero_first(%arg0: memref<?xi64, strided<[?], offset: ?>>) {"), buffers)
-    assert_eq(occurrences(buffers, "call @n.zero_first(%cast) : (memref<?xi64, strided<[?], offset: ?>>) -> ()"), 2)
+    assert(buffers.contains("func.func private @n.zero_first(%arg0: memref<?xi64, strided<[?], offset: ?>>, %arg1: !llvm.ptr) {"), buffers)
+    assert_eq(occurrences(buffers, ": (memref<?xi64, strided<[?], offset: ?>>, !llvm.ptr) -> ()"), 2)
 
 @test("two static shapes that differ are a compile error wherever both are known")
 static_shape_errors()
