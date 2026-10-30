@@ -661,8 +661,9 @@ impl Elab
         None -> self.invalid(span)
 
     // An `@elemental` function obeys the parallel-body rules (DESIGN §7.3, §9.4): scalar parameters,
-    // none `inout`, a result, and a body that writes no module variable and does no I/O but `print`.
-    check_elemental(*self, k: usize)
+    // none `inout`, a result, and a body that, through everything it calls, writes no module
+    // variable, does no I/O but `print` and `eprint` and starts no `parallel`.
+    check_elemental(*self, k: usize, fx: Effects)
         if !self.is_elemental(k) then return
 
         val f = self.funs[k]
@@ -677,11 +678,21 @@ impl Elab
 
         if is_void(self.fret[k]) then self.fail(span, s"an `@elemental` function gives a value for each element, and `${f.name}` returns nothing")
 
-        for t in self.fout
-            if t.name == f.name
-                impurity(t.body) match
-                    Some(why) -> self.fail(span, s"an `@elemental` function may be run in any order, so it cannot ${why}")
-                    None -> ()
+        fx.of_fun(f.name) match
+            Some(s) ->
+                val why = if s.writes.len() > 0
+                    s"write the module variable `${s.writes[0]}`"
+                elif s.io.len > 0
+                    s"do I/O with `${s.io}`"
+                elif s.parallel
+                    "run a `parallel` construct"
+                elif s.opaque.len > 0
+                    s"call ${s.opaque}, which the checker cannot see into"
+                else
+                    ""
+
+                if why.len > 0 then self.fail(span, s"an `@elemental` function may be run in any order, so it cannot ${why}")
+            None -> ()
     end check_elemental
 
     // -- loops ------------------------------------------------------------------------------------
@@ -713,38 +724,8 @@ impl Elab
     end for_each
 end Elab
 
-// What in a body an elemental function may not do: write a module variable, or do I/O other than
-// `print`; `None` where it does neither. Lambdas are their own functions and are not looked into.
-private impurity(e: TExpr) -> Option[string]
-    *e.kind match
-        TAssign(_, target, _) ->
-            root_global(target) match
-                Some(n) -> return Some(s"write the module variable `${n}`")
-                None -> ()
-        TBuiltin(name, _) ->
-            if name == "eprint" || name == "read_bytes" || name == "write_bytes" then return Some(s"do I/O with `${name}`")
-        _ -> ()
-
-    for c in children(e)
-        impurity(c) match
-            Some(why) -> return Some(why)
-            None -> ()
-
-    None
-end impurity
-
-// The module-level binding a place is in, where it is in one.
-private root_global(place: TExpr) -> Option[string] = *place.kind match
-    TGlobalRef(n) -> Some(n)
-    TField(v, _, _) -> root_global(v)
-    TTupleField(v, _) -> root_global(v)
-    TArray(op) -> *op match
-        TIndex(target, _) -> root_global(target)
-        _ -> None
-    _ -> None
-
-// The expressions directly inside `e`.
-private children(e: TExpr) -> Buf[TExpr]
+// The expressions directly inside `e`. A lambda's body is not inside the expression that makes it.
+children(e: TExpr) -> Buf[TExpr]
     var out: Buf[TExpr] = buf()
 
     *e.kind match
@@ -816,6 +797,7 @@ private children(e: TExpr) -> Buf[TExpr]
                 out.push(a.body)
         TDestructure(_, _, init) -> out.push(init)
         TArray(op) -> array_children(*op, &out)
+        TParallel(op) -> parallel_children(*op, &out)
         _ -> ()
 
     out

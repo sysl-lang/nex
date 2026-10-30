@@ -224,8 +224,48 @@ show_texpr(p: TProgram, e: TExpr) -> string
             tform(typed("match", e.ty), items)
         TDestructure(kind, pat, init) -> s"(${bind_word(kind)} ${show_bind(p, pat)} ${show_texpr(p, init)})"
         TArray(op) -> show_tarr(p, e.ty, *op)
+        TParallel(op) -> show_tpar(p, e.ty, *op)
         TInvalid -> "?"
 end show_texpr
+
+// `(parallel-for L0 (i#1:int64 (1 .. n#0)) (reduce total#2 +) body)`, `(contribute total#2 x)`,
+// `(parallel:[real64] ...)`.
+private show_tpar(p: TProgram, ty: Ty, op: TPar) -> string
+    var items: Buf[string] = buf()
+
+    op match
+        TParFor(id, clauses, reductions, body) ->
+            items.push(loop_name(p, id))
+
+            for c in clauses
+                var range = s"${show_texpr(p, c.lo)} ${if c.inclusive then ".." else "..<"} ${show_texpr(p, c.hi)}"
+
+                c.step match
+                    Some(s) -> range = range + " by " + show_texpr(p, s)
+                    None -> ()
+
+                items.push(s"(${local_name(p, c.var_id)}:${show_ty(p.locals[c.var_id].ty)} (${range}))")
+
+            for r in reductions
+                val how = r.op match
+                    RBuiltin(name) -> name
+                    RUser(f) -> show_texpr(p, f)
+
+                items.push(s"(reduce ${show_texpr(p, r.target)} ${how})")
+
+            items.push(show_texpr(p, body))
+            tform("parallel-for", items)
+        TContribute(target, value, index) ->
+            items.push(show_texpr(p, target))
+            items.push(show_texpr(p, value))
+
+            index match
+                Some(i) -> items.push(show_texpr(p, i))
+                None -> ()
+
+            tform("contribute", items)
+        TParExpr(value) -> s"(${typed("parallel", ty)} ${show_texpr(p, value)})"
+end show_tpar
 
 // ` (x real64) (y real64)`: each field and its type, after a struct's or a variant's name.
 private show_fields(fields: Buf[FieldInfo]) -> string

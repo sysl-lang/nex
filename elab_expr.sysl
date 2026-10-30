@@ -224,8 +224,8 @@ impl Elab
             ExprKind.Tuple(elems) -> self.tuple(span, elems, want)
             Index(target, indices) -> self.index(span, self.infer(target), indices)
             TupleField(receiver, index) -> self.tuple_field(span, receiver, index)
-            ParallelFor(_, _, _) -> self.not_yet(span, "a `parallel for`")
-            Parallel(_) -> self.not_yet(span, "a `parallel` expression")
+            ParallelFor(clauses, reductions, body) -> self.parallel_for(span, clauses, reductions, body)
+            Parallel(body) -> self.parallel_expr(span, body, want)
             Match(scrutinee, cases) -> self.match_expr(span, scrutinee, cases, want)
             NamedArg(_, _) ->
                 self.fail(span, "a named argument stands only in a call's argument list")
@@ -909,6 +909,10 @@ impl Elab
     end place
 
     assign(*self, span: Span, op: string, target: Expr, value: Expr) -> TExpr
+        self.reduction_named(target) match
+            Some(k) -> return self.contribution(span, op, k, value)
+            None -> ()
+
         val p = self.place(target)
 
         if is_array(p.ty) then return self.array_assign(span, op, target, p, value)
@@ -1021,4 +1025,8 @@ copy_fx(fx: Fx) -> Fx
     marks.extend(fx.marks.view())
     loops.extend(fx.loops.view())
     frames.extend(fx.frames.view())
-    Fx(scope, marks, loops, frames, fx.in_const)
+
+    var reds: Buf[RedVar] = buf()
+
+    reds.extend(fx.reds.view())
+    Fx(scope, marks, loops, frames, fx.in_const, reds)

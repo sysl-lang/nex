@@ -1,0 +1,152 @@
+@tests
+
+// The typed IR of parallelism and the checker's diagnostics (DESIGN §9): each form with the
+// program it accepts, and each rule of §9.4 with a body it refuses.
+
+// -- loops and reductions ---------------------------------------------------------------------
+@test("a parallel for with built-in reductions: each contribution keeps only its value")
+par_for_reduce()
+    assert_eq(elaborated("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var total = 0.0\n  var peak = 0.0\n  parallel for i in 1..n reduce total: +, peak: max\n    y[i] = 2.0 * x[i] + y[i]\n    total += x[i] * x[i]\n    peak = max(peak, abs(x[i]))\n"),
+        "(def main () void (block (val n#0:int64 4) (val x#1:[real64] (linspace:[real64] 0.0 1.0 n#0)) (var y#2:[real64] (zeros:[real64] n#0)) (var total#3:real64 0.0) (var peak#4:real64 0.0) (parallel-for L0 (i#5:int64 (1 .. n#0)) (reduce total#3 +) (reduce peak#4 max) (block (= (index:real64 y#2 i#5) (+:real64 (*:real64 2.0 (index:real64 x#1 i#5)) (index:real64 y#2 i#5))) (contribute total#3 (*:real64 (index:real64 x#1 i#5) (index:real64 x#1 i#5))) (contribute peak#4 (abs:real64 (index:real64 x#1 i#5)))))))")
+    assert_eq(elaborated("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var p = 1\n  var all = true\n  parallel for i in 1..n by 2 reduce p: *, all: and\n    p = p * i\n    all = all and x[i] > 0.0\n"),
+        "(def main () void (block (val n#0:int64 4) (val x#1:[real64] (linspace:[real64] 0.0 1.0 n#0)) (var y#2:[real64] (zeros:[real64] n#0)) (var p#3:int64 1) (var all#4:bool true) (parallel-for L0 (i#5:int64 (1 .. n#0 by 2)) (reduce p#3 *) (reduce all#4 and) (block (contribute p#3 i#5) (contribute all#4 (>:bool (index:real64 x#1 i#5) 0.0))))))")
+
+@test("a user-defined operator reduces from the variable's starting value")
+par_user_reduction()
+    assert_eq(elaborated("def kahan_add(a: (real, real), b: (real, real)): (real, real) =\n  val y = b.1 - a.2\n  val t = a.1 + y\n  (t, (t - a.1) - y)\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var s = (0.0, 0.0)\n  parallel for i in 1..n reduce s: kahan_add\n    s = kahan_add(s, (x[i], 0.0))\n"),
+        "(def kahan_add ((a#0 (real64, real64)) (b#1 (real64, real64))) (real64, real64) (block:(real64, real64) (val y#2:real64 (-:real64 (.1:real64 b#1) (.2:real64 a#0))) (val t#3:real64 (+:real64 (.1:real64 a#0) y#2)) (tuple:(real64, real64) t#3 (-:real64 (-:real64 t#3 (.1:real64 a#0)) y#2))))\n(def main () void (block (val n#4:int64 4) (val x#5:[real64] (linspace:[real64] 0.0 1.0 n#4)) (var y#6:[real64] (zeros:[real64] n#4)) (var s#7:(real64, real64) (tuple:(real64, real64) 0.0 0.0)) (parallel-for L0 (i#8:int64 (1 .. n#4)) (reduce s#7 kahan_add) (contribute s#7 (tuple:(real64, real64) (index:real64 x#5 i#8) 0.0)))))")
+
+@test("a maxloc reduction contributes a candidate and its index")
+par_location_reduction()
+    assert_eq(elaborated("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var worst = (0.0, 0)\n  parallel for i in 1..n reduce worst: maxloc\n    worst = maxloc(worst, abs(x[i]), i)\n"),
+        "(def main () void (block (val n#0:int64 4) (val x#1:[real64] (linspace:[real64] 0.0 1.0 n#0)) (var y#2:[real64] (zeros:[real64] n#0)) (var worst#3:(real64, int64) (tuple:(real64, int64) 0.0 0)) (parallel-for L0 (i#4:int64 (1 .. n#0)) (reduce worst#3 maxloc) (contribute worst#3 (abs:real64 (index:real64 x#1 i#4)) i#4))))")
+
+@test("a body owns its elements, binds its own locals, leaves inner loops, cycles and prints")
+par_body_freedoms()
+    assert_eq(elaborated("var hits = 0\ndef twice(v: inout real) = v *= 2.0\ndef main() =\n  val n = 3\n  var c: [real; :, :] = zeros((n, n))\n  parallel for j in 1..n, i in 1..n reduce hits: +\n    var acc = 0.0\n    for k in 1..n\n      if k > i then exit\n      acc += 1.0\n    twice(acc)\n    if i == j then cycle\n    c[i, j] = acc\n    hits += 1\n    eprint(acc)\n"),
+        "(var hits int64 0)\n(def twice ((v#0 inout real64)) void (*= v#0 2.0))\n(def main () void (block (val n#1:int64 3) (var c#2:[real64; :, :] (zeros:[real64; :, :] n#1 n#1)) (parallel-for L0 (j#3:int64 (1 .. n#1)) (i#4:int64 (1 .. n#1)) (reduce hits +) (block (var acc#5:real64 0.0) (for L1 k#6:int64 (1 .. n#1) (block (if (>:bool k#6 i#4) (exit L1)) (+= acc#5 1.0))) (call twice (inout acc#5)) (if (==:bool i#4 j#3) (cycle L0)) (= (index:real64 c#2 i#4 j#3) acc#5) (contribute hits 1) (eprint acc#5)))))")
+
+@test("a header runs over integer ranges and reduces outer vars its operator applies to")
+par_header_refusals()
+    assert_eq(refused("def main() =\n  val x = [1.0, 2.0]\n  parallel for v in x do print(v)\n"),
+        "error: a `parallel for` runs over an integer range (`v in 1..n`), not over an array's elements @3:21")
+    assert_eq(refused("def main() =\n  val k = 0.0\n  parallel for i in 1..2 reduce k: +\n    print(i)\n"),
+        "error: a reduction variable is an outer `var`, and `k` is not one @3:3")
+    assert_eq(refused("def main() =\n  var b = true\n  parallel for i in 1..2 reduce b: +\n    print(i)\n"),
+        "error: `+` reduces a number, and `b` is bool @3:3")
+    assert_eq(refused("def main() =\n  var a: [real] = zeros(2)\n  parallel for i in 1..2 reduce a: +\n    print(i)\n"),
+        "error: `+` reduces a number, and `a` is [real64] @3:3")
+    assert_eq(refused("def add3(a: real, b: real, c: real) = a + b + c\ndef main() =\n  var r = 0.0\n  parallel for i in 1..2 reduce r: add3\n    print(i)\n"),
+        "error: a reduction's operator `add3` must be a function (real64, real64) -> real64, and it is (real64, real64, real64) -> real64 @4:3")
+    assert_eq(refused("def main() =\n  var r = 0.0\n  parallel for i in 1..2 reduce r: +, r: *\n    print(i)\n"),
+        "error: `r` is named in two `reduce` clauses @3:3")
+
+@test("a reduction variable changes only by its form and is never read in the body")
+par_contribution_refusals()
+    assert_eq(refused("def main() =\n  var r = 0.0\n  parallel for i in 1..2 reduce r: max\n    r = min(r, 1.0)\n"),
+        "error: `r` reduces with `max`, so an iteration changes it only by `r = max(r, e)`, where `e` does not mention `r` @4:5")
+    assert_eq(refused("def main() =\n  var r = 0.0\n  parallel for i in 1..2 reduce r: +\n    r -= 1.0\n"),
+        "error: `r` reduces with `+`, so an iteration changes it only by `r += e` or `r = r + e`, where `e` does not mention `r` @4:5")
+    assert_eq(refused("def main() =\n  var r = 0.0\n  parallel for i in 1..2 reduce r: +\n    r += r * 2.0\n"),
+        "error: the reduction variable `r` is read here; inside its loop an iteration only contributes to it @4:10")
+    assert_eq(refused("def main() =\n  var r = 0.0\n  parallel for i in 1..2 reduce r: +\n    print(r)\n"),
+        "error: the reduction variable `r` is read here; inside its loop an iteration only contributes to it @4:11")
+    assert_eq(refused("def main() =\n  var loc = (0.0, 0)\n  parallel for i in 1..2 reduce loc: maxloc\n    loc.1 = 1.0\n"),
+        "error: `loc` is a reduction variable: an iteration changes it only by its contribution @4:5")
+    assert_eq(refused("def main() =\n  val loc = (0.0, 0)\n  print(maxloc(loc, 1.0, 2))\n"),
+        "error: `maxloc(v, x, i)` is the contribution of a `reduce v: maxloc` clause, and stands only in that loop's body as `v = maxloc(v, x, i)` @3:9")
+
+// -- rule 1: writes ---------------------------------------------------------------------------
+@test("a body writes only its own locals, its reductions and elements it owns")
+par_shared_writes()
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var t = 0.0\n  parallel for i in 1..n\n    t = x[i]\n"),
+        "error: a parallel body cannot assign `t`, which every iteration shares: declare it inside the body, or name it in a `reduce` clause @7:5")
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    y[i + 1] = 1.0\n"),
+        "error: this write to `y` is not owned by the iteration: one subscript must be the index `i` itself, so that no two iterations write one element @6:5")
+    assert_eq(refused("def main() =\n  var c: [real; :, :] = zeros((2, 2))\n  parallel for i in 1..2, j in 1..2\n    c[i, :] = 1.0\n"),
+        "error: this write to `c` is not owned by the iteration: each of the indices `i`, `j` must be the whole subscript of an axis of its own @4:5")
+    assert_eq(refused("def main() =\n  var c: [real; :, :] = zeros((2, 2))\n  parallel for i in 1..2, j in 1..2\n    c[i, j] = 1.0\n    c[j, i] = 2.0\n"),
+        "error: `c` is written at two different subscripts in this body, so two iterations could write one element @5:5")
+    assert_eq(refused("def zero(v: inout [real]) = v[1] = 0.0\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    zero(y)\n"),
+        "error: a parallel body cannot assign `y`, which every iteration shares: declare it inside the body, or name it in a `reduce` clause @7:10")
+    assert_eq(refused("var g = 0.0\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    g = x[i]\n"),
+        "error: a parallel body cannot assign `g`, which every iteration shares: declare it inside the body, or name it in a `reduce` clause @7:5")
+
+@test("nothing called from a body writes a module var or a shared local, however deep")
+par_writes_through_calls()
+    assert_eq(refused("var count = 0\ndef bump() = count += 1\ndef deep() = bump()\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    deep()\n"),
+        "error: `deep` assigns the module variable `count`, and nothing a parallel body calls may change a module variable @9:5")
+    assert_eq(refused("var hits = 0\ndef even(k: integer): bool = if k == 0 then true else odd(k - 1)\ndef odd(k: integer): bool =\n  hits += 1\n  if k == 0 then false else even(k - 1)\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    print(even(i))\n"),
+        "error: `even` assigns the module variable `hits`, and nothing a parallel body calls may change a module variable @11:11")
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var t = 0.0\n  def bump() = t += 1.0\n  parallel for i in 1..n\n    bump()\n"),
+        "error: `bump` assigns `t`, which every iteration shares @8:5")
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  var t = 0.0\n  parallel for i in 1..n\n    def f(v: real) = t = v\n    f(x[i])\n"),
+        "error: a parallel body cannot assign `t`, which every iteration shares: declare it inside the body, or name it in a `reduce` clause @7:22")
+
+// -- rule 2: reads ----------------------------------------------------------------------------
+@test("an array written element by element is read only at the iteration's own element")
+par_owned_reads()
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    y[i] = y[i - 1]\n"),
+        "error: `y` is written by every iteration at its own element, so the body reads it only there, not at another iteration's @6:12")
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    y[i] = sum(y)\n"),
+        "error: `y` is written by every iteration at its own element, so the body reads it only there @6:16")
+    assert_eq(refused("var g: [real] = zeros(3)\ndef total(): real = sum(g)\ndef main() =\n  parallel for i in 1..3\n    g[i] = total()\n"),
+        "error: `total` reads `g`, which this body writes element by element @5:12")
+
+// -- rule 3: calls and I/O --------------------------------------------------------------------
+@test("a body does no I/O but print and eprint, and calls only what the checker sees")
+par_io_and_opaque_calls()
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    print(length(read_bytes(\"data\")))\n"),
+        "error: a parallel body does no I/O but `print` and `eprint`, and `read_bytes` is I/O @6:18")
+    assert_eq(refused("def save(t: real) =\n  write_bytes(\"f\", to_bytes([1]))\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    save(x[i])\n"),
+        "error: `save` does I/O with `write_bytes`, and a parallel body does no I/O but `print` and `eprint` @8:5")
+    assert_eq(refused("def apply(f: (real) -> real, v: real) = f(v)\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    y[i] = apply(t -> t, x[i])\n"),
+        "error: `apply` calls `f`, which the checker cannot see into, so a parallel body cannot call it @7:12")
+    assert_eq(refused("def each(f: (real) -> real, v: [real]) = parallel map(v, f)\ndef main() = ()\n"),
+        "error: a parallel body calls only functions the checker can see into, and `f` is a function value; call a function by its name @1:58")
+
+// -- rule 5: nesting --------------------------------------------------------------------------
+@test("no parallel construct runs inside a parallel body, directly or through a call")
+par_nested()
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    parallel for j in 1..n do print(j)\n"),
+        "error: a `parallel` cannot run inside a parallel body; cover both axes with one header: `parallel for j in 1..n, i in 1..m` @6:5")
+    assert_eq(refused("def inner() =\n  parallel for k in 1..3 do print(k)\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    inner()\n"),
+        "error: `inner` runs a `parallel` construct, and a parallel body cannot start another @8:5")
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  val w = parallel map(x, t ->\n    val z = parallel sum(x)\n    t + z)\n"),
+        "error: a `parallel` cannot run inside a parallel body; cover both axes with one header: `parallel for j in 1..n, i in 1..m` @6:13")
+
+// -- rule 6: leaving --------------------------------------------------------------------------
+@test("cycle ends an iteration; exit, an outer cycle, return and stop are refused")
+par_leaving()
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    if i > 2 then exit\n"),
+        "error: `exit` cannot leave a parallel loop, whose iterations have no order to leave in; `cycle` ends one iteration @6:19")
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  outer: for k in 1..2\n    parallel for i in 1..n\n      cycle outer\n"),
+        "error: `cycle` cannot reach a loop outside the parallel body @7:7")
+    assert_eq(refused("def f(n: integer): integer =\n  parallel for i in 1..n\n    if i > 2 then return 1\n  0\ndef main() = ()\n"),
+        "error: `return` cannot leave a parallel body, whose iterations have no order to leave in @3:19")
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    if x[i] < 0.0 then stop 1\n"),
+        "error: `stop` cannot end the program from a parallel body; a failed `assert` traps, and a trap ends the loop @6:24")
+
+// -- parallel expressions ---------------------------------------------------------------------
+@test("parallel computes a map, a reduction or an element-wise expression")
+par_expressions()
+    assert_eq(elaborated("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  val z = parallel map(x, t -> if t > 0.0 then t else 0.0)\n  val d = parallel sum(x * y)\n  val e = parallel exp(-x * x)\n  val w = parallel 2x + y\n"),
+        "(def main () void (block (val n#0:int64 4) (val x#1:[real64] (linspace:[real64] 0.0 1.0 n#0)) (var y#2:[real64] (zeros:[real64] n#0)) (val z#4:[real64] (parallel:[real64] (map:[real64] x#1 (lambda 0)))) (val d#5:real64 (parallel:real64 (sum:real64 (.*:[real64] x#1 y#2)))) (val e#6:[real64] (parallel:[real64] (.exp:[real64] (.*:[real64] (.-:[real64] x#1) x#1)))) (val w#7:[real64] (parallel:[real64] (.+:[real64] (.*:[real64] (adopt:real64 2) x#1) y#2))) ()))\n(lambda 0 _ ((t#3 real64)) real64 (captures) passed (if:real64 (>:bool t#3 0.0) t#3 0.0))")
+    assert_eq(elaborated("val xs = [1.0, 2.0, 3.0]\nval total = parallel sum(xs)\ndef main() = ()\n"),
+        "(val xs [real64] (array:[real64] 1.0 2.0 3.0))\n(val total real64 (parallel:real64 (sum:real64 xs)))\n(def main () void ())")
+    assert_eq(refused("def main() =\n  val x = [1.0, 2.0]\n  print(parallel reduce(x, 0.0, (s, t) -> s + t))\n"),
+        "error: the general `reduce(a, init, f)` has no parallel form; write a `parallel for ... reduce s: f` with `f` as the operator @3:18")
+    assert_eq(refused("def main() = print(parallel 1.0 + 2.0)\n"),
+        "error: `parallel` computes a `map`, a reduction (`sum`, `product`, `minval`, `maxval`, `dot`) or a whole-array element-wise expression, and this is none of them @1:29")
+    assert_eq(refused("def main() = print(parallel norm2([3.0, 4.0]))\n"),
+        "error: `norm2` has no parallel form; `parallel` computes `sum`, `product`, `minval`, `maxval` and `dot` @1:29")
+    assert_eq(refused("def put(t: real): real =\n  write_bytes(\"f\", to_bytes([1]))\n  t\ndef main() = print(parallel map([1.0], put))\n"),
+        "error: `put` does I/O with `write_bytes`, and a parallel body does no I/O but `print` and `eprint` @4:40")
+
+// -- elemental functions ----------------------------------------------------------------------
+@test("an @elemental function obeys the body rules through everything it calls")
+par_elemental_transitive()
+    assert_eq(refused("var g = 0\ndef note() = g += 1\n@elemental def h(x: real) =\n  note()\n  x\ndef main() = ()\n"),
+        "error: an `@elemental` function may be run in any order, so it cannot write the module variable `g` @3:1")
+    assert_eq(refused("def inner() =\n  parallel for k in 1..3 do print(k)\n@elemental def h(x: real) =\n  inner()\n  x\ndef main() = ()\n"),
+        "error: an `@elemental` function may be run in any order, so it cannot run a `parallel` construct @3:1")
