@@ -2,19 +2,9 @@
 
 // The programs the interpreter does not run yet (`tests_engines.sysl`), by the stage of PLAN.md M13
 // that brings what each lacks: a `testdata/` program by its file stem, a program written into a test
-// by the test's function name or the case name it passes. I3-LA is `@` and the LAPACK functions; I4
-// units of measure and `parallel`.
+// by the test's function name or the case name it passes. I4 is units of
+// measure and `parallel`.
 val NOT_INTERPRETED: []const (string, string) = [
-    ("017-reshape-and-flatten-at-rank-3", "I3-LA"),
-    ("018-static-shapes", "I3-LA"),
-    ("074-ffi-blas-dispatch", "I3-LA"),
-    ("075-ffi-lapack", "I3-LA"),
-    ("149-matrix-vector-via", "I3-LA"),
-    ("150-dot-product-via-on-rank-1-rank-1", "I3-LA"),
-    ("321-10-power-iteration-dominant-eigenvalue-and-eigenvector", "I3-LA"),
-    ("la_runtime_matches_compiled", "I3-LA"),
-    ("linear-algebra", "I3-LA"),
-    ("run_lapack_uncaught", "I3-LA"),
     ("030-units-imperial-and-si", "I4"),
     ("031-units-rational-exponents", "I4"),
     ("032-units-through-the-language", "I4"),

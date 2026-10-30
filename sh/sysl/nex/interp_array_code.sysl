@@ -147,7 +147,7 @@ impl Interp
                 (c) -> Ok(int_value(last_index(arr_of(c.v[s]), axis - 1), t))
             TElementwise(o, l, r) -> self.elementwise(e.span, o, l, r)
             TElementwiseUnary(o, v) -> self.elementwise_unary(e.span, o, v, e.ty)
-            TMatMul(_, _) -> self.later(e.span, "`@`")
+            TMatMul(l, r) -> self.matmul(e.span, l, r, e.ty)
             TElemental(name, args) ->
                 var leaves: Buf[TExpr] = buf()
 

@@ -13,10 +13,6 @@ import nex_runtime.sh.sysl.nex_runtime.{NEGATIVE_EXTENT, NOT_AN_AXIS, NOT_A_PERM
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
-// The prelude's LAPACK functions (DESIGN §10.5), which the interpreter does not compute yet.
-private val LINEAR_ALGEBRA = ["solve", "lstsq", "inv", "det", "lu", "chol", "qr", "eigvals", "eig", "eigh", "svd", "svdvals", "solve_inplace", "lu_inplace", "chol_inplace",
-                              "qr_inplace"]
-
 // The elements a block of a tree reduction holds.
 private val BLOCK: usize = 4096
 
@@ -544,8 +540,7 @@ impl Interp
 
                 Ok(vector(out))
 
-        for f in LINEAR_ALGEBRA
-            if f == name then return self.later(span, s"the linear-algebra function `$name`")
+        if is_lapack(name) then return self.linear_algebra(name, args)
 
         self.later(span, s"`$name` on an array")
     end array_builtin

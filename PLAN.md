@@ -502,7 +502,10 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       frame. Printing an aggregate takes its punctuation from the runtime, which the emitter shares.
     - **I3 — arrays, views and the prelude**: rank-N arrays, slices as views, `inout` windows,
       element-wise expressions, the array prelude and the linear-algebra prelude, computed natively.
-      Built, but for `@` and LAPACK (I3-LA, on the runtime's `la.sysl`): an array is a window onto
+      Built. `@` and the linear-algebra prelude call the runtime's `la.sysl` (`interp_la.sysl`), each
+      array copied into machine numbers laid out as the compiled program's lies, two operands lying
+      in one storage copied as one stretch; a product below BLAS's size sums in order with each
+      product rounded, as the emitter's inline `linalg` operation does. An array is a window onto
       shared storage — an offset, and an extent and a stride per nex axis — so a slice, a reversed
       axis and an `origin` view copy nothing (`interp_array.sysl`). Storage is copied when a place
       writes it while it is shared: reading an array out of a place into anything that can keep it
