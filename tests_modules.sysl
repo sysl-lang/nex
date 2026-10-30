@@ -144,7 +144,7 @@ mod_qualified_shadow()
         "(struct Box (x int64))\n(val lib.x int64 99)\n(def main () void (block (val lib#0:Box (new:Box 7)) (print (.x:int64 lib#0))))")
     assert_eq(project_refused([("main.nex", "import lib\nstruct Box\n  x: integer\ndef get(lib: Box) = lib.x\ndef main() = print(get(Box(1)) + lib.x)\n"), lib]), "ok")
     assert_eq(project_refused([("main.nex", "import lib\nstruct Box\n  y: integer\ndef get(lib: Box) = lib.x\ndef main() = print(get(Box(1)))\n"), lib]),
-        "error: `lib` has no field `x` @main.nex:4:21")
+        "error: `Box` has no field `x`; did you mean `y`? @main.nex:4:21")
 
 @test("a private or missing member is not reached through `m.x`")
 mod_qualified_private()
