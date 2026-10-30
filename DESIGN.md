@@ -2293,7 +2293,9 @@ kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
 - **An array crosses as its extents and one buffer of its elements**, column-major (§3.2): `Ints`,
   `Reals`, `Complexes` (real and imaginary parts alternating) or `Bools`, a value per element only for
   elements that are not numbers or `bool`. It is the elements, not a view: a slice or a transposed
-  array crosses as the elements it shows, each axis from 1.
+  array crosses as the elements it shows, each axis from 1. **It crosses as a copy**: a script
+  writing an array it was given leaves the host's buffer as it was, and a buffer it answers is the
+  host's own.
 - **Every value is checked against the type it meets** — a parameter of the function called, the
   result of a host function, a binding set — and a mismatch names where the value was going:
   `argument 1 of \`f\`, \`x\`, is int8, and the int64 given, 128, does not fit it`. An integer

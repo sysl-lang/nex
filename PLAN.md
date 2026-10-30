@@ -557,8 +557,9 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       stack (`TraceFrame`s the interpreter records as the trap leaves each frame, the site from the
       statement or call it passed); a step budget and `cancel` halt a runaway; a sandboxed script may
       not `stop`. `examples/embed/` is a host, built and reloaded 50 times on a counted heap in
-      `tests_toolchain.sysl`. An array still crosses into the interpreter's storage a value per
-      element (`array_in`, `array_out`), the one copy the storage's representation decides.
+      `tests_toolchain.sysl`. An array crosses as one copy of its numbers: a `real64`, `int64` or
+      `bool` buffer is copied into the interpreter's typed storage whole and handed back gathered,
+      other widths converted number by number.
 
     **Every program test runs on both engines through one harness** (`compiler/tests_engines.sysl`).
     `Engine` is `Compiled` or `Interpreted`, and `ENGINES` is the list a test iterates: the corpus

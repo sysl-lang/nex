@@ -660,51 +660,54 @@ private[nex] to_host(p: TProgram, v: Value, t: Ty) -> NexValue = t match
             None -> NNothing
     _ -> NNothing
 
-// An array's elements in storage order, in one buffer of their type's numbers where they are numbers.
+// An array's elements in storage order, in one buffer of their type's numbers where they are numbers:
+// the interpreter's storage gathered into a new buffer, a `real64`, `int64` or `bool` array's handed
+// over as it is.
 private array_out(p: TProgram, a: &Arr, e: Ty) -> &NexArray
-    val items = elements(a)
+    val d = data_gather(a)
+    val n = data_len(d)
     var ext: Buf[long] = buf()
 
-    for n in a.ext
-        ext.push(n)
+    for x in a.ext
+        ext.push(x)
 
-    val elems = base_of(e) match
-        Int(bits, signed) ->
-            var v: Buf[long] = buf()
+    val elems = d match
+        DR64(v) -> Reals(v, 64)
+        DI64(v) -> Ints(v, 64, true)
+        DBool(v) -> Bools(v)
+        DValues(v) ->
+            var out: Buf[NexValue] = buf()
 
-            for x in items
-                v.push(int_of(x))
+            for x in v
+                out.push(to_host(p, x, e))
 
-            Ints(v, bits, signed)
-        Real(bits) ->
-            var v: Buf[real] = buf()
+            Others(out)
+        _ -> base_of(e) match
+            Int(bits, signed) ->
+                var v: Buf[long] = buf()
 
-            for x in items
-                v.push(real_of(x))
+                for k in 0..<n
+                    v.push(int_of(data_get(d, k)))
 
-            Reals(v, bits)
-        Complex(bits) ->
-            var v: Buf[real] = buf()
+                Ints(v, bits, signed)
+            Real(bits) ->
+                var v: Buf[real] = buf()
 
-            for x in items
-                v.push(re_of(x))
-                v.push(im_of(x))
+                for k in 0..<n
+                    v.push(real_of(data_get(d, k)))
 
-            Complexes(v, bits)
-        Bool ->
-            var v: Buf[bool] = buf()
+                Reals(v, bits)
+            Complex(bits) ->
+                var v: Buf[real] = buf()
 
-            for x in items
-                v.push(bool_of(x))
+                for k in 0..<n
+                    val z = data_get(d, k)
 
-            Bools(v)
-        _ ->
-            var v: Buf[NexValue] = buf()
+                    v.push(re_of(z))
+                    v.push(im_of(z))
 
-            for x in items
-                v.push(to_host(p, x, e))
-
-            Others(v)
+                Complexes(v, bits)
+            _ -> Others(buf())
 
     NexArray(ext, elems)
 
@@ -829,7 +832,6 @@ private array_in(p: TProgram, a: &NexArray, e: Ty, axes: Buf[Extent], what: stri
 
         count *= a.ext[k]
 
-    var v: Buf[Value] = buf()
     val held = a.elems match
         Ints(xs, _, _) -> xs.len()
         Reals(xs, _) -> xs.len()
@@ -839,7 +841,20 @@ private array_in(p: TProgram, a: &NexArray, e: Ty, axes: Buf[Extent], what: stri
 
     if long(held) != count then return Err(s"$what is given extents holding $count elements, and ${held} elements")
 
+    var ext: Buf[long] = buf()
+
+    for n in a.ext
+        ext.push(n)
+
+    // A buffer of the very numbers the storage holds is copied as it is, with no value per element.
+    a.elems match
+        Reals(xs, 64) -> if ty_eq(base_of(e), Real(64)) then return Ok(dense_data(DR64(xs.copy()), ext))
+        Ints(xs, 64, true) -> if ty_eq(base_of(e), Int(64, true)) then return Ok(dense_data(DI64(xs.copy()), ext))
+        Bools(xs) -> if ty_eq(base_of(e), Bool) then return Ok(dense_data(DBool(xs.copy()), ext))
+        _ -> ()
+
     val each = s"an element of $what"
+    var v: Buf[Value] = buf()
 
     a.elems match
         Ints(xs, b, s) ->
@@ -858,12 +873,7 @@ private array_in(p: TProgram, a: &NexArray, e: Ty, axes: Buf[Extent], what: stri
             for x in xs
                 v.push(from_host(p, x, e, each)?)
 
-    var ext: Buf[long] = buf()
-
-    for n in a.ext
-        ext.push(n)
-
-    Ok(dense(v, ext))
+    Ok(dense(e, v, ext))
 
 // Whether the integer `n`, of `from_bits` bits and `from_signed`, is a value of `bits` and `signed`.
 private fits(n: long, from_bits: int, from_signed: bool, bits: int, signed: bool) -> bool
