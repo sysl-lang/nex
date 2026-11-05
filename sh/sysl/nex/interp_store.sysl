@@ -242,21 +242,21 @@ private[nex] data_get(d: Data, p: usize) -> Value = d match
 // `x` written at storage position `p`.
 private[nex] data_set(d: Data, p: usize, x: Value)
     d match
-        DI8(v) -> v.set(p, i8.unboxed(x))
-        DI16(v) -> v.set(p, i16.unboxed(x))
-        DI32(v) -> v.set(p, i32.unboxed(x))
-        DI64(v) -> v.set(p, long.unboxed(x))
-        DU8(v) -> v.set(p, u8.unboxed(x))
-        DU16(v) -> v.set(p, u16.unboxed(x))
-        DU32(v) -> v.set(p, u32.unboxed(x))
-        DU64(v) -> v.set(p, u64.unboxed(x))
-        DR16(v) -> v.set(p, f16.unboxed(x))
-        DR32(v) -> v.set(p, f32.unboxed(x))
-        DR64(v) -> v.set(p, real.unboxed(x))
-        DC32(v) -> v.set(p, Cx[f32].unboxed(x))
-        DC64(v) -> v.set(p, Cx[real].unboxed(x))
-        DBool(v) -> v.set(p, bool.unboxed(x))
-        DValues(v) -> v.set(p, x)
+        DI8(v) -> v[p] = i8.unboxed(x)
+        DI16(v) -> v[p] = i16.unboxed(x)
+        DI32(v) -> v[p] = i32.unboxed(x)
+        DI64(v) -> v[p] = long.unboxed(x)
+        DU8(v) -> v[p] = u8.unboxed(x)
+        DU16(v) -> v[p] = u16.unboxed(x)
+        DU32(v) -> v[p] = u32.unboxed(x)
+        DU64(v) -> v[p] = u64.unboxed(x)
+        DR16(v) -> v[p] = f16.unboxed(x)
+        DR32(v) -> v[p] = f32.unboxed(x)
+        DR64(v) -> v[p] = real.unboxed(x)
+        DC32(v) -> v[p] = Cx[f32].unboxed(x)
+        DC64(v) -> v[p] = Cx[real].unboxed(x)
+        DBool(v) -> v[p] = bool.unboxed(x)
+        DValues(v) -> v[p] = x
 
 // `x` added at the end.
 private[nex] data_push(d: Data, x: Value)
@@ -379,14 +379,14 @@ private scatter[T](v: Buf[T], w: &Arr, xs: Buf[T])
         val at = usize(w.offset)
 
         for j in 0..<xs.len()
-            v.set(at + j, xs[j])
+            v[at + j] = xs[j]
 
         return
 
     val ps = positions(w)
 
     for j in 0..<ps.len()
-        v.set(usize(ps[j]), xs[j])
+        v[usize(ps[j])] = xs[j]
 
 // `n` copies of `x`, as storage for elements of type `t`.
 private[nex] data_repeated(t: Ty, x: Value, n: long) -> Data = data_for(t) match

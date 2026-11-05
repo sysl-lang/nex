@@ -62,7 +62,7 @@ sink_new() -> long
 
     val sink = if free_sinks.len() > 0 then free_sinks.pop().unwrap() else new_sink()
 
-    below.set(usize(sink - 3), top_sink)
+    below[usize(sink - 3)] = top_sink
     top_sink = sink
     sink
 
@@ -93,7 +93,7 @@ private closed(sink: long)
         val k = usize(s - 3)
 
         if below[k] == sink
-            below.set(k, below[usize(sink - 3)])
+            below[k] = below[usize(sink - 3)]
             return
 
         s = below[k]

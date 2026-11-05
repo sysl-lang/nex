@@ -294,7 +294,7 @@ impl Emitter
         self.arr = before
 
         for k in 0..<ids.len()
-            self.arr.set(ids[k], result_name(r, k, n))
+            self.arr[ids[k]] = result_name(r, k, n)
 
         self.dirty = entry
         if rt == "" then "" else self.own(result_name(r, n - 1, n), e.ty)
@@ -364,7 +364,7 @@ impl Emitter
                 *place.kind match
                     TLocal(id) ->
                         if self.in_ssa(id)
-                            self.arr.set(id, self.copied(span, v, t))
+                            self.arr[id] = self.copied(span, v, t)
                             return
                     _ -> ()
 

@@ -66,7 +66,7 @@ impl Emitter
 
         // Where the trap is taken the extents are the source's, so nothing reads outside it.
         for n in 0..<r
-            dims.set(n, self.def(s"arith.select $bad, ${src[n]}, ${dims[n]} : index"))
+            dims[n] = self.def(s"arith.select $bad, ${src[n]}, ${dims[n]} : index")
 
         val g = self.generate_open(span, t, dims)
         // The result's nex index on each axis, then the source's: source axis `m` takes the index of

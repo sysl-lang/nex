@@ -346,12 +346,12 @@ struct Lifetimes
         *e.kind match
             TLocal(id) ->
                 self.clock += 1
-                self.last.set(id, self.clock)
+                self.last[id] = self.clock
                 return
             TLet(id, init) ->
                 self.walk(init)
                 self.clock += 1
-                self.born.set(id, Some(self.clock))
+                self.born[id] = Some(self.clock)
                 return
             TWhile(_, _, _) -> return self.walk_loop(e)
             TFor(_, _, _, _, _, _, _) -> return self.walk_loop(e)
@@ -359,7 +359,7 @@ struct Lifetimes
                 TTransfer(v, d) -> *v.kind match
                     TLocal(id) ->
                         self.clock += 1
-                        self.last.set(id, self.clock)
+                        self.last[id] = self.clock
                         var around: Buf[usize] = buf()
 
                         around.extend(self.loops.view())

@@ -162,7 +162,7 @@ impl Interp
                 val hi = if lo + PAR_BLOCK < total then lo + PAR_BLOCK else total
 
                 for k in 0..<reds.len()
-                    c.v.set(acc_slots[k], identities[k].unwrap_or(begun[k]))
+                    c.v[acc_slots[k]] = identities[k].unwrap_or(begun[k])
 
                 run(lo, hi)?
 
@@ -179,7 +179,7 @@ impl Interp
                 val result = combine(c, begun[k], tree)?
                 val store = stores[k]
 
-                c.v.set(from_slots[k], result)
+                c.v[from_slots[k]] = result
                 store(c)?
 
             Ok(VVoid)
@@ -212,7 +212,7 @@ impl Interp
                     VAgg(0, pair)
                 None -> x
 
-            c.v.set(slot, combine(c, c.v[slot], y)?)
+            c.v[slot] = combine(c, c.v[slot], y)?
             Ok(VVoid)
 
     // The value a block starts from: the operator's identity, or `None` for a user operator, whose
@@ -286,8 +286,8 @@ impl Interp
             self.chains.pop()
 
             (c, a, b) ->
-                c.v.set(base, a)
-                c.v.set(base + 1, b)
+                c.v[base] = a
+                c.v[base + 1] = b
                 call(c)
 
     // -- `parallel` expressions -------------------------------------------------------------------
@@ -378,7 +378,7 @@ impl Interp
 
                 for j in lo..<hi
                     for k in 0..<vals.len()
-                        c.v.set(base + k, if arrays[k] then lists[k][usize(j)] else vals[k])
+                        c.v[base + k] = if arrays[k] then lists[k][usize(j)] else vals[k]
 
                     acc = step(acc, element(c)?)?
 

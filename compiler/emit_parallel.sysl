@@ -136,7 +136,7 @@ impl Emitter
         val r = self.fused_map(v, Some(id))
 
         self.par_kernel = false
-        self.arr.set(id, r)
+        self.arr[id] = r
         true
 
     // A whole-array reduction under `parallel` with its operand fused in: `sum(x * y)` and
@@ -358,7 +358,7 @@ impl Emitter
 
         for k in 0..<arrays.len()
             if writes[k]
-                self.arr.set(arrays[k], written[w])
+                self.arr[arrays[k]] = written[w]
                 w += 1
 
         for j in 0..<reds.len()
@@ -458,25 +458,25 @@ impl Emitter
                     val a = self.env_get(job.fields, f)
 
                     if self.boxed[id] || is_inout(self.prog.locals[id].kind) then self.bind_borrowed(id, a)
-                    else self.slot.set(id, a)
+                    else self.slot[id] = a
                 CArray(id, writes) ->
                     val d = self.env_get(job.fields, f)
                     val (m, t) = self.par_in(span, d, self.prog.locals[id].ty, writes)
 
-                    self.arr.set(id, t)
+                    self.arr[id] = t
 
                     if writes
                         written.push(id)
                         bufs.push(m)
                         self.par_bufs.push(ParBuf(id, d))
                 CStored(id) ->
-                    self.boxed.set(id, false)
+                    self.boxed[id] = false
                     unboxed.push(id)
 
                     val d = self.env_get(job.fields, f)
                     val (m, t) = self.par_in(span, d, self.prog.locals[id].ty, true)
 
-                    self.arr.set(id, t)
+                    self.arr[id] = t
                     written.push(id)
                     bufs.push(m)
                     self.par_bufs.push(ParBuf(id, d))
@@ -484,7 +484,7 @@ impl Emitter
 
                     // A lambda made here captures the cell, whose object's buffer is the one the
                     // body writes, so it reads what the iteration has written.
-                    self.slot.set(id, self.env_get(job.fields, f))
+                    self.slot[id] = self.env_get(job.fields, f)
 
             f += 1
 
@@ -538,7 +538,7 @@ impl Emitter
         self.end(s"  func.func private @\"p.$n\"(%env: !llvm.ptr, %w: i64, %nw: i64)")
 
         for id in unboxed
-            self.boxed.set(id, true)
+            self.boxed[id] = true
     end loop_body_code
 
     // The descriptor of the array object stored at `ptr`, an array of type `t` a parallel body
@@ -824,9 +824,9 @@ impl Emitter
             if is_arr(t)
                 val (_, a) = self.par_in(span, v, t, false)
 
-                arrays.set(k, a)
+                arrays[k] = a
             else
-                frame.set(k, self.from_mem(v, t))
+                frame[k] = self.from_mem(v, t)
 
         (arrays, frame)
 
@@ -879,8 +879,8 @@ impl Emitter
         var here = copy_strings(frame)
 
         for k in 0..<operands.len()
-            if dest == Some(k) then here.set(k, self.def(s"tensor.extract $acc[${joined(at)}] : $ot"))
-            elif arrays[k] != "" then here.set(k, self.def(s"tensor.extract ${arrays[k]}[${joined(at)}] : ${self.tensor_ty(span, operands[k].ty)}"))
+            if dest == Some(k) then here[k] = self.def(s"tensor.extract $acc[${joined(at)}] : $ot")
+            elif arrays[k] != "" then here[k] = self.def(s"tensor.extract ${arrays[k]}[${joined(at)}] : ${self.tensor_ty(span, operands[k].ty)}")
 
         val y = self.in_frame(here, scalar)
 
@@ -1119,7 +1119,7 @@ impl Emitter
         var here = copy_strings(frame)
 
         for k in 0..<operands.len()
-            if arrays[k] != "" then here.set(k, self.def(s"tensor.extract ${arrays[k]}[${joined(ivs)}] : ${self.tensor_ty(span, operands[k].ty)}"))
+            if arrays[k] != "" then here[k] = self.def(s"tensor.extract ${arrays[k]}[${joined(ivs)}] : ${self.tensor_ty(span, operands[k].ty)}")
 
         var yields = self.step(span, name, acc, self.in_frame(here, scalar), scalar.ty, t)
 

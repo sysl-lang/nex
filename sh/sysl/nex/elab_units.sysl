@@ -243,7 +243,7 @@ impl Elab
             self.fail(src.span, s"the unit `${src.name}` is defined through itself: ${join(names.view(), " -> ")}")
             return None
 
-        self.units.state.set(k, Working)
+        self.units.state[k] = Working
         self.units.path.push(k)
 
         val saved = self.units.params
@@ -268,8 +268,8 @@ impl Elab
 
         self.units.params = saved
         self.units.path.pop()
-        self.units.state.set(k, Finished)
-        self.units.vals.set(k, u)
+        self.units.state[k] = Finished
+        self.units.vals[k] = u
         u
     end unit_decl_value
 

@@ -248,7 +248,7 @@ impl Elab
                         if sig.names[j] == n
                             found = true
 
-                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots.set(j, Some(value))
+                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots[j] = Some(value)
 
                     if !found then self.fail(a.span, s"`${name}` has no parameter `${n}`")
                 _ ->
@@ -257,7 +257,7 @@ impl Elab
                     elif next >= slots.len()
                         self.fail(a.span, s"`${name}` takes ${sig.names.len()} argument${if sig.names.len() == 1 then "" else "s"}")
                     else
-                        slots.set(next, Some(a))
+                        slots[next] = Some(a)
 
                     next += 1
 
@@ -463,7 +463,7 @@ impl Elab
                     Error
 
         for k in 0..<out.len()
-            out.set(k, promote(out[k], with_elem(out[k].ty, ty)))
+            out[k] = promote(out[k], with_elem(out[k].ty, ty))
 
         out
     end unified
@@ -533,9 +533,9 @@ impl Elab
             self.fail(span, s"`fma` adds `c` to the product `a * b`, which is ${spell(u)}, and `c` is ${show_ty(out[2].ty)}")
             return self.invalid(span)
 
-        out.set(0, promote(out[0], with_elem(out[0].ty, measured(w, xa))))
-        out.set(1, promote(out[1], with_elem(out[1].ty, measured(w, xb))))
-        out.set(2, promote(out[2], with_elem(out[2].ty, measured(w, u))))
+        out[0] = promote(out[0], with_elem(out[0].ty, measured(w, xa)))
+        out[1] = promote(out[1], with_elem(out[1].ty, measured(w, xb)))
+        out[2] = promote(out[2], with_elem(out[2].ty, measured(w, u)))
 
         val ret = measured(w, u)
 
@@ -595,7 +595,7 @@ impl Elab
             if !is_real(base_of(ty)) && !is_error(ty) then self.fail(span, s"`${name}` takes reals; these are ${show_ty(ty)}")
 
             for k in 0..<out.len()
-                out.set(k, promote(out[k], with_elem(out[k].ty, ty)))
+                out[k] = promote(out[k], with_elem(out[k].ty, ty))
 
             // `atan2` gives an angle in radians, whatever its arguments' one unit (DESIGN §13.4).
             val result = if name == "atan2" then measured(base_of(ty), base_unit(ANGLE)) else ty
@@ -622,7 +622,7 @@ impl Elab
             if is_error(s.ty) then return self.invalid(span)
 
             *s.kind match
-                TBuiltin(_, xs) -> out.set(0, promote(v, with_elem(v.ty, xs[0].ty)))
+                TBuiltin(_, xs) -> out[0] = promote(v, with_elem(v.ty, xs[0].ty))
                 _ -> ()
 
             return self.elemental(span, name, out, s.ty)
@@ -630,14 +630,14 @@ impl Elab
         if is_array(v.ty)
             val r = self.scalar_result(span, name, elem_of(v.ty))
 
-            if is_real(base_of(r)) && is_int(elem_of(v.ty)) then out.set(0, promote(v, with_elem(v.ty, REAL)))
+            if is_real(base_of(r)) && is_int(elem_of(v.ty)) then out[0] = promote(v, with_elem(v.ty, REAL))
 
             return self.elemental(span, name, out, r)
 
         val result = self.scalar_result(span, name, v.ty)
 
         // An integer argument to a real function is widened to `real64` first.
-        if is_real(base_of(result)) && is_int(v.ty) then out.set(0, promote(v, REAL))
+        if is_real(base_of(result)) && is_int(v.ty) then out[0] = promote(v, REAL)
 
         texpr(span, result, TBuiltin(name, out))
     end builtin

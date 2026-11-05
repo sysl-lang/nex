@@ -298,7 +298,7 @@ impl Elab
             if vals[k].is_none()
                 val c = self.literal_class(leaves[k])
 
-                vals.set(k, Some(self.elab(leaves[k], Some(adoption(c, elem).unwrap_or(default_of(c))))))
+                vals[k] = Some(self.elab(leaves[k], Some(adoption(c, elem).unwrap_or(default_of(c)))))
 
         // With no type expected, the elements are in the unit of the first one that carries a unit, and
         // the others of its dimension are converted to it (DESIGN §13.3).

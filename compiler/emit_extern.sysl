@@ -179,7 +179,7 @@ impl Emitter
                 val cb = self.c_callback(a, x.params[j], has_data(x.partner, j), x.fortran)
 
                 vals.push(cb.code)
-                datas.set(j, cb.data)
+                datas[j] = cb.data
                 callbacks = true
                 continue
 
@@ -225,7 +225,7 @@ impl Emitter
 
         for j in 0..<x.params.len()
             x.partner[j] match
-                Some(f) -> vals.set(j, datas[f])
+                Some(f) -> vals[j] = datas[f]
                 None -> ()
 
         for n in lengths
@@ -400,14 +400,14 @@ impl Emitter
                     if inner[j] != "" then continue
 
                     if windows[next].described
-                        inner.set(j, self.array_desc(span, wms[next], wts[next], true))
+                        inner[j] = self.array_desc(span, wms[next], wts[next], true)
                         next += 1
                         continue
 
                     val c = self.c_pointer(span, wms[next], wts[next], windows[next].strided, true)
 
                     copies.push(c)
-                    inner.set(j, c.ptr)
+                    inner[j] = c.ptr
                     next += 1
 
                 val call = s"func.call @\"$symbol\"(${joined(inner)}) : (${joined(tys)}) -> ${result_text(rt)}"

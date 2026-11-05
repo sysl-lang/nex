@@ -498,7 +498,7 @@ impl Interp
                 for x in a.str
                     str.push(x)
 
-                str.set(j, -a.str[j])
+                str[j] = -a.str[j]
                 Ok(copy_of(Arr(a.store, a.offset + last * a.str[j], a.ext, str, buf())))
 
         if name == "permute"

@@ -369,7 +369,7 @@ struct Emitter
 
         if self.boxed[id]
             if self.slot[id] == ""
-                self.slot.set(id, self.zeroed_alloca("!llvm.ptr"))
+                self.slot[id] = self.zeroed_alloca("!llvm.ptr")
                 self.owned.push(id)
 
             // A binding inside a loop runs once per pass: the cell the pass before bound is released
@@ -381,15 +381,15 @@ struct Emitter
             self.release_ref(old)
         elif self.slot[id] == ""
             if self.managed(t) && !borrowed
-                self.slot.set(id, self.zeroed_alloca(self.mem_ty(span, t)))
+                self.slot[id] = self.zeroed_alloca(self.mem_ty(span, t))
                 self.owned.push(id)
             else
-                self.slot.set(id, self.alloca(self.mem_ty(span, t)))
+                self.slot[id] = self.alloca(self.mem_ty(span, t))
 
     // A local whose slot holds the address of storage someone else owns: an `inout` parameter, or a
     // capture inside the lambda.
     bind_borrowed(*self, id: usize, address: string)
-        if self.slot[id] == "" then self.slot.set(id, self.alloca("!llvm.ptr"))
+        if self.slot[id] == "" then self.slot[id] = self.alloca("!llvm.ptr")
         self.op(s"llvm.store $address, ${self.slot[id]} : !llvm.ptr, !llvm.ptr")
 
     // The address local `id`'s value is stored at.
@@ -441,7 +441,7 @@ struct Emitter
         self.temp_slots = buf()
 
         for k in 0..<self.slot.len()
-            self.slot.set(k, "")
+            self.slot[k] = ""
 
         self.arr = buf()
         self.inout_arrays = buf()
@@ -462,7 +462,7 @@ struct Emitter
             val r = self.ty(body.span, ret)
 
             // An array a `return` gives is carried as a value; any other in a slot.
-            if is_arr(ret) then self.arr.set(self.ret_id(), self.zero_array(body.span, ret))
+            if is_arr(ret) then self.arr[self.ret_id()] = self.zero_array(body.span, ret)
             elif r != "" then self.ret_slot = self.zeroed_alloca(self.mem_ty(body.span, ret))
 
     // The current function, finished, under `header`.
@@ -554,14 +554,14 @@ struct Emitter
             val id = params[k]
 
             if self.in_ssa(id)
-                self.arr.set(id, s"%a$k")
+                self.arr[id] = s"%a$k"
 
                 if self.inout_array(id)
                     self.inout_arrays.push(id)
-                    self.places.set(id, s"%p$k")
+                    self.places[id] = s"%p$k"
             elif self.inout_array(id)
                 self.inout_arrays.push(id)
-                self.places.set(id, s"%p$k")
+                self.places[id] = s"%p$k"
                 self.bind_borrowed(id, self.captured_param(span, id, s"%a$k", s"%p$k"))
             elif is_inout(self.prog.locals[id].kind)
                 self.bind_borrowed(id, s"%a$k")
@@ -616,13 +616,13 @@ struct Emitter
 
         for c in order
             if self.inout_array(c)
-                self.places.set(c, self.def(s"llvm.load ${self.def(s"llvm.getelementptr %env[$w] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")} : !llvm.ptr -> !llvm.ptr"))
+                self.places[c] = self.def(s"llvm.load ${self.def(s"llvm.getelementptr %env[$w] : (!llvm.ptr) -> !llvm.ptr, !llvm.ptr")} : !llvm.ptr -> !llvm.ptr")
                 w += 1
 
         // A local `def` that calls itself reaches itself through its own code and environment.
         self.self_local[id] match
             Some(me) ->
-                self.slot.set(me, self.alloca(CLOSURE))
+                self.slot[me] = self.alloca(CLOSURE)
                 self.op(s"llvm.store ${self.closure(self.adapted(l.body.span, s"l.$id", l.params, l.ret), self.code_type(l.body.span, l.params, l.ret), "%env")}, ${self.slot[me]} : $CLOSURE, !llvm.ptr")
             None -> ()
 
@@ -660,7 +660,7 @@ struct Emitter
         val l = self.prog.lambdas[id]
 
         if !self.lambdas_done[id]
-            self.lambdas_done.set(id, true)
+            self.lambdas_done[id] = true
             self.lambdas_wanted.push(id)
 
         val order = self.env_order(id)
@@ -909,7 +909,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
         done.push(false)
 
         for c in p.lambdas[k].captures
-            if selves[k] != Some(c) then boxed.set(c, true)
+            if selves[k] != Some(c) then boxed[c] = true
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
                     buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf(),

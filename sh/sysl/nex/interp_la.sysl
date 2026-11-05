@@ -381,7 +381,7 @@ private put_matrix[T: Scalar + Elem](a: &Arr, m: MatrixView[T])
     val step = if a.ext.len() == 2 then a.str[1] else 0
 
     for j in 0..<cols
-        for i in 0..<a.ext[0] do dst.set(usize(a.offset + i * a.str[0] + j * step), m.at(usize(i), usize(j)))
+        for i in 0..<a.ext[0] do dst[usize(a.offset + i * a.str[0] + j * step)] = m.at(usize(i), usize(j))
 
 // `xs`, the copy `slice_in` made of the vector `a`, written back over it; nothing where it ran in
 // place.
@@ -390,7 +390,7 @@ private put_slice[T: Elem](a: &Arr, xs: []T)
 
     val dst = T.held(a.store.d)
 
-    for i in 0..<a.ext[0] do dst.set(usize(a.offset + i * a.str[0]), xs[usize(i)])
+    for i in 0..<a.ext[0] do dst[usize(a.offset + i * a.str[0])] = xs[usize(i)]
 
 private tuple(xs: []const Value) -> Value
     var out: Buf[Value] = buf()
@@ -582,11 +582,11 @@ impl Interp
                 val dst = if cur.store.shared || !lies_in_place(cur) then arr_of(copy_of(cur)) else cur
 
                 blas_update(kind, scale(vals, alpha), a, fx, b, fy, scale(vals, beta), dst)?
-                c.v.set(s, VArr(dst))
+                c.v[s] = VArr(dst)
                 return Ok(VVoid)
 
-            vals.set(at, inline(a, b)?)
-            c.v.set(s, mapped_over(c, vals, arrays, base, body, out)?)
+            vals[at] = inline(a, b)?
+            c.v[s] = mapped_over(c, vals, arrays, base, body, out)?
             Ok(VVoid)
     end gemm_assign
 

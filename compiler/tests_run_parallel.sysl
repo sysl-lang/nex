@@ -90,7 +90,7 @@ private atomic_lines(out: Output, tail: string)
         val i = if parts.len == 4 then parse_count(parts[1]) else 0
 
         if parts.len != 4 || parts[0] != "line" || parts[2] != tail || i < 1 || i > 400 || parts[3] != s"${i * 3}" || seen[i] then bad.push(lines[k])
-        else seen.set(i, true)
+        else seen[i] = true
 
     assert_eq(join(bad.view(), "\n"), "")
     assert_eq(lines.len, 402)

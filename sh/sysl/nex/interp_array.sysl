@@ -141,13 +141,13 @@ private[nex] positions(a: &Arr) -> Buf[long]
         var k: usize = 0
 
         while k < r
-            at.set(k, at[k] + 1)
+            at[k] += 1
             p += a.str[k]
 
             if at[k] < a.ext[k] then break
 
             p -= a.str[k] * a.ext[k]
-            at.set(k, 0)
+            at[k] = 0
             k += 1
 
     out

@@ -440,8 +440,8 @@ impl Emitter
 
         val k = self.linear(at, ns)
 
-        frame.set(0, if is_items(a.ty) then self.item_load(span, self.item_at(src, k), elem_of(a.ty))
-                     else self.def(s"tensor.extract $src[${joined(n.ivs)}] : ${self.tensor_ty(span, a.ty)}"))
+        frame[0] = if is_items(a.ty) then self.item_load(span, self.item_at(src, k), elem_of(a.ty))
+                   else self.def(s"tensor.extract $src[${joined(n.ivs)}] : ${self.tensor_ty(span, a.ty)}")
 
         val y = self.in_frame(frame, apply)
 

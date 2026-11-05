@@ -55,7 +55,7 @@ private bound_names(pat: TBind, out: *Buf[string])
 private place_global(p: TProgram, inits: Buf[TExpr], binds: Buf[Buf[string]], k: usize, placed: *Buf[bool], out: *Buf[usize])
     if placed[k] then return
 
-    placed.set(k, true)
+    placed[k] = true
 
     var names: Buf[string] = buf()
     var seen: Buf[string] = buf()

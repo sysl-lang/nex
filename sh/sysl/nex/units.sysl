@@ -238,7 +238,7 @@ private add_power(out: *Buf[Power], p: Power, sorted: bool)
         if q.name == p.name && q.param == p.param
             val e = radd(q.exp, p.exp)
 
-            if e.num == 0 then out.remove(k) else out.set(k, Power(q.name, q.param, e))
+            if e.num == 0 then out.remove(k) else out[k] = Power(q.name, q.param, e)
 
             return
 

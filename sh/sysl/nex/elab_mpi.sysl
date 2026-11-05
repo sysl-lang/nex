@@ -183,7 +183,7 @@ impl Elab
                         self.fail(a.span, s"`$c`'s `$n` is given twice")
                         return self.invalid(span)
 
-                    bound.set(k, Some(v))
+                    bound[k] = Some(v)
                 _ ->
                     if !positional
                         self.fail(a.span, s"`$c`'s arguments by position come before the named ones")
@@ -191,7 +191,7 @@ impl Elab
 
                     if next == ps.len() then return self.arity(span, c, wants_of(c))
 
-                    bound.set(next, Some(a))
+                    bound[next] = Some(a)
                     next += 1
 
         for k in 0..<required_of(c)
@@ -807,7 +807,7 @@ impl Elab
                         self.fail(a.span, s"`$c`'s `$n` is given twice")
                         return self.invalid(span)
 
-                    bound.set(k, Some(v))
+                    bound[k] = Some(v)
                 _ ->
                     if !positional
                         self.fail(a.span, s"`$c`'s arguments by position come before the named ones")
@@ -817,7 +817,7 @@ impl Elab
                         self.fail(span, s"`$c` takes $wants")
                         return self.invalid(span)
 
-                    bound.set(next, Some(a))
+                    bound[next] = Some(a)
                     next += 1
 
         for k in 0..<required

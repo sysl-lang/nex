@@ -445,7 +445,7 @@ self_locals(p: TProgram) -> Buf[Option[usize]]
 
         // A `var` may be given another function, which the body must then see.
         p.locals[id].kind match
-            LVal -> if alone then out.set(lids[k], Some(id))
+            LVal -> if alone then out[lids[k]] = Some(id)
             _ -> ()
 
     out

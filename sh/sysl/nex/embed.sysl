@@ -258,12 +258,12 @@ private defaulted(m: &Machine, d: Compiled, held: &Cells, j: usize) -> Code
         val frame = frame_of(d.slots)
 
         for i in 0..<j
-            frame.v.set(i, held.v[i])
+            frame.v[i] = held.v[i]
 
         val r = code(frame)
 
         r match
-            Ok(v) -> held.v.set(j, v)
+            Ok(v) -> held.v[j] = v
             Err(Trapped(_)) ->
                 m.trace.push(TraceFrame(d.name, if m.sited then m.site else d.span))
                 m.sited = false
@@ -440,7 +440,7 @@ struct Script
 
                     if given[j].is_some() then return Err(ScriptRefused(s"`${a.name}` is given twice"))
 
-                    given.set(j, Some(a.value))
+                    given[j] = Some(a.value)
 
             if !found then return Err(ScriptRefused(s"`$name` has no parameter `${a.name}`"))
 
@@ -463,7 +463,7 @@ struct Script
                         Err(message) -> return Err(ScriptRefused(message))
 
                     codes.push((c) ->
-                        held.v.set(j, v)
+                        held.v[j] = v
                         Ok(v))
                 None -> self.defaults[k][j] match
                     Some(d) -> codes.push(defaulted(self.m, d, held, j))
@@ -494,7 +494,7 @@ struct Script
             Err(message) -> return Err(ScriptRefused(message))
 
         self.start()?
-        self.m.globals.v.set(k, x)
+        self.m.globals.v[k] = x
         Ok(())
 
     // Stops the run in progress at its next step, with `ScriptHalt`: a host function or `write` may

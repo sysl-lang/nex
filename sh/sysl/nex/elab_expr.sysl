@@ -379,7 +379,7 @@ impl Elab
         val ty = self.lambda_body(p.lambda, "", p.span, names, ptys, self.spellings(p.params), modes, None, p.body)
 
         self.fx = current
-        self.locals.set(p.local, LocalInfo(self.locals[p.local].name, ty, LVal))
+        self.locals[p.local] = LocalInfo(self.locals[p.local].name, ty, LVal)
         ty
     end resolve_pending
 
@@ -803,7 +803,7 @@ impl Elab
                 Some(x) -> x.ty
                 None -> Void
 
-            if !is_wild(ty) then self.fx.frames.set(top, Frame(frame.lambda, ty, true, frame.loop_base))
+            if !is_wild(ty) then self.fx.frames[top] = Frame(frame.lambda, ty, true, frame.loop_base)
 
         texpr(span, Never, TReturn(v))
     end return_expr
@@ -992,7 +992,7 @@ impl Elab
 
             val id = self.new_local(names[k], tys[k], LParam(modes[k]))
 
-            self.spelled.set(id, written[k])
+            self.spelled[id] = written[k]
 
             self.bind(id)
             ids.push(id)
@@ -1001,7 +1001,7 @@ impl Elab
         val frame = self.fx.frames.pop().unwrap()
 
         self.close()
-        self.lambdas.set(lid, TLambda(name, ids, frame.ret, buf(), b, self.check_captures(lid, span), buf()))
+        self.lambdas[lid] = TLambda(name, ids, frame.ret, buf(), b, self.check_captures(lid, span), buf())
         fn_type(tys, modes, frame.ret)
     end lambda_body
 

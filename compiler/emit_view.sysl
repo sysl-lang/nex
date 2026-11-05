@@ -330,7 +330,7 @@ impl Emitter
         val cur = self.read_array(span, id)
 
         if same_shape
-            self.arr.set(id, self.written_over(span, cur, x, t))
+            self.arr[id] = self.written_over(span, cur, x, t)
             return
 
         val tt = self.tensor_ty(span, t)
@@ -346,7 +346,7 @@ impl Emitter
         self.op("} else {")
         self.op(s"scf.yield ${self.rebound(span, id, x, t)} : $tt")
         self.op("}")
-        self.arr.set(id, r)
+        self.arr[id] = r
 
     // -- the place an `inout` array crosses with ----------------------------------------------------
     //
@@ -424,7 +424,7 @@ impl Emitter
 
         self.op(s"llvm.store ${self.def(s"builtin.unrealized_conversion_cast $lent : ${self.boundary_ty(span, t)} to ${self.desc_ty(rank_of(t))}")}, ${self.def(s"llvm.getelementptr $keeper[0, 1] : (!llvm.ptr) -> !llvm.ptr, $kt")} : ${self.desc_ty(rank_of(t))}, !llvm.ptr")
         self.guards.push(Guard(keeper, self.write_back_helper(span, t)))
-        self.keepers.set(id, keeper)
+        self.keepers[id] = keeper
 
         val target = self.def(s"arith.select ${self.names_storage(p)}, $p, $keeper : !llvm.ptr")
 
@@ -656,7 +656,7 @@ impl Emitter
         val root = frames[0]
         var ones: Buf[string] = buf()
 
-        frames.set(0, Opened(root.src, root.slot, self.place_value(root.src), root.subs, root.offs, root.sizes, root.strides, root.view))
+        frames[0] = Opened(root.src, root.slot, self.place_value(root.src), root.subs, root.offs, root.sizes, root.strides, root.view)
 
         for _ in l.idx
             ones.push(self.index_const(1))

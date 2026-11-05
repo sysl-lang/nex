@@ -133,7 +133,7 @@ summarize(p: TProgram) -> Effects
             for m in scans[n].edges
                 if merge(&sc, scans[m].s) then changed = true
 
-            scans.set(n, sc)
+            scans[n] = sc
 
     for sc in scans
         fx.nodes.push(sc.s)

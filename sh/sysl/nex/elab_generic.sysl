@@ -374,7 +374,7 @@ impl Elab
             self.fx.subst = saved
 
             // A signature refused here is refused once, and its body is not checked.
-            self.gen.funs.set(g, GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, formals, result, self.diags.len() == base))
+            self.gen.funs[g] = GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, formals, result, self.diags.len() == base)
 
         for g in 0..<self.gen.aggs.len()
             val a = self.gen.aggs[g]
@@ -393,7 +393,7 @@ impl Elab
                 variants.push(VariantInfo(a.name, self.resolve_fields(a.decl.span, a.name, self.agg.structs[self.find_struct(a.name).unwrap()].src)))
 
             self.fx.subst = saved
-            self.gen.aggs.set(g, GenAgg(a.decl, a.name, a.tparams, a.is_enum, variants, true))
+            self.gen.aggs[g] = GenAgg(a.decl, a.name, a.tparams, a.is_enum, variants, true)
     end resolve_generics
 
     // -- types ------------------------------------------------------------------------------------
@@ -482,7 +482,7 @@ impl Elab
         var inf = new_infer(name, a.tparams)
 
         for k in 0..<tys.len()
-            inf.args.set(k, Some(TypeArg(tys[k])))
+            inf.args[k] = Some(TypeArg(tys[k]))
 
         if !self.constraints_hold(span, &inf) then return Error
 
@@ -513,7 +513,7 @@ impl Elab
             if outer.generic == g && name.len > outer.name.len
                 // Reported wherever it is found, since it refuses the generic for good.
                 self.diags.push(error(span, s"`${a.name}` would hold ever larger instances of itself, ${name} inside ${outer.name}, and has no size"))
-                self.gen.aggs.set(g, GenAgg(a.decl, a.name, a.tparams, a.is_enum, a.variants, false))
+                self.gen.aggs[g] = GenAgg(a.decl, a.name, a.tparams, a.is_enum, a.variants, false)
                 return None
 
         val index = self.gen.agg_insts.len()
@@ -543,11 +543,11 @@ impl Elab
             for v in e.src
                 variants.push(VariantInfo(v.name, self.instance_fields(v.fields)))
 
-            self.agg.enums.set(k, EnumSrc(e.decl, name, false, e.src, variants))
+            self.agg.enums[k] = EnumSrc(e.decl, name, false, e.src, variants)
         else
             val s = self.agg.structs[k]
 
-            self.agg.structs.set(k, StructSrc(s.decl, name, false, s.src, self.instance_fields(s.src)))
+            self.agg.structs[k] = StructSrc(s.decl, name, false, s.src, self.instance_fields(s.src))
 
         self.gen.building.pop()
         self.fx.subst = saved
@@ -595,7 +595,7 @@ impl Elab
             if self.gen.fun_insts[i].generic == g && name.len > outer.len
                 // Reported wherever it is found, since it refuses the generic for good.
                 self.diags.push(error(span, s"`${f.name}` would need ever larger instances of itself, ${name} inside ${outer}, and they would never end"))
-                self.gen.funs.set(g, GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, f.formals, f.result, false))
+                self.gen.funs[g] = GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, f.formals, f.result, false)
                 return None
 
             up = self.gen.fun_insts[i].parent
@@ -617,7 +617,7 @@ impl Elab
         for j in base..<self.diags.len()
             val d = self.diags[j]
 
-            if !d.message.contains(" (in `") then self.diags.set(j, error(d.span, d.message + s" (in `${name}`)"))
+            if !d.message.contains(" (in `") then self.diags[j] = error(d.span, d.message + s" (in `${name}`)")
 
         Some(k)
     end instantiate_fun
@@ -633,7 +633,7 @@ impl Elab
     check_generic(*self, g: usize)
         if self.gen.checked[g] || self.gen.checking.is_some() then return
 
-        self.gen.checked.set(g, true)
+        self.gen.checked[g] = true
 
         val f = self.gen.funs[g]
 
@@ -664,7 +664,7 @@ impl Elab
         if self.diags.len() > base
             val now = self.gen.funs[g]
 
-            self.gen.funs.set(g, GenFun(now.decl, now.name, now.tparams, now.params, now.ret, now.body, now.formals, now.result, false))
+            self.gen.funs[g] = GenFun(now.decl, now.name, now.tparams, now.params, now.ret, now.body, now.formals, now.result, false)
     end check_generic
 
     // Whether a diagnostic given now is reported: not while a generic's body is checked and the
@@ -872,8 +872,8 @@ impl Elab
         val old = inf.args[k] match
             Some(a) -> a
             None ->
-                inf.args.set(k, Some(arg))
-                inf.firm.set(k, firm)
+                inf.args[k] = Some(arg)
+                inf.firm[k] = firm
                 return
 
         if targ_eq(old, arg) then return
@@ -881,8 +881,8 @@ impl Elab
         if inf.firm[k] && !firm then return
 
         if !inf.firm[k] && firm
-            inf.args.set(k, Some(arg))
-            inf.firm.set(k, true)
+            inf.args[k] = Some(arg)
+            inf.firm[k] = true
             return
 
         old match
@@ -891,7 +891,7 @@ impl Elab
                     if is_numeric(a) && is_numeric(b)
                         common(a, b) match
                             Some(c) ->
-                                inf.args.set(k, Some(TypeArg(c)))
+                                inf.args[k] = Some(TypeArg(c))
                                 return
                             None -> ()
                 _ -> ()
@@ -957,7 +957,7 @@ impl Elab
                 var inner = new_infer(n, self.gen.aggs[g].tparams)
 
                 for k in 0..<out.len()
-                    inner.args.set(k, Some(TypeArg(out[k])))
+                    inner.args[k] = Some(TypeArg(out[k]))
 
                 if !self.constraints_hold(span, &inner) then return Error
 
@@ -988,7 +988,7 @@ impl Elab
 
                     if lambda then self.pass_lambda(e)
 
-                    pre.set(i, Some(self.elab(e, if lambda || !has_param(hint) then Some(hint) else None)))
+                    pre[i] = Some(self.elab(e, if lambda || !has_param(hint) then Some(hint) else None))
 
                 if (pass == 0 && (literal || lambda)) || (pass == 1 && !literal) || (pass == 2 && !lambda) then continue
 
@@ -1071,7 +1071,7 @@ impl Elab
                         if names[j] == n
                             found = true
 
-                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots.set(j, Some(i))
+                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots[j] = Some(i)
 
                     if !found then self.fail(a.span, if fields then s"`${what}` has no field `${n}`" else s"`${what}` has no parameter `${n}`")
                 _ ->
@@ -1080,7 +1080,7 @@ impl Elab
                     elif next >= slots.len()
                         self.fail(a.span, if fields then s"`${what}` has ${count_text(names.len(), "field")}" else s"`${what}` takes ${count_text(names.len(), "argument")}")
                     else
-                        slots.set(next, Some(i))
+                        slots[next] = Some(i)
 
                     next += 1
 
@@ -1407,9 +1407,9 @@ impl Elab
                 if inst.generic != g then return
 
                 for k in 0..<inst.args.len()
-                    inf.args.set(k, Some(inst.args[k]))
-                    inf.firm.set(k, true)
-                    inf.given.set(k, true)
+                    inf.args[k] = Some(inst.args[k])
+                    inf.firm[k] = true
+                    inf.given[k] = true
             None -> ()
 
     private agg_instance_named(self, name: string) -> Option[usize]

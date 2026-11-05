@@ -222,7 +222,7 @@ impl Emitter
         val p = g.leaves[g.at]
         var vs = vals
 
-        vs.set(g.at, self.linalg_matmul(p, g.lhs.ty, g.rhs.ty, a, b))
+        vs[g.at] = self.linalg_matmul(p, g.lhs.ty, g.rhs.ty, a, b)
         self.set_place(g.target, self.mapped_values(span, g.target.ty, g.leaves, vs, g.scalar), false)
 
     // The target written by `nex_la_update` where it lies.

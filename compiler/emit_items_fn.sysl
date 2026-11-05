@@ -72,7 +72,7 @@ impl Emitter
         val m = self.mark()
         val x = self.item_load(span, self.item_at(src, self.position(l)), et)
 
-        frame.set(1, x)
+        frame[1] = x
 
         val holds = self.in_frame(frame, self.applied(span, Bool, args[1].ty, et))
 
@@ -108,8 +108,8 @@ impl Emitter
             val l = self.nest_open(self.upto(n), init, self.ty(span, t))
             val m = self.mark()
 
-            frame.set(1, l.accs[0])
-            frame.set(2, self.any_element(span, src, st, self.position(l)))
+            frame[1] = l.accs[0]
+            frame[2] = self.any_element(span, src, st, self.position(l))
 
             val y = self.in_frame(frame, apply)
 
@@ -124,8 +124,8 @@ impl Emitter
         val l = self.nest_open(self.upto(n), "", "")
         val m = self.mark()
 
-        frame.set(1, self.load(span, slot, t))
-        frame.set(2, self.any_element(span, src, st, self.position(l)))
+        frame[1] = self.load(span, slot, t)
+        frame[2] = self.any_element(span, src, st, self.position(l))
         self.keep(span, slot, self.in_frame(frame, apply), t)
         self.release_from(m)
         self.nest_close(l, "")
@@ -153,7 +153,7 @@ impl Emitter
         val l = self.nest_open(self.upto(n), "", "")
         val m = self.mark()
 
-        frame.set(1, self.any_element(span, src, st, self.position(l)))
+        frame[1] = self.any_element(span, src, st, self.position(l))
         self.call("nex_items_append", s"$h, ${self.in_frame(frame, apply)}", "!llvm.ptr, !llvm.ptr", "")
         self.release_from(m)
         self.nest_close(l, "")
@@ -187,7 +187,7 @@ impl Emitter
 
         val m = self.mark()
 
-        f.set(1, self.any_element(span, src, st, self.def(s"arith.addi ${self.to_i64(j)}, %one : i64")))
+        f[1] = self.any_element(span, src, st, self.def(s"arith.addi ${self.to_i64(j)}, %one : i64"))
 
         val piece = self.cast(span, self.in_frame(f, apply), ret, pt)
         val have = self.def(s"tensor.dim $have_acc, $zero : $tt")

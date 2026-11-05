@@ -507,7 +507,7 @@ private collect_aliases(p: TProgram, e: TExpr, al: *Aliases)
                 LOrigin -> true
                 _ -> false
 
-            if shares && path_of(p, *al, init).is_some() then al.locals.set(id, Some(init))
+            if shares && path_of(p, *al, init).is_some() then al.locals[id] = Some(init)
         _ -> ()
 
     for c in children(e)

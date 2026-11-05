@@ -382,7 +382,7 @@ private struct Loader
                     if d.private_ then self.deferred.push(Deferred(k, d.span, "a module is not `private`; its declarations are"))
 
                     for a in d.attrs
-                        if a.name == "test" then self.test_only.set(m, true) else self.deferred.push(Deferred(k, d.span, s"a module takes only the attribute `@test`, not `@${a.name}`"))
+                        if a.name == "test" then self.test_only[m] = true else self.deferred.push(Deferred(k, d.span, s"a module takes only the attribute `@test`, not `@${a.name}`"))
                 Import(segs, _, _) ->
                     if seen_other then self.deferred.push(Deferred(k, d.span, "an `import` stands at the top of its file, before every other declaration"))
 
@@ -530,7 +530,7 @@ private struct Loader
     private visit(self, m: usize, state: *Buf[u8], order: *Buf[usize], stack: *Buf[usize], diags: *Buf[Diagnostic], ranges: Buf[FileRange])
         if state[m] != 0 then return
 
-        state.set(m, 1)
+        state[m] = 1
         stack.push(m)
 
         for e in self.edges
@@ -553,7 +553,7 @@ private struct Loader
                 self.visit(e.to, state, order, stack, diags, ranges)
 
         _ = stack.pop()
-        state.set(m, 2)
+        state[m] = 2
         order.push(m)
     end visit
 

@@ -91,7 +91,7 @@ impl Elab
             if !is_real(ty) && !is_error(ty) then self.fail(span, s"`linspace` spaces reals; these are ${show_ty(ty)}")
 
             for k in 0..<2
-                out.set(k, promote(out[k], ty))
+                out[k] = promote(out[k], ty)
 
             out.push(self.check(pos[2], INTEGER, "the count"))
             return texpr(span, Ty.Array(ty, dynamic_axes(1)), TBuiltin(name, out))
@@ -507,8 +507,8 @@ impl Elab
 
         if self.shape_meet(span, "`dot`", axes_of(out[0].ty), axes_of(out[1].ty)).is_none() then return self.invalid(span)
 
-        out.set(0, promote(out[0], with_unit(with_elem(out[0].ty, n), ua)))
-        out.set(1, promote(out[1], with_unit(with_elem(out[1].ty, n), ub)))
+        out[0] = promote(out[0], with_unit(with_elem(out[0].ty, n), ua))
+        out[1] = promote(out[1], with_unit(with_elem(out[1].ty, n), ub))
 
         texpr(span, measured(n, u), TArray(TReduction("dot", out, None)))
     end dot
@@ -657,7 +657,7 @@ impl Elab
 
         if is_int(e)
             for k in 0..<2
-                out.set(k, promote(out[k], with_elem(out[k].ty, REAL)))
+                out[k] = promote(out[k], with_elem(out[k].ty, REAL))
 
         out.push(self.check(pos[2], REAL, "the tolerance"))
         texpr(span, Void, TBuiltin(name, out))

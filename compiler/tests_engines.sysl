@@ -177,7 +177,7 @@ struct Seen
     note(*self, case: string, refused: bool)
         for k in 0..<self.cases.len()
             if self.cases[k] == case
-                if refused then self.refused.set(k, true)
+                if refused then self.refused[k] = true
                 return
 
         self.cases.push(case)

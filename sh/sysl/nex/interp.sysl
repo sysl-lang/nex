@@ -222,7 +222,7 @@ private[nex] call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answ
     for j in 0..<args.len()
         val a = args[j]
 
-        frame.v.set(j, a(c)?)
+        frame.v[j] = a(c)?
 
     run_frame(m, f.code, frame, f.name, f.span)
 
@@ -235,13 +235,13 @@ private call_lambda(m: &Machine, k: usize, env: Buf[Value], args: Buf[Code], c: 
     for j in 0..<args.len()
         val a = args[j]
 
-        frame.v.set(j, a(c)?)
+        frame.v[j] = a(c)?
 
     for j in 0..<env.len()
-        frame.v.set(l.params + j, env[j])
+        frame.v[l.params + j] = env[j]
 
     l.self_slot match
-        Some(s) -> frame.v.set(s, VClosure(k, env))
+        Some(s) -> frame.v[s] = VClosure(k, env)
         None -> ()
 
     run_frame(m, l.code, frame, l.name, l.span)
@@ -284,15 +284,15 @@ private[nex] function_value(m: &Machine, f: Value) -> Result[Repeated, Signal] =
 impl Repeated
     // Argument `j` of the next call.
     arg(self, j: usize, v: Value)
-        self.frame.v.set(j, v)
+        self.frame.v[j] = v
 
     // The call, its arguments stored; a trap is sited at `site`, the call's place in the caller.
     run(self, site: Span) -> Answer
         for j in 0..<self.env.len()
-            self.frame.v.set(self.at + j, self.env[j])
+            self.frame.v[self.at + j] = self.env[j]
 
         self.self_slot match
-            Some(s) -> self.frame.v.set(s, self.me)
+            Some(s) -> self.frame.v[s] = self.me
             None -> ()
 
         sited(self.m, run_frame(self.m, self.code, self.frame, self.name, self.span), site)
@@ -385,7 +385,7 @@ impl Interp
 
         for l in self.prog.lambdas
             for id in l.captures
-                self.captured.set(id, true)
+                self.captured[id] = true
 
         for d in self.prog.decls
             d match
@@ -425,7 +425,7 @@ impl Interp
     // A fresh frame layout for a function.
     begin(*self)
         for id in self.used
-            self.slot.set(id, -1)
+            self.slot[id] = -1
 
         self.used = buf()
         self.next = 0
@@ -436,7 +436,7 @@ impl Interp
     slot_of(*self, id: usize) -> usize
         if self.slot[id] >= 0 then return usize(self.slot[id])
 
-        self.slot.set(id, long(self.next))
+        self.slot[id] = long(self.next)
         self.used.push(id)
         self.next += 1
         self.next - 1
@@ -464,7 +464,7 @@ impl Interp
 
         (c) ->
             for s in boxed
-                c.v.set(s, cell(c.v[s]))
+                c.v[s] = cell(c.v[s])
 
             body(c)
 
@@ -499,7 +499,7 @@ impl Interp
         val m = self.m
 
         Compiled((c) ->
-            m.globals.v.set(k, init(c)?)
+            m.globals.v[k] = init(c)?
             Ok(VVoid)
         , self.next, "module level", g.span)
 
@@ -787,7 +787,7 @@ impl Interp
                     val v = self.ex(init)
 
                     return (c) ->
-                        c.v.set(s, v(c)?)
+                        c.v[s] = v(c)?
                         Ok(VVoid)
 
                 // The cell is made before the value, so a local `def` captured by a lambda inside
@@ -799,7 +799,7 @@ impl Interp
                 return (c) ->
                     val r = cell(VVoid)
 
-                    c.v.set(s, r)
+                    c.v[s] = r
                     store_through(r, v(c)?)
             TAssign(op, target, value) -> return self.assign(e.span, op, target, value)
             TReturn(v) ->
@@ -886,9 +886,9 @@ impl Interp
     local_binder(*self, id: usize) -> Binder
         val s = self.slot_of(id)
 
-        if self.captured[id] then return (c, v) -> c.v.set(s, cell(v))
+        if self.captured[id] then return (c, v) -> c.v[s] = cell(v)
 
-        (c, v) -> c.v.set(s, v)
+        (c, v) -> c.v[s] = v
 
     // What binds the names of a destructuring pattern to the parts of a tuple.
     binder(*self, pat: TBind) -> Binder = pat match
@@ -897,7 +897,7 @@ impl Interp
             val m = self.m
             val g = self.global_number(name)
 
-            (c, v) -> m.globals.v.set(g, v)
+            (c, v) -> m.globals.v[g] = v
         BSkip -> (c, v) -> ()
         BTuple(elems) ->
             var parts: Buf[Binder] = buf()
@@ -1002,7 +1002,7 @@ impl Interp
 
         for x in l.captures
             outer.push(self.slot[x])
-            self.slot.set(x, -1)
+            self.slot[x] = -1
 
         self.used = buf()
         self.next = 0
@@ -1017,7 +1017,7 @@ impl Interp
 
         // A local `def` holds itself as its value, not in a cell, in its own frame.
         own match
-            Some(id) -> self.captured.set(id, false)
+            Some(id) -> self.captured[id] = false
             None -> ()
 
         val k = self.m.lambdas.len()
@@ -1029,14 +1029,14 @@ impl Interp
             Some(id) -> Some(usize(self.slot[id]))
             None -> None
 
-        self.m.lambdas.set(k, Lambda(body, self.next, l.params.len(), self_slot, if l.name == "" then "a lambda" else l.name, l.body.span))
+        self.m.lambdas[k] = Lambda(body, self.next, l.params.len(), self_slot, if l.name == "" then "a lambda" else l.name, l.body.span)
 
         own match
-            Some(id) -> self.captured.set(id, true)
+            Some(id) -> self.captured[id] = true
             None -> ()
 
         for id in self.used
-            self.slot.set(id, -1)
+            self.slot[id] = -1
 
         self.used = used
         self.next = next
@@ -1044,7 +1044,7 @@ impl Interp
         self.ends = ends
 
         for j in 0..<l.captures.len()
-            self.slot.set(l.captures[j], outer[j])
+            self.slot[l.captures[j]] = outer[j]
 
         k
     end lambda
@@ -1256,13 +1256,13 @@ impl Interp
         (c) ->
             val first = ops[0]
 
-            c.v.set(base, first(c)?)
+            c.v[base] = first(c)?
 
             for k in 0..<tests.len()
                 val next = ops[k + 1]
                 val test = tests[k]
 
-                c.v.set(base + k + 1, next(c)?)
+                c.v[base + k + 1] = next(c)?
 
                 if !bool_of(test(c)?) then return Ok(VBool(false))
 
@@ -1395,7 +1395,7 @@ impl Interp
                 return (c) ->
                     val x = v(c)?
 
-                    c.v.set(s, step(c.v[s], x)?)
+                    c.v[s] = step(c.v[s], x)?
                     Ok(VVoid)
             TGlobalRef(name) ->
                 val g = self.global_number(name)
@@ -1403,7 +1403,7 @@ impl Interp
                 return (c) ->
                     val x = v(c)?
 
-                    m.globals.v.set(g, step(m.globals.v[g], x)?)
+                    m.globals.v[g] = step(m.globals.v[g], x)?
                     Ok(VVoid)
             _ ->
                 val r = self.place_ref(target)

@@ -395,7 +395,7 @@ struct Elab
             Some(g) -> return self.ensure_group(g)
             None -> ()
 
-        self.gstate.set(k, Working)
+        self.gstate[k] = Working
 
         val g = self.globals[k]
         val saved = self.fx
@@ -409,9 +409,9 @@ struct Elab
         val init = self.escaping(v, "bound at module level")
 
         self.fx = saved
-        self.gty.set(k, init.ty)
+        self.gty[k] = init.ty
         self.gout.push(TGlobal(g.decl.span, g.name, g.kind, self.gty[k], init))
-        self.gstate.set(k, Finished)
+        self.gstate[k] = Finished
     end ensure_global
 
     // The type of a module-level binding, elaborating it first where it has not been.
@@ -455,12 +455,12 @@ struct Elab
 
         f.ret match
             Some(t) ->
-                self.fret.set(k, self.resolve_type(t))
-                self.fret_known.set(k, true)
+                self.fret[k] = self.resolve_type(t)
+                self.fret_known[k] = true
             None ->
                 if f.name == "main"
-                    self.fret.set(k, Void)
-                    self.fret_known.set(k, true)
+                    self.fret[k] = Void
+                    self.fret_known[k] = true
 
         self.leave_unit_params(saved_units)
         self.fx = saved
@@ -469,7 +469,7 @@ struct Elab
         while self.fsig.len() <= k
             self.fsig.push(Sig(buf(), buf(), buf(), buf(), buf(), Waiting))
 
-        self.fsig.set(k, sig)
+        self.fsig[k] = sig
     end sig_types
 
     // The `k`th function's defaults, elaborated at the first call that needs them, so that a default
@@ -521,7 +521,7 @@ struct Elab
         var sig = self.fsig[k]
 
         sig.stage = Working
-        self.fsig.set(k, sig)
+        self.fsig[k] = sig
         self.defaulting.push(k)
 
         val saved = self.fx
@@ -549,7 +549,7 @@ struct Elab
 
                     val base = self.lambdas.len()
 
-                    sig.defaults.set(j, Some(self.check(d, sig.tys[j], "this default")))
+                    sig.defaults[j] = Some(self.check(d, sig.tys[j], "this default"))
                     self.no_captured_parameter(base, sig.params, d.span)
 
                     if first.is_none() then first = Some(p.name)
@@ -563,7 +563,7 @@ struct Elab
 
         self.close()
         sig.stage = Finished
-        self.fsig.set(k, sig)
+        self.fsig[k] = sig
         self.defaulting.pop()
         self.leave_unit_params(saved_units)
         self.fx = saved
@@ -580,7 +580,7 @@ struct Elab
     ensure_body(*self, k: usize)
         if self.fstate[k] != Waiting then return
 
-        self.fstate.set(k, Working)
+        self.fstate[k] = Working
 
         val f = self.funs[k]
         val sig = self.fsig[k]
@@ -599,14 +599,14 @@ struct Elab
         val body = self.body_of(f.body)
         val frame = self.fx.frames[0]
 
-        self.fret.set(k, frame.ret)
-        self.fret_known.set(k, true)
+        self.fret[k] = frame.ret
+        self.fret_known[k] = true
         self.close()
         self.unresolved_lambdas(pending_base, diags_base)
         self.leave_unit_params(saved_units)
         self.fx = saved
         self.fout.push(TFun(f.decl.span, f.name, sig.params, sig.defaults, frame.ret, body))
-        self.fstate.set(k, Finished)
+        self.fstate[k] = Finished
     end ensure_body
 
     // The result type of a function, elaborating its body first where it does not declare one.
@@ -649,7 +649,7 @@ struct Elab
         // A `return` inside fixed the type first; the body's own value has to agree with it.
         if now.ret_known then return self.escaping(self.coerce(v, now.ret, "the result"), "returned")
 
-        self.fx.frames.set(top, Frame(now.lambda, v.ty, true, now.loop_base))
+        self.fx.frames[top] = Frame(now.lambda, v.ty, true, now.loop_base)
         self.escaping(v, "returned")
     end body_of
 
@@ -686,7 +686,7 @@ struct Elab
     // Inside an instance of a generic `def`, a type that names one of its parameters is not what the
     // instance holds, and keeps its full name.
     written(*self, id: usize, t: Type)
-        self.spelled.set(id, self.spelling_of(t))
+        self.spelled[id] = self.spelling_of(t)
 
     // `t` as written, or `""` where it names a type parameter of the instance being elaborated.
     spelling_of(self, t: Type) -> string = if self.names_type_param(t) then "" else show_type(t)

@@ -181,7 +181,7 @@ impl Elab
         for k in 0..<self.agg.structs.len()
             val s = self.agg.structs[k]
 
-            if !s.generic then self.agg.structs.set(k, StructSrc(s.decl, s.name, false, s.src, self.resolve_fields(s.decl.span, s.name, s.src)))
+            if !s.generic then self.agg.structs[k] = StructSrc(s.decl, s.name, false, s.src, self.resolve_fields(s.decl.span, s.name, s.src))
 
         for k in 0..<self.agg.enums.len()
             val e = self.agg.enums[k]
@@ -193,7 +193,7 @@ impl Elab
             for v in e.src
                 variants.push(VariantInfo(v.name, self.resolve_fields(e.decl.span, v.name, v.fields)))
 
-            self.agg.enums.set(k, EnumSrc(e.decl, e.name, false, e.src, variants))
+            self.agg.enums[k] = EnumSrc(e.decl, e.name, false, e.src, variants)
 
         for s in self.agg.structs
             if !s.generic then continue
@@ -401,7 +401,7 @@ impl Elab
         val grp = self.agg.groups[g]
 
         for k in grp.members
-            self.gstate.set(k, Working)
+            self.gstate[k] = Working
 
         val saved = self.fx
 
@@ -414,9 +414,9 @@ impl Elab
         self.fx = saved
 
         for k in grp.members
-            self.gstate.set(k, Finished)
+            self.gstate[k] = Finished
 
-        self.agg.groups.set(g, GlobalGroup(grp.decl, grp.kind, grp.pat, grp.typ, grp.init, grp.members, Some(TGlobalTuple(grp.decl.span, grp.kind, b, v.ty, v))))
+        self.agg.groups[g] = GlobalGroup(grp.decl, grp.kind, grp.pat, grp.typ, grp.init, grp.members, Some(TGlobalTuple(grp.decl.span, grp.kind, b, v.ty, v)))
     end ensure_group
 
     // The declaration of a group, at its first name.
@@ -591,7 +591,7 @@ impl Elab
                 Some(d) ->
                     val v = self.check(d, s.fields[j].ty, s"the default of `${s.src[j].name}`")
 
-                    values.set(j, Some(self.escaping(v, s"stored in `${s.name}`")))
+                    values[j] = Some(self.escaping(v, s"stored in `${s.name}`"))
                 None -> ()
 
         self.fx = saved
@@ -619,7 +619,7 @@ impl Elab
                         if fields[j].name == n
                             found = true
 
-                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots.set(j, Some(value))
+                            if slots[j].is_some() then self.fail(a.span, s"`${n}` is given twice") else slots[j] = Some(value)
 
                     if !found then self.fail(a.span, s"`${what}` has no field `${n}`")
                 _ ->
@@ -628,7 +628,7 @@ impl Elab
                     elif next >= slots.len()
                         self.fail(a.span, s"`${what}` has ${fields_text(fields.len())}")
                     else
-                        slots.set(next, Some(a))
+                        slots[next] = Some(a)
 
                     next += 1
 
@@ -710,7 +710,7 @@ impl Elab
                 val g = self.mods.qualify(self.mods.module_at(pat.span.start), n)
 
                 for k in members
-                    if self.globals[k].name == g then self.gty.set(k, ty)
+                    if self.globals[k].name == g then self.gty[k] = ty
 
                 BGlobal(g)
             Wildcard -> BSkip
@@ -865,7 +865,7 @@ impl Elab
             val arm = self.arm(shapes[k], cases[k], want)
 
             ty = self.arm_join(span, ty, arm.body.ty, statement)
-            bodies.set(k, Some(arm))
+            bodies[k] = Some(arm)
 
         val lwant = if is_wild(ty) then want else Some(ty)
         val adopted = lwant match
@@ -878,7 +878,7 @@ impl Elab
             val arm = self.arm(shapes[k], cases[k], Some(adopted))
 
             ty = self.arm_join(span, ty, arm.body.ty, statement)
-            bodies.set(k, Some(arm))
+            bodies[k] = Some(arm)
 
         var arms: Buf[TArm] = buf()
 
@@ -928,7 +928,7 @@ impl Elab
                     Some(j) ->
                         if covered[j] then self.fail(c.pat.span, s"`${shape.variant}` is matched twice; the second arm is never reached")
 
-                        covered.set(j, true)
+                        covered[j] = true
                     None -> all = true
             else
                 judged = false

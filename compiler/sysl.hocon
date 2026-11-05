@@ -12,7 +12,7 @@
 package {
   name    = "nexc"
   version = "0.1.0"
-  sysl    = "0.8.4"
+  sysl    = "0.9.0"
 }
 
 dependencies {

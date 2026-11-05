@@ -70,7 +70,7 @@ impl Emitter
                 // replaces the table of arrays the local's entry is set in.
                 val v = self.var_start(e.span, id, init, self.lasting(init))
 
-                self.arr.set(id, v)
+                self.arr[id] = v
                 self.note_origin(e.span, id, init)
                 return ""
 
@@ -115,7 +115,7 @@ impl Emitter
                 Some(x) ->
                     val r = if is_arr(self.ret) then self.lasting(x) else self.ex(x)
 
-                    if is_arr(self.ret) then self.arr.set(self.ret_id(), r)
+                    if is_arr(self.ret) then self.arr[self.ret_id()] = r
                     elif self.ret_slot != "" && r != "" then self.keep(x.span, self.ret_slot, r, self.ret)
                 None -> ()
 

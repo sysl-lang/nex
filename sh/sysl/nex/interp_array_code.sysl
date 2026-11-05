@@ -86,7 +86,7 @@ private[nex] mapped_over(c: &Cells, vals: Buf[Value], arrays: Buf[bool], base: u
 
     for j in 0..<n
         for k in 0..<vals.len()
-            c.v.set(base + k, if arrays[k] then data_get(runs[k], usize(j)) else vals[k])
+            c.v[base + k] = if arrays[k] then data_get(runs[k], usize(j)) else vals[k]
 
         data_push(res, body(c)?)
 
@@ -286,7 +286,7 @@ impl Interp
         self.ends.pop()
 
         (c, v) ->
-            c.v.set(slot, v)
+            c.v[slot] = v
 
             val a = arr_of(v)
             var axes: Buf[Cut] = buf()
@@ -560,7 +560,7 @@ impl Interp
                 val xs = elements(parts[j])
 
                 for k in 0..<xs.len()
-                    out.set(usize(long(j) + n * long(k)), xs[k])
+                    out[usize(long(j) + n * long(k))] = xs[k]
 
             var ext: Buf[long] = buf()
 

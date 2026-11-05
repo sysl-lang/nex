@@ -122,7 +122,7 @@ private[nex] with_field(v: Value, k: usize, x: Value) -> Value = v match
         for f in fields
             out.push(f)
 
-        out.set(k, x)
+        out[k] = x
         VAgg(tag, out)
     _ -> v
 
@@ -155,7 +155,7 @@ private[nex] deref(v: Value) -> Value = v match
 // shape.
 private[nex] store_through(r: Value, v: Value) -> Answer = r match
     VRef(cells, k, path) ->
-        cells.v.set(k, if path.len() == 0 then v else put_path(cells.v[k], path, 0, v))
+        cells.v[k] = if path.len() == 0 then v else put_path(cells.v[k], path, 0, v)
         Ok(VVoid)
     VSub(w, path) -> sub_store(w, path, v)
     _ -> Ok(VVoid)

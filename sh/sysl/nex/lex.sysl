@@ -202,7 +202,7 @@ private emit_dent(out: *Buf[Spanned[Tok]], d: Dent, ended: Span, at: Span, start
 end emit_dent
 
 private drop_trailing_newline(out: *Buf[Spanned[Tok]])
-    if out.len() > 0 && is_newline(out.at(out.len() - 1).value) then out.pop()
+    if out.len() > 0 && is_newline(out[out.len() - 1].value) then out.pop()
 
 private is_newline(t: Tok) -> bool = t match
     Newline -> true
@@ -212,7 +212,7 @@ private is_newline(t: Tok) -> bool = t match
 private last_keyword(out: *Buf[Spanned[Tok]]) -> string
     if out.len() == 0 then return ""
 
-    keyword_of(out.at(out.len() - 1).value)
+    keyword_of(out[out.len() - 1].value)
 
 private keyword_of(t: Tok) -> string = t match
     Keyword(k) -> k
@@ -225,7 +225,7 @@ private ends_the_statement(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]]) -
     val last = last_keyword(out)
     val trigger = lay.brackets > 0 && last == "->"
     val suspended = !lay.significant()
-    val reduction = out.len() > 1 && keyword_of(out.at(out.len() - 2).value) == ":"
+    val reduction = out.len() > 1 && keyword_of(out[out.len() - 2].value) == ":"
 
     s.accept_newline()
 
@@ -304,7 +304,7 @@ private scan_punct(s: *Scanner, lay: *Layout, out: *Buf[Spanned[Tok]], m: usize)
         return Ok(())
 
     if s.peek() == Some(u8('<')) && s.peek_at(1) != Some(u8('=')) && out.len() > 0
-        val prev = out.at(out.len() - 1)
+        val prev = out[out.len() - 1]
         val glued = prev.span.end == m
         val ends_operand = prev.value match
             Num(_) -> true
@@ -346,7 +346,7 @@ private unit_open(out: *Buf[Spanned[Tok]]) -> bool
     while i > 0
         i -= 1
 
-        out.at(i).value match
+        out[i].value match
             UnitOpen -> return true
             UnitClose -> return false
             Newline -> return false

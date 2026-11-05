@@ -38,7 +38,7 @@ private ex(s: *Subst, e: TExpr) -> TExpr
         TLocal(id) ->
             for i in 0..<s.from.len()
                 if s.from[i] == id
-                    s.hits.set(i, true)
+                    s.hits[i] = true
 
                     if i < s.to.len() then return s.to[i]
 
