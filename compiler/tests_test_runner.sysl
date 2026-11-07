@@ -1,0 +1,41 @@
+@tests
+
+// Why `nex test` reports a failing test as it does: a trap's message, with the rank in front under an
+// MPI job, however the launcher's own output is interleaved with the rank's.
+
+import nex.sh.sysl.nex.*
+import sysl.fs.read_text
+import sysl.process.{Output, Status}
+
+private died(err: string) -> Output = Output(Status.Exited(134), "", Some(err))
+
+@test("a rank's trap line is reported when Open MPI forwarded it with a NUL byte in front")
+failure_nul_before_rank()
+    assert_eq(failure(died("---\n\0rank 2: trap: index out of bounds\n")), "rank 2: index out of bounds")
+
+@test("a captured stderr of an aborted job, NUL and launcher banner included, reports the trap")
+failure_captured_stderr()
+    val err = read_text(repo("testdata/mpi/nul_abort_stderr.txt")).unwrap()
+
+    assert(err.contains("\0"))
+    assert_eq(failure(died(err)), "rank 2: index out of bounds")
+
+@test("a NUL byte only at the end of the stderr does not hide the trap line")
+failure_nul_at_end()
+    assert_eq(failure(died("rank 1: trap: index out of bounds\n\0")), "rank 1: index out of bounds")
+    assert_eq(failure(died("trap: division by zero\n\0")), "division by zero")
+
+@test("NUL bytes inside a line are dropped, wherever they fall")
+failure_nul_inside_line()
+    assert_eq(failure(died("ra\0nk 3: tr\0ap: index out of bounds\n")), "rank 3: index out of bounds")
+
+@test("a clean trap line is reported as before, with and without a rank")
+failure_clean_trap()
+    assert_eq(failure(died("rank 2: trap: index out of bounds\n")), "rank 2: index out of bounds")
+    assert_eq(failure(died("trap: index out of bounds\n")), "index out of bounds")
+
+@test("with no trap line the status is reported, NUL bytes or not")
+failure_no_rank_line()
+    assert_eq(failure(died("")), "stopped with status 134")
+    assert_eq(failure(died("---\n\0some other line\n")), "stopped with status 134")
+    assert_eq(failure(Output(Status.Exited(134), "", None)), "stopped with status 134")

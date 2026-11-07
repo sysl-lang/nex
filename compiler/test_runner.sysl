@@ -12,7 +12,7 @@ import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, remove_dir_all}
 import sysl.process.{Output, Status, capture}
-import sysl.text.split
+import sysl.text.{replace_all, split}
 
 // What a run of the tests found: one line per failure and the summary line, and how many failed.
 struct TestRun
@@ -112,9 +112,11 @@ private with_test(args: []const string, k: usize) -> Buf[string]
     out
 
 // Why a test's process did not end with status 0: its trap's message, the rank in front where an
-// MPI job's rank trapped, or how it ended.
-private failure(out: Output) -> string
-    for line in split(out.err.unwrap_or(""), "\n")
+// MPI job's rank trapped, or how it ended. NUL bytes are dropped first: under load Open MPI's launcher
+// forwards a rank's stderr after its own abort banner with a NUL in front of the line, which would
+// otherwise hide the `rank ` the line starts with.
+failure(out: Output) -> string
+    for line in split(replace_all(out.err.unwrap_or(""), "\0", ""), "\n")
         if line.starts_with("trap: ") then return line[6..]
 
         if line.starts_with("rank ") && line.contains(": trap: ")
