@@ -272,6 +272,17 @@ the program links `libomp` from `$NEX_LLVM_HOME/lib` (`driver.sysl`'s `pipeline_
   not leave an OpenMP worker, so every thread of a region runs its share under a catch of its own,
   and the region's end raises the first trap in the thread that started it (DESIGN §9.4).
 
+## Versions
+
+The first release is **0.0.1**, and releases stay at `0.0.x` until all three of the following hold.
+**0.1.0 is reserved for that point**:
+
+- **The language is basically useful.** Someone can write real numerical programs in it.
+- **Its executables are comparable in speed to gfortran's.** The perf oracle (below) meets its bars
+  on the machines nex ships for, not only on the development Mac.
+- **Its programs run on AWS ParallelCluster.** This is the cluster run in M14's exit: Slurm, `srun`,
+  more than one node over EFA.
+
 ## Milestones
 
 Each is one bounded item ending in a green `sysl test .` on its branch, with the corpus programs of

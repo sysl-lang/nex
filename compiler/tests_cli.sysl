@@ -20,7 +20,7 @@ cli_version()
     val word = capture(nex, ["version"], stderr = true).unwrap()
     val extra = capture(nex, ["--version", "x"], stderr = true).unwrap()
 
-    remove_dir_all(work)
+    _ = remove_dir_all(work)
     assert(flag.status.ok(), flag.err.unwrap_or(""))
     assert_eq(flag.text, s"nex $NEX_VERSION\n")
     assert_eq(word.text, s"nex $NEX_VERSION\n")

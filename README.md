@@ -20,8 +20,9 @@ reference is right until the specification says otherwise. The architecture and 
 
 ## Status
 
-Version 0.1.0. nex compiles a program through MLIR to a native executable, and runs it on an
-interpreter with no toolchain (`nex run --interp`); both engines are held to the same output on
+Version 0.0.1, the first. 0.1.0 is kept for the version that meets PLAN.md's "Versions".
+nex compiles a program through MLIR to a native executable, and runs it on an interpreter with no
+toolchain (`nex run --interp`); both engines are held to the same output on
 `testdata/corpus/` — the reference's 425 programs, each beside the exact output it must print — and
 the programs of `testdata/v2/`. Units of measure, `parallel`, the C and Fortran FFI, BLAS and LAPACK
 dispatch, assumed-rank descriptors and the embedding API are built. The `mpi` module is a preview.
