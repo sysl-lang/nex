@@ -40,7 +40,7 @@
 import nex.sh.sysl.nex.*
 import sysl.buf.{Buf, buf}
 import sysl.text.str_builder
-import sh.sysl.parsing.Span
+import sh.sysl.parsing.{Span, error}
 
 // What `declared` holds where the module calls BLAS or LAPACK.
 private val BLAS_MARK = "nex.blas"
@@ -282,6 +282,14 @@ impl Emitter
 
         val rt = self.ext_result_ty(span, x.ret, x.fortran)
 
+        val sig = s"(${joined(tys)}) -> ${result_text(rt)}"
+        val seen = self.signature_of(x.symbol)
+
+        if seen != ""
+            if seen != sig then self.diags.push(error(span, s"`extern def` of `${x.symbol}` is declared as $sig, but the compiler itself uses it as $seen"))
+            return tys
+
+        self.declared.push(s"sig ${x.symbol} $sig")
         self.declare(s"c.${x.symbol}", s"func.func private @\"${x.symbol}\"(${joined(decl)})${if rt == "" then "" else s" -> ($rt${result_ext(x.ret, x.fortran)})"}")
         tys
 

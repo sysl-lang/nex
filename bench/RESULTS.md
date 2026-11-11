@@ -315,3 +315,46 @@ gfortran twin with `schedule(runtime)`, at a load of about 3.7:
 - **Left unset, the OpenMP runtimes use all 18 cores**, as fast as the best fixed count in every
   row, so nex does not need to pick a thread count. The `OMP_NUM_THREADS=6` the oracle uses for its
   main table understates the machine.
+
+### With dynamic blocks
+
+The threads now claim their work from a counter as they free up (DESIGN §9.5): runs of 1/16 of a
+thread's share, at least one iteration and at most 16 blocks of 4096, a reduction's runs of whole
+blocks, so every result keeps its bits. `zsh bench/run.zsh --scale` on branch `par-dynamic`,
+2026-11-11, at a load of 4.6 to 9.4 (mandel's rows the busiest). nex columns only; *before* is the
+table above.
+
+| kernel | threads | nex ms | nex speedup | before |
+|---|---:|---:|---:|---:|
+| parallel axpy | 1 | 1.63 | 1.00 | 1.00 |
+| | 2 | 1.15 | 1.42 | 1.29 |
+| | 4 | 1.33 | 1.22 | 1.41 |
+| | 6 | 0.99 | 1.66 | 1.38 |
+| | 8 | 0.99 | 1.65 | 1.66 |
+| | 12 | 0.94 | 1.74 | 1.69 |
+| | 18 | 0.91 | 1.79 | 1.81 |
+| | unset | 0.92 | 1.78 | 1.77 |
+| parallel dot | 1 | 4.99 | 1.00 | 1.00 |
+| | 2 | 2.53 | 1.97 | 1.98 |
+| | 4 | 1.39 | 3.58 | 3.81 |
+| | 6 | 0.97 | 5.14 | 5.11 |
+| | 8 | 0.86 | 5.77 | 6.43 |
+| | 12 | 0.70 | 7.10 | 6.45 |
+| | 18 | 0.73 | 6.83 | 6.46 |
+| | unset | 0.73 | 6.84 | 6.46 |
+| parallel mandel | 1 | 125.58 | 1.00 | 1.00 |
+| | 2 | 65.41 | 1.92 | 1.97 |
+| | 4 | 34.06 | 3.69 | 2.13 |
+| | 6 | 23.63 | 5.31 | 2.75 |
+| | 8 | 17.74 | 7.08 | 3.37 |
+| | 12 | 11.89 | 10.56 | 4.56 |
+| | 18 | 8.76 | 14.34 | 6.56 |
+| | unset | 8.71 | 14.42 | 6.56 |
+
+- **Mandel scales as the Fortran twin does under `schedule(dynamic,1)`**: 14.3× at 18 threads
+  against its 15.2×, and 8.76 ms against the static Fortran builds' 16.6 to 18.1 ms.
+- **The memory-bound kernels lose nothing.** Axpy is within the run-to-run spread of the table above
+  at every count. Dot is as fast or faster from 6 threads up (0.70 ms at 12, where static gave 0.77).
+- **Claims of a single block were measured first and rejected**: parallel dot fell to 0.89 to 0.92 ms
+  at 8 to 18 threads, about 15% behind static, the threads queueing on the counter. Runs of up to 16
+  blocks bring a 10-million-element pass down to a few hundred claims.
