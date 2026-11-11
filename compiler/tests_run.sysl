@@ -11,7 +11,8 @@
 import nex.sh.sysl.nex.*
 import sh.sysl.parsing.{Diagnostic, Source, source_of}
 import sysl.buf.{Buf, buf}
-import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
+import sysl.env.{get, get_or}
+import sysl.fs.{exists, make_dir, make_temp_dir, read_text, remove_dir_all, symlink, write_text}
 import sysl.process.{Output, Status, Var, capture}
 import sysl.testing.{compiler, skip}
 import sysl.text.{from_utf8, join, split}
@@ -349,6 +350,41 @@ run_command()
     assert(run.status == Status.Exited(2), s"${run.status}")
     assert(refused.status == Status.Exited(1), s"${refused.status}")
     assert(refused.err.unwrap_or("").contains("`args` other than `args[k]`, `length(args)` and `for a in args` is not compiled yet"), refused.err.unwrap_or(""))
+
+// With no `NEX_RUNTIME`, `nex` finds `libnex_rt.a` beside the executable the loader started — not
+// beside what the shell typed. A shell that finds `nex` on `PATH` hands it a bare `nex`, and Homebrew
+// puts a symlink to it in a `bin/` of its own, so neither `args[0]` names the directory the archive is
+// in. The program runs from a directory that holds no archive, so a lookup relative to the working
+// directory finds nothing either.
+@test("with no NEX_RUNTIME, nex finds its runtime beside itself when started through PATH or a symlink")
+run_command_finds_runtime()
+    val b = bench()
+
+    if get("NEX_RUNTIME").is_some() then skip("NEX_RUNTIME is set, so the lookup beside nex is not taken")
+
+    val nex = s"${b.work}/nex"
+    val built = capture(compiler(), ["build", repo("compiler"), "-o", nex], stderr = true).unwrap()
+
+    assert(built.status.ok(), built.err.unwrap_or(""))
+
+    val links = s"${b.work}/links"
+    val away = s"${b.work}/away"
+
+    make_dir(links).unwrap()
+    make_dir(away).unwrap()
+    symlink(nex, s"$links/nex").unwrap()
+    write_text(s"$away/hello.nex", "def main() =\n  print(6 * 7)\n").unwrap()
+
+    val outer = get_or("PATH", "")
+    val on_path = capture("/bin/sh", ["-c", "nex run hello.nex"], dir = away, env = [Var("PATH", s"${b.work}:$outer")], stderr = true).unwrap()
+    val link_on_path = capture("/bin/sh", ["-c", "nex run hello.nex"], dir = away, env = [Var("PATH", s"$links:$outer")], stderr = true).unwrap()
+    val by_link = capture(s"$links/nex", ["run", "hello.nex"], dir = away, stderr = true).unwrap()
+
+    finish(b)
+
+    for (how, ran) in [("on PATH", on_path), ("a symlink on PATH", link_on_path), ("a symlink by its path", by_link)]
+        assert(ran.status.ok(), s"$how: ${ran.err.unwrap_or("")}")
+        assert_eq(ran.text, "42\n")
 
 @test("a chained comparison evaluates each operand once, left to right, and stops at the first false link")
 run_chain_once()

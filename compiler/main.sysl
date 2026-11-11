@@ -14,12 +14,18 @@
 import nex.sh.sysl.nex.*
 import nex_runtime.sh.sysl.nex_runtime.uncaught_text
 import sysl.buf.{Buf, buf}
+import sysl.env.current_exe
 import sysl.fs.{make_temp_dir, read_bytes, remove_dir_all}
 import sysl.process.run
 import sysl.text.parse_int
 import sh.sysl.parsing.source
 
-private val usage = "usage: nex <tokens | parse | elaborate | emit | build | run | test | version> [--fpe-trap] [--interp] [--np ranks] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
+// Where this `nex` is, to find `libnex_rt.a` beside it: the loader's absolute, symlink-resolved path.
+// `args[0]` is what the shell typed — a bare `nex` when it was found on `PATH`, or the path of a
+// symlink such as Homebrew's in `bin/` — so it is only the answer where the loader gives none.
+private self_path(args: []string) -> string = current_exe().unwrap_or(args[0])
+
+private val usage ="usage: nex <tokens | parse | elaborate | emit | build | run | test | version> [--fpe-trap] [--interp] [--np ranks] [--prelude-path dir] [-L dir] [-l lib] <file.nex> [-o out | -- args | substring]"
 
 main(args: []string)
     if args.len == 2 && (args[1] == "--version" || args[1] == "version")
@@ -95,7 +101,7 @@ main(args: []string)
 
     if command == "test"
         val ran = if interp then run_tests_interpreted(file, prelude, filter, fpe_trap)
-                  else find_toolchain(args[0]) match
+                  else find_toolchain(self_path(args)) match
                       Ok(tc) -> run_tests(file, prelude, filter, tc, fpe_trap, np)
                       Err(m) -> fail(m)
 
@@ -113,7 +119,7 @@ main(args: []string)
     if command == "run" && interp then interpret_file(file, opts, program_args.view(), fpe_trap)
 
     if build || command == "run"
-        val tc = find_toolchain(args[0]) match
+        val tc = find_toolchain(self_path(args)) match
             Ok(t) -> t
             Err(m) -> fail(m)
 
