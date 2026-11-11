@@ -11,7 +11,7 @@
 
 package {
   name    = "nexc"
-  version = "0.0.2"
+  version = "0.0.3"
   sysl    = "0.9.19"
 }
 
