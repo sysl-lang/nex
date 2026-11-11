@@ -20,7 +20,7 @@ reference is right until the specification says otherwise. The architecture and 
 
 ## Status
 
-Version 0.0.1, the first. 0.1.0 is kept for the version that meets PLAN.md's "Versions".
+Version 0.0.2. 0.1.0 is kept for the version that meets PLAN.md's "Versions".
 nex compiles a program through MLIR to a native executable, and runs it on an interpreter with no
 toolchain (`nex run --interp`); both engines are held to the same output on
 `testdata/corpus/` — the reference's 425 programs, each beside the exact output it must print — and

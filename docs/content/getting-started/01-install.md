@@ -28,7 +28,7 @@ to a prefix holding `bin/nex`, the runtime archive `bin/libnex_rt.a` (found besi
 
 ```
 mkdir -p ~/nex
-tar -xzf nex-0.0.1-linux-aarch64.tar.gz -C ~/nex
+tar -xzf nex-0.0.2-linux-aarch64.tar.gz -C ~/nex
 export PATH=~/nex/bin:$PATH
 nex --version
 ```

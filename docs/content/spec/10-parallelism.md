@@ -450,7 +450,7 @@ a reduction's bits.
 ## 10.8 Many nodes: the `mpi` module
 
 {{< note >}}
-The `mpi` module is a preview in 0.0.1: it is built and tested on one machine under Open MPI, not on
+The `mpi` module is a preview in 0.0.2: it is built and tested on one machine under Open MPI, not on
 a cluster, and its interface may grow or change.
 {{< /note >}}
 
