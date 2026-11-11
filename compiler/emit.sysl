@@ -194,6 +194,16 @@ struct Emitter
         self.set_ctl(0)
         self.op("}")
 
+    // The signature `(params)result` the C symbol `name` was first declared with, `""` if none yet.
+    // The runtime's calls and the program's `extern def`s share one MLIR symbol per name.
+    signature_of(*self, name: string) -> string
+        val prefix = s"sig $name "
+
+        for d in self.declared
+            if d.starts_with(prefix) then return d[prefix.len..<d.len]
+
+        ""
+
     // A declaration at module level, written once.
     declare(*self, name: string, text: string)
         for d in self.declared
@@ -206,6 +216,15 @@ struct Emitter
     // through a failed check as leaving the loop it is in: the check can then be hoisted out of the
     // loop and the loop vectorized.
     external(*self, name: string, params: string, result: string)
+        val sig = s"($params) -> ${result_text(result)}"
+        val seen = self.signature_of(name)
+
+        if seen != ""
+            if seen != sig then self.diags.push(error(Span(0, 0), s"`$name` is declared by an `extern def` as $seen, but the compiler itself calls it as $sig"))
+            return
+
+        self.declared.push(s"sig $name $sig")
+
         val never = if never_returns(name) then " attributes {llvm.passthrough = [\"noreturn\", \"nounwind\"]}" else ""
 
         self.declare(name, s"func.func private @$name($params)${arrow(result)}$never")
@@ -923,6 +942,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 private arrow(result: string) -> string = if result == "" then "" else s" -> $result"
 
 result_text(t: string) -> string = if t == "" then "()" else t
+
 
 is_inout(k: LocalKind) -> bool = k match
     LParam(m) -> m == Inout

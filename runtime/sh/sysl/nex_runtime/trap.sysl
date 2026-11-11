@@ -15,7 +15,7 @@ module sh.sysl.nex_runtime
 
 @include("<setjmp.h>")
 
-import sysl.sync.{Acquire, Atomic, Release, SpinLock}
+import sysl.sync.{Acquire, Atomic, Relaxed, Release, SpinLock}
 
 c const
     JMP_BUF_WORDS: usize = "(sizeof(jmp_buf) + sizeof(long long) - 1) / sizeof(long long)"
@@ -269,6 +269,14 @@ par_run(code: *extern(*u8, long, long) -> unit, env: *u8, worker: long, workers:
 
         // The message is the region's now; a worker thread keeps no copy of its own.
         last_message = ""
+
+// `take` more of a region's work from the counter at `word`, which the region's environment ends
+// in: the number of the first thing taken. Every thread of the team claims from the one counter
+// until what it is answered passes the end, so a thread that finishes early takes more. Relaxed
+// suffices: the counter only divides the work and publishes nothing, and the region's end orders
+// every thread's writes before the code after it.
+@export("nex_par_claim")
+par_claim(word: *i64, take: i64) -> i64 = atomic_add(word, take, Relaxed)
 
 // The word that turns nonzero once a trap has ended the region, which generated code reads with an
 // atomic load before each iteration: an iteration not yet started does not start.
