@@ -29,7 +29,7 @@
 //
 // **The order of a reduction never depends on the thread count** (DESIGN §9.2.1). The iteration
 // space is numbered with the first clause's index varying fastest and cut into blocks of 4096; a
-// thread claims whole blocks, one at a time, and reduces each from the operator's identity into the
+// thread claims runs of whole blocks and reduces each block from the operator's identity into the
 // block's own partial, and after the region the partials are combined in the fixed pairwise tree,
 // then once with the variable's starting value. Threads decide only who computes which block, so
 // claiming blocks as they come changes nothing in a result's bits.
@@ -52,8 +52,10 @@ import sh.sysl.parsing.Span
 // The block a reduction reduces sequentially (DESIGN §9.2.1).
 private val PAR_BLOCK: usize = 4096
 
-// How many runs per thread a region without reductions is cut into, at the most (see `grain`).
+// How many runs per thread a region's work is cut into, at the most, and how many blocks of
+// `PAR_BLOCK` one run may hold (see `grain`).
 private val PAR_RUNS: usize = 16
+private val PAR_CAP_BLOCKS: usize = 16
 
 // What a region's code is made from.
 enum ParKind
@@ -242,20 +244,22 @@ impl Emitter
     // The address of the claim counter that ends the environment at `env` of `fields`.
     claim_word(*self, env: string, fields: Buf[string]) -> string = self.env_at(env, env_ty(fields), fields.len())
 
-    // How many of `n` iterations or elements (`i64`) one claim takes, for a team of `nw`: `n` cut
-    // into `PAR_RUNS` runs per thread, but no fewer than 1 and no more than `PAR_BLOCK`. The count
-    // of claims is then bounded by `nw · PAR_RUNS` plus `n / PAR_BLOCK`, whatever `n` is, so a region
-    // of cheap iterations pays a few hundred atomic adds at most besides one per 4096 iterations;
-    // the last run a thread takes is at most a sixteenth of its fair share, so a thread that drew
-    // the dearest iterations finishes late by little; and a loop of a few dear iterations
+    // How many of `n` things (`i64`: iterations, elements or blocks) one claim takes, for a team of
+    // `nw`: `n` cut into `PAR_RUNS` runs per thread, but no fewer than 1 thing and no more than
+    // `cap`. A region therefore makes at most `nw · PAR_RUNS` claims plus one per `cap` things,
+    // a few hundred on a large array, so claiming costs nothing beside the work; the last run a
+    // thread takes is at most a sixteenth of its fair share, so a thread that drew the dearest
+    // iterations finishes late by little; and a loop of a few dear iterations
     // (`parallel for j in 1..5`) is claimed one iteration at a time, spread over 5 threads. The cap
-    // keeps the trap check of DESIGN §9.4 between at most 4096 iterations.
-    grain(*self, n: string, nw: string) -> string
+    // is `PAR_CAP_BLOCKS` blocks of 4096: claims of a single block, measured on `bench/parallel-dot`
+    // at 8 to 18 threads, cost about 15% against the fixed shares, the threads queueing on the
+    // counter's cache line.
+    grain(*self, n: string, nw: string, cap: usize) -> string
         val runs = self.def(s"arith.muli $nw, ${self.def(s"arith.constant $PAR_RUNS : i64")} : i64")
         val g = self.def(s"arith.ceildivsi $n, $runs : i64")
         val lo = self.def(s"arith.maxsi $g, ${self.def("arith.constant 1 : i64")} : i64")
 
-        self.def(s"arith.minsi $lo, ${self.def(s"arith.constant $PAR_BLOCK : i64")} : i64")
+        self.def(s"arith.minsi $lo, ${self.def(s"arith.constant $cap : i64")} : i64")
 
     // One claim of `take` (`i64`) more of `n` things from the counter at `word`: whether this thread
     // goes on — something was left, and no trap has ended the region — and the first thing taken.
@@ -284,16 +288,23 @@ impl Emitter
         self.loop_condition(l, go)
         (l, self.def(s"llvm.load $ptr : !llvm.ptr -> i64"))
 
-    // A loop of a counter from `lo` up to `hi − 1` (`i64`); the body follows, the counter's value
-    // answered with the loop.
-    count_open(*self, lo: string, hi: string) -> (Loop, string, string)
+    // A loop of a counter from `lo` up to `hi − 1` (`i64`), where `checked` one whose next pass does
+    // not start once a trap has ended the region; the body follows, the counter's value answered
+    // with the loop.
+    count_open(*self, lo: string, hi: string, checked: bool) -> (Loop, string, string)
         val ptr = self.alloca("i64")
 
         self.op(s"llvm.store $lo, $ptr : i64, !llvm.ptr")
 
         val l = self.loop_open()
+        var go = self.def(s"arith.cmpi slt, ${self.def(s"llvm.load $ptr : !llvm.ptr -> i64")}, $hi : i64")
 
-        self.loop_condition(l, self.def(s"arith.cmpi slt, ${self.def(s"llvm.load $ptr : !llvm.ptr -> i64")}, $hi : i64"))
+        if checked
+            val stop = self.def(s"llvm.load ${self.par_stop} atomic monotonic {alignment = 4 : i64} : !llvm.ptr -> i32")
+
+            go = self.def(s"arith.andi $go, ${self.def(s"arith.cmpi eq, $stop, ${self.def("arith.constant 0 : i32")} : i32")} : i1")
+
+        self.loop_condition(l, go)
         (l, ptr, self.def(s"llvm.load $ptr : !llvm.ptr -> i64"))
 
     count_close(*self, l: Loop, ptr: string, k: string)
@@ -540,21 +551,29 @@ impl Emitter
         for c in counts
             total = self.def(s"arith.muli $total, $c : i64")
 
-        // A thread checks for a trap that has ended the region before each claim, so the iterations
-        // themselves stay a plain loop.
+        // A thread checks for a trap that has ended the region before each claim and between blocks
+        // of 4096 iterations within a run, so the iterations themselves stay a plain loop.
         val block = self.def(s"arith.constant $PAR_BLOCK : i64")
         val word = self.claim_word("%env", job.fields)
 
         if reds.len() == 0
-            // Runs of iterations, claimed one after another until none are left.
-            val take = self.grain(total, "%nw")
+            // Runs of iterations, claimed one after another until none are left, each run in blocks.
+            val take = self.grain(total, "%nw", PAR_BLOCK * PAR_CAP_BLOCKS)
             val (l, first) = self.claim_open(word, total, take)
+            val hi = self.def(s"arith.minsi ${self.def(s"arith.addi $first, $take : i64")}, $total : i64")
+            val (sl, sptr, s) = self.count_open(self.def("arith.constant 0 : i64"), self.def(s"arith.ceildivsi ${self.def(s"arith.subi $hi, $first : i64")}, $block : i64"), true)
+            val lo = self.def(s"arith.addi $first, ${self.def(s"arith.muli $s, $block : i64")} : i64")
 
-            self.iterations(span, first, self.def(s"arith.minsi ${self.def(s"arith.addi $first, $take : i64")}, $total : i64"), loop_id, clauses, los, steps, counts, body)
+            self.iterations(span, lo, self.def(s"arith.minsi ${self.def(s"arith.addi $lo, $block : i64")}, $hi : i64"), loop_id, clauses, los, steps, counts, body)
+            self.count_close(sl, sptr, s)
             self.loop_close(l)
         else
-            // The blocks every reduction is cut into, claimed one at a time.
-            val (l, b) = self.claim_open(word, self.def(s"arith.ceildivsi $total, $block : i64"), self.def("arith.constant 1 : i64"))
+            // Runs of the blocks every reduction is cut into, claimed one after another until none
+            // are left.
+            val nb = self.def(s"arith.ceildivsi $total, $block : i64")
+            val take = self.grain(nb, "%nw", PAR_CAP_BLOCKS)
+            val (l, first) = self.claim_open(word, nb, take)
+            val (bl, bptr, b) = self.count_open(first, self.def(s"arith.minsi ${self.def(s"arith.addi $first, $take : i64")}, $nb : i64"), true)
 
             for a in self.par_accs
                 self.store(span, a.acc, self.red_identity(span, a), a.t)
@@ -568,6 +587,7 @@ impl Emitter
 
                 self.store(span, self.elem_at(parts[k], b, self.mem_ty(span, a.t)), self.load(span, a.acc, a.t), a.t)
 
+            self.count_close(bl, bptr, b)
             self.loop_close(l)
 
         for k in 0..<written.len()
@@ -605,7 +625,7 @@ impl Emitter
     // Iterations `lo` to `hi − 1` of the box the clauses span, numbered with the first clause's index
     // varying fastest: each sets the indices and runs the body.
     iterations(*self, span: Span, lo: string, hi: string, loop_id: usize, clauses: Buf[TParClause], los: Buf[string], steps: Buf[string], counts: Buf[string], body: TExpr)
-        val (l, ptr, t) = self.count_open(lo, hi)
+        val (l, ptr, t) = self.count_open(lo, hi, false)
         var rest = t
 
         for k in 0..<clauses.len()
@@ -895,7 +915,7 @@ impl Emitter
 
         // Runs of elements, claimed one after another until none are left, the result carried round.
         val n64 = self.to_i64(total)
-        val take = self.grain(n64, "%nw")
+        val take = self.grain(n64, "%nw", PAR_BLOCK * PAR_CAP_BLOCKS)
         val word = self.claim_word("%env", job.fields)
         val at_ptr = self.alloca("i64")
         val res = self.fresh()
@@ -1124,26 +1144,32 @@ impl Emitter
         val block = self.index_const(PAR_BLOCK)
         val nb = self.to_i64(self.def(s"arith.ceildivui $count, $block : index"))
 
-        // The blocks, claimed one at a time until none are left.
+        // Runs of blocks, claimed one after another until none are left.
+        val take = self.grain(nb, "%nw", PAR_CAP_BLOCKS)
         val word = self.claim_word("%env", job.fields)
         val at_ptr = self.alloca("i64")
 
         self.par_stop = self.call("nex_par_stop_word", "", "", "!llvm.ptr")
         self.op("scf.while : () -> () {")
 
-        val (go, first) = self.claim(word, nb, self.def("arith.constant 1 : i64"))
+        val (go, first) = self.claim(word, nb, take)
 
         self.op(s"llvm.store $first, $at_ptr : i64, !llvm.ptr")
         self.op(s"scf.condition($go)")
         self.op("} do {")
 
-        val b = self.def(s"llvm.load $at_ptr : !llvm.ptr -> i64")
-        val iv = self.def(s"arith.index_cast $b : i64 to index")
+        val from = self.def(s"llvm.load $at_ptr : !llvm.ptr -> i64")
+        val to = self.def(s"arith.minsi ${self.def(s"arith.addi $from, $take : i64")}, $nb : i64")
+        val iv = self.fresh()
+
+        self.op(s"scf.for $iv = ${self.def(s"arith.index_cast $from : i64 to index")} to ${self.def(s"arith.index_cast $to : i64 to index")} step ${self.index_const(1)} {")
+
         val lo = self.def(s"arith.muli $iv, $block : index")
         val hi = self.def(s"arith.minui ${self.def(s"arith.addi $lo, $block : index")}, $count : index")
         val partial = self.reduce_leaves(span, name, operands, arrays, frame, scalar, dims, t, lo, hi)
 
-        self.store(span, self.elem_at(p, b, self.mem_ty(span, t)), partial, t)
+        self.store(span, self.elem_at(p, self.to_i64(iv), self.mem_ty(span, t)), partial, t)
+        self.op("}")
         self.op("scf.yield")
         self.op("}")
         self.finish_body(span, "")

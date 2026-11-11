@@ -1222,8 +1222,8 @@ one starts, and the trap is raised in the thread that started the loop, as if by
 statement after the loop: an `assert_traps` around the loop catches it, and with nothing catching
 it the program writes it and aborts as any trap does. Which iteration's trap is reported when
 several trap is unspecified. A thread looks for a trap before each run of iterations it claims
-(§9.5), a run being at most 4096 iterations, so "no new one starts" holds per run: the iterations of
-a run already begun go to its end. (Each
+(§9.5) and between blocks of 4096 iterations within a run, so "no new one starts" holds per block:
+the iterations of a block already begun run to its end. (Each
 thread runs its share under a catch of its own, so the runtime's `longjmp` never crosses an OpenMP
 thread; the first trap's message is kept and raised by the thread that started the loop.)
 
@@ -1248,13 +1248,12 @@ than each taking an equal share fixed in advance. The region's environment ends 
 0 as the region opens; a thread takes the next run with one atomic add to it and comes back when the
 run is done, until the counter passes the end. A thread on a fast core, or one whose iterations
 happened to be cheap, takes more runs, so uneven work — a Mandelbrot grid, a triangular loop — and a
-machine whose cores differ in speed both keep every thread busy to the end. A reduction's thread
-claims one block at a time; since only *who* computes a block changes, never the blocks or the tree,
-the bits are those of §9.2.1 whatever order the blocks are claimed in. Elsewhere a run is the
-iteration space cut into 16 runs per thread, but never fewer than 1 iteration nor more than 4096:
-a region pays a few hundred claims at most besides one per 4096 iterations, the last run a thread
-takes is short beside its share, and a few dear iterations (`parallel for j in 1..5`) are claimed
-one at a time and spread over 5 threads.
+machine whose cores differ in speed both keep every thread busy to the end. A run is the work cut
+into 16 runs per thread, but never less than one iteration nor more than 16 blocks of 4096: a region
+makes a few hundred claims at most however large, the last run a thread takes is short beside its
+share, and a few dear iterations (`parallel for j in 1..5`) are claimed one at a time and spread
+over 5 threads. A reduction's runs are of whole blocks; since only *who* computes a block changes,
+never the blocks or the tree, the bits are those of §9.2.1 whatever order the blocks are claimed in.
 
 **A whole element-wise expression is one region.** Under `parallel`, the operators, elemental
 calls, conversions and widenings of an element-wise expression are fused into one scalar computation
