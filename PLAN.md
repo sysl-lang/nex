@@ -230,6 +230,10 @@ the program links `libomp` from `$NEX_LLVM_HOME/lib` (`driver.sysl`'s `pipeline_
   too), and its one allocation is freed by `buffer-deallocation-pipeline`. An assignment to a local
   the expression reads writes the local's buffer in place; bufferization copies it only where the
   old value is still read (`tests_run_fusion.sysl`).
+- **Unroll-and-jam is the emitter's too.** LLVM has the pass, but it is off by default and
+  `-mllvm -enable-unroll-and-jam` does not fire on naive gemm even as C with `restrict`. The
+  emitter jams a counted nest by two where nex's own facts prove the reordering unobservable
+  (DESIGN §11.1, `emit_jam.sysl`, `tests_run_jam.sysl`).
 - **Views are free.** A `tensor.extract_slice` bufferizes to a strided `memref.subview` of its
   source, with no allocation and no copy, for a column, a row, a window strided on both axes and a
   plane of a rank-3 array, each handed to a function as a dynamic-shape tensor (`views.mlir`). When

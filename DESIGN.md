@@ -2330,6 +2330,18 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
   `for k in 120..127` with `k: int8` runs eight times without overflowing. A step of 0 traps.
 - In a `parallel for` body, `cycle` ends that iteration and is allowed; `exit` is a compile error
   (§9.4).
+- **The compiled engine may unroll and jam a counted nest, and nothing observable changes.** In
+  `for k … ; for i … ; c[i, j] = c[i, j] + a[i, k] * b[k, j]`, two passes of `k` run as one, their
+  inner bodies jammed into one `i` loop, so `c(:, j)` is loaded and stored once per two `k`, as
+  `gfortran -O3` does. Each element is still updated for `k`, then for `k + step`, so the bits are
+  the loop's own. It is done only where the order of *different* elements cannot be seen: the inner
+  body binds scalars and updates elements of arrays of reals or complexes, from elements, locals,
+  literals and `+ - * /`, with no call, jump or integer arithmetic; every subscript is a loop
+  variable, a literal or a local the nest does not bind; an array written is reached only at one
+  index list, naming the inner variable and not the outer one. A bounds check is the one trap
+  left, so the nest is jammed only after a test before it has found that no element it reaches can
+  be out of bounds; otherwise it runs as written and the first failing element traps as it would
+  have. Under `--fpe-trap` nothing is jammed. The interpreter runs every loop as written.
 
 ### 11.2 The program
 

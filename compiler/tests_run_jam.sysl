@@ -1,0 +1,196 @@
+@tests
+
+// Unroll-and-jam (`emit_jam.sysl`, DESIGN §11.1): a counted nest whose inner body only updates
+// elements indexed by the inner variable runs two passes of its outer loop at once, each element
+// updated in the order it was. Each program runs on both engines, which must agree; the interpreter
+// runs every loop as written, so agreement is the check that jamming changes no bit and no trap.
+
+import sysl.text.split
+
+private val GEMM = raw"""
+def main() =
+  val n = 6
+  var a: [real; :, :] = zeros((n, n))
+  var b: [real; :, :] = zeros((n, n))
+  var c: [real; :, :] = zeros((n, n))
+  for j in 1..n
+    for i in 1..n
+      a[i, j] = 1.0 / (i + 3 * j)
+      b[i, j] = 1.0 / (7 * i + j) - 0.1
+  for j in 1..n
+    for k in 1..n
+      val bkj = b[k, j]
+      for i in 1..n
+        c[i, j] = c[i, j] + a[i, k] * bkj
+  print(sum(c * c) * 1.0e10)
+"""
+
+// The textbook nest at trip counts of the outer loop even, odd, 0 and 1, an empty inner loop,
+// steps of -1 and -3, `-=` with no binding before the inner loop, complex and `real32` elements, two
+// arrays written, and two bindings, the second reading the first.
+private val TRIPS = raw"""
+def fill_ab(m: integer, p: integer, a: inout [real; :, :], b: inout [real; :, :]) =
+  for j in 1..p
+    for i in 1..m
+      a[i, j] = 1.0 / (i + 3 * j)
+  for j in 1..3
+    for i in 1..p
+      b[i, j] = 1.0 / (7 * i + j) - 0.1
+
+def up(m: integer, p: integer, n: integer): real =
+  var a: [real; :, :] = zeros((m, p))
+  var b: [real; :, :] = zeros((p, 3))
+  var c: [real; :, :] = zeros((m, 3))
+  fill_ab(m, p, a, b)
+  for j in 1..3
+    for k in 1..n
+      val bkj = b[k, j]
+      for i in 1..m
+        c[i, j] = c[i, j] + a[i, k] * bkj
+  sum(c * c) * 1.0e10
+
+def down(m: integer, p: integer, n: integer, s: integer): real =
+  var a: [real; :, :] = zeros((m, p))
+  var b: [real; :, :] = zeros((p, 3))
+  var c: [real; :, :] = zeros((m, 3))
+  fill_ab(m, p, a, b)
+  for j in 1..3
+    if s == 1
+      for k in n..1 by -1
+        for i in 1..m
+          c[i, j] -= a[i, k] * b[k, j]
+    else
+      for k in n..1 by -3
+        for i in 1..m
+          c[i, j] -= a[i, k] * b[k, j]
+  sum(c * c) * 1.0e10
+
+def two(m: integer, n: integer) =
+  var x: [complex; :] = zeros(m)
+  var y: [real32; :] = zeros(m)
+  var z: [real; :] = zeros(m)
+  for k in 1..n
+    val w = 1.0 / (k + 0.5)
+    val v = w * w - 0.25
+    for q in 1..m
+      x[q] = x[q] * (0.5 + 1i) + w * q
+      y[q] += y[q] / 3.0 + 0.5
+      z[q] = z[q] / 3.0 + v
+  print(x)
+  print(y)
+  print(z)
+
+def main() =
+  print(up(5, 7, 7))
+  print(up(5, 8, 8))
+  print(up(5, 8, 0))
+  print(up(5, 8, 1))
+  print(up(0, 9, 9))
+  print(down(5, 9, 9, 1))
+  print(down(5, 9, 9, 3))
+  print(down(5, 9, 8, 3))
+  two(3, 5)
+  two(2, 4)
+"""
+
+// A trap inside a jammed nest, caught: what the nest wrote before it shows which element failed
+// first. `c` is complete for `k` = 1, 2, 3 when `a[1, 4]` traps; `d` has rows 1 and 2 for `k` = 1
+// only when `d[3, 1]` traps.
+private val TRAPS = raw"""
+def partial(c: inout [real; :, :], a: [real; :, :], b: [real; :, :], m: integer, n: integer) =
+  for k in 1..n
+    val bk = b[k, 1]
+    for i in 1..m
+      c[i, 1] = c[i, 1] + a[i, k] * bk
+
+def main() =
+  val a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+  val b = [[1.0], [10.0], [100.0], [1000.0]]
+  var c: [real; :, :] = zeros((3, 1))
+  assert_traps(() -> partial(c, a, b, 3, 4), "index out of bounds")
+  print(c)
+  var d: [real; :, :] = zeros((2, 1))
+  assert_traps(() -> partial(d, a, b, 3, 2), "index out of bounds")
+  print(d)
+  var e: [real; :, :] = zeros((3, 1))
+  partial(e, a, b, 3, 3)
+  print(e)
+  partial(e, a, b, 3, 4)
+"""
+
+// How many nests `main`'s body `body` jams, over arrays `a`, `c` (reals, 4 × 4) and `n` (integers).
+private jams(body: string) -> usize
+    val m = emitted(s"def main() =\n  var a: [real; :, :] = ones((4, 4))\n  var c: [real; :, :] = zeros((4, 4))\n  var n: [integer; :, :] = zeros((4, 4))\n$body  print(c)\n").unwrap()
+
+    occurrences(m, "// unroll-and-jam by 2")
+
+@test("the textbook gemm nest is jammed by two: one inner loop updates c twice per pass, and no bit changes")
+gemm_jammed()
+    val b = bench()
+    val m = emitted(GEMM).unwrap()
+    val out = ran(b, GEMM)
+
+    finish(b)
+    assert_eq(occurrences(m, "// unroll-and-jam by 2"), 1)
+
+    // The jammed loop's first region to close is its inner loop's: two element writes, then the yield.
+    val jammed = split(split(m, "// unroll-and-jam by 2")[1], "scf.yield")[0]
+
+    assert_eq(occurrences(jammed, "tensor.insert"), 2)
+    assert_eq(occurrences(jammed, "scf.for %"), 2)
+    assert_eq(out.text, "1.8100447490573925E8\n")
+
+@test("a jammed nest gives the loop's own bits at every trip count, step, element type and shape of body")
+jammed_bits()
+    val b = bench()
+    val m = emitted(TRIPS).unwrap()
+    val out = ran(b, TRIPS)
+
+    finish(b)
+    assert_eq(occurrences(m, "// unroll-and-jam by 2"), 4)
+    assert(out.status.ok(), out.err.unwrap_or(""))
+    assert_eq(out.text, "7.75413961452359E7\n9.982389902810848E7\n0.0\n1244765.5309551794\n0.0\n" +
+                        "1.2281490158891238E8\n1.927800944932708E7\n1.9750505606591053E7\n" +
+                        "[-0.7630230880230879-0.592063492063492i, -1.5260461760461759-1.184126984126984i, -2.2890692640692643-1.7761904761904763i]\n" +
+                        "[4.820988, 4.820988, 4.820988]\n[-0.3034548443735553, -0.3034548443735553, -0.3034548443735553]\n" +
+                        "[-0.8515873015873016+0.5190476190476191i, -1.7031746031746031+1.0380952380952382i]\n" +
+                        "[3.240741, 3.240741]\n[-0.25953808683967416, -0.25953808683967416]\n")
+
+@test("a nest that can trap is run as written: the first element out of bounds traps, as before")
+jammed_traps()
+    val b = bench()
+    val m = emitted(TRAPS).unwrap()
+    val out = ran(b, TRAPS)
+
+    finish(b)
+    assert_eq(occurrences(m, "// unroll-and-jam by 2"), 1)
+    assert_eq(out.text, "[[321.0], [654.0], [987.0]]\n[[1.0], [4.0]]\n[[321.0], [654.0], [987.0]]\n")
+    assert_eq(out.err.unwrap_or(""), "trap: index out of bounds\n")
+
+@test("a nest jamming could reorder is left as written: a write by k, a call, an exit, aliasing, integers")
+refused_nests()
+    // Accepted: the reference shape.
+    assert_eq(jams("  for k in 1..4\n    for i in 1..4\n      c[i, 1] = c[i, 1] + a[i, k]\n"), 1)
+    // A write indexed by the outer variable, or not by the inner one.
+    assert_eq(jams("  for k in 1..4\n    for i in 1..4\n      c[i, k] = c[i, k] + a[i, k]\n"), 0)
+    assert_eq(jams("  for k in 1..4\n    for i in 1..4\n      c[2, 1] = c[2, 1] + a[i, k]\n"), 0)
+    // A call that prints, and one of a function of the program.
+    assert_eq(jams("  for k in 1..4\n    for i in 1..4\n      print(a[i, k])\n      c[i, 1] = c[i, 1] + a[i, k]\n"), 0)
+    assert_eq(jams("  val f = (x: real) -> x * 2.0\n  for k in 1..4\n    for i in 1..4\n      c[i, 1] = c[i, 1] + f(a[i, k])\n"), 0)
+    // An early exit of either loop, and a `cycle`.
+    assert_eq(jams("  for k in 1..4\n    for i in 1..4\n      if a[i, k] > 2.0 then exit\n      c[i, 1] = c[i, 1] + a[i, k]\n"), 0)
+    assert_eq(jams("  outer: for k in 1..4\n    for i in 1..4\n      c[i, 1] = c[i, 1] + a[i, k]\n      if i == k then cycle outer\n"), 0)
+    // The written array read at another element, read before the inner loop, or written at a
+    // subscript that is not a plain one.
+    assert_eq(jams("  for k in 1..4\n    for i in 1..4\n      c[i, 1] = c[i, 2] + a[i, k]\n"), 0)
+    assert_eq(jams("  for k in 1..4\n    val t = c[k, 1]\n    for i in 1..4\n      c[i, 1] = c[i, 1] + t\n"), 0)
+    assert_eq(jams("  for k in 1..4\n    for i in 1..3\n      c[i + 1, 1] = c[i, 1] + a[i, k]\n"), 0)
+    // Integers, whose arithmetic can overflow and trap.
+    assert_eq(jams("  for k in 1..4\n    for i in 1..4\n      n[i, 1] = n[i, 1] + n[i, k]\n"), 0)
+    // A scalar carried from pass to pass, and inner bounds that depend on the outer variable.
+    assert_eq(jams("  var s = 0.0\n  for k in 1..4\n    for i in 1..4\n      s = s + a[i, k]\n  print(s)\n"), 0)
+    assert_eq(jams("  for k in 1..4\n    for i in 1..k\n      c[i, 1] = c[i, 1] + a[i, k]\n"), 0)
+
+@test("under --fpe-trap a real operation can trap, so nothing is jammed")
+fpe_trap_not_jammed()
+    assert_eq(occurrences(emitted(GEMM, fpe_trap = true).unwrap(), "// unroll-and-jam by 2"), 0)

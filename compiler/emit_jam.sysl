@@ -1,0 +1,457 @@
+// Unroll-and-jam of a counted loop nest (DESIGN §11.1): the outer loop of
+//
+//     for k in 1..n
+//       val bkj = b[k, j]
+//       for i in 1..m
+//         c[i, j] = c[i, j] + a[i, k] * bkj
+//
+// stepped by `JAM`, its `JAM` copies of the inner body jammed into one inner loop, copy `u` with
+// `k` at `k + u × step`. Each element of `c` is loaded and stored once per `JAM` passes of `k`
+// instead of once per pass, and its updates are made in the order they were: for `k`, then for
+// `k + step`. So the bits are the loop's own; only the order in which *different* elements are
+// visited changes, which nothing in an accepted nest can observe.
+//
+// **What is accepted** (`jam_plan`), from the typed IR alone:
+//
+// - The outer body is zero or more `val`/`var` bindings of scalars, then a counted inner `for`
+//   whose bounds are literals or locals the nest does not bind, and whose step is a nonzero literal.
+// - The inner body is bindings of scalars and assignments to elements of arrays of reals or
+//   complexes. Every value is built from literals, locals, elements, promotions and `+ - * /`
+//   on reals and complexes: nothing that calls, prints, exits, overflows or traps but the bounds
+//   check of an element.
+// - Every subscript is the outer variable, the inner variable, a local the nest does not bind or an
+//   integer literal. Every element of an array the nest writes is read and written at one index
+//   list, which names the inner variable and not the outer one; the bindings before the inner loop
+//   read none of them. So the copies for `k` and `k + step` touch one element at one pass of `i`
+//   only, and in their own order.
+//
+// **A bounds trap fires where it did.** Before the loop, one test asks whether any element the
+// nest reaches can be out of bounds: each subscript's range over the whole nest against its axis's
+// extent, an element of the inner body counting only where the inner loop has passes. Where one
+// can, the jammed loop makes no passes and the loop runs as written, so the first failing element
+// traps as before; where none can, nothing in the nest traps at all. Under `--fpe-trap` a real
+// operation can trap, and nothing is jammed.
+//
+// The emitted loops are the jammed one over `JAM` passes at a time, then the loop as written over
+// the passes left: the last `count mod JAM`, or all of them where the test failed.
+
+import nex.sh.sysl.nex.*
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// How many passes of the outer loop one pass of the jammed loop makes.
+val JAM: usize = 2
+
+// An element the nest reads or writes: array local `id` at the integer subscripts `subs`, inside the
+// inner loop (`inner`) or before it.
+struct Access
+    id: usize
+    subs: Buf[TExpr]
+    inner: bool
+    write: bool
+
+// A nest unroll-and-jam accepts: the bindings before the inner loop and their locals, the inner
+// loop, its body's statements, the scalar locals the nest binds and every element it reaches.
+struct JamPlan
+    pre: Buf[TExpr]
+    pre_locals: Buf[usize]
+    inner_loop: usize
+    inner_var: usize
+    lo: TExpr
+    hi: TExpr
+    inclusive: bool
+    step: Option[TExpr]
+    body: TExpr
+    stmts: Buf[TExpr]
+    lets: Buf[usize]
+    accesses: Buf[Access]
+
+// The nest being read: its two loop variables, the locals it binds so far and the elements it
+// reaches.
+struct JamScan
+    outer: usize
+    inner: usize
+    lets: Buf[usize]
+    accesses: Buf[Access]
+
+// The nest `for <outer> in … body` as a plan to jam, where it is one.
+nest_plan(p: TProgram, outer: usize, body: TExpr) -> Option[JamPlan]
+    val items = statements(body)
+
+    if items.len() == 0 then return None
+
+    val last = items[items.len() - 1]
+    var plan = *last.kind match
+        TFor(l, v, lo, hi, inclusive, step, b) -> JamPlan(buf(), buf(), l, v, lo, hi, inclusive, step, b, statements(b), buf(), buf())
+        _ -> return None
+    var s = JamScan(outer, plan.inner_var, buf(), buf())
+
+    val n = items.len() - 1
+
+    for k in 0..<n
+        val it = items[k]
+
+        *it.kind match
+            TLet(id, init) ->
+                if !scalar_number(p.locals[id].ty) || !s.pure(p, init, false) then return None
+
+                s.lets.push(id)
+                plan.pre_locals.push(id)
+            _ -> return None
+
+        plan.pre.push(it)
+
+    if !s.invariant(p, plan.lo) || !s.invariant(p, plan.hi) then return None
+
+    plan.step match
+        Some(x) ->
+            constant_of(x) match
+                Some(v) -> if v == 0 then return None
+                None -> return None
+        None -> ()
+
+    for st in plan.stmts
+        if !s.statement(p, st) then return None
+
+    if !s.independent() then return None
+
+    plan.lets = s.lets
+    plan.accesses = s.accesses
+    Some(plan)
+
+impl JamScan
+    // Whether `e` is a statement the inner body may hold.
+    statement(*self, p: TProgram, e: TExpr) -> bool
+        *e.kind match
+            TLet(id, init) ->
+                if !scalar_number(p.locals[id].ty) || !self.pure(p, init, true) then return false
+
+                self.lets.push(id)
+                true
+            TAssign(op, target, value) ->
+                if op != "=" && op != "+=" && op != "-=" && op != "*=" && op != "/=" then return false
+
+                self.pure(p, value, true) && self.element(p, target, true, true)
+            _ -> is_unit(e)
+
+    // Whether `e` computes a number without a call, a jump or a trap other than an element's bounds
+    // check, recording each element it reads.
+    pure(*self, p: TProgram, e: TExpr, inner: bool) -> bool
+        *e.kind match
+            TLiteral(l, _) -> l match
+                IntVal(_) -> true
+                RealVal(_) -> true
+                _ -> false
+            TConstant(_, _) -> scalar_number(e.ty)
+            TLocal(id) -> scalar_number(p.locals[id].ty)
+            TPromote(v) -> scalar_number(e.ty) && self.pure(p, v, inner)
+            TBinary(op, l, r) -> floating(e.ty) && (op == "+" || op == "-" || op == "*" || op == "/") && self.pure(p, l, inner) && self.pure(p, r, inner)
+            TUnary(op, v) -> op == "-" && floating(e.ty) && self.pure(p, v, inner)
+            TArray(_) -> self.element(p, e, inner, false)
+            _ -> false
+
+    // Whether `e` is an element of an array local of numbers at plain subscripts, recording it.
+    element(*self, p: TProgram, e: TExpr, inner: bool, write: bool) -> bool
+        val (target, subs) = *e.kind match
+            TArray(op) -> *op match
+                TIndex(t, s) -> (t, s)
+                _ -> return false
+            _ -> return false
+        val id = *target.kind match
+            TLocal(x) -> x
+            _ -> return false
+        val t = p.locals[id].ty
+
+        if !is_arr(t) || (write && !floating(elem_of(t))) then return false
+
+        p.locals[id].kind match
+            LOrigin -> return false
+            _ -> ()
+
+        var xs: Buf[TExpr] = buf()
+
+        for s in subs
+            s match
+                TSubAt(i) ->
+                    if !self.index(p, i) then return false
+
+                    xs.push(i)
+                _ -> return false
+
+        self.accesses.push(Access(id, xs, inner, write))
+        true
+
+    // Whether `e` is a subscript the nest's ranges bound: a loop variable or an invariant.
+    index(*self, p: TProgram, e: TExpr) -> bool =
+        is_local(e, self.outer) || is_local(e, self.inner) || self.invariant(p, e)
+
+    // Whether `e` is an integer the nest cannot change: a literal, or a local it does not bind.
+    invariant(*self, p: TProgram, e: TExpr) -> bool
+        if !is_int(base_of(e.ty)) then return false
+
+        *e.kind match
+            TLiteral(l, _) -> l match
+                IntVal(_) -> true
+                _ -> false
+            TLocal(id) -> id != self.outer && id != self.inner && !has_id(self.lets, id) && scalar_number(p.locals[id].ty)
+            TPromote(v) -> self.invariant(p, v)
+            _ -> false
+
+    // Whether the copies of the inner body for consecutive outer passes may be interleaved: every
+    // array written is reached only inside the inner loop, at one index list naming the inner
+    // variable and not the outer one.
+    independent(*self) -> bool
+        for w in self.accesses
+            if w.write
+                var by_inner = false
+
+                for s in w.subs
+                    if is_local(s, self.outer) then return false
+                    if is_local(s, self.inner) then by_inner = true
+
+                if !by_inner then return false
+
+                for a in self.accesses
+                    if a.id == w.id && (!a.inner || !same_subs(a.subs, w.subs)) then return false
+
+        true
+
+impl Emitter
+    // The nest of loop variable `var_id` and outer body `body` as a plan to jam, where the nest
+    // allows it and the emitter holds everything it reaches as it needs to.
+    jam_plan(*self, var_id: usize, body: TExpr) -> Option[JamPlan]
+        if self.fpe_trap || self.boxed[var_id] then return None
+
+        val plan = nest_plan(self.prog, var_id, body)?
+
+        if self.boxed[plan.inner_var] then return None
+        if !passes_fit(plan.lo, plan.hi, plan.inclusive, plan.step, self.prog.locals[plan.inner_var].ty) then return None
+
+        for id in plan.lets
+            if self.boxed[id] then return None
+
+        for a in plan.accesses
+            if !self.in_ssa(a.id) || self.arr[a.id] == "" || self.shift_words(a.id) > 0 then return None
+            if self.par_buffer(texpr(Span(0, 0), self.prog.locals[a.id].ty, TLocal(a.id))) != "" then return None
+
+        Some(plan)
+
+    // The loop `id` over `count` passes (an `i64`), its variable `var_id` at `lo + pass × step`,
+    // jammed by `JAM` as `plan` says, then the passes left as written.
+    jammed(*self, span: Span, id: usize, var_id: usize, lo: string, step: string, count: string, body: TExpr, plan: JamPlan)
+        val vt = self.prog.locals[var_id].ty
+        val bits = bits_of(vt)
+        val it = self.prog.locals[plan.inner_var].ty
+        val ibits = bits_of(it)
+        val ilo = self.ex(plan.lo)
+        val ihi = self.ex(plan.hi)
+        val izero = self.int_const("0", ibits)
+        val istep = plan.step match
+            Some(s) -> self.ex(s)
+            None -> self.int_const("1", ibits)
+        val (iempty, ipasses) = self.trip(ilo, ihi, istep, izero, plan.inclusive, ibits, is_signed(it))
+        val icount = self.count_of(iempty, ipasses, ibits)
+        val zero = self.def("arith.constant 0 : i64")
+        val u = self.def(s"arith.constant $JAM : i64")
+
+        // Each subscript's least and greatest value over the nest.
+        val last = self.at_pass(lo, step, self.def(s"arith.subi $count, %one : i64"), bits)
+        val (kmin, kmax) = self.bounds_of(lo, last, bits, is_signed(vt))
+        val ilast = self.at_pass(ilo, istep, self.def(s"arith.subi $icount, %one : i64"), ibits)
+        val (imin, imax) = self.bounds_of(ilo, ilast, ibits, is_signed(it))
+        val idle = self.def(s"arith.cmpi eq, $icount, $zero : i64")
+        var safe = self.def("arith.constant true")
+
+        for a in plan.accesses
+            val t = self.prog.locals[a.id].ty
+            var ok = self.def("arith.constant true")
+
+            for k in 0..<a.subs.len()
+                val s = a.subs[k]
+                val n = self.to_i64(self.dim(span, self.arr[a.id], t, k + 1))
+                var least = kmin
+                var most = kmax
+
+                if is_local(s, plan.inner_var)
+                    least = imin
+                    most = imax
+                elif !is_local(s, var_id)
+                    least = self.index64(s)
+                    most = least
+
+                val above = self.def(s"arith.cmpi sge, $least, %one : i64")
+                val below = self.def(s"arith.cmpi sle, $most, $n : i64")
+
+                ok = self.def(s"arith.andi $ok, ${self.def(s"arith.andi $above, $below : i1")} : i1")
+
+            if a.inner then ok = self.def(s"arith.ori $ok, $idle : i1")
+
+            safe = self.def(s"arith.andi $safe, $ok : i1")
+
+        val groups = self.def(s"arith.select $safe, ${self.def(s"arith.divui $count, $u : i64")}, $zero : i64")
+        val done = self.def(s"arith.muli $groups, $u : i64")
+        val rest = self.def(s"arith.subi $count, $done : i64")
+        val entry = self.dirty
+
+        self.op(s"// unroll-and-jam by $JAM")
+
+        val l = self.counted_open(self.def(s"arith.index_cast $groups : i64 to index"), body)
+        val first = self.def(s"arith.muli ${self.def(s"arith.index_cast ${l.iv} : index to i64")}, $u : i64")
+
+        self.bind_local(span, var_id)
+
+        // Copy `c` has its own slot for the loop variable and for each binding before the inner
+        // loop; copy 0 has the loop's own.
+        var kslots: Buf[string] = buf()
+        var pslots: Buf[Buf[string]] = buf()
+
+        for c in 0..<JAM
+            val ks = if c == 0 then self.slot[var_id] else self.alloca(self.mem_ty(span, vt))
+
+            kslots.push(ks)
+            self.slot[var_id] = ks
+            self.store(span, ks, self.at_pass(lo, step, self.def(s"arith.addi $first, ${self.def(s"arith.constant $c : i64")} : i64"), bits), vt)
+
+            if c > 0
+                for x in plan.pre_locals
+                    self.slot[x] = ""
+
+            for st in plan.pre
+                self.dirty = entry
+                self.region(st)
+
+            var ps: Buf[string] = buf()
+
+            for x in plan.pre_locals
+                ps.push(self.slot[x])
+
+            pslots.push(ps)
+
+        val li = self.counted_open(self.def(s"arith.index_cast $icount : i64 to index"), plan.body)
+        val ipass = self.def(s"arith.index_cast ${li.iv} : index to i64")
+
+        self.bind_local(span, plan.inner_var)
+        self.store(span, self.local_ptr(span, plan.inner_var), self.at_pass(ilo, istep, ipass, ibits), it)
+
+        for c in 0..<JAM
+            self.slot[var_id] = kslots[c]
+
+            for x in 0..<plan.pre_locals.len()
+                self.slot[plan.pre_locals[x]] = pslots[c][x]
+
+            for st in plan.stmts
+                self.dirty = entry
+                self.region(st)
+
+        self.end_pass(plan.inner_loop)
+        self.loop_close(li)
+        self.after_loop(plan.inner_loop)
+
+        self.slot[var_id] = kslots[0]
+
+        for x in 0..<plan.pre_locals.len()
+            self.slot[plan.pre_locals[x]] = pslots[0][x]
+
+        self.end_pass(id)
+        self.loop_close(l)
+
+        // The passes left, as written.
+        val r = self.counted_open(self.def(s"arith.index_cast $rest : i64 to index"), body)
+        val pass = self.def(s"arith.addi $done, ${self.def(s"arith.index_cast ${r.iv} : index to i64")} : i64")
+
+        self.bind_local(span, var_id)
+        self.store(span, self.local_ptr(span, var_id), self.at_pass(lo, step, pass, bits), vt)
+        self.dirty = entry
+        self.region(body)
+        self.end_pass(id)
+        self.loop_close(r)
+        self.after_loop(id)
+    end jammed
+
+    // `lo + pass × step` in `i$bits`, `pass` an `i64`.
+    private at_pass(*self, lo: string, step: string, pass: string, bits: int) -> string
+        val t = s"i$bits"
+        val p = if bits < 64 then self.def(s"arith.trunci $pass : i64 to $t") else pass
+
+        self.def(s"arith.addi $lo, ${self.def(s"arith.muli $p, $step : $t")} : $t")
+
+    // The lesser and the greater of `a` and `b`, integers of `i$bits`, widened to `i64`.
+    private bounds_of(*self, a: string, b: string, bits: int, signed: bool) -> (string, string)
+        val x = self.widen64(a, bits, signed)
+        val y = self.widen64(b, bits, signed)
+        val lt = self.def(s"arith.cmpi slt, $x, $y : i64")
+
+        (self.def(s"arith.select $lt, $x, $y : i64"), self.def(s"arith.select $lt, $y, $x : i64"))
+end Emitter
+
+// The statements of a body: a block's items and its result, unless that is `()`.
+private statements(e: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    *e.kind match
+        TBlock(items, result) ->
+            for x in items
+                out.push(x)
+
+            if !is_unit(result) then out.push(result)
+        _ -> out.push(e)
+
+    out
+
+private is_unit(e: TExpr) -> bool = *e.kind match
+    TLiteral(l, _) -> l match
+        VoidVal -> true
+        _ -> false
+    _ -> false
+
+// A scalar number: an integer, a real or a complex, with or without a unit.
+private scalar_number(t: Ty) -> bool = base_of(t) match
+    Int(_, _) -> true
+    Real(_) -> true
+    Complex(_) -> true
+    _ -> false
+
+// A real or a complex, with or without a unit.
+private floating(t: Ty) -> bool = base_of(t) match
+    Real(_) -> true
+    Complex(_) -> true
+    _ -> false
+
+// `e` without the promotions around it.
+private unpromoted(e: TExpr) -> TExpr = *e.kind match
+    TPromote(v) -> unpromoted(v)
+    _ -> e
+
+// Whether `e` is local `id`, promoted or not.
+private is_local(e: TExpr, id: usize) -> bool = *unpromoted(e).kind match
+    TLocal(x) -> x == id
+    _ -> false
+
+private has_id(ids: Buf[usize], id: usize) -> bool
+    for x in ids
+        if x == id then return true
+
+    false
+
+// Whether two index lists of plain subscripts are the same: the same locals and literals in order.
+private same_subs(a: Buf[TExpr], b: Buf[TExpr]) -> bool
+    if a.len() != b.len() then return false
+
+    for k in 0..<a.len()
+        if !same_index(unpromoted(a[k]), unpromoted(b[k])) then return false
+
+    true
+
+private same_index(a: TExpr, b: TExpr) -> bool
+    *a.kind match
+        TLocal(x) -> *b.kind match
+            TLocal(y) -> x == y
+            _ -> false
+        TLiteral(l, _) -> *b.kind match
+            TLiteral(m, _) -> l match
+                IntVal(x) -> m match
+                    IntVal(y) -> x == y
+                    _ -> false
+                _ -> false
+            _ -> false
+        _ -> false

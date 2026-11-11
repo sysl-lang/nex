@@ -649,6 +649,33 @@ impl Emitter
         self.after_loop(id)
         ""
 
+    // The trip of `lo..hi by step`, all of type `i$bits`, `zero` that type's 0: whether it is empty,
+    // and how many passes follow the first where it is not, counted without sign.
+    trip(*self, lo: string, hi: string, step: string, zero: string, inclusive: bool, bits: int, signed: bool) -> (string, string)
+        val t = s"i$bits"
+        val up = if signed then self.def(s"arith.cmpi sgt, $step, $zero : $t") else self.def("arith.constant true")
+        val lt = if signed then "slt" else "ult"
+        val le = if signed then "sle" else "ule"
+        val empty_up = self.def(s"arith.cmpi ${if inclusive then lt else le}, $hi, $lo : $t")
+        val empty_down = self.def(s"arith.cmpi ${if inclusive then lt else le}, $lo, $hi : $t")
+        val empty = self.def(s"arith.select $up, $empty_up, $empty_down : i1")
+        val span_up = self.def(s"arith.subi $hi, $lo : $t")
+        val span_down = self.def(s"arith.subi $lo, $hi : $t")
+        var distance = self.def(s"arith.select $up, $span_up, $span_down : $t")
+
+        if !inclusive then distance = self.def(s"arith.subi $distance, ${self.int_const("1", bits)} : $t")
+
+        val magnitude = self.def(s"arith.select $up, $step, ${self.def(s"arith.subi $zero, $step : $t")} : $t")
+
+        (empty, self.def(s"arith.divui $distance, $magnitude : $t"))
+
+    // The number of passes of a trip `trip` answered, as an `i64`.
+    count_of(*self, empty: string, passes: string, bits: int) -> string
+        var count = if bits < 64 then self.def(s"arith.extui $passes : i$bits to i64") else passes
+
+        count = self.def(s"arith.addi $count, %one : i64")
+        self.def(s"arith.select $empty, ${self.def("arith.constant 0 : i64")}, $count : i64")
+
     // `for v in lo..hi by step`: the trip is worked out before the first pass, as Fortran's `DO` does,
     // so the counter never steps past `hi` and cannot overflow at the end of its type's range.
     for_loop(*self, span: Span, id: usize, var_id: usize, lo_e: TExpr, hi_e: TExpr, inclusive: bool, step_e: Option[TExpr], body: TExpr) -> string
@@ -665,28 +692,19 @@ impl Emitter
 
         if step_e.is_some() then self.trap_if(self.def(s"arith.cmpi eq, $step, $zero : $t"), ZERO_STEP)
 
-        val up = if signed then self.def(s"arith.cmpi sgt, $step, $zero : $t") else self.def("arith.constant true")
-        val lt = if signed then "slt" else "ult"
-        val le = if signed then "sle" else "ule"
-        val empty_up = self.def(s"arith.cmpi ${if inclusive then lt else le}, $hi, $lo : $t")
-        val empty_down = self.def(s"arith.cmpi ${if inclusive then lt else le}, $lo, $hi : $t")
-        val empty = self.def(s"arith.select $up, $empty_up, $empty_down : i1")
-        val span_up = self.def(s"arith.subi $hi, $lo : $t")
-        val span_down = self.def(s"arith.subi $lo, $hi : $t")
-        var distance = self.def(s"arith.select $up, $span_up, $span_down : $t")
-
-        if !inclusive then distance = self.def(s"arith.subi $distance, ${self.int_const("1", bits)} : $t")
-
-        val magnitude = self.def(s"arith.select $up, $step, ${self.def(s"arith.subi $zero, $step : $t")} : $t")
-        val passes = self.def(s"arith.divui $distance, $magnitude : $t")
+        val (empty, passes) = self.trip(lo, hi, step, zero, inclusive, bits, signed)
 
         // Where no pass can end the loop early and the count of passes fits an `index`, the loop
         // is an `scf.for` over them, the variable `lo + pass × step` in its own type.
         if !leaves_loop(body, id) && passes_fit(lo_e, hi_e, inclusive, step_e, vt)
-            var count = if bits < 64 then self.def(s"arith.extui $passes : $t to i64") else passes
+            val count = self.count_of(empty, passes, bits)
 
-            count = self.def(s"arith.addi $count, %one : i64")
-            count = self.def(s"arith.select $empty, ${self.def("arith.constant 0 : i64")}, $count : i64")
+            // A nest that unroll-and-jam may run with fewer loads and stores (`emit_jam.sysl`).
+            self.jam_plan(var_id, body) match
+                Some(plan) ->
+                    self.jammed(span, id, var_id, lo, step, count, body, plan)
+                    return ""
+                None -> ()
 
             val l = self.counted_open(self.def(s"arith.index_cast $count : i64 to index"), body)
             var pass = self.def(s"arith.index_cast ${l.iv} : index to i64")
@@ -864,7 +882,7 @@ end Emitter
 // Whether the passes of `for v in lo..hi by step`, with `v` of type `t`, are sure to number fewer
 // than 2⁶⁴, so that an `i64` counts them: always below 64 bits and for a range that stops before
 // `hi`, and otherwise unless the range may run from one end of the type to the other in steps of 1.
-private passes_fit(lo: TExpr, hi: TExpr, inclusive: bool, step: Option[TExpr], t: Ty) -> bool
+passes_fit(lo: TExpr, hi: TExpr, inclusive: bool, step: Option[TExpr], t: Ty) -> bool
     if bits_of(t) < 64 || !inclusive then return true
 
     val signed = is_signed(t)
@@ -889,7 +907,7 @@ private may_be(e: TExpr, v: i128) -> bool = constant_of(e) match
     None -> true
 
 // The value of the integer constant `e`, where it is one.
-private constant_of(e: TExpr) -> Option[i128] = *e.kind match
+constant_of(e: TExpr) -> Option[i128] = *e.kind match
     TLiteral(l, _) -> l match
         IntVal(n) -> Some(n)
         _ -> None
