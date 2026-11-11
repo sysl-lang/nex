@@ -16,13 +16,13 @@ import sh.sysl.parsing.Span
 
 // What an index list does to the array it is given: each subscript evaluated and checked in turn,
 // the array and the window answered.
-private[nex] type Subs = &Fn(&Cells, Value) -> Result[(&Arr, Buf[Cut]), Signal]
+private[nex] type Subs = &Fn(@keeps &Cells, @keeps Value) -> Result[(&Arr, Buf[Cut]), Signal]
 
 // One subscript, on axis `k` (from 0) of the array.
-private type Sub = &Fn(&Cells, &Arr, usize) -> Result[Cut, Signal]
+private type Sub = &Fn(@keeps &Cells, &Arr, usize) -> Result[Cut, Signal]
 
 // An optional bound or stride.
-private type Bound = &Fn(&Cells) -> Result[Option[long], Signal]
+private type Bound = &Fn(@keeps &Cells) -> Result[Option[long], Signal]
 
 // Whether evaluating `e` can write a local: an assignment or an `inout` borrow inside it.
 private[nex] writes(e: TExpr) -> bool

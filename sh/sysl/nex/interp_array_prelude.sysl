@@ -31,7 +31,7 @@ private[nex] struct Red
     seed: Value
 
 // An integer extent, or why there is none.
-private type Extent64 = &Fn(&Cells) -> Result[long, Signal]
+private type Extent64 = &Fn(@keeps &Cells) -> Result[long, Signal]
 
 // `xs` reduced by `r`.
 private[nex] reduce_all(r: Red, xs: Buf[Value]) -> Answer

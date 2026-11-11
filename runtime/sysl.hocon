@@ -25,7 +25,7 @@ requires {
 // **`@` and the linear-algebra prelude** (`la.sysl`): `blas` for the products, `lapack` for the rest,
 // both engines calling the same functions.
 dependencies {
-  blas   { git = "github.com/sysl-lang/blas", version = "0.1.1" }
+  blas   { git = "github.com/sysl-lang/blas", version = "0.1.2" }
   lapack { git = "github.com/sysl-lang/lapack", version = "0.1.1" }
 }
 
