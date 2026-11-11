@@ -8,6 +8,12 @@
 #     zsh bench/run.zsh axpy gemm        only these
 #     zsh bench/run.zsh --ir point-distance
 #                                        print the kernel's LLVM IR as `clang -O2` optimizes it
+#     zsh bench/run.zsh --scale          every parallel kernel at each thread count, nex and twin
+#     zsh bench/run.zsh --scale parallel-dot
+#
+# --scale prints one row per kernel and thread count: OMP_NUM_THREADS at 1, 2, 4, the performance-
+# core count, 8, 12 and every core, then unset (libomp's and libgomp's own choice). Each time is the
+# best of five, and the speedup is over the same program at one thread.
 #
 # Columns: the time per pass the kernel prints for itself (best of five), the ratio nex / twin and
 # the verdict against the exit bar (1.25x; BLAS gemm 1.1x against `cblas_dgemm` from C), whether
@@ -28,11 +34,12 @@ work=${BENCH_WORK:-$(mktemp -d -t nex-bench)}
 ref=${NEX_REF:-$HOME/dev/nex}
 llvm=${NEX_LLVM_HOME:-/opt/homebrew/opt/llvm}
 pcores=$(sysctl -n hw.perflevel0.physicalcpu)
+cores=$(sysctl -n hw.physicalcpu)
 runs=5
 mkdir -p $work
 
 kernels=(axpy dot nrm2 gemv gemm stencil complex-axpy point-distance axpy-real32 blas-gemm
-         parallel-axpy parallel-dot)
+         parallel-axpy parallel-dot parallel-mandel)
 
 log() { print -u2 -- "$*" }
 
@@ -149,6 +156,37 @@ if [[ $1 == --ir ]]; then
     shift
     build_nex
     for k in $@; do ir $k; done
+    return 0
+fi
+
+if [[ $1 == --scale ]]; then
+    shift
+    if (( $# )); then kernels=($@); else kernels=(${(M)kernels:#parallel-*}); fi
+    build_nex
+    log "machine: $(sysctl -n machdep.cpu.brand_string), $pcores performance of $cores cores"
+    log "work: $work"
+    printf '%-16s %7s %10s %10s %7s %8s %8s %-5s %6s\n' kernel threads twin_ms nex_ms ratio \
+        twin_x nex_x sums load
+    counts=(1 2 4 $pcores 8 12 $cores default)
+    counts=(${(u)counts})
+    for k in $kernels; do
+        build_kernel $k
+        twin1=0 nex1=0
+        for th in $counts; do
+            if [[ $th == default ]]; then unset OMP_NUM_THREADS; else export OMP_NUM_THREADS=$th; fi
+            load=$(sysctl -n vm.loadavg | awk '{print $2}')
+            measure $work/$k-twin yes
+            twin_pass=$best_pass twin_sums=$sums
+            measure $work/$k-nex yes
+            nex_pass=$best_pass nex_sums=$sums
+            if (( twin1 == 0 )); then twin1=$twin_pass nex1=$nex_pass; fi
+            printf '%-16s %7s %10.2f %10.2f %7.2f %8.2f %8.2f %-5s %6s\n' $k $th \
+                $(( twin_pass / 1e6 )) $(( nex_pass / 1e6 )) $(( 1.0 * nex_pass / twin_pass )) \
+                $(( 1.0 * twin1 / twin_pass )) $(( 1.0 * nex1 / nex_pass )) \
+                $(agree "$nex_sums" "$twin_sums") $load
+        done
+    done
+    unset OMP_NUM_THREADS
     return 0
 fi
 

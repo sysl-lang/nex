@@ -1,0 +1,34 @@
+// The perf oracle's compute-bound parallel kernel: the escape count of every point of a
+// 1024 × 1024 grid over the Mandelbrot set, as a `parallel for` over both axes. Each point iterates
+// until it escapes or reaches 256 steps, so the work is uneven: the points inside the set cost the
+// most, and they sit in the middle columns of the grid. The kernel reads almost no memory, so its
+// time measures how well the threads share the work, not memory bandwidth. Prints nanoseconds per
+// pass, then the total count, which is exact; `parallel-mandel.f90` is its twin.
+
+extern def clock_gettime_nsec_np(clock: int32): uint64
+
+def main() =
+  val w = 1024
+  val h = 1024
+  val maxit = 256
+  val reps = 5
+  var c: [integer; :, :] = zeros((w, h))
+  var s = 0
+  val start = clock_gettime_nsec_np(4)
+  for r in 1..reps
+    parallel for i in 1..w, j in 1..h
+      val cx = -2.0 + 2.5 * (i - 1) / w
+      val cy = -1.25 + 2.5 * (j - 1) / h
+      var x = 0.0
+      var y = 0.0
+      var k = 0
+      while k < maxit and x * x + y * y <= 4.0
+        val t = x * x - y * y + cx
+        y = 2.0 * x * y + cy
+        x = t
+        k += 1
+      c[i, j] = k
+    s = s + sum(c)
+  val done = clock_gettime_nsec_np(4)
+  print((done - start) / reps)
+  print(s)
