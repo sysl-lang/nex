@@ -16,6 +16,9 @@ def main() =
   val start = clock_gettime_nsec_np(4)
   for r in 1..reps
     y = a * x + y
+    // Each pass feeds the next, so an optimizer cannot turn the passes inside out: `gfortran -O3`
+    // otherwise runs the fifty passes as one, with `a * x[i]` computed once and added fifty times.
+    x[1] = x[1] + y[n] * 1.0e-30
   val done = clock_gettime_nsec_np(4)
   print((done - start) / reps)
   print(sum(real(y)))

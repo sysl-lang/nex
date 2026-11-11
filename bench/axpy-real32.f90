@@ -16,6 +16,7 @@ program axpy_real32
   call system_clock(t0, rate)
   do r = 1, reps
     y = a * x + y
+    x(1) = x(1) + y(n) * 1.0e-30_real32
   end do
   call system_clock(t1)
   print '(I0)', int(real(t1 - t0, real64) * 1.0e9_real64 / rate / reps, int64)
