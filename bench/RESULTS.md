@@ -259,6 +259,30 @@ to 11:
 | axpy | 1.66 | 1.63 | 3.32 | 1.75 | 1.06 | 1.07 (was 1.19) |
 | axpy, real32 | 0.83 | 0.83 | 1.64 | 0.81 | 0.97 | 0.97 |
 
+### With unroll-and-jam
+
+The emitter now jams a counted nest by two where nex's own facts make the reordering
+unobservable (DESIGN §11.1, `compiler/emit_jam.sysl`). The first jammed copy holds its update of
+`c[i, j]` for the second instead of storing it, so `c(:, j)` is loaded and stored once per two `k`.
+Leaving that to LLVM is not enough: its dead-store elimination runs before the vectorizer proves
+`c` and `a` apart, so the first store survives. The checksums are unchanged. Jamming by four was no
+faster than by two (gemm 111 to 123 ms against 102 to 118 ms, at a load of 20 to 36), so the
+factor is two.
+
+gemv is jammed by the same rule and is slower. Its `y` (32 KB) is already in L1, and its 128 MB `a` is
+read once per pass, so jamming saves no traffic and adds a second DRAM stream. Measured side by
+side under one load, nex 0.0.2 ran it at 1.93 to 2.24 ms and the jammed build at 2.08 to 2.85 ms.
+`gfortran -O3` is also slower than `-O2` on gemv in some runs (2.41 against 2.16). Telling the two
+kernels apart needs a cost model, which nex does not have yet.
+
+`zsh bench/run.zsh gemm gemv stencil` from branch `unroll-jam`, 2026-11-11, at a load of 4.4 to 6.0:
+
+| kernel | gfortran -O2 | gfortran -O3 | flang -O3 | nex | ratio (bar) | nex/best |
+|---|---:|---:|---:|---:|---:|---:|
+| gemm (naive) | 130.70 | 84.50 | 114.08 | 83.84 | 0.64 | **0.99** (was 1.32) |
+| gemv | 1.98 | 1.98 | 1.88 | 2.06 | 1.04 | 1.10 (was 1.02) |
+| stencil | 1.40 | 1.40 | 1.42 | 1.42 | 1.01 | 1.01 |
+
 ## Scaling across the 18 cores
 
 `zsh bench/run.zsh --scale`, the same run: each parallel kernel at `OMP_NUM_THREADS` 1 to 18 and
