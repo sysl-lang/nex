@@ -101,11 +101,11 @@ private ended(s: Signal) -> Ending = s match
 
 // -- the running program --------------------------------------------------------------------------
 
-private[nex] type Code = &Fn(&Cells) -> Answer
+private[nex] type Code = &Fn(@keeps &Cells) -> Answer
 
 // What binds a value to a local or a pattern's names, and what stores one into a list of places.
-private[nex] type Binder = &Fn(&Cells, Value) -> unit
-private[nex] type Storer = &Fn(&Cells, Value) -> Answer
+private[nex] type Binder = &Fn(&Cells, @keeps Value) -> unit
+private[nex] type Storer = &Fn(@keeps &Cells, @keeps Value) -> Answer
 
 // A function compiled: its code, how many slots its frame holds, and its name and where it is
 // declared, which a trap's stack names.

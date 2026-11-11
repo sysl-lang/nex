@@ -290,7 +290,7 @@ private lies_in_place(a: &Arr) -> bool
 private[nex] crossing[T: Scalar + Elem](a: &Arr) -> MatrixView[T]
     if !lies_in_place(a) then return gathered(a)
 
-    viewed(T.held(a.store.d).view(), a, a.offset)
+    viewed(T.held(a.store.d).into_view(), a, a.offset)
 
 // The array `a`, lying in `xs` from position `at` with its own column stride.
 private viewed[T](xs: []T, a: &Arr, at: long) -> MatrixView[T]
@@ -320,7 +320,7 @@ private runs_in_place(a: &Arr) -> bool = a.ext[0] > 0 && a.str[0] == 1
 private slice_in[T: Elem](a: &Arr, zero: T) -> []T
     val src = T.held(a.store.d)
 
-    if runs_in_place(a) then return src.view()[usize(a.offset)..<usize(a.offset + a.ext[0])]
+    if runs_in_place(a) then return T.held(a.store.d).into_view()[usize(a.offset)..<usize(a.offset + a.ext[0])]
 
     var xs: []T = [zero; usize(a.ext[0])]
 

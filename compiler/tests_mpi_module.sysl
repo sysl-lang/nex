@@ -65,7 +65,7 @@ private sorted_lines(text: string) -> string
     for l in split(text, "\n")
         if l != "" then ls.push(l)
 
-    sort(ls.view())
+    sort(ls.view_mut())
     join(ls.view(), "\n")
 
 private hello_lines(np: int) -> string
@@ -320,7 +320,7 @@ mpi_collectives_match_the_oracle()
         for r in 0..<np
             want.push(s"rank $r: ${if r == 1 then 54 else 51} checks")
 
-        sort(want.view())
+        sort(want.view_mut())
         assert(out.status.ok(), s"-np $np: ${out.status}\n${out.err.unwrap_or("")}")
         assert_eq(sorted_lines(out.text), join(want.view(), "\n"))
 
@@ -495,7 +495,7 @@ mpi_exchange_corpus()
         for r in 0..<np
             want.push(s"rank $r: 26 checks")
 
-        sort(want.view())
+        sort(want.view_mut())
         assert(out.status.ok(), s"-np $np: ${out.status}\n${out.err.unwrap_or("")}")
         assert_eq(sorted_lines(out.text), join(want.view(), "\n"))
 
@@ -754,7 +754,7 @@ private scratch_report(o: Output) -> string
     for l in split(s"${o.text}\n${o.err.unwrap_or("")}", "\n")
         if l.contains(": scratch live ") then ls.push(l)
 
-    sort(ls.view())
+    sort(ls.view_mut())
     join(ls.view(), "\n")
 
 @test("a trap caught by `assert_traps` in each collective that takes scratch memory gives it back: after 200 rounds of caught traps the shim holds no scratch buffer, and every round catches its trap")

@@ -9,7 +9,7 @@ module sh.sysl.nex
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_dir_all, make_temp_dir, remove_dir_all, write_text}
 import sysl.text.{StrBuilder, join, str_builder}
-import sysl.threads.spawn
+import sysl.threads.scope
 import sysl.sync.Atomic
 import sysl.time.monotonic
 
@@ -672,13 +672,11 @@ emb_cancel_from_thread()
 
         var st = Stopper(s.cancel_token(), beat)
         val began = monotonic()
-        val th = spawn(&stop_when_running, &st)
+        val sp = &st
 
-        assert(th.is_some(), "spawned")
-
-        val r = if round == 0 then called(s, "spin", none()) else ran(s)
-
-        if th is Some(t) then t.join()
+        val r = scope((sc) ->
+            sc.spawn(() -> stop_when_running(sp))
+            if round == 0 then called(s, "spin", none()) else ran(s))
 
         assert_eq(r, "cancelled by the host")
         assert((monotonic() - began).us < 5000000, "halted promptly")

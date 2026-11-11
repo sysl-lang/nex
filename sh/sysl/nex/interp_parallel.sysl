@@ -24,7 +24,7 @@ import sh.sysl.parsing.Span
 private val PAR_BLOCK: i128 = 4096
 
 // Two partial results of a reduction combined, the first the earlier.
-private[nex] type Combine = &Fn(&Cells, Value, Value) -> Answer
+private[nex] type Combine = &Fn(@keeps &Cells, @keeps Value, @keeps Value) -> Answer
 
 // A reduction of a `parallel for` being compiled: its variable, the slot its block's accumulator is
 // kept in, and how a contribution joins it.

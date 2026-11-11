@@ -9,7 +9,7 @@ import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
 // Code that computes text.
-private[nex] type TextCode = &Fn(&Cells) -> Result[string, Signal]
+private[nex] type TextCode = &Fn(@keeps &Cells) -> Result[string, Signal]
 
 // The prelude's complex functions the interpreter computes.
 private val COMPLEX_FNS = ["conj", "arg", "sqrt", "exp", "log", "sin", "cos", "tan"]

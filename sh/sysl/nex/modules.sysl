@@ -315,7 +315,7 @@ private struct Loader
             self.deferred.push(Deferred(file, span, s"the module `${self.names[m]}` has no `.nex` files in `${dir}`"))
             return
 
-        sort(found.view())
+        sort(found.view_mut())
 
         for n in found
             self.read_file(s"${dir}/${n}", m) match
@@ -398,11 +398,11 @@ private struct Loader
 
     // Every module directory under `dir`, whose module path is `path`, read as a module.
     discover(*self, dir: string, path: string)
-        val names = entries(dir) match
+        var names = entries(dir) match
             Ok(ns) -> ns
             Err(_) -> return
 
-        sort(names.view())
+        sort(names.view_mut())
 
         for n in names
             val sub = s"${dir}/${n}"

@@ -74,8 +74,8 @@ private[nex] enum Signal
 private[nex] type Answer = Result[Value, Signal]
 
 // An operator on two values, and a conversion or a function of one, each chosen for its types.
-private[nex] type Op2 = &Fn(Value, Value) -> Answer
-private[nex] type Op1 = &Fn(Value) -> Answer
+private[nex] type Op2 = &Fn(@keeps Value, @keeps Value) -> Answer
+private[nex] type Op1 = &Fn(@keeps Value) -> Answer
 
 private[nex] trapped(message: string) -> Answer = Err(Trapped(message))
 
