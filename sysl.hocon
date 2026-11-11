@@ -41,7 +41,7 @@ exclude = ["bench", "mpi"]
 dependencies {
   parsing { git = "github.com/sysl-lang/parsing", version = "0.14.2" }
   nex_runtime { workspace = true }
-  blas    { git = "github.com/sysl-lang/blas", version = "0.1.1" }
+  blas    { git = "github.com/sysl-lang/blas", version = "0.1.2" }
   lapack  { git = "github.com/sysl-lang/lapack", version = "0.1.1" }
 }
 
