@@ -507,3 +507,51 @@ par_claimed_region_traps()
             assert_eq(out.err.unwrap_or(""), "trap: integer division by zero\n")
 
     finish(b)
+
+// A program naming the OpenMP functions the emitter calls for its own parallel regions as externs.
+private val OMP_EXTERN_BODY = "def main() =\n  val n = omp_get_num_threads()\n  val t = omp_get_thread_num()\n  print(n)\n  print(t)\n  parallel for i in 1..64\n    print(omp_get_thread_num() < omp_get_num_threads())\n"
+private val OMP_EXTERNS = "@pure\nextern def omp_get_thread_num(): int32\n@pure\nextern def omp_get_num_threads(): int32\n"
+
+@test("an extern of an OpenMP function the emitter also declares is the same function: before the parallel region or after it, thread ids stay below the thread count")
+par_run_extern_of_omp_symbols()
+    val b = bench()
+
+    for order in 0..<2
+        val text = if order == 0 then OMP_EXTERNS + OMP_EXTERN_BODY else OMP_EXTERN_BODY + OMP_EXTERNS
+        val exe = s"${b.work}/omp-extern-$order"
+
+        build(b, text, exe)
+
+        val out = capture(exe, [], env = [Var("OMP_NUM_THREADS", "4")], stderr = true).unwrap()
+
+        assert(out.status.ok(), s"${out.status}\n${out.err.unwrap_or("")}")
+        var expected = "1\n0\n"
+
+        for _ in 0..<64 do expected += "true\n"
+
+        assert_eq(out.text, expected)
+
+    finish(b)
+
+@test("an extern in a program with no parallel region compiles and runs")
+par_run_extern_of_omp_symbol_without_parallel()
+    val b = bench()
+    val exe = executable(b)
+
+    build(b, "extern def abs(x: int32): int32\ndef main() = print(abs(-3))\n", exe)
+
+    val out = capture(exe, [], env = [Var("OMP_NUM_THREADS", "3")], stderr = true).unwrap()
+
+    assert_eq(out.text, "3\n")
+    finish(b)
+
+@test("an extern of an emitter-declared symbol with another signature is a nex diagnostic, in either order")
+par_extern_of_omp_symbol_mismatch()
+    for order in 0..<2
+        val bad = "extern def omp_get_thread_num(x: int32): int32\n"
+        val body = "def main() =\n  print(omp_get_thread_num(1))\n  parallel for i in 1..4\n    print(i)\n"
+        val e = emitted(if order == 0 then bad + body else body + bad) match
+            Ok(m) -> fail_with(m)
+            Err(e) -> e
+
+        assert(e.contains("omp_get_thread_num") && !e.contains("redefinition"), e)
