@@ -22,6 +22,8 @@ def main() =
         val bkj = b[k, j]
         for i in 1..n
           c[i, j] = c[i, j] + a[i, k] * bkj
+    // Each product feeds the next, so an optimizer cannot compute the loop-invariant product once.
+    a[1, 1] = a[1, 1] + c[n, n] * 1.0e-30
   val done = clock_gettime_nsec_np(4)
   print((done - start) / reps)
   print(sum(c))

@@ -21,6 +21,8 @@ def main() =
       val xj = x[j]
       for i in 1..n
         y[i] = y[i] + a[i, j] * xj
+    // Each product feeds the next, so an optimizer cannot compute the loop-invariant product once.
+    x[1] = x[1] + y[n] * 1.0e-30
   val done = clock_gettime_nsec_np(4)
   print((done - start) / reps)
   print(sum(y))

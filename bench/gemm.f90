@@ -28,6 +28,8 @@ program gemm
         end do
       end do
     end do
+    ! Each product feeds the next, so an optimizer cannot compute the loop-invariant product once.
+    a(1, 1) = a(1, 1) + c(n, n) * 1.0e-30_real64
   end do
   call system_clock(t1)
   print '(I0)', int(real(t1 - t0, real64) * 1.0e9_real64 / rate / reps, int64)

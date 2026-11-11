@@ -21,6 +21,8 @@ def main() =
   val start = clock_gettime_nsec_np(4)
   for r in 1..reps
     d = sqrt((x2 - x1)^2 + (y2 - y1)^2)
+    // Each pass feeds the next, so an optimizer cannot compute the loop-invariant pass once.
+    x1[1] = x1[1] + d[n] * 1.0e-30
   val done = clock_gettime_nsec_np(4)
   print((done - start) / reps)
   print(sum(d))

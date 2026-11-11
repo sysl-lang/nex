@@ -8,22 +8,28 @@
 #     zsh bench/run.zsh axpy gemm        only these
 #     zsh bench/run.zsh --ir point-distance
 #                                        print the kernel's LLVM IR as `clang -O2` optimizes it
-#     zsh bench/run.zsh --scale          every parallel kernel at each thread count, nex and twin
+#     zsh bench/run.zsh --scale          every parallel kernel at each thread count
 #     zsh bench/run.zsh --scale parallel-dot
 #
-# --scale prints one row per kernel and thread count: OMP_NUM_THREADS at 1, 2, 4, the performance-
-# core count, 8, 12 and every core, then unset (libomp's and libgomp's own choice). Each time is the
-# best of five, and the speedup is over the same program at one thread.
+# Every Fortran twin is built three ways: `gfortran -O2` (the twin the exit bar is measured
+# against), `gfortran -O3 -mcpu=native`, and LLVM `flang -O3 -mcpu=native`, which lowers through
+# MLIR and LLVM as nex does. A missing flang leaves its column out.
 #
-# Columns: the time per pass the kernel prints for itself (best of five), the ratio nex / twin and
-# the verdict against the exit bar (1.25x; BLAS gemm 1.1x against `cblas_dgemm` from C), whether
-# the checksums agree, the large allocations (>= 1 MiB, counted by `alloc-count.dylib` interposed on
-# the binary) of nex and of the twin, the Scala reference's whole-process time against nex's whole-
-# process time (the reference has no `extern`, so it cannot time itself), and the load average when
-# the row ran. The parallel kernels run with OMP_NUM_THREADS = the performance-core count.
+# Columns: the time per pass each program prints for itself (best of five), the ratio nex / gfortran
+# -O2 and the verdict against the exit bar (1.25x; BLAS gemm 1.1x against `cblas_dgemm` from C), the
+# ratio nex / the fastest Fortran, whether every checksum agrees, the large allocations (>= 1 MiB,
+# counted by `alloc-count.dylib` interposed on the binary) of nex and of the twin, the Scala
+# reference's whole-process time against nex's whole-process time (the reference has no `extern`, so
+# it cannot time itself), and the load average when the row ran. The parallel kernels run with
+# OMP_NUM_THREADS = the performance-core count.
+#
+# --scale prints one row per kernel and thread count: OMP_NUM_THREADS at 1, 2, 4, the performance-
+# core count, 8, 12 and every core, then unset (the OpenMP runtime's own choice). The speedups are
+# nex's and the fastest Fortran's over the same program at one thread.
 #
 # Environment: NEX_REF (default ~/dev/nex) is the Scala reference, used when its JVM classes are
-# built; BENCH_WORK keeps the binaries in a directory of your choosing rather than a temporary one.
+# built; NEX_FLANG (default: `flang` on PATH, else Homebrew's) is flang; BENCH_WORK keeps the
+# binaries in a directory of your choosing rather than a temporary one.
 
 emulate -L zsh
 setopt err_return pipe_fail
@@ -33,6 +39,8 @@ root=${bench:h}
 work=${BENCH_WORK:-$(mktemp -d -t nex-bench)}
 ref=${NEX_REF:-$HOME/dev/nex}
 llvm=${NEX_LLVM_HOME:-/opt/homebrew/opt/llvm}
+flang=${NEX_FLANG:-${commands[flang]:-/opt/homebrew/opt/flang/bin/flang}}
+[[ -x $flang ]] || flang=""
 pcores=$(sysctl -n hw.perflevel0.physicalcpu)
 cores=$(sysctl -n hw.physicalcpu)
 runs=5
@@ -71,15 +79,25 @@ find_ref() {
     ref_java=(java -cp $cp io.github.edadma.nex.run compile --prelude-path $ref/prelude)
 }
 
-# Each kernel's binaries: `<k>-nex`, the twin `<k>-twin`, and `<k>-ref` where the reference has it.
+# Each kernel's binaries: `<k>-nex`; the twin `<k>-twin` (gfortran -O2, or C for BLAS gemm); for a
+# Fortran twin `<k>-gf3` (gfortran -O3 -mcpu=native) and `<k>-flang`; `<k>-ref` where the reference
+# has it.
 build_kernel() {
     local k=$1
+    local -a omp
+    if [[ $k == parallel-* ]]; then omp=(-fopenmp); fi
     $work/nex build $bench/$k.nex -o $work/$k-nex > $work/$k.build.log 2>&1
-    case $k in
-        blas-gemm) clang -O2 $bench/blas-gemm.c -framework Accelerate -o $work/$k-twin ;;
-        parallel-*) gfortran -O2 -fopenmp $bench/$k.f90 -o $work/$k-twin ;;
-        *) gfortran -O2 $bench/$k.f90 -o $work/$k-twin ;;
-    esac
+    rm -f $work/$k-gf3 $work/$k-flang
+    if [[ $k == blas-gemm ]]; then
+        clang -O2 $bench/blas-gemm.c -framework Accelerate -o $work/$k-twin
+    else
+        gfortran -O2 $omp $bench/$k.f90 -o $work/$k-twin
+        gfortran -O3 -mcpu=native $omp $bench/$k.f90 -o $work/$k-gf3
+        # flang's Homebrew runtime was built for a newer macOS, which ld warns about.
+        if [[ -n $flang ]]; then
+            $flang -O3 -mcpu=native $omp $bench/$k.f90 -o $work/$k-flang >> $work/$k.build.log 2>&1
+        fi
+    fi
     if (( $#ref_java )) && [[ -f $bench/scala/$k.nex ]]; then
         # The reference compiles every .nex in the file's directory, so each kernel gets its own.
         mkdir -p $work/ref-$k
@@ -132,6 +150,37 @@ agree() {
     print yes
 }
 
+# Times kernel `$1`'s programs at the current OMP_NUM_THREADS: sets `t_twin`, `t_gf3`, `t_flang`
+# and `t_nex` (ns per pass; 0 for a program not built), `t_best` (the fastest Fortran), `nex_wall`,
+# `nex_sums`, `twin_sums`, and `sums_ok` (yes when every program's checksums agree with nex's).
+t_twin=0 t_gf3=0 t_flang=0 t_nex=0 t_best=0 nex_wall=0 nex_sums="" twin_sums="" sums_ok=yes
+
+measure_all() {
+    local k=$1 v
+    sums_ok=yes
+    measure $work/$k-nex yes
+    t_nex=$best_pass nex_wall=$best_wall nex_sums=$sums
+    measure $work/$k-twin yes
+    t_twin=$best_pass twin_sums=$sums
+    [[ $(agree "$nex_sums" "$sums") == yes ]] || sums_ok=no
+    t_best=$t_twin
+    for v in gf3 flang; do
+        if [[ -x $work/$k-$v ]]; then
+            measure $work/$k-$v yes
+            [[ $(agree "$nex_sums" "$sums") == yes ]] || sums_ok=no
+            if (( best_pass < t_best )); then t_best=$best_pass; fi
+        else
+            best_pass=0
+        fi
+        typeset -g t_$v=$best_pass
+    done
+    # blas-gemm and its C twin print microseconds per product, not nanoseconds.
+    if [[ $k == blas-gemm ]]; then (( t_twin *= 1000, t_nex *= 1000, t_best *= 1000 )); fi
+}
+
+# A time in ms, or `-` for a program not built.
+ms() { if (( $1 )); then printf '%.2f' $(( $1 / 1e6 )); else print -- -; fi }
+
 large_allocs() {
     local line
     line=$(DYLD_INSERT_LIBRARIES=$work/alloc-count.dylib $1 2>&1 >/dev/null | grep '^large allocations:')
@@ -165,25 +214,21 @@ if [[ $1 == --scale ]]; then
     build_nex
     log "machine: $(sysctl -n machdep.cpu.brand_string), $pcores performance of $cores cores"
     log "work: $work"
-    printf '%-16s %7s %10s %10s %7s %8s %8s %-5s %6s\n' kernel threads twin_ms nex_ms ratio \
-        twin_x nex_x sums load
+    printf '%-16s %7s %9s %9s %9s %9s %8s %7s %7s %-5s %6s\n' kernel threads gfO2_ms gfO3_ms \
+        flang_ms nex_ms nex/best best_x nex_x sums load
     counts=(1 2 4 $pcores 8 12 $cores default)
     counts=(${(u)counts})
     for k in $kernels; do
         build_kernel $k
-        twin1=0 nex1=0
+        best1=0 nex1=0
         for th in $counts; do
             if [[ $th == default ]]; then unset OMP_NUM_THREADS; else export OMP_NUM_THREADS=$th; fi
             load=$(sysctl -n vm.loadavg | awk '{print $2}')
-            measure $work/$k-twin yes
-            twin_pass=$best_pass twin_sums=$sums
-            measure $work/$k-nex yes
-            nex_pass=$best_pass nex_sums=$sums
-            if (( twin1 == 0 )); then twin1=$twin_pass nex1=$nex_pass; fi
-            printf '%-16s %7s %10.2f %10.2f %7.2f %8.2f %8.2f %-5s %6s\n' $k $th \
-                $(( twin_pass / 1e6 )) $(( nex_pass / 1e6 )) $(( 1.0 * nex_pass / twin_pass )) \
-                $(( 1.0 * twin1 / twin_pass )) $(( 1.0 * nex1 / nex_pass )) \
-                $(agree "$nex_sums" "$twin_sums") $load
+            measure_all $k
+            if (( nex1 == 0 )); then best1=$t_best nex1=$t_nex; fi
+            printf '%-16s %7s %9s %9s %9s %9s %8.2f %7.2f %7.2f %-5s %6s\n' $k $th \
+                $(ms $t_twin) $(ms $t_gf3) $(ms $t_flang) $(ms $t_nex) $(( 1.0 * t_nex / t_best )) \
+                $(( 1.0 * best1 / t_best )) $(( 1.0 * nex1 / t_nex )) $sums_ok $load
         done
     done
     unset OMP_NUM_THREADS
@@ -197,20 +242,16 @@ find_ref
 log "machine: $(sysctl -n machdep.cpu.brand_string), $pcores performance cores"
 log "work: $work"
 
-printf '%-15s %12s %12s %7s %-7s %-5s %9s %8s %6s\n' kernel twin_ms nex_ms ratio verdict sums alloc_n/t ref/nex load
+printf '%-15s %9s %9s %9s %9s %7s %-7s %8s %-5s %9s %8s %6s\n' kernel gfO2_ms gfO3_ms flang_ms \
+    nex_ms ratio verdict nex/best sums alloc_n/t ref/nex load
 for k in $kernels; do
     build_kernel $k
     load=$(sysctl -n vm.loadavg | awk '{print $2}')
     if [[ $k == parallel-* ]]; then export OMP_NUM_THREADS=$pcores; else unset OMP_NUM_THREADS; fi
 
-    measure $work/$k-twin yes
-    twin_pass=$best_pass twin_sums=$sums
-    measure $work/$k-nex yes
-    nex_pass=$best_pass nex_wall=$best_wall nex_sums=$sums
-    # blas-gemm and its C twin print microseconds per product, not nanoseconds.
-    if [[ $k == blas-gemm ]]; then (( twin_pass *= 1000, nex_pass *= 1000 )); fi
+    measure_all $k
 
-    ratio=$(( 1.0 * nex_pass / twin_pass ))
+    ratio=$(( 1.0 * t_nex / t_twin ))
     bar=1.25
     [[ $k == blas-gemm ]] && bar=1.1
     if (( ratio <= bar )); then verdict=meets; else verdict=MISSES; fi
@@ -224,6 +265,7 @@ for k in $kernels; do
 
     allocs="$(large_allocs $work/$k-nex)/$(large_allocs $work/$k-twin)"
 
-    printf '%-15s %12.2f %12.2f %7.2f %-7s %-5s %9s %8s %6s\n' $k $(( twin_pass / 1e6 )) \
-        $(( nex_pass / 1e6 )) $ratio $verdict $(agree "$nex_sums" "$twin_sums") $allocs $refcol $load
+    printf '%-15s %9s %9s %9s %9s %7.2f %-7s %8.2f %-5s %9s %8s %6s\n' $k $(ms $t_twin) \
+        $(ms $t_gf3) $(ms $t_flang) $(ms $t_nex) $ratio $verdict $(( 1.0 * t_nex / t_best )) \
+        $sums_ok $allocs $refcol $load
 done

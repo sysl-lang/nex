@@ -180,3 +180,95 @@ Inside the bar but worth watching: in naive gemm and gemv the inner loop vectori
 behind a runtime alias check (`vector.memcheck`), and the bounds checks are hoisted to the outer
 loop. The multiplies and adds stay separate `fmul`/`fadd` with no FMA contraction, while gfortran
 contracts them.
+
+## Against three Fortran compilers
+
+dev `a3d4151` plus the kernels of this section, 2026-11-11, at a load of 2.3 to 3.2 (point
+distance, gemm, gemv and axpy real32 re-run at 5 to 9 after the guard below). Every twin is built
+three ways: `gfortran -O2` (GCC 16.2.0, the twin the exit bar is measured against), `gfortran -O3
+-mcpu=native`, and LLVM `flang -O3 -mcpu=native` (Homebrew flang 23.1.5), which lowers through MLIR
+and LLVM as nex does. *nex/best* is nex over the fastest of the three. Every checksum agrees.
+
+| kernel | gfortran -O2 | gfortran -O3 | flang -O3 | nex | ratio (bar) | nex/best |
+|---|---:|---:|---:|---:|---:|---:|
+| axpy | 1.69 | 1.36 | 3.34 | 1.62 | 0.96 | **1.19** |
+| dot | 8.16 | 8.16 | 5.13 | 5.00 | 0.61 | 0.97 |
+| nrm2 | 7.99 | 7.98 | 5.15 | 4.93 | 0.62 | 0.96 |
+| gemv | 2.04 | 2.04 | 1.89 | 1.92 | 0.94 | 1.02 |
+| gemm (naive) | 128.27 | 83.87 | 113.02 | 113.07 | 0.88 | **1.35** |
+| stencil | 1.42 | 1.42 | 1.43 | 1.42 | 1.00 | 1.00 |
+| complex axpy | 3.22 | 1.64 | 6.91 | 3.35 | 1.04 | **2.05** |
+| point distance | 3.44 | 3.43 | 3.51 | 3.39 | 0.99 | 0.99 |
+| axpy, real32 | 0.81 | 1.36 | 1.62 | 0.80 | 0.99 | 0.99 |
+| BLAS gemm (vs `cblas_dgemm`) | 5.98 (C) | – | – | 3.98 | 0.67 | 0.67 |
+| parallel axpy (6 threads) | 1.22 | 1.16 | 1.22 | 1.20 | 0.98 | 1.04 |
+| parallel dot (6 threads) | 1.42 | 1.43 | 1.06 | 0.98 | 0.69 | 0.92 |
+| parallel mandel (6 threads) | 43.76 | 40.91 | 40.75 | 45.42 | 1.04 | 1.11 |
+
+- **Against `gfortran -O2` every kernel still meets its bar.** Against `gfortran -O3 -mcpu=native`
+  three do not: complex axpy (2.05×), naive gemm (1.35×) and axpy (1.19×). These are the gaps that
+  stand between nex and PLAN.md's "Versions" bar.
+- **flang is nowhere faster than nex**, and is 2× slower on axpy and complex axpy, so the three gaps
+  are what GCC's optimizer does, not something LLVM offers that nex fails to reach. flang and nex
+  both beat gfortran on dot and nrm2 by vectorizing the sum.
+- `gfortran -O3 -mcpu=native` is slower than `-O2` on axpy real32 (1.36 against 0.81), in two runs.
+- **Point distance, gemm and gemv now feed each pass into the next** (`x1[1] += d[n] * 1e-30` and the
+  like). Before, each pass recomputed the same result from unchanged inputs, and `gfortran -O3` ran
+  point distance's fifty passes as one (0.16 ms a pass).
+
+## Scaling across the 18 cores
+
+`zsh bench/run.zsh --scale`, the same run: each parallel kernel at `OMP_NUM_THREADS` 1 to 18 and
+unset. The machine has 6 performance and 12 efficiency cores. Times in ms; *speedup* is over the same
+program at one thread; *best* is the fastest of the three Fortran builds.
+
+| kernel | threads | gfortran -O2 | gfortran -O3 | flang -O3 | nex | nex/best | best speedup | nex speedup |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| parallel axpy | 1 | 2.41 | 1.62 | 1.63 | 1.63 | 1.01 | 1.00 | 1.00 |
+| | 2 | 1.43 | 1.39 | 1.39 | 1.27 | 0.92 | 1.17 | 1.29 |
+| | 4 | 1.38 | 1.36 | 1.37 | 1.16 | 0.86 | 1.19 | 1.41 |
+| | 6 | 1.22 | 1.20 | 1.22 | 1.18 | 0.99 | 1.35 | 1.38 |
+| | 8 | 1.03 | 1.02 | 1.02 | 0.98 | 0.97 | 1.59 | 1.66 |
+| | 12 | 0.98 | 0.98 | 1.00 | 0.97 | 0.99 | 1.65 | 1.69 |
+| | 18 | 0.91 | 0.93 | 0.96 | 0.90 | 0.99 | 1.77 | 1.81 |
+| | unset | 0.94 | 0.94 | 0.97 | 0.92 | 0.99 | 1.73 | 1.77 |
+| parallel dot | 1 | 8.17 | 8.16 | 5.03 | 4.99 | 0.99 | 1.00 | 1.00 |
+| | 2 | 4.11 | 4.11 | 2.55 | 2.52 | 0.99 | 1.97 | 1.98 |
+| | 4 | 2.10 | 2.10 | 1.36 | 1.31 | 0.97 | 3.71 | 3.81 |
+| | 6 | 1.42 | 1.42 | 1.05 | 0.98 | 0.93 | 4.77 | 5.11 |
+| | 8 | 1.09 | 1.08 | 0.84 | 0.78 | 0.93 | 6.01 | 6.43 |
+| | 12 | 0.83 | 0.85 | 0.91 | 0.77 | 0.93 | 6.03 | 6.45 |
+| | 18 | 0.85 | 0.96 | 0.94 | 0.77 | 0.91 | 5.91 | 6.46 |
+| | unset | 0.96 | 0.97 | 0.92 | 0.77 | 0.84 | 5.48 | 6.46 |
+| parallel mandel | 1 | 120.49 | 112.95 | 112.31 | 124.83 | 1.11 | 1.00 | 1.00 |
+| | 2 | 60.81 | 57.02 | 56.62 | 63.34 | 1.12 | 1.98 | 1.97 |
+| | 4 | 56.47 | 52.93 | 52.65 | 58.72 | 1.12 | 2.13 | 2.13 |
+| | 6 | 43.69 | 40.91 | 40.70 | 45.41 | 1.12 | 2.76 | 2.75 |
+| | 8 | 35.81 | 33.44 | 32.97 | 37.02 | 1.12 | 3.41 | 3.37 |
+| | 12 | 25.79 | 23.98 | 24.32 | 27.36 | 1.14 | 4.68 | 4.56 |
+| | 18 | 18.10 | 16.89 | 16.77 | 19.03 | 1.13 | 6.70 | 6.56 |
+| | unset | 18.12 | 16.91 | 16.81 | 19.03 | 1.13 | 6.68 | 6.56 |
+
+**The schedule decides the compute-bound case.** `parallel-mandel` is a 1024 × 1024 Mandelbrot
+grid: little memory, very uneven work, the costly points together in the middle of the grid. nex
+gives each thread one equal contiguous share of the iterations (`compiler/emit_parallel.sysl`), which
+is OpenMP's `static` schedule, and the three Fortran builds use `static` by default too. The same
+gfortran twin with `schedule(runtime)`, at a load of about 3.7:
+
+| threads | static | dynamic,1 | guided |
+|---:|---:|---:|---:|
+| 1 | 120.59 (1.00×) | 120.71 (1.00×) | 120.59 (1.00×) |
+| 4 | 56.52 (2.13×) | 30.84 (3.91×) | 43.11 (2.80×) |
+| 6 | 43.75 (2.76×) | 20.93 (5.77×) | 30.00 (4.02×) |
+| 8 | 35.74 (3.37×) | 16.02 (7.54×) | 22.19 (5.43×) |
+| 12 | 25.63 (4.70×) | 11.09 (10.88×) | 15.51 (7.78×) |
+| 18 | 18.07 (6.67×) | 7.96 (15.16×) | 10.50 (11.49×) |
+
+- With work handed out as threads free up, 18 threads run 15.2× faster than one; with equal shares,
+  6.7×. Every one of the 18 cores does useful work; the efficiency cores were not the limit, the
+  imbalance was.
+- **The memory-bound kernels are near their ceiling**: parallel axpy levels off at about 1.8× and
+  parallel dot at about 6.5×, where bandwidth runs out. A schedule cannot help them.
+- **Left unset, the OpenMP runtimes use all 18 cores**, as fast as the best fixed count in every
+  row, so nex does not need to pick a thread count. The `OMP_NUM_THREADS=6` the oracle uses for its
+  main table understates the machine.
