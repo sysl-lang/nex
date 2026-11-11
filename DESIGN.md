@@ -1221,8 +1221,9 @@ The body of an `@elemental` function (§7.3) obeys rules 1–3 and 5 as if it we
 one starts, and the trap is raised in the thread that started the loop, as if by its first
 statement after the loop: an `assert_traps` around the loop catches it, and with nothing catching
 it the program writes it and aborts as any trap does. Which iteration's trap is reported when
-several trap is unspecified. A thread looks for a trap between blocks of 4096 iterations, so "no
-new one starts" holds per block: the iterations of a block already begun run to its end. (Each
+several trap is unspecified. A thread looks for a trap before each run of iterations it claims
+(§9.5), a run being at most 4096 iterations, so "no new one starts" holds per run: the iterations of
+a run already begun go to its end. (Each
 thread runs its share under a catch of its own, so the runtime's `longjmp` never crosses an OpenMP
 thread; the first trap's message is kept and raised by the thread that started the loop.)
 
@@ -1237,10 +1238,23 @@ gives each thread its own copy of every local the body binds, its loop counter a
 
 | nex | the region's code |
 |---|---|
-| `parallel for` | the thread's contiguous run of iterations (or, with a `reduce` clause, of blocks), each iteration setting the indices from its number and running the body |
+| `parallel for` | the runs of iterations the thread claims (or, with a `reduce` clause, the blocks), each iteration setting the indices from its number and running the body |
 | a `reduce` clause | per block: an accumulator started from the identity, each contribution combined into it, the block's partial stored; after the region the partials are combined in the tree of §9.2.1 and once with the starting value |
-| `parallel` element-wise or `map` | the thread's run of the result's elements, in storage order, each computed by the scalar operation over the operands' elements |
-| `parallel sum`, `product`, `minval`, `maxval`, `dot` | the thread's run of blocks, each reduced as the sequential reduction reduces it; after the region the same tree |
+| `parallel` element-wise or `map` | the runs of the result's elements the thread claims, in storage order, each computed by the scalar operation over the operands' elements |
+| `parallel sum`, `product`, `minval`, `maxval`, `dot` | the blocks the thread claims, each reduced as the sequential reduction reduces it; after the region the same tree |
+
+**The threads claim their work as they go**, as OpenMP's `schedule(dynamic)` hands it out, rather
+than each taking an equal share fixed in advance. The region's environment ends in a counter set to
+0 as the region opens; a thread takes the next run with one atomic add to it and comes back when the
+run is done, until the counter passes the end. A thread on a fast core, or one whose iterations
+happened to be cheap, takes more runs, so uneven work — a Mandelbrot grid, a triangular loop — and a
+machine whose cores differ in speed both keep every thread busy to the end. A reduction's thread
+claims one block at a time; since only *who* computes a block changes, never the blocks or the tree,
+the bits are those of §9.2.1 whatever order the blocks are claimed in. Elsewhere a run is the
+iteration space cut into 16 runs per thread, but never fewer than 1 iteration nor more than 4096:
+a region pays a few hundred claims at most besides one per 4096 iterations, the last run a thread
+takes is short beside its share, and a few dear iterations (`parallel for j in 1..5`) are claimed
+one at a time and spread over 5 threads.
 
 **A whole element-wise expression is one region.** Under `parallel`, the operators, elemental
 calls, conversions and widenings of an element-wise expression are fused into one scalar computation

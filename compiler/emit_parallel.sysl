@@ -1,14 +1,23 @@
 // Emission of parallelism (DESIGN §9): `parallel for`, its reductions, and the `parallel`
 // expressions, each lowered to one OpenMP region.
 //
-// **A region is outlined code that every thread of the team runs on its own share.** The function
-// that meets a `parallel` construct gathers what the region reads into an *environment* — a struct
-// in its frame — and opens an `omp.parallel` whose every thread calls the runtime's `nex_par_run`
+// **A region is outlined code that every thread of the team runs, claiming work as it goes.** The
+// function that meets a `parallel` construct gathers what the region reads into an *environment* —
+// a struct in its frame — and opens an `omp.parallel` whose every thread calls the runtime's `nex_par_run`
 // with the region's code `@"p.N"(env, worker, workers)`. The code is an ordinary function emitted
 // after the one that runs it, so its locals are its own entry-block slots: each thread has its own
 // copy of every local a body binds, its own loop counter and its own control word. `nex_par_run`
 // runs the code under a catch, so a trap ends the region and is raised after it in the thread that
 // started it (`runtime/trap.sysl`).
+//
+// **The threads claim their work as they go.** An environment ends in a counter, set to 0 as the
+// region opens; a thread takes the next run of iterations, elements or blocks with one atomic add to
+// it and comes back for another when that run is done, until the counter passes the end. A thread on
+// a fast core, or one whose iterations were cheap, takes more runs, so uneven work spreads over the
+// team as it would under OpenMP's `schedule(dynamic)`. The counter is a field of the environment, in
+// the frame of the function that opened the region, rather than a word of the runtime's, so each
+// opening of a region has a counter of its own; the add is the runtime's `nex_par_claim`. A thread
+// looks for a trap that has ended the region before each claim.
 //
 // **What a body reaches crosses by address or as a buffer.** A local the body reads crosses as the
 // address of its storage. An array held as a value crosses as a memref descriptor: one the body only
@@ -20,9 +29,10 @@
 //
 // **The order of a reduction never depends on the thread count** (DESIGN §9.2.1). The iteration
 // space is numbered with the first clause's index varying fastest and cut into blocks of 4096; a
-// thread reduces whole blocks, each from the operator's identity into the block's own partial, and
-// after the region the partials are combined in the fixed pairwise tree, then once with the
-// variable's starting value. Threads decide only who computes which block.
+// thread claims whole blocks, one at a time, and reduces each from the operator's identity into the
+// block's own partial, and after the region the partials are combined in the fixed pairwise tree,
+// then once with the variable's starting value. Threads decide only who computes which block, so
+// claiming blocks as they come changes nothing in a result's bits.
 //
 // **A `parallel` expression is a kernel region of the same shape.** Under `parallel`, a whole
 // element-wise expression is one region: its operations are fused into one scalar computation over
@@ -41,6 +51,9 @@ import sh.sysl.parsing.Span
 
 // The block a reduction reduces sequentially (DESIGN §9.2.1).
 private val PAR_BLOCK: usize = 4096
+
+// How many runs per thread a region without reductions is cut into, at the most (see `grain`).
+private val PAR_RUNS: usize = 16
 
 // What a region's code is made from.
 enum ParKind
@@ -203,12 +216,14 @@ impl Emitter
     par_back(*self, span: Span, v: string, m: string, t: Ty)
         self.op(s"bufferization.materialize_in_destination $v in restrict writable $m : (${self.tensor_ty(span, t)}, ${self.boundary_ty(span, t)}) -> ()")
 
-    // Region `n`'s code run by every thread of an OpenMP team over the environment `env`; a trap it
-    // raised, raised here.
-    run_region(*self, n: usize, env: string)
+    // Region `n`'s code run by every thread of an OpenMP team over the environment `env` of `fields`,
+    // its claim counter set to 0 first; a trap it raised, raised here.
+    run_region(*self, n: usize, env: string, fields: Buf[string])
         val fty = "(!llvm.ptr, i64, i64) -> ()"
         val f = self.def(s"func.constant @\"p.$n\" : $fty")
         val code = self.def(s"builtin.unrealized_conversion_cast $f : $fty to !llvm.ptr")
+
+        self.op(s"llvm.store ${self.def("arith.constant 0 : i64")}, ${self.claim_word(env, fields)} : i64, !llvm.ptr")
 
         self.external("omp_get_thread_num", "", "i32")
         self.external("omp_get_num_threads", "", "i32")
@@ -224,34 +239,61 @@ impl Emitter
         self.op("}")
         self.call("nex_par_end", "", "", "")
 
-    // Of `n` things (`i64`), the first and one past the last that worker `w` of `nw` takes: a
-    // contiguous run, the first `n % nw` workers one more than the rest.
-    share(*self, n: string, w: string, nw: string) -> (string, string)
-        val q = self.def(s"arith.divsi $n, $nw : i64")
-        val r = self.def(s"arith.remsi $n, $nw : i64")
-        val lo = self.def(s"arith.addi ${self.def(s"arith.muli $w, $q : i64")}, ${self.def(s"arith.minsi $w, $r : i64")} : i64")
-        val extra = self.def(s"arith.extui ${self.def(s"arith.cmpi slt, $w, $r : i64")} : i1 to i64")
+    // The address of the claim counter that ends the environment at `env` of `fields`.
+    claim_word(*self, env: string, fields: Buf[string]) -> string = self.env_at(env, env_ty(fields), fields.len())
 
-        (lo, self.def(s"arith.addi ${self.def(s"arith.addi $lo, $q : i64")}, $extra : i64"))
+    // How many of `n` iterations or elements (`i64`) one claim takes, for a team of `nw`: `n` cut
+    // into `PAR_RUNS` runs per thread, but no fewer than 1 and no more than `PAR_BLOCK`. The count
+    // of claims is then bounded by `nw · PAR_RUNS` plus `n / PAR_BLOCK`, whatever `n` is, so a region
+    // of cheap iterations pays a few hundred atomic adds at most besides one per 4096 iterations;
+    // the last run a thread takes is at most a sixteenth of its fair share, so a thread that drew
+    // the dearest iterations finishes late by little; and a loop of a few dear iterations
+    // (`parallel for j in 1..5`) is claimed one iteration at a time, spread over 5 threads. The cap
+    // keeps the trap check of DESIGN §9.4 between at most 4096 iterations.
+    grain(*self, n: string, nw: string) -> string
+        val runs = self.def(s"arith.muli $nw, ${self.def(s"arith.constant $PAR_RUNS : i64")} : i64")
+        val g = self.def(s"arith.ceildivsi $n, $runs : i64")
+        val lo = self.def(s"arith.maxsi $g, ${self.def("arith.constant 1 : i64")} : i64")
 
-    // A loop of a counter from `lo` up to `hi − 1` (`i64`), where `checked` one whose next pass does
-    // not start once a trap has ended the region; the body follows, the counter's value answered
-    // with the loop.
-    count_open(*self, lo: string, hi: string, checked: bool) -> (Loop, string, string)
+        self.def(s"arith.minsi $lo, ${self.def(s"arith.constant $PAR_BLOCK : i64")} : i64")
+
+    // One claim of `take` (`i64`) more of `n` things from the counter at `word`: whether this thread
+    // goes on — something was left, and no trap has ended the region — and the first thing taken.
+    // The add is the runtime's `nex_par_claim` rather than an `llvm.atomicrmw` here, because the
+    // buffer deallocation pipeline refuses an operation whose memory effects it cannot see, and an
+    // `llvm.atomicrmw` declares none; it costs a call per claim, a few hundred per region.
+    claim(*self, word: string, n: string, take: string) -> (string, string)
+        val stop = self.def(s"llvm.load ${self.par_stop} atomic monotonic {alignment = 4 : i64} : !llvm.ptr -> i32")
+
+        self.external("nex_par_claim", "!llvm.ptr, i64", "i64")
+
+        val first = self.def(s"func.call @nex_par_claim($word, $take) : (!llvm.ptr, i64) -> i64")
+        val left = self.def(s"arith.cmpi slt, $first, $n : i64")
+
+        (self.def(s"arith.andi $left, ${self.def(s"arith.cmpi eq, $stop, ${self.def("arith.constant 0 : i32")} : i32")} : i1"), first)
+
+    // A loop that claims `take` (`i64`) of `n` things at a time from the counter at `word` while any
+    // are left; the body follows, answered with the first thing of the pass's claim. `loop_close`
+    // ends it.
+    claim_open(*self, word: string, n: string, take: string) -> (Loop, string)
+        val ptr = self.alloca("i64")
+        val l = self.loop_open()
+        val (go, first) = self.claim(word, n, take)
+
+        self.op(s"llvm.store $first, $ptr : i64, !llvm.ptr")
+        self.loop_condition(l, go)
+        (l, self.def(s"llvm.load $ptr : !llvm.ptr -> i64"))
+
+    // A loop of a counter from `lo` up to `hi − 1` (`i64`); the body follows, the counter's value
+    // answered with the loop.
+    count_open(*self, lo: string, hi: string) -> (Loop, string, string)
         val ptr = self.alloca("i64")
 
         self.op(s"llvm.store $lo, $ptr : i64, !llvm.ptr")
 
         val l = self.loop_open()
-        val k = self.def(s"llvm.load $ptr : !llvm.ptr -> i64")
-        var go = self.def(s"arith.cmpi slt, $k, $hi : i64")
 
-        if checked
-            val stop = self.def(s"llvm.load ${self.par_stop} atomic monotonic {alignment = 4 : i64} : !llvm.ptr -> i32")
-
-            go = self.def(s"arith.andi $go, ${self.def(s"arith.cmpi eq, $stop, ${self.def("arith.constant 0 : i32")} : i32")} : i1")
-
-        self.loop_condition(l, go)
+        self.loop_condition(l, self.def(s"arith.cmpi slt, ${self.def(s"llvm.load $ptr : !llvm.ptr -> i64")}, $hi : i64"))
         (l, ptr, self.def(s"llvm.load $ptr : !llvm.ptr -> i64"))
 
     count_close(*self, l: Loop, ptr: string, k: string)
@@ -413,7 +455,7 @@ impl Emitter
             Some(v) -> self.def(s"arith.constant $v : i64")
             None -> self.env_get(fields, k)
 
-    // The code of `parallel for` job `n`: this worker's share of the iterations, or of the blocks
+    // The code of `parallel for` job `n`: the runs of iterations this thread claims, or the blocks
     // where the loop reduces.
     loop_code(*self, n: usize, job: ParJob, e: TExpr)
         *e.kind match
@@ -498,22 +540,21 @@ impl Emitter
         for c in counts
             total = self.def(s"arith.muli $total, $c : i64")
 
-        // A thread checks for a trap that has ended the region between blocks of iterations, so the
-        // iterations themselves stay a plain loop.
+        // A thread checks for a trap that has ended the region before each claim, so the iterations
+        // themselves stay a plain loop.
         val block = self.def(s"arith.constant $PAR_BLOCK : i64")
+        val word = self.claim_word("%env", job.fields)
 
         if reds.len() == 0
-            // This worker's run of iterations, in blocks.
-            val (lo, hi) = self.share(total, "%w", "%nw")
-            val (l, ptr, b) = self.count_open(self.def("arith.constant 0 : i64"), self.def(s"arith.ceildivsi ${self.def(s"arith.subi $hi, $lo : i64")}, $block : i64"), true)
-            val first = self.def(s"arith.addi $lo, ${self.def(s"arith.muli $b, $block : i64")} : i64")
+            // Runs of iterations, claimed one after another until none are left.
+            val take = self.grain(total, "%nw")
+            val (l, first) = self.claim_open(word, total, take)
 
-            self.iterations(span, first, self.def(s"arith.minsi ${self.def(s"arith.addi $first, $block : i64")}, $hi : i64"), loop_id, clauses, los, steps, counts, body)
-            self.count_close(l, ptr, b)
+            self.iterations(span, first, self.def(s"arith.minsi ${self.def(s"arith.addi $first, $take : i64")}, $total : i64"), loop_id, clauses, los, steps, counts, body)
+            self.loop_close(l)
         else
-            // This worker's run of the blocks every reduction is cut into.
-            val (blo, bhi) = self.share(self.def(s"arith.ceildivsi $total, $block : i64"), "%w", "%nw")
-            val (l, ptr, b) = self.count_open(blo, bhi, true)
+            // The blocks every reduction is cut into, claimed one at a time.
+            val (l, b) = self.claim_open(word, self.def(s"arith.ceildivsi $total, $block : i64"), self.def("arith.constant 1 : i64"))
 
             for a in self.par_accs
                 self.store(span, a.acc, self.red_identity(span, a), a.t)
@@ -527,7 +568,7 @@ impl Emitter
 
                 self.store(span, self.elem_at(parts[k], b, self.mem_ty(span, a.t)), self.load(span, a.acc, a.t), a.t)
 
-            self.count_close(l, ptr, b)
+            self.loop_close(l)
 
         for k in 0..<written.len()
             self.par_back(span, self.arr[written[k]], bufs[k], self.prog.locals[written[k]].ty)
@@ -564,7 +605,7 @@ impl Emitter
     // Iterations `lo` to `hi − 1` of the box the clauses span, numbered with the first clause's index
     // varying fastest: each sets the indices and runs the body.
     iterations(*self, span: Span, lo: string, hi: string, loop_id: usize, clauses: Buf[TParClause], los: Buf[string], steps: Buf[string], counts: Buf[string], body: TExpr)
-        val (l, ptr, t) = self.count_open(lo, hi, false)
+        val (l, ptr, t) = self.count_open(lo, hi)
         var rest = t
 
         for k in 0..<clauses.len()
@@ -830,9 +871,9 @@ impl Emitter
 
         (arrays, frame)
 
-    // The code of map job `n`: this worker's share of the output's elements, in storage order. The
-    // operand `dest` the output is written over is read from the output itself, at the element about
-    // to be written.
+    // The code of map job `n`: the runs of the output's elements this thread claims, in storage
+    // order. The operand `dest` the output is written over is read from the output itself, at the
+    // element about to be written.
     map_code(*self, n: usize, job: ParJob, out: Ty, operands: Buf[TExpr], scalar: TExpr, dest: Option[usize])
         val span = scalar.span
 
@@ -852,12 +893,34 @@ impl Emitter
             dims.push(d)
             total = self.def(s"arith.muli $total, $d : index")
 
-        val (lo, hi) = self.share(self.to_i64(total), "%w", "%nw")
+        // Runs of elements, claimed one after another until none are left, the result carried round.
+        val n64 = self.to_i64(total)
+        val take = self.grain(n64, "%nw")
+        val word = self.claim_word("%env", job.fields)
+        val at_ptr = self.alloca("i64")
+        val res = self.fresh()
+        val carried = self.fresh()
+
+        self.par_stop = self.call("nex_par_stop_word", "", "", "!llvm.ptr")
+        self.op(s"$res = scf.while ($carried = $o) : ($ot) -> ($ot) {")
+
+        val (go, first) = self.claim(word, n64, take)
+
+        self.op(s"llvm.store $first, $at_ptr : i64, !llvm.ptr")
+        self.op(s"scf.condition($go) $carried : $ot")
+        self.op("} do {")
+
+        val run = self.fresh()
+
+        self.op(s"^bb0($run: $ot):")
+
+        val lo = self.def(s"llvm.load $at_ptr : !llvm.ptr -> i64")
+        val hi = self.def(s"arith.minsi ${self.def(s"arith.addi $lo, $take : i64")}, $n64 : i64")
         val iv = self.fresh()
         val acc = self.fresh()
-        val res = self.fresh()
+        val ran = self.fresh()
 
-        self.op(s"$res = scf.for $iv = ${self.def(s"arith.index_cast $lo : i64 to index")} to ${self.def(s"arith.index_cast $hi : i64 to index")} step ${self.index_const(1)} iter_args($acc = $o) -> ($ot) {")
+        self.op(s"$ran = scf.for $iv = ${self.def(s"arith.index_cast $lo : i64 to index")} to ${self.def(s"arith.index_cast $hi : i64 to index")} step ${self.index_const(1)} iter_args($acc = $run) -> ($ot) {")
 
         // The element's tensor indices, the last axis varying fastest.
         var idx: Buf[string] = buf()
@@ -885,6 +948,8 @@ impl Emitter
         val y = self.in_frame(here, scalar)
 
         self.op(s"scf.yield ${self.def(s"tensor.insert $y into $acc[${joined(at)}] : $ot")} : $ot")
+        self.op("}")
+        self.op(s"scf.yield $ran : $ot")
         self.op("}")
         self.par_back(span, res, m, out)
         self.finish_body(span, "")
@@ -977,7 +1042,7 @@ impl Emitter
         var out: Buf[string] = buf()
 
         if arrays.len() == 0
-            self.run_region(n, env)
+            self.run_region(n, env, fields)
             return out
 
         val outer = self.body
@@ -1000,7 +1065,7 @@ impl Emitter
             bufs.push(m)
             self.op(s"llvm.store $d, ${self.env_at("%env", env_ty(fields), slots[k])} : ${fields[slots[k]]}, !llvm.ptr")
 
-        self.run_region(n, "%env")
+        self.run_region(n, "%env", fields)
 
         // Each written array as the region left its buffer, written over the argument: the buffer is
         // the argument's, so this copies nothing, and the result is the argument, handed back.
@@ -1036,7 +1101,7 @@ impl Emitter
         out
     end launch_values
 
-    // The code of reduction job `n`: this worker's share of the blocks, each reduced sequentially from
+    // The code of reduction job `n`: the blocks this thread claims, each reduced sequentially from
     // the identity into its partial, every element computed from the operands' as it is reduced.
     reduce_code(*self, n: usize, job: ParJob, name: string, ft: Ty, t: Ty, operands: Buf[TExpr], scalar: TExpr)
         val span = scalar.span
@@ -1058,16 +1123,28 @@ impl Emitter
 
         val block = self.index_const(PAR_BLOCK)
         val nb = self.to_i64(self.def(s"arith.ceildivui $count, $block : index"))
-        val (blo, bhi) = self.share(nb, "%w", "%nw")
-        val iv = self.fresh()
 
-        self.op(s"scf.for $iv = ${self.def(s"arith.index_cast $blo : i64 to index")} to ${self.def(s"arith.index_cast $bhi : i64 to index")} step ${self.index_const(1)} {")
+        // The blocks, claimed one at a time until none are left.
+        val word = self.claim_word("%env", job.fields)
+        val at_ptr = self.alloca("i64")
 
+        self.par_stop = self.call("nex_par_stop_word", "", "", "!llvm.ptr")
+        self.op("scf.while : () -> () {")
+
+        val (go, first) = self.claim(word, nb, self.def("arith.constant 1 : i64"))
+
+        self.op(s"llvm.store $first, $at_ptr : i64, !llvm.ptr")
+        self.op(s"scf.condition($go)")
+        self.op("} do {")
+
+        val b = self.def(s"llvm.load $at_ptr : !llvm.ptr -> i64")
+        val iv = self.def(s"arith.index_cast $b : i64 to index")
         val lo = self.def(s"arith.muli $iv, $block : index")
         val hi = self.def(s"arith.minui ${self.def(s"arith.addi $lo, $block : index")}, $count : index")
         val partial = self.reduce_leaves(span, name, operands, arrays, frame, scalar, dims, t, lo, hi)
 
-        self.store(span, self.elem_at(p, self.to_i64(iv), self.mem_ty(span, t)), partial, t)
+        self.store(span, self.elem_at(p, b, self.mem_ty(span, t)), partial, t)
+        self.op("scf.yield")
         self.op("}")
         self.finish_body(span, "")
         self.end(s"  func.func private @\"p.$n\"(%env: !llvm.ptr, %w: i64, %nw: i64)")
@@ -1155,8 +1232,9 @@ impl Emitter
             JReduce(name, ft, t, operands, scalar) -> self.reduce_code(n, job, name, ft, t, operands, scalar)
 end Emitter
 
-// The MLIR type of an environment of `fields`.
-env_ty(fields: Buf[string]) -> string = s"!llvm.struct<(${joined(fields)})>"
+// The MLIR type of an environment of `fields`, then the `i64` counter its region's threads claim
+// their work from.
+env_ty(fields: Buf[string]) -> string = if fields.len() == 0 then "!llvm.struct<(i64)>" else s"!llvm.struct<(${joined(fields)}, i64)>"
 
 // The position among `leaves` of a read of local `id`.
 leaf_of(leaves: Buf[TExpr], id: usize) -> Option[usize]
