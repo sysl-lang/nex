@@ -1323,6 +1323,10 @@ impl Emitter
 
     // `a[i, j]` read: one element.
     element(*self, e: TExpr, target: TExpr, subs: Buf[TSub]) -> string
+        val held = self.jam_value(target)
+
+        if held != "" then return held
+
         val tv = self.ex(target)
         val idx = self.indices(e.span, tv, target.ty, subs, self.shifts_of(target))
 
@@ -1499,9 +1503,12 @@ impl Emitter
             var x = v
 
             if op != "="
-                val old = self.def(s"tensor.extract $cur[${joined(idx)}] : $tt")
+                val held = self.jam_value(target)
+                val old = if held != "" then held else self.def(s"tensor.extract $cur[${joined(idx)}] : $tt")
 
                 x = self.binary(span, op[0..<op.len - 1], old, v, elem_of(target.ty))
+
+            if self.jam_hold(target, x) then return
 
             if frames.len() > 0
                 var ones: Buf[string] = buf()

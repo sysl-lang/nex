@@ -32,6 +32,11 @@
 // traps as before; where none can, nothing in the nest traps at all. Under `--fpe-trap` a real
 // operation can trap, and nothing is jammed.
 //
+// **Each element is loaded and stored once per jammed pass.** Every copy but the last holds the
+// value it writes instead of storing it, and the next copy reads the held value where it would have
+// loaded the element: LLVM's own store elimination runs before its vectorizer has proved the arrays
+// apart, so it cannot be left to remove the first copy's store.
+//
 // The emitted loops are the jammed one over `JAM` passes at a time, then the loop as written over
 // the passes left: the last `count mod JAM`, or all of them where the test failed.
 
@@ -49,6 +54,11 @@ struct Access
     subs: Buf[TExpr]
     inner: bool
     write: bool
+
+// The value a jammed copy wrote to the one element of array local `id` it reaches, not yet stored.
+struct JamHeld
+    id: usize
+    v: string
 
 // A nest unroll-and-jam accepts: the bindings before the inner loop and their locals, the inner
 // loop, its body's statements, the scalar locals the nest binds and every element it reaches.
@@ -333,7 +343,10 @@ impl Emitter
         self.bind_local(span, plan.inner_var)
         self.store(span, self.local_ptr(span, plan.inner_var), self.at_pass(ilo, istep, ipass, ibits), it)
 
+        // Every copy but the last holds its writes, which the next copy reads in place of the
+        // element: one load and one store of each element per pass.
         for c in 0..<JAM
+            self.jam_defer = c + 1 < JAM
             self.slot[var_id] = kslots[c]
 
             for x in 0..<plan.pre_locals.len()
@@ -343,6 +356,8 @@ impl Emitter
                 self.dirty = entry
                 self.region(st)
 
+        self.jam_defer = false
+        self.jam_held = buf()
         self.end_pass(plan.inner_loop)
         self.loop_close(li)
         self.after_loop(plan.inner_loop)
@@ -367,6 +382,34 @@ impl Emitter
         self.loop_close(r)
         self.after_loop(id)
     end jammed
+
+    // The value held for the element of array place `target` a jammed copy wrote, `""` for none.
+    // Every access to an array the nest writes is at one element per pass (`independent`), so
+    // the array names the element.
+    jam_value(*self, target: TExpr) -> string
+        *target.kind match
+            TLocal(id) ->
+                for h in self.jam_held
+                    if h.id == id then return h.v
+            _ -> ()
+
+        ""
+
+    // Whether the write of `v` to the element of `target` is held, in a jammed copy before the
+    // last; a write that is made ends what was held for it.
+    jam_hold(*self, target: TExpr, v: string) -> bool
+        val id = *target.kind match
+            TLocal(x) -> x
+            _ -> return false
+        var kept: Buf[JamHeld] = buf()
+
+        for h in self.jam_held
+            if h.id != id then kept.push(h)
+
+        if self.jam_defer then kept.push(JamHeld(id, v))
+
+        self.jam_held = kept
+        self.jam_defer
 
     // `lo + pass × step` in `i$bits`, `pass` an `i64`.
     private at_pass(*self, lo: string, step: string, pass: string, bits: int) -> string

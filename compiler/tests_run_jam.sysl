@@ -27,7 +27,8 @@ def main() =
 
 // The textbook nest at trip counts of the outer loop even, odd, 0 and 1, an empty inner loop,
 // steps of -1 and -3, `-=` with no binding before the inner loop, complex and `real32` elements, two
-// arrays written, and two bindings, the second reading the first.
+// arrays written, two bindings, the second reading the first, and one element written twice in a
+// copy, read back between.
 private val TRIPS = raw"""
 def fill_ab(m: integer, p: integer, a: inout [real; :, :], b: inout [real; :, :]) =
   for j in 1..p
@@ -80,7 +81,18 @@ def two(m: integer, n: integer) =
   print(y)
   print(z)
 
+def twice(m: integer, n: integer) =
+  var z: [real; :] = zeros(m)
+  for k in 1..n
+    for q in 1..m
+      z[q] = z[q] / 3.0 + 1.0 / k
+      val t = z[q] * 0.7
+      z[q] -= t / q
+  print(z)
+
 def main() =
+  twice(3, 5)
+  twice(2, 0)
   print(up(5, 7, 7))
   print(up(5, 8, 8))
   print(up(5, 8, 0))
@@ -124,7 +136,7 @@ private jams(body: string) -> usize
 
     occurrences(m, "// unroll-and-jam by 2")
 
-@test("the textbook gemm nest is jammed by two: one inner loop updates c twice per pass, and no bit changes")
+@test("the textbook gemm nest is jammed by two: one inner loop loads and stores c once per two k, and no bit changes")
 gemm_jammed()
     val b = bench()
     val m = emitted(GEMM).unwrap()
@@ -133,10 +145,13 @@ gemm_jammed()
     finish(b)
     assert_eq(occurrences(m, "// unroll-and-jam by 2"), 1)
 
-    // The jammed loop's first region to close is its inner loop's: two element writes, then the yield.
+    // The jammed loop's first region to close is its inner loop's. Before it, two reads of `b`
+    // (one per copy); inside it, two of `a`, and `c` read once and written once: the first copy's
+    // update is held for the second, not stored.
     val jammed = split(split(m, "// unroll-and-jam by 2")[1], "scf.yield")[0]
 
-    assert_eq(occurrences(jammed, "tensor.insert"), 2)
+    assert_eq(occurrences(jammed, "tensor.extract"), 5)
+    assert_eq(occurrences(jammed, "tensor.insert"), 1)
     assert_eq(occurrences(jammed, "scf.for %"), 2)
     assert_eq(out.text, "1.8100447490573925E8\n")
 
@@ -147,9 +162,10 @@ jammed_bits()
     val out = ran(b, TRIPS)
 
     finish(b)
-    assert_eq(occurrences(m, "// unroll-and-jam by 2"), 4)
+    assert_eq(occurrences(m, "// unroll-and-jam by 2"), 5)
     assert(out.status.ok(), out.err.unwrap_or(""))
-    assert_eq(out.text, "7.75413961452359E7\n9.982389902810848E7\n0.0\n1244765.5309551794\n0.0\n" +
+    assert_eq(out.text, "[0.06868000000000002, 0.18011775848765432, 0.22867263018848755]\n[0.0, 0.0]\n" +
+                        "7.75413961452359E7\n9.982389902810848E7\n0.0\n1244765.5309551794\n0.0\n" +
                         "1.2281490158891238E8\n1.927800944932708E7\n1.9750505606591053E7\n" +
                         "[-0.7630230880230879-0.592063492063492i, -1.5260461760461759-1.184126984126984i, -2.2890692640692643-1.7761904761904763i]\n" +
                         "[4.820988, 4.820988, 4.820988]\n[-0.3034548443735553, -0.3034548443735553, -0.3034548443735553]\n" +
