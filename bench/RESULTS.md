@@ -216,6 +216,49 @@ and LLVM as nex does. *nex/best* is nex over the fastest of the three. Every che
   like). Before, each pass recomputed the same result from unchanged inputs, and `gfortran -O3` ran
   point distance's fifty passes as one (0.16 ms a pass).
 
+### The three gaps to `gfortran -O3`, diagnosed
+
+Two of the three were the benchmark, not nex. In `gfortran -O3 -mcpu=native -S` of the axpy, complex
+axpy and axpy real32 twins, the timed loop is turned inside out. The element loop is outside. Inside
+it, `a * x(i)` is computed once and added to a register 50 times (`mov w0, 25` around two `fadd`s),
+and `y(i)` is stored once. The fifty passes over 160 to 480 MB become one, and nothing else
+explains the speed. The same twins under `-ffp-contract=off` run as fast (complex axpy 1.71 ms
+against 1.69, axpy 1.37 against 1.37), so `fcmla` and contraction play no part. This
+inside-out loop also explains why `-O3` was slower than `-O2` on axpy real32: fifty dependent
+`real32` adds per element cost more than the memory traffic they save. The three kernels now feed
+each pass into the next (`x[1] += y[n] * 1e-30`), as point distance, gemm and gemv already did, and
+their checksums are unchanged.
+
+Naive gemm is a real gap. gfortran unrolls and jams the `k` loop by two:
+`c(i,j) = (c(i,j) + a(i,k) b(k,j)) + a(i,k+1) b(k+1,j)`, two-wide. That loads and stores `c(:,j)`
+once per two `k`, and its additions are in the serial order, so the bits are unchanged (`-ffp-contract=off`
+gives 85.1 ms against 83.9). nex's inner loop is already as good as LLVM makes it: four `<2 x double>`
+per iteration, bounds checks hoisted. A C twin with `restrict`, built by `clang -O2`, runs at 114 ms,
+as nex does. The same C with `k` jammed by two by hand runs at 85 ms, as gfortran does. LLVM has an
+unroll-and-jam pass, but it is off by default, and `-mllvm -enable-unroll-and-jam` (count 2 or 4) does
+not fire even on the C with `restrict`. Closing the gap therefore needs nex to unroll and jam the loop
+itself: legality from its own dependence facts, and the remainder when `n` is odd. That is a design
+item, not a flag.
+
+Nothing is recovered by flags alone. nex's own `.ll`, rebuilt by `clang` with `-O3`, `-mcpu=native`,
+`-ffp-contract=fast`, or all three, gives the same time as `-O2` within 1 % on all three kernels, and
+the same checksums. `-ffp-contract=fast` changes nothing because contraction of IR needs the
+`contract` flag on the instructions, which nex never writes (DESIGN §2.5). There is also the runtime alias check
+(`vector.memcheck`) in gemm. It is there because `memref.alloc`'s 64-byte alignment rounds the
+allocated pointer through `ptrtoint`/`inttoptr`, which loses its provenance. With the allocator
+declared `noalias` and the aligned pointer derived by a `getelementptr` instead, the check goes away,
+but the time does not change (113.1 ms against 113.0).
+
+`zsh bench/run.zsh complex-axpy gemm axpy axpy-real32` from this branch, 2026-11-11, at a load of 7.8
+to 11:
+
+| kernel | gfortran -O2 | gfortran -O3 | flang -O3 | nex | ratio (bar) | nex/best |
+|---|---:|---:|---:|---:|---:|---:|
+| complex axpy | 3.28 | 3.27 | 7.51 | 3.37 | 1.03 | 1.03 (was 2.05) |
+| gemm (naive) | 140.21 | 91.36 | 119.68 | 120.72 | 0.86 | **1.32** |
+| axpy | 1.66 | 1.63 | 3.32 | 1.75 | 1.06 | 1.07 (was 1.19) |
+| axpy, real32 | 0.83 | 0.83 | 1.64 | 0.81 | 0.97 | 0.97 |
+
 ## Scaling across the 18 cores
 
 `zsh bench/run.zsh --scale`, the same run: each parallel kernel at `OMP_NUM_THREADS` 1 to 18 and
