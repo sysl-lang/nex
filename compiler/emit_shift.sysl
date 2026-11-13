@@ -1,0 +1,213 @@
+// Emission of `cshift`, `eoshift` and `spread` (`elab_shift.sysl`): each element of the result read
+// from the source at an index computed from the element's own, in a `linalg.generic` whose body
+// takes its indices from `linalg.index` and reads the source with `tensor.extract`.
+//
+// **A shift is a read, so it fuses.** Everything that does not change from element to element — the
+// source, its extents, the shift brought into `0 ..< n` for `cshift`, the boundary — is computed once
+// before the loop (`shift_prepared`), and the read itself (`shift_read`) is a few index operations and
+// one load. A quiet element-wise expression whose leaves include a shift reads the source that way
+// inside its own `linalg.generic` (`emit_array.sysl`'s `elementwise`), so a stencil such as
+// `0.5 * (cshift(u, 1) + cshift(u, -1)) - u` is one loop that builds no array in between.
+
+import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{NOT_AN_AXIS, SHAPE_MISMATCH}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// A shift made ready to be read element by element: `cshift` or not (`eoshift`), the source and its
+// type, its extents (`index`, nex order), and per nex axis the shift along it, an `i64`, `""` where
+// it does not move. `cshift`'s is already in `0 ..< n`. Where each lane has its own shift, `lanes` is
+// the array of them (`""` otherwise) and `axis` the axis it moves along, from 1. `boundary` is what
+// `eoshift` fills with.
+struct ShiftRead
+    circular: bool
+    src: string
+    src_ty: Ty
+    extents: Buf[string]
+    shifts: Buf[string]
+    lanes: string
+    lanes_ty: Ty
+    axis: usize
+    boundary: string
+
+// A leaf of a fused element-wise expression read through a shift: its position among the leaves.
+struct ShiftLeaf
+    leaf: usize
+    read: ShiftRead
+
+// Whether `e` is a `cshift` or `eoshift` of numbers, which a fused expression reads in its own loop.
+is_shift(e: TExpr) -> bool = *e.kind match
+    TBuiltin(name, _) -> (name == "cshift" || name == "eoshift") && is_arr(e.ty)
+    _ -> false
+
+// The axis written as a number, 0 where it is computed.
+private written_axis(e: TExpr) -> usize = *e.kind match
+    TLiteral(IntVal(k), _) -> usize(k)
+    _ -> 0
+
+impl Emitter
+    // `cshift`, `eoshift` or `spread` as a new array of type `t`.
+    shifted(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        if name == "spread" then return self.spread(span, args, t)
+
+        val sr = self.shift_prepared(span, name == "cshift", args)
+        val g = self.generate_open(span, t, sr.extents)
+
+        self.generate_close(span, t, self.shift_read(span, sr))
+        g
+
+    // The arguments of a `cshift` or `eoshift`, `[a, shift, dim]` with `eoshift`'s boundary after,
+    // evaluated in that order and made ready to read (`ShiftRead`). A computed axis that is not one
+    // traps, and so do shifts per lane whose extents are not the array's without the axis.
+    shift_prepared(*self, span: Span, circular: bool, args: Buf[TExpr]) -> ShiftRead
+        val a = args[0]
+        val v = self.ex(a)
+        val r = rank_of(a.ty)
+        val per_lane = is_array(args[1].ty)
+        val sv = self.ex(args[1])
+        val s = if per_lane then "" else self.widen64(sv, bits_of(args[1].ty), is_signed(args[1].ty))
+        val fixed = written_axis(args[2])
+        val k = if fixed == 0 then self.widen64(self.ex(args[2]), bits_of(args[2].ty), is_signed(args[2].ty)) else ""
+        val et = elem_of(a.ty)
+        val boundary = if circular then "" elif args.len() == 4 then self.ex(args[3]) else self.one_or_zero(span, et, false)
+        var extents: Buf[string] = buf()
+
+        for m in 1..r
+            extents.push(self.dim(span, v, a.ty, m))
+
+        if fixed == 0
+            val off = self.def(s"arith.subi $k, %one : i64")
+
+            self.trap_if(self.def(s"arith.cmpi uge, $off, ${self.def(s"arith.constant $r : i64")} : i64"), NOT_AN_AXIS)
+
+        if per_lane
+            var q: usize = 1
+
+            for m in 1..r
+                if m == fixed then continue
+
+                self.trap_if(self.def(s"arith.cmpi ne, ${self.dim(span, sv, args[1].ty, q)}, ${extents[m - 1]} : index"), SHAPE_MISMATCH)
+                q += 1
+
+        val zero = self.def("arith.constant 0 : i64")
+        var shifts: Buf[string] = buf()
+
+        for m in 1..r
+            if per_lane || fixed != 0 && m != fixed
+                shifts.push("")
+                continue
+
+            val by = if fixed != 0 then s else self.def(s"arith.select ${self.def(s"arith.cmpi eq, $k, ${self.def(s"arith.constant $m : i64")} : i64")}, $s, $zero : i64")
+
+            shifts.push(if circular then self.wrapped(by, extents[m - 1]) else by)
+
+        ShiftRead(circular, v, a.ty, extents, shifts, if per_lane then sv else "", args[1].ty, fixed, boundary)
+    end shift_prepared
+
+    // The shift `by` (`i64`) brought into `0 ..< n` (`n` an `index`): `modulo(by, n)`, 0 where `n` is.
+    private wrapped(*self, by: string, n: string) -> string
+        val n64 = self.to_i64(n)
+        val zero = self.def("arith.constant 0 : i64")
+        val d = self.def(s"arith.select ${self.def(s"arith.cmpi eq, $n64, $zero : i64")}, %one, $n64 : i64")
+        val w = self.def(s"arith.remsi $by, $d : i64")
+
+        self.def(s"arith.select ${self.def(s"arith.cmpi slt, $w, $zero : i64")}, ${self.def(s"arith.addi $w, $n64 : i64")}, $w : i64")
+
+    // Inside the body of a `linalg.generic` over `sr`'s shape: the element its indices read through
+    // the shift.
+    shift_read(*self, span: Span, sr: ShiftRead) -> string
+        val r = rank_of(sr.src_ty)
+        var at: Buf[string] = buf()
+
+        for m in 1..r
+            at.push(self.def(s"linalg.index ${r - m} : index"))
+
+        var inside = ""
+        var src: Buf[string] = buf()
+
+        for m in 1..r
+            var by = sr.shifts[m - 1]
+
+            if sr.lanes != "" && m == sr.axis
+                var lane: Buf[string] = buf()
+                var q = r
+
+                // The shift's own indices, tensor order: the array's without the axis.
+                while q > 0
+                    if q != m then lane.push(at[q - 1])
+                    q -= 1
+
+                val x = self.def(s"tensor.extract ${sr.lanes}[${joined(lane)}] : ${self.tensor_ty(span, sr.lanes_ty)}")
+
+                by = self.widen64(x, bits_of(elem_of(sr.lanes_ty)), is_signed(elem_of(sr.lanes_ty)))
+                if sr.circular then by = self.wrapped(by, sr.extents[m - 1])
+
+            if by == ""
+                src.push(at[m - 1])
+                continue
+
+            val n = sr.extents[m - 1]
+
+            if sr.circular
+                val j = self.def(s"arith.addi ${at[m - 1]}, ${self.def(s"arith.index_cast $by : i64 to index")} : index")
+                val past = self.def(s"arith.cmpi uge, $j, $n : index")
+
+                src.push(self.def(s"arith.select $past, ${self.def(s"arith.subi $j, $n : index")}, $j : index"))
+                continue
+
+            val x = self.def(s"arith.addi ${self.to_i64(at[m - 1])}, $by : i64")
+            val low = self.def(s"arith.cmpi sge, $x, ${self.def("arith.constant 0 : i64")} : i64")
+            val ok = self.def(s"arith.andi $low, ${self.def(s"arith.cmpi slt, $x, ${self.to_i64(n)} : i64")} : i1")
+
+            // Out of range, a lane reads its own element instead, and the boundary is taken.
+            src.push(self.def(s"arith.select $ok, ${self.def(s"arith.index_cast $x : i64 to index")}, ${at[m - 1]} : index"))
+            inside = if inside == "" then ok else self.def(s"arith.andi $inside, $ok : i1")
+
+        var order: Buf[string] = buf()
+        var q = r
+
+        while q > 0
+            order.push(src[q - 1])
+            q -= 1
+
+        val y = self.def(s"tensor.extract ${sr.src}[${joined(order)}] : ${self.tensor_ty(span, sr.src_ty)}")
+
+        if inside == "" then y else self.def(s"arith.select $inside, $y, ${sr.boundary} : ${self.elem_ty(span, elem_of(sr.src_ty))}")
+    end shift_read
+
+    // `spread(a, dim, ncopies)`: element `(…, c, …)` of the result, `c` on axis `dim`, is the element
+    // of `a` at the other indices; a value `a` fills a vector. A negative count is none.
+    private spread(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val a = args[0]
+        val v = self.ex(a)
+        val k = written_axis(args[1])
+        val asked = self.widen64(self.ex(args[2]), bits_of(args[2].ty), is_signed(args[2].ty))
+        val zero = self.def("arith.constant 0 : i64")
+        val count = self.def(s"arith.index_cast ${self.def(s"arith.maxsi $asked, $zero : i64")} : i64 to index")
+        var dims: Buf[string] = buf()
+
+        if !is_array(a.ty)
+            dims.push(count)
+            return self.filled(span, t, dims, v)
+
+        val r = rank_of(a.ty)
+
+        for m in 1..r
+            if m == k then dims.push(count)
+            dims.push(self.dim(span, v, a.ty, m))
+
+        if k == r + 1 then dims.push(count)
+
+        val g = self.generate_open(span, t, dims)
+        var at: Buf[string] = buf()
+
+        // The source's indices, tensor order: the result's without axis `k`.
+        var m = r + 1
+
+        while m > 0
+            if m != k then at.push(self.def(s"linalg.index ${r + 1 - m} : index"))
+            m -= 1
+
+        self.generate_close(span, t, self.def(s"tensor.extract $v[${joined(at)}] : ${self.tensor_ty(span, a.ty)}"))
+        g
+end Emitter

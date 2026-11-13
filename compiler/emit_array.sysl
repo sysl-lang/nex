@@ -68,13 +68,16 @@ enum Dest
 
 // A fused element-wise expression: its leaves in source order and their values, the scalar over
 // them, the condition that a shape check among them trapped (`""` where none can), and the index of
-// the first array leaf.
+// the first array leaf. Where `gather` is set, a leaf that is a shift is not computed but made ready
+// to be read in the loop (`shifts`), its value the array it shifts.
 struct Fused
     leaves: Buf[TExpr]
     scalar: TExpr
     vals: Buf[string]
     mismatch: string
     first: Option[usize]
+    gather: bool
+    shifts: Buf[ShiftLeaf]
 
 // The local `e` reads, where it is one.
 local_of(e: TExpr) -> Option[usize] = *e.kind match
@@ -955,6 +958,7 @@ impl Emitter
     // The `linalg.generic` computing `scalar` over the arrays among `operands` into `init`. An
     // operand that is the local `local` is read through the output's element instead, `init` being
     // that local's own value.
+    // An operand that `shift_reads` names is read through its shift inside the body.
     private elementwise(*self, span: Span, out: Ty, operands: Buf[TExpr], vals: Buf[string], init: string, local: Option[usize], scalar: TExpr) -> string
         val r = rank_of(out)
         val ot = self.tensor_ty(span, out)
@@ -963,6 +967,9 @@ impl Emitter
         var ins: Buf[string] = buf()
         var in_tys: Buf[string] = buf()
         val o = self.fresh()
+        val shifts = self.shift_reads
+
+        self.shift_reads = buf()
 
         // The block's arguments: one per array operand read as an input, then the output element.
         var args: Buf[string] = buf()
@@ -971,6 +978,16 @@ impl Emitter
         for k in 0..<operands.len()
             if !is_arr(operands[k].ty)
                 frame.push(vals[k])
+                continue
+
+            var through = false
+
+            for s in shifts
+                if s.leaf == k then through = true
+
+            // Filled in once the block is open.
+            if through
+                frame.push("")
                 continue
 
             if local.is_some() && local_of(operands[k]) == local
@@ -992,6 +1009,9 @@ impl Emitter
 
         self.op(s"$v = linalg.generic {indexing_maps = [$maps], iterator_types = [${parallel_iterators(r)}]} ${ins_text}outs($init : $ot) {")
         self.op(s"^bb0(${joined(args)}):")
+
+        for s in shifts
+            frame[s.leaf] = self.shift_read(span, s.read)
 
         val outer = self.in_elementwise
 
@@ -1025,6 +1045,16 @@ impl Emitter
     // operations one by one. Answers the index of `e`'s first array leaf.
     fused_leaves(*self, e: TExpr, f: *Fused) -> Option[usize]
         if !fusible(e)
+            if f.gather && is_shift(e)
+                *e.kind match
+                    TBuiltin(name, args) ->
+                        val sr = self.shift_prepared(e.span, name == "cshift", args)
+
+                        f.shifts.push(ShiftLeaf(f.vals.len(), sr))
+                        f.vals.push(sr.src)
+                        return Some(f.vals.len() - 1)
+                    _ -> ()
+
             f.vals.push(self.ex(e))
             return if is_arr(e.ty) then Some(f.vals.len() - 1) else None
 
@@ -1042,8 +1072,9 @@ impl Emitter
         if reps.len() == 0 then None else Some(reps[0])
 
     // The fusible `e` with its leaves evaluated and their shapes checked.
+    // A leaf that is a shift is read through it in the loop.
     fused_form(*self, e: TExpr) -> Fused
-        var f = Fused(buf(), texpr(e.span, e.ty, TChainOperand(0)), buf(), "", None)
+        var f = Fused(buf(), texpr(e.span, e.ty, TChainOperand(0)), buf(), "", None, true, buf())
 
         f.scalar = fused_scalar(e, &f.leaves)
         f.first = self.fused_leaves(e, &f)
@@ -1053,6 +1084,7 @@ impl Emitter
     fused(*self, e: TExpr) -> string
         val f = self.fused_form(e)
 
+        self.shift_reads = f.shifts
         self.map_into(e.span, e.ty, f.leaves, f.vals, f.scalar, f.first, f.mismatch, Dest.Fresh)
 
     // `target = value` where `value` fuses and `target` is a local array held as a value of the same
@@ -1071,12 +1103,23 @@ impl Emitter
         if !self.in_ssa(id) || !self.fuses(value) || self.tensor_ty(value.span, value.ty) != self.tensor_ty(target.span, target.ty) then return false
 
         val f = self.fused_form(value)
-        val dest = leaf_of(f.leaves, id) match
-            Some(k) -> Dest.Operand(k)
-            None -> if is_static(target.ty) then Dest.Over(self.read_array(target.span, id))
-                    elif f.first.is_some() then Dest.OverIfSame(self.read_array(target.span, id))
-                    else Dest.Fresh
+        // A shift of the target reads it at other elements than the one being written, so the
+        // result is a new array.
+        var shifts_target = false
 
+        for s in f.shifts
+            if reads_local(f.leaves[s.leaf], id) then shifts_target = true
+
+        var dest = Dest.Fresh
+
+        if !shifts_target
+            dest = leaf_of(f.leaves, id) match
+                Some(k) -> Dest.Operand(k)
+                None -> if is_static(target.ty) then Dest.Over(self.read_array(target.span, id))
+                        elif f.first.is_some() then Dest.OverIfSame(self.read_array(target.span, id))
+                        else Dest.Fresh
+
+        self.shift_reads = f.shifts
         self.arr[id] = self.map_into(value.span, value.ty, f.leaves, f.vals, f.scalar, f.first, f.mismatch, dest)
         true
 

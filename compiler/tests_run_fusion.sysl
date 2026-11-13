@@ -33,6 +33,23 @@ point_distance_one_generic()
     assert(m.contains("ins(%v23, %v9, %v28, %v18 : tensor<?xf64>, tensor<?xf64>, tensor<?xf64>, tensor<?xf64>)"), m)
     assert(m.contains("math.sqrt"), m)
 
+@test("a stencil of cshifts is one linalg.generic reading its source at shifted indices, and one assigned back to its source is right")
+shift_stencil_fused()
+    val b = bench()
+    val stencil = "def step(u: [real]): [real] = 0.5 * (cshift(u, 1) + cshift(u, -1)) - u\n\ndef main() = print(step([1.0, 4.0, 9.0, 16.0]))\n"
+    val sweep = "def main() =\n  var u: [real] = [1.0, 4.0, 9.0, 16.0]\n  for _ in 1..2\n    u = 0.5 * (cshift(u, 1) + cshift(u, -1))\n  print(u)\n"
+    val m = emitted(stencil).unwrap()
+    val out = ran(b, stencil)
+    val swept = ran(b, sweep)
+
+    finish(b)
+    assert_eq(occurrences(m, "linalg.generic"), 1)
+    // `u` read as an input at the element, and twice through a shift.
+    assert(m.contains("ins(%a0 : tensor<?xf64>)"), m)
+    assert_eq(occurrences(m, "tensor.extract %a0["), 2)
+    assert_eq(out.text, "[9.0, 1.0, 1.0, -11.0]\n")
+    assert_eq(swept.text, "[5.0, 10.0, 5.0, 10.0]\n")
+
 @test("sum(x * y), dot(x, y) and sqrt(sum(x * x)) never build the products: no linalg.generic at all")
 reductions_fused()
     val b = bench()

@@ -1,0 +1,121 @@
+module sh.sysl.nex
+
+// `cshift`, `eoshift` and `spread` as the interpreter computes them (`elab_shift.sysl`), each a new
+// dense array, as `compiler/emit_shift.sysl` makes it.
+//
+// **An array is taken apart around the axis it moves along**: its elements in storage order are
+// `inner` × `n` × `outer`, the axes before the one moved along, that axis, and the axes after it, so
+// element `(i, l, o)` is at `i + inner · (l + n · o)`. A lane is one `(i, o)`, and a shift per lane
+// is element `i + inner · o` of the shifts, whose axes are the array's without that one.
+
+import nex_runtime.sh.sysl.nex_runtime.{NOT_AN_AXIS, SHAPE_MISMATCH}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The product of `ext[lo..<hi]`.
+private extent_product(ext: Buf[long], lo: usize, hi: usize) -> long
+    var n: long = 1
+
+    for k in lo..<hi
+        n *= ext[k]
+
+    n
+
+impl Interp
+    shifted(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> Code
+        if name == "spread" then return self.spread(args, t)
+
+        val v = self.lent(args[0])
+        val per_lane = is_array(args[1].ty)
+        val s = if per_lane then self.lent(args[1]) else self.ex(args[1])
+        val k = self.ex(args[2])
+        val circular = name == "cshift"
+        val bound = if args.len() == 4 then self.ex(args[3]) else self.constant_code(one_or_zero(elem_of(t), false))
+
+        (c) ->
+            // In the node's order, as the compiled program evaluates them.
+            val a = arr_of(v(c)?)
+            val sv = s(c)?
+            val axis = int_of(k(c)?)
+            val b = bound(c)?
+            val r = a.ext.len()
+
+            if ulong.wrap(axis - 1) >= ulong(r) then return trapped(NOT_AN_AXIS)
+
+            val j = usize(axis - 1)
+            val inner = extent_product(a.ext, 0, j)
+            val n = a.ext[j]
+            val outer = extent_product(a.ext, j + 1, r)
+            var lanes: Buf[long] = buf()
+
+            if per_lane
+                val sa = arr_of(sv)
+
+                // The shifts have the array's extents with axis `j` left out.
+                for m in 0..<sa.ext.len()
+                    if sa.ext[m] != a.ext[if m < j then m else m + 1] then return trapped(SHAPE_MISMATCH)
+
+                for p in positions(sa)
+                    lanes.push(int_of(stored(sa, p)))
+
+            val one = int_of(if per_lane then VInt(0) else sv)
+            val src = positions(a)
+            val out = data_like(a.store.d)
+
+            for o in 0..<outer
+                for l in 0..<n
+                    for i in 0..<inner
+                        val by = if per_lane then lanes[usize(i + inner * o)] else one
+                        val x = l + by
+
+                        if circular
+                            val w = x % n
+                            val at = if w < 0 then w + n else w
+
+                            data_push(out, stored(a, src[usize(i + inner * (at + n * o))]))
+                        elif x >= 0 && x < n
+                            data_push(out, stored(a, src[usize(i + inner * (x + n * o))]))
+                        else
+                            data_push(out, b)
+
+            Ok(dense_data(out, a.ext))
+    end shifted
+
+    // `spread(a, dim, ncopies)`: element `(i, c, o)` of the result is element `(i, o)` of `a`, `i`
+    // running over the axes before `dim` and `o` over the rest.
+    private spread(*self, args: Buf[TExpr], t: Ty) -> Code
+        val scalar = !is_array(args[0].ty)
+        val v = if scalar then self.ex(args[0]) else self.lent(args[0])
+        val k = *args[1].kind match
+            TLiteral(IntVal(k), _) -> usize(k)
+            _ -> 1
+        val count = self.ex(args[2])
+        val et = elem_of(t)
+
+        (c) ->
+            val x = v(c)?
+            val asked = int_of(count(c)?)
+            val copies: long = if asked < 0 then 0 else asked
+
+            if scalar then return Ok(vector_data(data_repeated(et, x, copies)))
+
+            val a = arr_of(x)
+            val inner = extent_product(a.ext, 0, k - 1)
+            val outer = extent_product(a.ext, k - 1, a.ext.len())
+            val src = positions(a)
+            val out = data_like(a.store.d)
+            var ext: Buf[long] = buf()
+
+            for m in 0..<a.ext.len()
+                if m == k - 1 then ext.push(copies)
+                ext.push(a.ext[m])
+
+            if k - 1 == a.ext.len() then ext.push(copies)
+
+            for o in 0..<outer
+                for _ in 0..<copies
+                    for i in 0..<inner
+                        data_push(out, stored(a, src[usize(i + inner * o)]))
+
+            Ok(dense_data(out, ext))
+end Interp

@@ -501,6 +501,8 @@ impl Interp
                 str[j] = -a.str[j]
                 Ok(copy_of(Arr(a.store, a.offset + last * a.str[j], a.ext, str, buf())))
 
+        if name == "cshift" || name == "eoshift" || name == "spread" then return self.shifted(span, name, args, t)
+
         if name == "permute"
             val v = self.lent(args[0])
             var order: Buf[Extent64] = buf()

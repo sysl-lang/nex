@@ -1,0 +1,184 @@
+module sh.sysl.nex
+
+// The array-shifting functions, Fortran's CSHIFT, EOSHIFT and SPREAD (DESIGN §4.3). Each returns a
+// new array of numbers or booleans with the source's element type, units included:
+//
+// - `cshift(a, shift, dim = 1)` rotates along axis `dim`: element `k` of a lane is element
+//   `1 + modulo(k − 1 + shift, n)` of the source's, so a positive shift moves elements toward lower
+//   indices. `shift` is an integer, or an array of rank R − 1 giving each lane its own, where `dim` is
+//   written as a number.
+// - `eoshift(a, shift, boundary, dim = 1)` shifts the same way, end-off: a vacated position holds
+//   `boundary`, a value converted to the element type as `+` converts it, zero (or `false`) where it
+//   is not given.
+// - `spread(a, dim, ncopies)` has rank R + 1: a new axis at position `dim`, of `ncopies` copies
+//   (none where `ncopies` is negative). `dim` fixes the rank, so it is written as a number. A scalar
+//   `a` gives a vector.
+//
+// The arguments come in Fortran's order, and all but the array may be named.
+//
+// The node is `TBuiltin(name, args)` with every argument in place: `[a, shift, dim]` for `cshift`,
+// `[a, shift, dim]` or `[a, shift, dim, boundary]` for `eoshift`, `[a, dim, ncopies]` for `spread`.
+// A `dim` left out is the literal 1, and `spread`'s is always a literal.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+private literal_axis(span: Span, k: i128) -> TExpr = texpr(span, INTEGER, TLiteral(IntVal(k), false))
+
+impl Elab
+    shifting(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        var params: Buf[string] = buf()
+
+        params.push("array")
+
+        if name == "spread"
+            params.push("dim")
+            params.push("ncopies")
+        else
+            params.push("shift")
+            if name == "eoshift" then params.push("boundary")
+            params.push("dim")
+
+        val usage = if name == "spread" then "an array or a value, an axis and a count, `spread(a, 2, n)`"
+                    elif name == "cshift" then "an array, a shift and an optional axis, `cshift(a, 1)` or `cshift(a, 1, dim = 2)`"
+                    else "an array, a shift, an optional boundary and an optional axis, `eoshift(a, 1)` or `eoshift(a, 1, boundary = 0.5, dim = 2)`"
+        var given: Buf[Option[Expr]] = buf()
+
+        for _ in params
+            given.push(None)
+
+        var next: usize = 0
+
+        for a in args
+            *a.kind match
+                NamedArg(n, v) ->
+                    var at: Option[usize] = None
+
+                    for k in 1..<params.len()
+                        if params[k] == n then at = Some(k)
+
+                    at match
+                        Some(k) ->
+                            if given[k].is_some()
+                                self.fail(a.span, s"`${n}` is given twice")
+                                return self.invalid(span)
+
+                            given[k] = Some(v)
+                        None ->
+                            var names = ""
+
+                            for k in 1..<params.len()
+                                names += (if k == 1 then "" elif k + 1 == params.len() then " and " else ", ") + s"`${params[k]} =`"
+
+                            self.fail(a.span, s"`${name}` takes the named arguments ${names}")
+                            return self.invalid(span)
+                _ ->
+                    while next < params.len() && given[next].is_some()
+                        next += 1
+
+                    if next == params.len() then return self.arity(span, name, usage)
+
+                    given[next] = Some(a)
+                    next += 1
+
+        if given[0].is_none() || given[1].is_none() || name == "spread" && given[2].is_none() then return self.arity(span, name, usage)
+        if name == "spread" then return self.spread(span, given[0].unwrap(), given[1].unwrap(), given[2].unwrap())
+
+        val a = self.array_arg(name, given[0].unwrap())
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        val e = elem_of(a.ty)
+        val r = rank_of(a.ty)
+
+        if !self.shiftable(given[0].unwrap().span, name, e) then return self.invalid(span)
+
+        val d = given[params.len() - 1]
+        val dim = d match
+            Some(x) -> self.axis(x, r, "an axis")
+            None -> literal_axis(span, 1)
+        val fixed = d match
+            Some(x) -> int_written(x)
+            None -> Some(1i128)
+        val s = self.infer(given[1].unwrap())
+        var out: Buf[TExpr] = buf()
+
+        out.push(a)
+
+        if is_array(s.ty)
+            val at = given[1].unwrap().span
+
+            if r == 1
+                self.fail(at, s"the shift of a vector is one integer; this is ${self.shown(s)}")
+                return self.invalid(span)
+
+            if fixed.is_none()
+                self.fail(at, "a shift per lane needs its axis written as a number, `dim = 2`")
+                return self.invalid(span)
+
+            if rank_of(s.ty) != r - 1 || !is_int(base_of(elem_of(s.ty)))
+                self.fail(at, s"`${name}` shifts by an integer, or by an array of them of rank ${r - 1}, one per lane; this is ${self.shown(s)}")
+                return self.invalid(span)
+
+            out.push(self.coerce(s, Ty.Array(INTEGER, dynamic_axes(r - 1)), "the shift"))
+        else
+            out.push(self.coerce(s, INTEGER, "the shift"))
+
+        out.push(dim)
+
+        if name == "eoshift"
+            given[2] match
+                Some(b) -> out.push(self.check(b, e, "the boundary"))
+                None -> ()
+
+        texpr(span, a.ty, TBuiltin(name, out))
+    end shifting
+
+    // `spread(a, dim, ncopies)`: `a`, an array or a value, repeated along a new axis `dim`.
+    private spread(*self, span: Span, source: Expr, d: Expr, n: Expr) -> TExpr
+        val a = self.infer(source)
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        self.rank_param_of(a.ty) match
+            Some(p) ->
+                self.fail(source.span, s"`spread` adds an axis to its array's rank, which `${p}` leaves open")
+                return self.invalid(span)
+            None -> ()
+
+        val e = elem_of(a.ty)
+        val r = rank_of(a.ty)
+
+        if !self.shiftable(source.span, "spread", e) then return self.invalid(span)
+
+        val k = int_written(d) match
+            Some(k) -> k
+            None ->
+                self.fail(d.span, "`spread`'s axis fixes the rank of its result, so it is written as a number: `spread(a, 2, n)`")
+                return self.invalid(span)
+
+        if k < 1 || k > i128(r + 1)
+            self.fail(d.span, s"there is no axis ${k} to spread along: the result has rank ${r + 1}")
+            return self.invalid(span)
+
+        var axes: Buf[Extent] = buf()
+        val source_axes = axes_of(a.ty)
+
+        for j in 0..r
+            if i128(j + 1) == k then axes.push(Dynamic)
+            if j < r then axes.push(source_axes[j])
+
+        var out: Buf[TExpr] = buf()
+
+        out.push(a)
+        out.push(literal_axis(d.span, k))
+        out.push(self.check(n, INTEGER, "the number of copies"))
+        texpr(span, Ty.Array(e, axes), TBuiltin("spread", out))
+
+    // Whether `name` can move elements of type `e`: numbers and booleans.
+    private shiftable(*self, at: Span, name: string, e: Ty) -> bool
+        if is_number_ty(e) then return true
+
+        self.fail(at, s"`${name}` moves numbers and booleans; these are ${show_ty(e)}")
+        false
+end Elab
