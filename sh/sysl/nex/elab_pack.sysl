@@ -84,13 +84,13 @@ impl Elab
 
         val shape = Ty.Array(e, axes_of(m.ty))
 
-        out.push(self.unpack_field(given[2].unwrap(), e, shape))
+        out.push(self.field(given[2].unwrap(), e, shape))
         texpr(span, shape, TBuiltin(name, out))
     end packing
 
     // `unpack`'s field: one value of the element type `e`, or an array of the mask's shape, `shape`.
     // A literal takes its type from where it goes, as an array literal's elements do.
-    private unpack_field(*self, f: Expr, e: Ty, shape: Ty) -> TExpr
+    private field(*self, f: Expr, e: Ty, shape: Ty) -> TExpr
         val what = "`unpack`'s field"
 
         *f.kind match
