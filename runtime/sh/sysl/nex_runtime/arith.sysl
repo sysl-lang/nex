@@ -2,6 +2,13 @@ module sh.sysl.nex_runtime
 
 // Integer arithmetic too long to emit inline.
 
+import sysl.math.nextafter
+
+// The next `real16` after `x` toward `toward`, both arriving widened to `real32` (every half is exact
+// there) and the answer going back the same way; libm has no half-width `nextafter`.
+@export("nex_nextafter_f16")
+nextafter_f16(x: f32, toward: f32) -> f32 = f32(nextafter(f16(x), f16(toward)))
+
 // `base ^ exponent` on integers of `bits` bits: each value arrives widened to 64 bits by its own
 // signedness, and the answer goes back at `bits`. It traps where the power leaves the type's range,
 // signed or unsigned, at every width. A negative exponent divides, as Fortran's `**` does: `2 ^ -1` is

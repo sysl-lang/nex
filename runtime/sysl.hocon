@@ -12,7 +12,7 @@
 package {
   name    = "nex_runtime"
   version = "0.0.3"
-  sysl    = "0.10.4"
+  sysl    = "0.10.5"
 }
 
 // **`os`** for standard output and error and for `abort`; **`heap`** because the formatter builds its

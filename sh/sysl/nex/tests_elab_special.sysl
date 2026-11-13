@@ -40,7 +40,7 @@ elab_representation()
     assert_eq(refused("def main() = print(scale(1, 2))\n"), "error: `scale` takes a real, and this is int64 @1:20")
     assert_eq(refused("def main() = print(scale(1.0, 2.0))\n"), "error: `scale` takes the power of two as an integer, and this is real64 @1:20")
     assert_eq(refused("def main() = print(nearest(1.0, 1))\n"), "error: `nearest` takes the direction as a real, whose sign it reads, and this is int64 @1:20")
-    assert_eq(refused("def f(h: real16) = print(nearest(h, 1.0))\n" + MAIN), "error: `nearest` of a real16 is not supported: compute it in real32 and convert @1:26")
+    assert_eq(refused("def f(h: real16) = print(nearest(h, 1.0))\n" + MAIN), "ok")
 
 @test("units: epsilon, exponent, fraction and set_exponent are plain numbers; huge, tiny, spacing, nearest and scale keep the argument's unit")
 elab_representation_units()
