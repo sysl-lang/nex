@@ -1,0 +1,85 @@
+// Fortran's special functions (spec §12.2.1): `erf`, `erfc`, `gamma`, `log_gamma` and the Bessel
+// functions, elemental over reals like `exp`. Values with one exact answer on every C library are
+// printed; the rest are asserted against gfortran's within a few units in the last place. A `real32`
+// argument gives a `real32`, an integer one a `real64`; a dimensionless unit of another scale is
+// brought to scale 1, and each fuses into a whole-array expression, a `parallel for` and a
+// `parallel map`, and reads a strided view.
+
+def main() =
+  print(erf(0.0))
+  print(erfc(0.0))
+  print(gamma(1.0))
+  print(log_gamma(1))
+  print(log_gamma(2.0))
+  print(bessel_j0(0.0))
+  print(bessel_j1(0.0))
+  print(bessel_jn(0, 0.0))
+  print(bessel_jn(3, 0.0))
+  print(bessel_y0(0.0))
+  print(gamma(0.0))
+  print(s"${erf(inf)} ${erf(-inf)} ${erfc(inf)}")
+
+  // `real64`, against gfortran's values.
+  val xs = [0.5, 1.0, 1.5, 2.0]
+
+  assert_approx(erf(xs), [0.52049987781304652, 0.84270079294971478, 0.96610514647531076, 0.99532226501895271], 1e-15)
+  assert_approx(erfc(xs), [0.47950012218695348, 0.15729920705028516, 0.033894853524689274, 0.0046777349810472645], 1e-15)
+  assert_approx(gamma(xs), [1.7724538509055161, 1.0, 0.88622692545275805, 1.0], 1e-15)
+  assert_approx(log_gamma(xs), [0.57236494292469997, 0.0, -0.12078223763524526, 0.0], 1e-15)
+  assert_approx(bessel_j0(xs), [0.93846980724081286, 0.76519768655796661, 0.51182767173591814, 0.22389077914123567], 1e-15)
+  assert_approx(bessel_j1(xs), [0.24226845767487390, 0.44005058574493350, 0.55793650791009963, 0.57672480775687329], 1e-15)
+  assert_approx(bessel_y0(xs), [-0.44451873350670656, 0.088256964215676970, 0.38244892379775891, 0.51037567264974504], 1e-15)
+  assert_approx(bessel_y1(xs), [-1.4714723926702433, -0.78121282130028868, -0.41230862697391130, -0.10703243154093756], 1e-14)
+  assert_approx(bessel_jn(2, xs), [0.030604023458682642, 0.11490348493190049, 0.23208767214421472, 0.35283402861563762], 1e-15)
+  assert_approx(bessel_yn(3, xs), [-42.059494304723891, -5.8215176059647291, -2.0735413990606855, -1.1277837768404275], 1e-12)
+
+  // An integer argument, a scalar or an array, gives `real64`.
+  val g: real = gamma(4)
+  val ks = [1, 2, 3, 4]
+
+  assert_approx(g, 6.0, 1e-14)
+  assert_approx(gamma(ks), [1.0, 1.0, 2.0, 6.0], 1e-14)
+  assert_approx(erf(ks), [0.84270079294971489, 0.99532226501895271, 0.99997790950300136, 0.99999998458274209], 1e-15)
+
+  // A `real32` computes in `real32`, and the Bessel functions in `real64` rounded once.
+  val ys: [real32] = [0.5, 1.0, 1.5, 2.0]
+  val e32: [real32] = erf(ys)
+  val y32: real32 = bessel_yn(2, ys[1])
+
+  assert_approx(real64(e32), [0.520499885, 0.842700779, 0.966105163, 0.995322287], 1e-7)
+  assert_approx(real64(gamma(ys)), [1.77245390, 1.0, 0.886226952, 1.0], 1e-6)
+  assert_approx(real64(log_gamma(ys)), [0.572364926, 0.0, -0.120782241, 0.0], 1e-6)
+  assert_approx(real64(bessel_j0(ys)), [0.938469827, 0.765197694, 0.511827648, 0.223890781], 1e-7)
+  assert_approx(real64(y32), -5.44137096, 1e-6)
+
+  // A `real16` computes in `real32` and rounds.
+  val h: real16 = 0.5
+  val eh: real16 = erf(h)
+
+  assert_approx(real64(eh), 0.5205, 1e-3)
+
+  // Fused into a whole-array expression, and over a strided view.
+  assert_approx(2.0 * erfc(xs) + gamma(xs + 1.0), [1.8452271698266651, 1.3145984141005704, 1.3971300952285155, 2.0093554699620944], 1e-14)
+
+  val wide = [0.5, 9.0, 1.0, 9.0, 1.5, 9.0, 2.0, 9.0]
+
+  assert_approx(erf(wide[1..7 by 2]), erf(xs), 0.0)
+  assert_approx(bessel_jn(2, wide[1..7 by 2]), bessel_jn(2, xs), 0.0)
+
+  // A dimensionless value of another scale is brought to scale 1 first: 25.4 mm/in is 1.
+  assert_approx(erf(25.4<mm/in>), erf(1.0), 1e-15)
+  assert_approx(bessel_jn(1, [25.4<mm/in>, 50.8<mm/in>]), [bessel_j1(1.0), bessel_j1(2.0)], 1e-15)
+
+  // Inside a `parallel for` and a `parallel map`, as the sequential loop computes them.
+  var out: [real] = zeros(8)
+
+  parallel for k in 1..8
+    out[k] = erf(real(k) / 4.0) + bessel_jn(2, real(k))
+
+  assert_approx(out, [0.39122987510013740, 0.87333390642868414, 1.1972468942394063, 1.2068289388017877, 0.96946524453421035, 0.72323193651512518, 0.68525445113324235, 0.88233054459487748], 1e-14)
+
+  val m = parallel map(xs, x -> gamma(x) * log_gamma(x))
+
+  assert_approx(m, [1.0144904472102003, 0.0, -0.10704047110878781, 0.0], 1e-14)
+  assert_approx(parallel erfc(xs) * 2.0, erfc(xs) * 2.0, 0.0)
+  print("ok")

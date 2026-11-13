@@ -2806,6 +2806,12 @@ unit psi = lbf / in^2
   goes back into `sin` unchanged (`sin(asin(x))`), converts with `to<deg>(atan(x))`, and is refused
   where a plain number is expected, as any angle is: `strip(asin(x))` is its number in radians.
   `asin`, `acos` and `atan` do not take a complex argument.
+- **The special functions** (`erf`, `erfc`, `gamma`, `log_gamma`, the Bessel functions) need a
+  dimensionless argument and return a plain number, as `exp` does; **the functions of a real's
+  representation follow what they measure**: `huge`, `tiny`, `spacing`, `nearest` and `scale` are
+  distances or values on `x`'s own scale and keep its unit, while `epsilon`, `exponent`, `fraction`
+  and `set_exponent` describe the number `x` is held as and are plain numbers; `nearest` reads only
+  its direction's sign, of any unit, and `is_nan` and `is_finite` take any unit.
 - `product(a)` has unit `U^n`; for an `a` that carries a unit, `n` must be a static extent
   (**PROPOSED**), and otherwise it is a compile error that suggests `strip`.
 - `print` and string interpolation show the unit after the value, separated by a space: with

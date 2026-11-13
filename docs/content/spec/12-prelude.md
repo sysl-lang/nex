@@ -108,6 +108,51 @@ A user function is elemental when it is marked `@elemental` (see
 [Functions](/spec/06-functions/)). Applying an unmarked scalar function to an array is a compile
 error that suggests `@elemental` or `map`.
 
+### 12.2.1 Special functions and numeric inquiry
+
+Fortran's special functions, its numeric inquiry and manipulation functions, and the IEEE
+classification, with Fortran's meaning. All but the three inquiry functions are elemental: on an
+array they apply element by element and fuse into the surrounding expression like `exp`.
+
+| Signature | Meaning | Fortran |
+|---|---|---|
+| `erf(x)`, `erfc(x)` | the error function and its complement `1 − erf(x)` | `ERF`, `ERFC` |
+| `gamma(x)` | the gamma function Γ(x) | `GAMMA` |
+| `log_gamma(x)` | ln \|Γ(x)\| | `LOG_GAMMA` |
+| `bessel_j0(x)`, `bessel_j1(x)` | Bessel functions of the first kind, orders 0 and 1 | `BESSEL_J0`, `BESSEL_J1` |
+| `bessel_y0(x)`, `bessel_y1(x)` | Bessel functions of the second kind, orders 0 and 1 | `BESSEL_Y0`, `BESSEL_Y1` |
+| `bessel_jn(n, x)`, `bessel_yn(n, x)` | Bessel functions of integer order `n` | `BESSEL_JN(N, X)`, `BESSEL_YN(N, X)` |
+| `epsilon(x)` | `2^(1−p)` for `x`'s type, whose significand has `p` bits: the spacing just above 1 | `EPSILON` |
+| `huge(x)` | the largest finite value of `x`'s type, a real or an integer | `HUGE` |
+| `tiny(x)` | the smallest positive normal value of `x`'s real type | `TINY` |
+| `exponent(x)` | the integer `e` of `x = f · 2^e` with `0.5 ≤ \|f\| < 1`; `0` for a zero, the largest `integer` for an infinity or a NaN | `EXPONENT` |
+| `fraction(x)` | that `f`; a zero is its own, an infinity or a NaN gives a NaN | `FRACTION` |
+| `spacing(x)` | the distance between `x` and the next value of its type of greater magnitude, `2^(e−p)`; `tiny(x)` for a zero and wherever that is smaller; a NaN for an infinity or a NaN | `SPACING` |
+| `nearest(x, s)` | the next value of `x`'s type after `x` toward the infinity of `s`'s sign; `huge` steps to the infinity, an infinity steps back to `huge` | `NEAREST` |
+| `scale(x, i)` | `x · 2^i`, rounded once | `SCALE` |
+| `set_exponent(x, i)` | `fraction(x) · 2^i` | `SET_EXPONENT` |
+| `is_nan(x)` | whether `x` is a NaN | `IEEE_IS_NAN` |
+| `is_finite(x)` | whether `x` is neither infinite nor a NaN | `IEEE_IS_FINITE` |
+
+**The special functions** take a real or an integer and return a real of the argument's width, as
+the functions of §12.2 do: an integer gives `real64`, a `real32` computes in `real32` (`erff`,
+`tgammaf`, …), and a `real16` computes in `real32` and rounds. The Bessel functions have no `real32`
+form in every C library, so they compute in `real64` at every width and round once. A complex
+argument is a compile error.
+
+**The inquiry functions** depend only on their argument's type. The argument is not evaluated, and
+an array gives the scalar of its element type, as in Fortran: `epsilon(a)` of a `[real32]` is a
+`real32`. `huge` also takes an integer and gives the type's largest value (`huge(int8(0))` is
+`127`).
+
+**The representation functions** take reals only. `exponent` returns an `integer` and `is_nan` and
+`is_finite` a `bool`; the others return the argument's type. `nearest` reads only the sign of `s`,
+which may be any real, and a negative zero points toward −∞. `nearest` does not take a `real16`.
+
+**Units** (DESIGN §13.4): a special function needs a dimensionless argument and gives a plain
+number. `huge`, `tiny`, `spacing`, `nearest` and `scale` keep the argument's unit; `epsilon`,
+`exponent`, `fraction` and `set_exponent` give a plain number; `is_nan` and `is_finite` take any.
+
 ## 12.3 Complex numbers
 
 A complex value is written with `i` and arithmetic, or with a constructor:

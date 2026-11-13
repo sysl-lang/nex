@@ -111,6 +111,14 @@ impl Interp
 
         val bits = bits_of(base_of(t))
         val fpe = m.fpe
+        var ts: Buf[Ty] = buf()
+
+        for a in args
+            ts.push(a.ty)
+
+        special_code(name, codes, ts, fpe) match
+            Some(f) -> return f
+            None -> ()
 
         if name == "sqrt" || name == "floor" || name == "ceil" || name == "trunc" || name == "round"
             return (c) ->

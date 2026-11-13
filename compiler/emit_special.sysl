@@ -1,0 +1,132 @@
+// Emission of the special functions and the representation functions (spec §12.2.1) on scalars; in
+// an array expression each is the body of the loop nest, as any elemental function is.
+//
+// **Each calls the C library function the interpreter calls** (`sh/sysl/nex/interp_special.sysl`),
+// at the same width, so the engines agree bit for bit: `erf`, `erfc`, `tgamma` and `lgamma` at the
+// argument's width (a `real16` through `real32`), the Bessel functions in `real64` and rounded once,
+// `ilogb` and `scalbln` for the representation of a real, and `nextafter` for `nearest`.
+
+import nex.sh.sysl.nex.*
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Emitter
+    // Special or representation function `name` of scalar operands `args`, its result of type `t`.
+    special(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        if name == "bessel_jn" || name == "bessel_yn"
+            val n = self.ex(args[0])
+            val x = self.ex(args[1])
+            val bits = bits_of(base_of(args[1].ty))
+            val wide = self.widen64(n, bits_of(base_of(args[0].ty)), is_signed(base_of(args[0].ty)))
+            val low = self.int_const("-2147483648", 64)
+            val high = self.int_const("2147483647", 64)
+            val held = self.def(s"arith.minsi ${self.def(s"arith.maxsi $wide, $low : i64")}, $high : i64")
+            val order = self.def(s"arith.trunci $held : i64 to i32")
+            val r = self.call(if name == "bessel_jn" then "jn" else "yn", s"$order, ${self.to64(x, bits)}", "i32, f64", "f64")
+
+            return self.fpe_check(self.from64(r, bits), x, x, bits)
+
+        val x = self.ex(args[0])
+        val bits = bits_of(base_of(args[0].ty))
+        val f = s"f$bits"
+
+        position_of(name, SPECIAL_FUNCTIONS[..]) match
+            Some(k) ->
+                val c = SPECIAL_C_NAMES[k]
+
+                if k >= FIRST_BESSEL then return self.fpe_check(self.from64(self.call(c, self.to64(x, bits), "f64", "f64"), bits), x, x, bits)
+
+                if bits == 64 then return self.fpe_check(self.call(c, x, "f64", "f64"), x, x, bits)
+
+                val v = if bits == 16 then self.def(s"arith.extf $x : f16 to f32") else x
+                val r = self.call(c + "f", v, "f32", "f32")
+                val out = if bits == 16 then self.def(s"arith.truncf $r : f32 to f16") else r
+
+                return self.fpe_check(out, x, x, bits)
+            None -> ()
+
+        if name == "is_nan" then return self.def(s"arith.cmpf uno, $x, $x : $f")
+        if name == "is_finite" then return self.finite(x, bits)
+
+        if name == "nearest"
+            val s = self.ex(args[1])
+            val sb = bits_of(base_of(args[1].ty))
+            val negative = self.def(s"arith.cmpi slt, ${self.def(s"arith.bitcast $s : f$sb to i$sb")}, ${self.int_const("0", sb)} : i$sb")
+            val inf = self.real_const(1.0 / 0.0, bits)
+            val toward = self.def(s"arith.select $negative, ${self.real_const(-1.0 / 0.0, bits)}, $inf : $f")
+
+            return self.call(if bits == 64 then "nextafter" else "nextafterf", s"$x, $toward", s"$f, $f", f)
+
+        if name == "scale" then return self.fpe_check(self.scaled(x, self.ex(args[1]), args[1].ty, bits), x, x, bits)
+
+        val x64 = self.to64(x, bits)
+
+        if name == "exponent"
+            val e = self.exponent64(x64)
+            val zero = self.def(s"arith.cmpf oeq, $x64, ${self.real_const(0.0, 64)} : f64")
+            val finite = self.finite(x64, 64)
+            val big = self.def(s"arith.select $finite, $e, ${self.int_const("9223372036854775807", 64)} : i64")
+
+            return self.def(s"arith.select $zero, ${self.int_const("0", 64)}, $big : i64")
+
+        if name == "spacing"
+            val tiny = self.real_const(real_tiny(bits), 64)
+            val e = self.def(s"arith.subi ${self.exponent64(x64)}, ${self.int_const(s"${real_digits(bits)}", 64)} : i64")
+            val power = self.call("scalbln", s"${self.real_const(1.0, 64)}, $e", "f64, i64", "f64")
+            val below = self.def(s"arith.cmpf olt, $power, $tiny : f64")
+            val zero = self.def(s"arith.cmpf oeq, $x64, ${self.real_const(0.0, 64)} : f64")
+            val small = self.def(s"arith.ori $below, $zero : i1")
+            val s = self.def(s"arith.select $small, $tiny, $power : f64")
+            val r = self.def(s"arith.select ${self.finite(x64, 64)}, $s, ${self.nan_const(64)} : f64")
+
+            return self.from64(r, bits)
+
+        val fraction = self.from64(self.fraction64(x64), bits)
+
+        if name == "fraction" then return fraction
+
+        // `set_exponent`: the fraction, exact at the width, scaled.
+        self.scaled(fraction, self.ex(args[1]), args[1].ty, bits)
+    end special
+
+    // Whether `x`, a real of `bits` bits, is finite: its magnitude is below infinity, which a NaN's is
+    // not.
+    finite(*self, x: string, bits: int) -> string =
+        self.def(s"arith.cmpf olt, ${self.def(s"math.absf $x : f$bits")}, ${self.real_const(1.0 / 0.0, bits)} : f$bits")
+
+    // Fortran's `exponent` of a finite non-zero `x`, a `real64`, as an `i64`: one more than `ilogb`.
+    exponent64(*self, x: string) -> string =
+        self.def(s"arith.addi ${self.def(s"arith.extsi ${self.call("ilogb", x, "f64", "i32")} : i32 to i64")}, ${self.int_const("1", 64)} : i64")
+
+    // Fortran's `fraction` of `x`, a `real64`: a zero is its own, an infinity or a NaN gives a NaN.
+    fraction64(*self, x: string) -> string
+        val e = self.def(s"arith.subi ${self.int_const("0", 64)}, ${self.exponent64(x)} : i64")
+        val f = self.call("scalbln", s"$x, $e", "f64, i64", "f64")
+        val zero = self.def(s"arith.cmpf oeq, $x, ${self.real_const(0.0, 64)} : f64")
+        val number = self.def(s"arith.select ${self.finite(x, 64)}, $f, ${self.nan_const(64)} : f64")
+
+        self.def(s"arith.select $zero, $x, $number : f64")
+
+    // `x * 2^i` rounded once at `bits`, `i` an integer of type `it`; a `real16` through `real32`.
+    scaled(*self, x: string, i: string, it: Ty, bits: int) -> string
+        val n = self.widen64(i, bits_of(base_of(it)), is_signed(base_of(it)))
+
+        if bits == 64 then return self.call("scalbln", s"$x, $n", "f64, i64", "f64")
+
+        val v = if bits == 16 then self.def(s"arith.extf $x : f16 to f32") else x
+        val r = self.call("scalblnf", s"$v, $n", "f32, i64", "f32")
+
+        if bits == 16 then self.def(s"arith.truncf $r : f32 to f16") else r
+
+    // A real of `bits` bits widened to `real64`, exactly.
+    to64(*self, x: string, bits: int) -> string = if bits == 64 then x else self.def(s"arith.extf $x : f$bits to f64")
+
+    // A `real64` rounded once to `bits`.
+    from64(*self, x: string, bits: int) -> string = if bits == 64 then x else self.def(s"arith.truncf $x : f64 to f$bits")
+end Emitter
+
+private position_of(name: string, names: []const string) -> Option[usize]
+    for k in 0..<names.len
+        if names[k] == name then return Some(k)
+
+    None

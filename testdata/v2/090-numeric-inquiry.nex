@@ -1,0 +1,107 @@
+// Fortran's numeric inquiry and manipulation functions and IEEE classification (spec §12.2.1).
+// `epsilon`, `huge` and `tiny` describe their argument's type, never evaluating it, and on an array
+// its element type; `spacing`, `nearest`, `exponent`, `fraction`, `scale`, `set_exponent`, `is_nan`
+// and `is_finite` are elemental. Every value is exact, and each was checked against gfortran's at
+// `real32` and `real64`: `exponent(0.0)` is 0, `spacing(0.0)` is `tiny`, a subnormal's `exponent`
+// and `fraction` are its true ones, `nearest` steps into and out of the infinities. Units follow
+// DESIGN §13.4, and each works in a fused expression, a strided view, a `parallel for`, a
+// `parallel map` and a generic.
+
+def tolerance[T: Float](x: T): T = epsilon(x) * 4.0
+
+def top[T: Integral](n: T): T = huge(n)
+
+def main() =
+  val x: real = 1.0
+  val y: real32 = 1.0
+  val h: real16 = 1.0
+
+  print(s"${epsilon(x)} ${huge(x)} ${tiny(x)}")
+  print(s"${epsilon(y)} ${huge(y)} ${tiny(y)}")
+  print(s"${epsilon(h)} ${huge(h)} ${tiny(h)}")
+  print(s"${huge(1)} ${huge(int8(1))} ${huge(int32(0))} ${huge(uint8(0))} ${huge(uint64(1))}")
+
+  // On an array, a scalar of its element type; the argument is not evaluated, so an index out of
+  // bounds does not trap.
+  val e32: real32 = epsilon([y, y])
+  val none: [real] = zeros(0)
+
+  print(e32)
+  print(huge(none[1]))
+  print(s"${tolerance(y)} ${tolerance(x)} ${top(int16(3))} ${top(uint32(3))}")
+
+  // `real64` edge cases.
+  val sub = tiny(x) / 8.0
+  val minus_zero = -0.0
+
+  print(s"${exponent(0.0)} ${exponent(1.0)} ${exponent(-3.0)} ${exponent(sub)} ${exponent(minus_zero)} ${exponent(inf)} ${exponent(nan)}")
+  print(s"${fraction(0.0)} ${fraction(-3.0)} ${fraction(sub)} ${fraction(minus_zero)} ${fraction(inf)} ${fraction(nan)}")
+  print(s"${spacing(0.0)} ${spacing(1.0)} ${spacing(sub)} ${spacing(-3.0)} ${spacing(minus_zero)} ${spacing(inf)} ${spacing(huge(x))}")
+  print(s"${nearest(1.0, 1.0)} ${nearest(1.0, -1.0)} ${nearest(0.0, 1.0)} ${nearest(0.0, -1.0)} ${nearest(huge(x), 1.0)}")
+  print(s"${nearest(inf, -1.0)} ${nearest(inf, 1.0)} ${nearest(-inf, 1.0)} ${nearest(nan, 1.0)} ${nearest(1.0, minus_zero)} ${nearest(minus_zero, 1.0)}")
+  print(s"${scale(1.5, 3)} ${scale(1.5, -1075)} ${scale(0.0, 5)} ${scale(1.0, 2000)} ${scale(huge(x), -1024)}")
+  print(s"${set_exponent(3.0, 3)} ${set_exponent(0.0, 5)} ${set_exponent(sub, 0)} ${set_exponent(inf, 1)} ${set_exponent(nan, 1)} ${set_exponent(minus_zero, 3)}")
+  // A negative zero keeps its sign, which a division shows.
+  print(s"${1.0 / fraction(minus_zero)} ${1.0 / set_exponent(minus_zero, 3)} ${1.0 / scale(minus_zero, 1)}")
+  print(s"${is_nan(nan)} ${is_nan(inf)} ${is_nan(1.0)} ${is_finite(1.0)} ${is_finite(inf)} ${is_finite(-inf)} ${is_finite(nan)} ${is_finite(sub)}")
+
+  // `real32` edge cases: each computed at `real32`.
+  val sub32 = tiny(y) / 8.0
+  val three: real32 = 3.0
+  val zero32: real32 = 0.0
+
+  print(s"${exponent(sub32)} ${fraction(sub32)} ${spacing(sub32)} ${spacing(y)} ${spacing(zero32)} ${spacing(three)}")
+  print(s"${nearest(y, 1.0)} ${nearest(y, -1.0)} ${nearest(zero32, 1.0)} ${nearest(zero32, -2.0)} ${nearest(huge(y), 1.0)}")
+  print(s"${scale(y, -149)} ${scale(y, 200)} ${scale(three, -150)} ${scale(three, 2)} ${set_exponent(three, 3)} ${set_exponent(-0.75 * y, -2)}")
+  print(s"${is_nan(sub32)} ${is_finite(huge(y))} ${is_finite(huge(y) * 2.0)}")
+
+  // `real16` through `real32`.
+  print(s"${exponent(h)} ${fraction(h)} ${spacing(h)} ${scale(h, 15)} ${scale(h, 16)} ${set_exponent(h, -3)}")
+
+  // Units: `spacing`, `nearest`, `scale`, `huge` and `tiny` keep the argument's; `epsilon`,
+  // `exponent`, `fraction` and `set_exponent` give a plain number; the direction's unit is not read.
+  val d = 3.0<m>
+
+  print(spacing(d))
+  print(nearest(d, -1.0))
+  print(nearest(d, -1.0<s>))
+  print(scale(d, 2))
+  print(huge(d))
+  print(tiny(d))
+  print(epsilon(d))
+  print(exponent(d))
+  print(fraction(d))
+  print(set_exponent(d, 1))
+  print(s"${is_nan(d)} ${is_finite(d)}")
+  print(scale([1.0<mm>, 2.0<mm>], 1))
+
+  // Arrays, element by element, fused into a whole-array expression and over a strided view.
+  val a = [0.0, 1.0, -3.0, inf, nan]
+
+  print(exponent(a))
+  print(fraction(a))
+  print(spacing(a))
+  print(is_nan(a))
+  print(is_finite(a))
+  print(scale(a, 2) + 1.0)
+  print(nearest(a, 1.0) - a)
+  print(scale(a, [1, 2, 3, 4, 5]))
+  print(set_exponent(a, 1) * 2.0)
+  print(spacing(a[1..5 by 2]))
+  print(count(is_finite(a)))
+
+  val b: [real32] = [1.0, 0.75, 1.0e-40]
+
+  print(exponent(b))
+  print(spacing(b))
+  print(nearest(b, -1.0))
+
+  // Inside a `parallel for` and a `parallel map`.
+  var es: [integer] = zeros(5)
+
+  parallel for k in 1..5
+    es[k] = if is_nan(a[k]) then -1 else exponent(a[k])
+
+  print(es)
+  print(parallel map(a, t -> is_finite(t)))
+  print(parallel spacing(a) * 2.0)

@@ -1,0 +1,150 @@
+module sh.sysl.nex
+
+// The special functions and the representation functions (spec §12.2.1) as the interpreter computes
+// them: through the same C library functions `compiler/emit_special.sysl` calls, at the same widths,
+// so the two engines agree bit for bit.
+
+import sysl.buf.{Buf, buf}
+import sysl.math.nextafter
+
+private extern "erf" c_erf(x: real) -> real
+private extern "erff" c_erff(x: f32) -> f32
+private extern "erfc" c_erfc(x: real) -> real
+private extern "erfcf" c_erfcf(x: f32) -> f32
+private extern "tgamma" c_tgamma(x: real) -> real
+private extern "tgammaf" c_tgammaf(x: f32) -> f32
+private extern "lgamma" c_lgamma(x: real) -> real
+private extern "lgammaf" c_lgammaf(x: f32) -> f32
+private extern "j0" c_j0(x: real) -> real
+private extern "j1" c_j1(x: real) -> real
+private extern "y0" c_y0(x: real) -> real
+private extern "y1" c_y1(x: real) -> real
+private extern "jn" c_jn(n: i32, x: real) -> real
+private extern "yn" c_yn(n: i32, x: real) -> real
+private extern "ilogb" c_ilogb(x: real) -> i32
+private extern "scalbln" c_scalbln(x: real, n: long) -> real
+private extern "scalblnf" c_scalblnf(x: f32, n: long) -> f32
+
+private val INF = 1.0 / 0.0
+private val NAN = 0.0 / 0.0
+
+// Special function `k` of `SPECIAL_FUNCTIONS` at the width: a `real32` through the library's `f`
+// function, a `real16` through it and rounded, and a Bessel function in `real64` and rounded.
+private[nex] special1(k: usize, x: real, bits: int) -> real
+    if k >= FIRST_BESSEL
+        val r = if k == 4 then c_j0(x) elif k == 5 then c_j1(x) elif k == 6 then c_y0(x) else c_y1(x)
+
+        return rnd(r, bits)
+
+    if bits == 64 then return if k == 0 then c_erf(x) elif k == 1 then c_erfc(x) elif k == 2 then c_tgamma(x) else c_lgamma(x)
+
+    val v = f32(x)
+
+    rnd(real(if k == 0 then c_erff(v) elif k == 1 then c_erfcf(v) elif k == 2 then c_tgammaf(v) else c_lgammaf(v)), bits)
+
+// `bessel_jn(n, x)` or `bessel_yn(n, x)` in `real64`, rounded to the width; an order beyond C's
+// `int` is held at its ends.
+private[nex] bessel_n(first_kind: bool, n: long, x: real, bits: int) -> real
+    val m = i32(if n > 2147483647 then 2147483647 elif n < -2147483648 then -2147483648 else n)
+
+    rnd(if first_kind then c_jn(m, x) else c_yn(m, x), bits)
+
+// Fortran's `exponent(x)`: the `e` of `x = f * 2^e` with `0.5 <= |f| < 1`; 0 for a zero, and the
+// largest integer for an infinity or a NaN, as gfortran answers.
+private[nex] real_exponent(x: real) -> long =
+    if x == 0.0 then 0 elif !x.is_finite() then 9223372036854775807 else long(c_ilogb(x)) + 1
+
+// Fortran's `fraction(x)`: the `f` of `exponent`; a zero is its own, and an infinity or a NaN gives
+// a NaN. It is exact at every width.
+private[nex] real_fraction(x: real) -> real =
+    if x == 0.0 then x elif !x.is_finite() then NAN else c_scalbln(x, -(long(c_ilogb(x)) + 1))
+
+// Fortran's `spacing(x)` at `bits`: `2^(e-p)` for a significand of `p` digits, and `tiny` where that
+// is smaller or `x` is zero; a NaN for an infinity or a NaN.
+private[nex] real_spacing(x: real, bits: int) -> real
+    if !x.is_finite() then return NAN
+
+    val tiny = real_tiny(bits)
+
+    if x == 0.0 then return tiny
+
+    val s = c_scalbln(1.0, real_exponent(x) - long(real_digits(bits)))
+
+    if s < tiny then tiny else s
+
+// Fortran's `scale(x, i)`: `x * 2^i` rounded once at the width; a `real16` through `real32`, where
+// it is exact until it is far below the half's range.
+private[nex] real_scale(x: real, i: long, bits: int) -> real =
+    if bits == 64 then c_scalbln(x, i) else rnd(real(c_scalblnf(f32(x), i)), bits)
+
+// Fortran's `set_exponent(x, i)`: `fraction(x) * 2^i`; a zero is its own, and an infinity or a NaN
+// gives a NaN.
+private[nex] real_set_exponent(x: real, i: long, bits: int) -> real = real_scale(real_fraction(x), i, bits)
+
+// Fortran's `nearest(x, s)`: the next representable value after `x` toward the infinity of `s`'s
+// sign, at `bits` (32 or 64).
+private[nex] real_nearest(x: real, s: real, bits: int) -> real
+    val toward = INF.copysign(s)
+
+    if bits == 64 then nextafter(x, toward) else real(nextafter(f32(x), f32(toward)))
+
+// The code of special or representation function `name` on scalar operands `codes` of types `ts`;
+// `None` where `name` is neither.
+private[nex] special_code(name: string, codes: Buf[Code], ts: Buf[Ty], fpe: bool) -> Option[Code]
+    val x = codes[0]
+    val bits = bits_of(base_of(ts[0]))
+
+    position(name, SPECIAL_FUNCTIONS[..]) match
+        Some(k) ->
+            val f: Code = (c) ->
+                val v = real_of(x(c)?)
+
+                fpe_checked(special1(k, v, bits), v, v, fpe)
+
+            return Some(f)
+        None -> ()
+
+    if name == "bessel_jn" || name == "bessel_yn"
+        val y = codes[1]
+        val width = bits_of(base_of(ts[1]))
+        val first_kind = name == "bessel_jn"
+
+        val f: Code = (c) ->
+            val n = int_of(x(c)?)
+            val v = real_of(y(c)?)
+
+            fpe_checked(bessel_n(first_kind, n, v, width), v, v, fpe)
+
+        return Some(f)
+
+    if name == "scale" || name == "set_exponent"
+        val y = codes[1]
+        val scaling = name == "scale"
+
+        val f: Code = (c) ->
+            val v = real_of(x(c)?)
+            val i = int_of(y(c)?)
+
+            if scaling then fpe_checked(real_scale(v, i, bits), v, v, fpe) else Ok(VReal(real_set_exponent(v, i, bits)))
+
+        return Some(f)
+
+    if name == "nearest"
+        val y = codes[1]
+
+        val f: Code = (c) ->
+            val v = real_of(x(c)?)
+
+            Ok(VReal(real_nearest(v, real_of(y(c)?), bits)))
+
+        return Some(f)
+
+    val f: Code = if name == "spacing" then (c) -> Ok(VReal(real_spacing(real_of(x(c)?), bits)))
+                  elif name == "fraction" then (c) -> Ok(VReal(real_fraction(real_of(x(c)?))))
+                  elif name == "exponent" then (c) -> Ok(VInt(real_exponent(real_of(x(c)?))))
+                  elif name == "is_nan" then (c) -> Ok(VBool(real_of(x(c)?).is_nan()))
+                  elif name == "is_finite" then (c) -> Ok(VBool(real_of(x(c)?).is_finite()))
+                  else return None
+
+    Some(f)
+end special_code

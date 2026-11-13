@@ -128,6 +128,8 @@ impl Emitter
 
             return self.fpe_check3(out, p, q, r, bits)
 
+        if is_special(name) then return self.special(span, name, args, t)
+
         val x = self.ex(args[0])
 
         if name == "abs" then return self.abs(span, x, args[0].ty)

@@ -1,0 +1,48 @@
+module sh.sysl.nex
+@tests
+
+// The typing of the special functions, the numeric inquiry and representation functions and the
+// IEEE classification (spec §12.2.1): their result types, their units (DESIGN §13.4) and the
+// arguments they refuse.
+
+private val MAIN = "def main() = ()\n"
+
+@test("a special function gives a real of its argument's width, real64 for an integer, element by element on an array")
+elab_special_types()
+    assert_eq(elaborated("def f(x: real32, n: int32) =\n  print(erf(x))\n  print(gamma(n))\n  print(bessel_jn(n, x))\n" + MAIN),
+        "(def f ((x#0 real32) (n#1 int32)) void (block (print (erf:real32 x#0)) (print (gamma:real64 (promote:real64 n#1))) (print (bessel_jn:real32 n#1 x#0))))\n(def main () void ())")
+    assert_eq(refused("def f(a: [real32], h: real16, k: [integer]) =\n  val b: [real32] = log_gamma(a) + bessel_y1(a)\n  val g: real16 = erfc(h)\n  val c: [real] = bessel_yn(2, k)\n" + MAIN), "ok")
+
+@test("a special function refuses a complex argument, a non-integer order and a dimension")
+elab_special_refused()
+    assert_eq(refused("def main() = print(erf(1.0 + 2.0i))\n"), "error: `erf` does not take complex[real64] @1:20")
+    assert_eq(refused("def main() = print(bessel_jn(2, 1.0 + 0.0i))\n"), "error: `bessel_jn` takes a real argument, and this is complex[real64] @1:20")
+    assert_eq(refused("def main() = print(bessel_jn(2.0, 1.0))\n"), "error: `bessel_jn` takes the order as an integer, and this is real64 @1:20")
+    assert_eq(refused("def main() = print(gamma(1.0<m>))\n"), "error: `gamma` takes a dimensionless argument, and this is real64<m> (length); strip the unit to pass the number: `gamma(strip(x))` @1:20")
+    assert_eq(refused("def main() = print(bessel_yn(1, [1.0<s>]))\n"), "error: `bessel_yn` takes a dimensionless argument, and this is real64<s> (time); strip the unit to pass the number: `bessel_yn(strip(x))` @1:20")
+    assert_eq(refused("def main() = print(erf(1.0<mm/in>) + bessel_jn(1, 2.0<mm/in>))\n"), "ok")
+
+@test("the inquiry functions are constants of their argument's element type, and huge takes integers too")
+elab_inquiry()
+    assert_eq(elaborated("def f(x: real32, a: [real; 3]) =\n  print(epsilon(x))\n  print(huge(a))\n  print(tiny(x))\n  print(huge(int8(1)))\n" + MAIN),
+        "(def f ((x#0 real32) (a#1 [real64; 3])) void (block (print epsilon) (print huge) (print tiny) (print huge)))\n(def main () void ())")
+    assert_eq(refused("def main() = print(epsilon(1))\n"), "error: `epsilon` takes a real, and this is int64 @1:20")
+    assert_eq(refused("def main() = print(tiny(1.0 + 0.0i))\n"), "error: `tiny` takes a real, and this is complex[real64] @1:20")
+    assert_eq(refused("def main() = print(huge(true))\n"), "error: `huge` takes an integer or a real, and this is bool @1:20")
+    assert_eq(refused("def main() = print(huge(1.0, 2.0))\n"), "error: `huge` takes one value, whose type it describes @1:20")
+
+@test("the representation functions take reals; exponent gives an integer and the classifications a bool")
+elab_representation()
+    assert_eq(refused("def f(x: real32, a: [real]) =\n  val e: integer = exponent(x)\n  val f: real32 = fraction(x) + spacing(x) + nearest(x, -1.0) + scale(x, int8(3)) + set_exponent(x, 2)\n  val n: [bool] = is_nan(a)\n  val k: bool = is_finite(x)\n  val es: [integer] = exponent(a)\n" + MAIN), "ok")
+    assert_eq(refused("def main() = print(spacing(1))\n"), "error: `spacing` takes a real, and this is int64 @1:20")
+    assert_eq(refused("def main() = print(is_nan(1))\n"), "error: `is_nan` takes a real, and this is int64 @1:20")
+    assert_eq(refused("def main() = print(exponent(1.0 + 0.0i))\n"), "error: `exponent` takes a real, and this is complex[real64] @1:20")
+    assert_eq(refused("def main() = print(scale(1, 2))\n"), "error: `scale` takes a real, and this is int64 @1:20")
+    assert_eq(refused("def main() = print(scale(1.0, 2.0))\n"), "error: `scale` takes the power of two as an integer, and this is real64 @1:20")
+    assert_eq(refused("def main() = print(nearest(1.0, 1))\n"), "error: `nearest` takes the direction as a real, whose sign it reads, and this is int64 @1:20")
+    assert_eq(refused("def f(h: real16) = print(nearest(h, 1.0))\n" + MAIN), "error: `nearest` of a real16 is not supported: compute it in real32 and convert @1:26")
+
+@test("units: epsilon, exponent, fraction and set_exponent are plain numbers; huge, tiny, spacing, nearest and scale keep the argument's unit")
+elab_representation_units()
+    assert_eq(refused("def f(d: real<m>, a: [real<m>]) =\n  val e: real = epsilon(d)\n  val n: integer = exponent(d)\n  val r: real = fraction(d) + set_exponent(d, 1)\n  val k: real<m> = huge(d) + tiny(d) + spacing(d) + nearest(d, -1.0<s>) + scale(d, 2)\n  val b: [real<m>] = scale(a, 1) + spacing(a)\n  val c: [bool] = is_nan(a)\n" + MAIN), "ok")
+    assert_eq(refused("def f(d: real<m>) =\n  val k: real = spacing(d)\n" + MAIN), "error: `k` must be real, but this is real64<m>: strip the unit to take the number, `strip(x)` @2:17")

@@ -1,0 +1,59 @@
+module sh.sysl.nex
+
+// Fortran's special functions and its numeric inquiry and manipulation functions (spec §12.2.1),
+// named once here for both engines.
+//
+// **The special functions are the C library's**: `erf`, `erfc`, `gamma` (`tgamma`), `log_gamma`
+// (`lgamma`) and the Bessel functions (`j0`, `j1`, `y0`, `y1`, `jn`, `yn`). A `real32` computes in
+// `real32` where the library has an `f` function and a `real16` computes in `real32` and rounds, as
+// the elementary functions do. The Bessel functions have no `f` function in every C library (Apple's
+// has none), so they compute in `real64` at every width and round once.
+//
+// **`epsilon`, `huge` and `tiny` depend only on their argument's type**, as Fortran's inquiry
+// functions do: each is a constant of that type, its argument never evaluated, and on an array the
+// constant of its element type.
+
+// The special functions of one real argument, in the order the engines number them; those from
+// `bessel_j0` on compute in `real64` at every width.
+val SPECIAL_FUNCTIONS = ["erf", "erfc", "gamma", "log_gamma", "bessel_j0", "bessel_j1", "bessel_y0", "bessel_y1"]
+
+// Their C library names at `real64`; `real32` adds `f` to the first four.
+val SPECIAL_C_NAMES = ["erf", "erfc", "tgamma", "lgamma", "j0", "j1", "y0", "y1"]
+
+// The first of `SPECIAL_FUNCTIONS` that computes in `real64` at every width.
+val FIRST_BESSEL: usize = 4
+
+// The elemental functions of a real's representation: `spacing`, `fraction` and `exponent`,
+// `nearest`, `scale` and `set_exponent`, and the IEEE classification `is_nan` and `is_finite`.
+val REPRESENTATION_FUNCTIONS = ["spacing", "fraction", "exponent", "nearest", "scale", "set_exponent", "is_nan", "is_finite"]
+
+private one_of(name: string, names: []const string) -> bool
+    for n in names
+        if n == name then return true
+
+    false
+
+// Whether `name` is one of Fortran's inquiry functions, whose value is a constant of its argument's
+// type.
+is_inquiry(name: string) -> bool = name == "epsilon" || name == "huge" || name == "tiny"
+
+// Whether `name` is a special function, a representation function or an inquiry function.
+is_special(name: string) -> bool =
+    one_of(name, SPECIAL_FUNCTIONS[..]) || name == "bessel_jn" || name == "bessel_yn" || one_of(name, REPRESENTATION_FUNCTIONS[..]) || is_inquiry(name)
+
+// The number of binary digits in the significand of a real of `bits` bits, the hidden bit counted.
+real_digits(bits: int) -> int = if bits == 64 then 53 elif bits == 32 then 24 else 11
+
+// `tiny` of a real of `bits` bits: its smallest positive normal value.
+real_tiny(bits: int) -> real = if bits == 64 then 2.2250738585072014e-308 elif bits == 32 then 1.1754943508222875e-38 else 6.103515625e-05
+
+// The value of inquiry function `name` for type `t`, a real or (for `huge`) an integer: `epsilon` is
+// `2^(1-p)` for a significand of `p` digits, `huge` the largest finite value, `tiny` the smallest
+// positive normal one.
+inquiry_value(name: string, t: Ty) -> Lit = base_of(t) match
+    Int(bits, signed) -> IntVal(if signed then (i128(1) << (bits - 1)) - 1 else (i128(1) << bits) - 1)
+    Real(bits) ->
+        if name == "tiny" then RealVal(real_tiny(bits))
+        elif name == "epsilon" then RealVal(if bits == 64 then 2.220446049250313e-16 elif bits == 32 then 1.1920928955078125e-07 else 0.0009765625)
+        else RealVal(if bits == 64 then 1.7976931348623157e308 elif bits == 32 then 3.4028234663852886e38 else 65504.0)
+    _ -> IntVal(0)

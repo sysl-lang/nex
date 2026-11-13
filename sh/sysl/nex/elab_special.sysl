@@ -1,0 +1,105 @@
+module sh.sysl.nex
+
+// The typing of Fortran's inquiry functions and of the prelude's functions of a real and a second
+// value (spec §12.2.1): `nearest(x, s)`, `scale(x, i)`, `set_exponent(x, i)`, `bessel_jn(n, x)` and
+// `bessel_yn(n, x)`. The special functions of one argument and the representation functions of one
+// are typed with the other functions of one argument (`elab_call.sysl`).
+//
+// **Units** (DESIGN §13.4): `epsilon` is a plain number, `huge` and `tiny` have the argument's unit;
+// `nearest` and `scale` keep `x`'s unit, and `nearest` reads only the sign of `s`, whatever it
+// measures; `set_exponent` is a plain number, as `fraction` is; a Bessel function's `x` must be
+// dimensionless, and its result is.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Elab
+    // `epsilon(x)`, `huge(x)` or `tiny(x)`: a constant of `x`'s element type, `x` itself never
+    // evaluated.
+    inquiry(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        if args.len() != 1 then return self.arity(span, name, "one value, whose type it describes")
+
+        val v = self.infer(args[0])
+        val e = elem_of(v.ty)
+        val b = base_of(e)
+
+        if is_error(e) then return self.invalid(span)
+
+        if !is_real(b) && !(name == "huge" && is_int(b))
+            val takes = if name == "huge" then "an integer or a real" else "a real"
+
+            self.fail(span, s"`${name}` takes ${takes}, and this is ${show_ty(v.ty)}")
+            return self.invalid(span)
+
+        texpr(span, if name == "epsilon" then b else e, TConstant(name, false))
+
+    // A prelude function of a real and a second value, element by element over arrays.
+    special_pair(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        if args.len() != 2 then return self.arity(span, name, "two values")
+
+        val bessel = name == "bessel_jn" || name == "bessel_yn"
+        var out: Buf[TExpr] = buf()
+
+        for a in args
+            out.push(self.infer(a))
+
+        for v in out
+            if is_error(v.ty) then return self.invalid(span)
+
+        // The order is the operand's position: `bessel_jn(n, x)` has its integer first.
+        val xk: usize = if bessel then 1 else 0
+        val ok: usize = 1 - xk
+        val x = out[xk]
+        val xe = elem_of(x.ty)
+        val xb = base_of(xe)
+        val other = base_of(elem_of(out[ok].ty))
+
+        if !is_real(xb) && !(bessel && is_int(xb))
+            self.fail(span, s"`${name}` takes a real${if bessel then " argument" else ""}, and this is ${show_ty(x.ty)}")
+            return self.invalid(span)
+
+        if name == "nearest"
+            if !is_real(other)
+                self.fail(span, s"`nearest` takes the direction as a real, whose sign it reads, and this is ${show_ty(out[1].ty)}")
+                return self.invalid(span)
+
+            if bits_of(xb) == 16
+                self.fail(span, "`nearest` of a real16 is not supported: compute it in real32 and convert")
+                return self.invalid(span)
+        elif !is_int(other)
+            val what = if bessel then "the order" else "the power of two"
+
+            self.fail(span, s"`${name}` takes ${what} as an integer, and this is ${show_ty(out[ok].ty)}")
+            return self.invalid(span)
+
+        var result = if name == "set_exponent" then xb else xe
+
+        if bessel
+            val arg = self.dimensionless(span, name, x)
+
+            if is_error(arg.ty) then return self.invalid(span)
+
+            val rb = if is_int(xb) then REAL else xb
+
+            out[1] = promote(arg, with_elem(arg.ty, rb))
+            result = rb
+
+        if any_array(out) then return self.elemental(span, name, out, result)
+
+        texpr(span, result, TBuiltin(name, out))
+    end special_pair
+
+    // `v` as the argument of function `name`, which takes a plain number: one with a dimensionless
+    // unit of another scale (`mm/in`) brought to scale 1, one of another dimension refused.
+    dimensionless(*self, span: Span, name: string, v: TExpr) -> TExpr
+        if !carries_unit(v.ty) then return v
+
+        val probe = if is_array(v.ty) then texpr(v.span, elem_of(v.ty), TInvalid) else v
+        val s = self.measured_builtin(span, name, probe)
+
+        if is_error(s.ty) then return self.invalid(span)
+
+        *s.kind match
+            TBuiltin(_, xs) -> if is_array(v.ty) then promote(v, with_elem(v.ty, xs[0].ty)) else xs[0]
+            _ -> v
+end Elab
