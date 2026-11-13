@@ -296,7 +296,7 @@ Generic functions, structs and enums (ref §3.6, §3.8, §6.10) stand, with thes
   `apply1[int64, real64]`). A parameter nothing fixes is a compile error.
 - **An expected type gives a generic struct's or enum's arguments**, before its fields are looked
   at, and an argument that disagrees with them is converted or refused against its field:
-  `val n: Opt[integer] = None`, `val r: Result[integer, string] = Ok(7)`. A type names all of a
+  `val n: Option[integer] = None`, `val r: Result[integer, string] = Ok(7)` (§17.1). A type names all of a
   generic's arguments (`Pair[integer, string]`); `Pair` alone or `Pair[integer]` is a compile error.
 - **A type argument holds a value**: `void` and `never` are not type arguments.
 - **A name holds at most one generic `def` and one concrete `def`.** The concrete one is called
@@ -1221,7 +1221,8 @@ Inside the body of a `parallel for`, or the function passed to `parallel map`:
    it whole when it ends, so a trap in the middle of computing a line's value (`print(s"a ${f()}")`)
    leaves none of that line written; a program without one writes the pieces as they come. This is the one deliberately non-reproducible thing in a parallel
    loop. Every other I/O (`read_bytes`, `write_bytes`, opening or writing a file, reading input) is a
-   compile error in a parallel body.
+   compile error in a parallel body (§17.6). `!` is allowed, a trap like any other; `?` is a
+   `return` and is not (rule 6).
 4. **The reductions are well formed** (§9.2).
 5. **No nested `parallel`.** A `parallel for` or `parallel` expression inside a parallel body is a
    compile error, and the message suggests the two-axis header
@@ -2366,7 +2367,8 @@ indented lines takes no `do`, in a `for`, a `while` and a `parallel for` alike.
 
 ### 11.2 The program
 
-- **The entry point** is `def main()` or `def main(args: [string])`, returning `void`; any other
+- **The entry point** is `def main()` or `def main(args: [string])`, returning `void` or
+  `Result[void, E]` (§17.2, whose `Err` ends the program with status 1); any other
   signature of `main` is a compile error, and so is a program without one. `args` holds only the user's arguments, without the program name, 1-based:
   `args[1]` is the first, and an index outside `1..length(args)` traps. The exit status is 0 when
   `main` returns, `n` after `stop n`, and non-zero after an uncaught trap.
@@ -2986,6 +2988,7 @@ is in `K` until the affine units of §15 arrive.
 | Units of measure | — | §13 | `unit` declarations (base, derived, scaled by an exact factor); `9.81<m/s^2>`, `real<m>`, `[real<Pa>; :, :]`; same-dimension scales convert to the left operand's unit, other dimensions are a compile error; `to<u>`, `strip`; erased before code generation |
 | Unit generics | §6.10 | §2.6, §13.5 | `U: Unit` parameters (`real<U^2>`) |
 | Prelude units | — | §13.9 | SI base, derived and scaled, imperial and US customary; `usgal` / `ukgal`, no `gal` |
+| Errors, text and files | §10.6, §10.9 (`print`, `read_bytes`, `write_bytes` only) | §17 | `Option` and `Result` in the prelude; postfix `!` (unwrap or trap) and `?` (propagate); a dropped `Result` is an error; `IoError`; string functions; conversions from text; `File`; whole-file functions; tables; a sandbox's granted directory |
 | The empty type | `unit` (§3.1) | §2.1, §11 | spelled `void`; `unit` is a keyword that declares a unit of measure (§13.1), and a type written `unit` is an error suggesting `void` |
 
 Unchanged, and restated only to fix their meaning beside the new rules: `i` and its shadowing
@@ -3018,6 +3021,15 @@ each has an item in PLAN.md's later list.
   records as well as numbers.
 - **Unit-polymorphic externs**: an `extern` declaration whose parameters carry units (§13.7), so a C
   routine can be given its units once in its declaration instead of `strip` at every call.
+
+- **Converting error types under `?`** (§17.2): an `E1` returned from a function whose `Result`
+  carries `E2`, through a conversion the program declares, as Rust's `From`. Until then `?` needs
+  the same `E`, and a `match` converts.
+- **More of files** (§17.6): a file open for reading and writing at once, seeking, directories
+  (listing, making, removing), and complex tables (§17.7), whose `(re, im)` needs a separator that
+  is not a comma.
+- **`NAMELIST`**: Fortran's `&group key = value /` input read into a struct by its field names, the
+  natural next step once structs can be read from text.
 
 Not in the language, and not planned: implicit parallelism (§9.3), static extents as generic
 parameters (§3.4), batched `@` on rank ≥ 3 (§7.2), a call-site marker for `inout` (§8.1).
@@ -3157,5 +3169,281 @@ kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
 `opts.sandbox` is for scripts from untrusted sources. A sandboxed script may not `stop` — its host
 decides when it ends — and the rest of what an untrusted script must not do the interpreter already
 refuses to every script: an `extern` (the interpreter never calls C) and a host function its host
-does not give. nex has no file I/O to refuse. A runaway sandboxed script is bounded by the budget,
-which a host running untrusted scripts sets.
+does not give. A runaway sandboxed script is bounded by the budget, which a host running untrusted
+scripts sets. **What a sandboxed script may do with files is what its host grants** (§17.8): with
+no grant, every file operation answers `Denied`.
+
+---
+
+## 17. Errors as values, text and files (PROPOSED)
+
+Fortran reports an I/O failure through a status argument: without `iostat=`, any failure ends the
+program; with it, the statement sets an integer the program may test or forget to, `iomsg=` adds the
+text, and the end of a file is the magic value `iostat_end`. Two of its choices stand here: **a
+failure nobody handles stops the program loudly**, and **the end of a file is an outcome, not an
+error**. The mechanism does not: a status nobody is made to look at, a message kept apart from it and
+a sentinel for the end are each a way to be wrong. nex reports a failure **as a value**, an
+`Option` or a `Result`, and the program says at each call what becomes of it, in one character
+where it wants Fortran's default.
+
+| Written | Meaning | Fortran |
+|---|---|---|
+| `read_text(p)!` | the value, or **trap** with the failure's message | no `iostat=` |
+| `read_text(p)?` | the value, or **return** the failure from the enclosing function | `iostat=`, then `return` |
+| `match read_text(p)` … | each outcome handled | `iostat=` and an `if` on it |
+
+```nex
+def load(path: string): Result[[real; :, :], IoError] =
+  val f = open(path, Read)?
+  val n = int64(trim(read_line(f)?!))?     // a count on the first line
+  val a = read_table(f)?
+  if extent(a, 1) != n then return Err(Malformed(path, 1, 1, s"says $n rows, has ${extent(a, 1)}"))
+  a
+
+def main() =
+  val a = load("in.dat")!                  // a script: stop on any failure
+  val log = open("run.log", Append)!
+  while true
+    match read_line(stdin)!
+      Some(line) -> write_line(log, line)!
+      None       -> exit
+```
+
+Exceptions were the other modern answer and are not taken: a call that may jump anywhere is at odds
+with a `parallel` body, an MPI rank and a C frame, and would make a bounds error something to catch
+rather than to fix. A trap stays what it is (§2.5): a bug or an unhandled failure, which only
+`assert_traps` catches.
+
+### 17.1 `Option` and `Result`
+
+The prelude declares two generic enums (§2.6, §11.4):
+
+```nex
+enum Option[T] =
+  Some(value: T)
+  None
+end Option
+
+enum Result[T, E] =
+  Ok(value: T)
+  Err(error: E)
+end Result
+```
+
+- **They are ordinary enums**: built by their variants, taken apart by `match`, compared with `==`
+  where their payloads are `Eq`, printed as `Some(3)`, `None`, `Ok(1.5)`, `Err(NotFound(in.dat))`.
+  A bare `None` or `Ok(…)` takes its arguments from the type expected (§2.6): `val n: Option[integer]
+  = None`.
+- **They are prelude names, so a program's own declarations shadow them** (§11.5): a program
+  declaring its own `enum Opt[T]` with `Some` and `None` keeps working, its `Some` hiding the
+  prelude's in its module. Matching a prelude `Option` (one from `read_line`, say) with variants that
+  module has shadowed is a compile error naming both declarations.
+- **Three functions on each**: `get_or(x, default)` is the value or `default`; `is_some(o)` /
+  `is_none(o)`; `is_ok(r)` / `is_err(r)`. Everything else is `match`, `?` and `!`.
+- **A `Result` may not be dropped.** A statement whose value is a `Result` — a `write_line(f, s)`
+  standing alone — is a compile error: *"the `Result` of `write_line` is dropped: handle it with
+  `!`, `?` or `match`"*. Discarding one on purpose is `val _ = write_line(f, s)`. This is the rule
+  that keeps a forgotten `iostat` from being written at all. An `Option` may be dropped.
+
+### 17.2 `?` and `!`
+
+Both are postfix operators binding as tightly as a call, a subscript or a field, so they chain:
+`read_line(f)?!`, `real64(split(line))!.sum()`, `-x!` is `-(x!)`. Neither is a token today (`!`
+appears only in `!=`, which the lexer reads first, so `a!=b` is a comparison).
+
+- **`e!`** is `e`'s value where it is `Some(v)` or `Ok(v)`, and **traps** otherwise. On `Err(err)`
+  the trap's message is the error's own: for an `IoError` its sentence (§17.3), for a `string` the
+  string, for any other type the value as `print` spells it. On `None` the message is
+  `` `!` found None ``. `!` is allowed wherever a trap is, a parallel body included (§9.4).
+- **`e?`** is `e`'s value where it is `Some(v)` or `Ok(v)`; otherwise the enclosing function
+  **returns** `None`, or `Err(err)` with the same `err`. The enclosing function must be a `def`
+  (top-level or local) whose result type is **declared**: an `Option[U]` for an `Option`, a
+  `Result[U, E]` with the same `E` for a `Result`. `?` on a `Result` in a function returning an
+  `Option`, or the reverse, is a compile error, as is an `E` that differs (*"`?` would return
+  `Err(string)` from `load`, which returns `Result[…, IoError]`"*); there is no implicit conversion
+  between error types (§15). A function whose result is inferred (§11.3) cannot use `?`, since `?`
+  is a return whose `Ok` side is unknown: the message asks for the result type to be declared. A
+  lambda cannot use `?` either; a local `def` with a declared result can.
+- **`?` is a `return`**, so it is a compile error in a parallel body (§9.4 rule 6), and it releases
+  what the function holds as `return` does (§11.4).
+- **`main` may return `Result[void, E]`** (§11.2), so a program's `?` reaches the top: an `Err`
+  ends the program as an unhandled trap does, writing `error: <message>` (the message as `!` would
+  word it) to standard error, with status 1. `main` returning `Ok(())` exits 0. `?` inside `main`
+  needs this form; plain `main()` uses `!`.
+
+### 17.3 `IoError`
+
+Every failure of the functions in this section is an `IoError`, a prelude enum:
+
+```nex
+enum IoError =
+  NotFound(path: string)                       // no such file or directory
+  Denied(path: string)                         // permission, or outside a sandbox's grant (§17.8)
+  Malformed(source: string, line: integer, column: integer, message: string)
+  Failed(path: string, message: string)        // anything else the system reports: a full disk,
+                                               // a directory where a file was wanted, a device error
+end IoError
+```
+
+- **`message(e)` is its sentence**, the text `!` traps with and `main`'s `Err` writes:
+  `in.dat: no such file`, `/etc/x: permission denied`, `in.dat:4:13: expected a real64, found
+  "1.2.3"`, `out.dat: no space left on device`. A `Malformed` from a string rather than a file has
+  `source` empty and reads `1:3: expected an int32, found "4x"`.
+- **`Malformed`'s line and column count from 1**, the column in bytes from the line's start, so an
+  editor's go-to-line finds it.
+- A program branches on the variant (`NotFound(_) -> use_defaults()`) and prints the sentence; the
+  variants are few on purpose, the message carrying the system's own wording.
+- **Misusing a file is a bug, not an `IoError`**: reading a file opened for writing, or using one
+  after `close`, traps (`read_line on a file opened for Write`, `write_line on a closed file`).
+
+### 17.4 Strings
+
+A `string` is immutable UTF-8 (§3.10). Reading text needs a little more of it than literals, `+`,
+`==` and interpolation, and Fortran's `CHARACTER` intrinsics are the measure. **Positions are
+1-based and count bytes**, as Fortran's do and as `Malformed`'s column does; a slice must begin and
+end on a character's boundary, so it is never invalid UTF-8.
+
+| Signature | Meaning | Fortran |
+|---|---|---|
+| `length(s): integer` | its length in bytes | `LEN` |
+| `s[i..j]`, `s[i..<j]`, `s[i..end]` | the bytes `i` to `j` as a string; traps outside `1..length(s)` or off a character boundary | `s(i:j)` |
+| `trim(s)` | without leading and trailing blanks (space, tab, CR, LF) | `TRIM(ADJUSTL(s))` |
+| `split(s): [string]` | the words between runs of blanks; no empty words | list-directed `READ` |
+| `split(s, sep): [string]` | the pieces between each `sep`, empty ones kept: `split("a,,b", ",")` is `["a", "", "b"]` | — |
+| `join(parts: [string], sep): string` | `parts` with `sep` between | — |
+| `find(s, sub): Option[integer]` | the position where `sub` first occurs | `INDEX` (0 for absent) |
+| `contains(s, sub)`, `starts_with(s, p)`, `ends_with(s, p)` | `bool` | `INDEX(…) > 0` |
+| `replace(s, old, new)` | every `old` replaced, left to right | — |
+| `upper(s)`, `lower(s)` | ASCII letters changed, everything else kept | — |
+| `string(x)` | `x` as `print` spells it, the same as `s"$x"` | internal `WRITE` |
+
+There is no character type and no `s[i]`: one character is `s[i..i]` where it is one byte. Strings
+compare with `==` and `!=`; ordering them is not needed for reading data and is left out.
+
+### 17.5 Numbers from text
+
+**Every numeric conversion function (§2.4) also takes a string**, and answers a `Result`, since text
+can be wrong where a number cannot: `real64("2.5")` is `Ok(2.5)`, `int32("4x")` is
+`Err(Malformed("", 1, 2, "expected an int32, found \"4x\""))`, and `real64(s)!` is Fortran's
+`READ(s, *) x` without `iostat=`.
+
+- **On a `[string]` it converts each element** and answers `Result[[T], IoError]`, the first
+  failure's position in the column: `real64(split(line))!` parses a line of numbers.
+- **What reads**: blanks around the number are ignored. An integer is an optional sign and decimal
+  digits, `_` allowed between digits as in a literal (§2.3); one outside its type's range is
+  `Malformed` (`out of range for int32`). A real is an optional sign and a literal as nex writes
+  one, with the exponent letter `e`, `E`, `d` or `D` (Fortran's `1.5d0`), or `inf`, `infinity` or
+  `nan` in any case. A complex is `complex[realN]("1.5+2.0i")` as `print` writes one, or Fortran's
+  `(1.5, 2.0)`.
+- **A real is rounded correctly at its own width**: `real32("0.1")` is the `real32` nearest 0.1,
+  never the `real64` nearest rounded again. **Everything `print` writes reads back to the same
+  value** (§2.5's shortest form), NaN as a NaN, `-0.0` as `-0.0`; that is the contract
+  `write_table` and `read_table` rest on.
+- **Units**: `val d: real<mm> = real64(s)!` is a number taken in millimetres; the text carries no
+  unit and none is parsed.
+
+### 17.6 Files
+
+**A `File` is an open file**, a prelude type that holds the system's handle and a buffer. It is
+reference counted like a string (§11.4), every copy sharing the one file, and **closes when the last
+reference goes**. Fortran's unit numbers, `newunit=` and the unit left open until the program ends
+are gone with it.
+
+| Signature | Meaning | Fortran |
+|---|---|---|
+| `open(path, mode): Result[File, IoError]` | `mode` is `Read`, `Write` (create or empty) or `Append` (create, or write at the end) | `OPEN(newunit=u, file=…, action=…, status=…, position=…)` |
+| `read_line(f): Result[Option[string], IoError]` | the next line without its `\n` or `\r\n`; `None` at the end | `READ(u, '(A)', iostat=ios)` and `iostat_end` |
+| `read_table(f)` | the rest of the file as a table (§17.7) | list-directed `READ` into an array |
+| `write(f, s): Result[void, IoError]` | `s` as it is | `WRITE(u, '(A)', advance='no')` |
+| `write_line(f, s): Result[void, IoError]` | `s` and a newline | `WRITE(u, '(A)')` |
+| `flush(f): Result[void, IoError]` | the buffer written to the system | `FLUSH(u)` |
+| `close(f): Result[void, IoError]` | flushed and closed now, every copy with it; a second `close` does nothing | `CLOSE(u)` |
+| `stdin`, `stdout`, `stderr` | the three standard files, prelude values | `INPUT_UNIT` … |
+
+- **`Mode`** is a prelude enum, `Read`, `Write` and `Append`. A file is opened one way; reading and
+  writing one file at once (`action='readwrite'`) is left out (§15).
+- **A line is text**: a line that is not UTF-8 is `Malformed` at its line and the column of the
+  first bad byte. A last line without a newline is still a line, and a file ending in a newline has
+  no empty line after it. Binary data is `read_bytes` (below).
+- **Writing is buffered**, and `print` and `write_line(stdout, …)` share one buffer, so their lines
+  stay in order. `print` and `eprint` keep their meaning (§11.2) and answer nothing; a failure to
+  write standard output is not reported, as in Fortran.
+- **Closing when the last reference goes flushes**, and a failure then cannot be returned to
+  anyone, so it **traps** with its message rather than being lost; a program that must handle that
+  failure calls `close` and matches its `Result`. While a trap is already unwinding (§11.4) the
+  failure is dropped, since the program is failing anyway.
+- **A `File` is a value of its own kind**: it may be a local, a field, an element or a module-level
+  binding, but it has no `==` (§2.6 `Eq` does not admit it), it prints as `File(run.log)`, it does
+  not cross to a host (§16.3) or to C (§10.2), and it is not sent between MPI ranks.
+
+**Whole-file functions** cover the common case without a `File`:
+
+| Signature | Meaning |
+|---|---|
+| `read_text(path): Result[string, IoError]` | the whole file, which must be UTF-8 |
+| `read_lines(path): Result[[string], IoError]` | its lines, as `read_line` reads them |
+| `write_text(path, s)`, `append_text(path, s)` | the file made `s`, or `s` added at its end |
+| `write_lines(path, lines: [string])` | each line followed by a newline |
+| `read_bytes(path): Result[[uint8], IoError]`, `write_bytes(path, data: [uint8])` | binary, as before (§12.11 of the spec), now answering a `Result` |
+| `exists(path): bool` | whether anything is there |
+| `remove(path): Result[void, IoError]` | the file deleted (`CLOSE(u, status='delete')`) |
+
+The writers answer `Result[void, IoError]`. A relative path is relative to the working directory, or
+to the grant's directory in a sandbox (§17.8). Directories are not listed, made or removed here
+(§15).
+
+**In a parallel body** every function of this section that touches a file is a compile error, as
+file I/O already is (§9.4 rule 3); `print` and `eprint` stay allowed. The string functions and the
+conversions of §17.4 and §17.5 are pure and allowed everywhere, `@elemental` bodies included.
+
+### 17.7 Tables
+
+`read_table` reads a file of numbers into a rank-2 array, as `numpy.loadtxt` does and as Fortran's
+list-directed `READ` into an array is used for, and `write_table` writes one that reads back exactly.
+
+| Signature | Meaning |
+|---|---|
+| `read_table(path, skip = 0): Result[[T; :, :], IoError]` | the file's rows; `skip` leading lines ignored (a header) |
+| `read_table(f): Result[[T; :, :], IoError]` | the rest of an open `File` |
+| `write_table(path, a, sep = " "): Result[void, IoError]` | `a`'s rows, one per line; a rank-1 `a` one value per line |
+
+- **The element type comes from the type expected** (§2.6), and is `real64` where nothing expects
+  one: `val a: [int32; :, :] = read_table("counts.dat")!`, `val b: [real<mm>; :, :] = …`. Any
+  integer or real type may be read; complex tables are left out (§15), since a comma in `(1.0, 2.0)`
+  is also a separator.
+- **The format**: a line holds one row; its fields are separated by **commas** where the first row
+  has one, otherwise by **runs of blanks**; blanks around a comma are ignored. A blank line and a
+  line whose first non-blank is `#` are skipped. Every row must have the first row's number of
+  fields, or the read is `Malformed` at the short or long row; a field that does not read as `T`
+  (§17.5) is `Malformed` at its line and column. A file with no rows is a `0 × 0` array.
+- **`a[i, j]` is row `i`, field `j`**, as the file shows it, so `extent(a, 1)` is the number of rows.
+  A one-column file is `n × 1`, and `a[:, 1]` is the column.
+- **`write_table` writes each value as `print` does**, which reads back to the same value (§17.5),
+  so `read_table(p)` after `write_table(p, a)` gives `a` exactly, bit for bit. A value with a unit is
+  written as its number in the array's unit.
+
+### 17.8 Files in a sandbox
+
+An embedded script reads and writes files as a program does (§16), relative to the host's working
+directory. **A sandboxed one (§16.6) reaches only the directory its host grants**:
+
+- `opts.files` is `FileGrant(dir, writable)`, or nothing. With no grant, every function of §17.6
+  answers `Denied(path)` and `exists` answers `false`. `stdin` reads as empty in a sandbox; standard
+  output and standard error go to the host's `write` as `print`'s do.
+- **A path is resolved inside `dir`**: a relative path from it, an absolute path refused. A path
+  that leaves `dir` — through `..`, or through a symbolic link anywhere along it, inside the
+  directory or not — answers `Denied`. The check is the opening itself, made one component at a time
+  from a handle on `dir` with links not followed (`openat` with `O_NOFOLLOW`; `O_NOFOLLOW_ANY` on
+  macOS, `RESOLVE_BENEATH` on Linux), never a check on a path string followed by an open, which a
+  link swapped in between would defeat.
+- **`writable = false` grants reading only**: `open(p, Write)`, `open(p, Append)`, the writers and
+  `remove` answer `Denied`.
+- A script that is not sandboxed is not confined. A host that wants a confined but trusted script
+  sandboxes it and grants a directory.
+
+### 17.9 What the two engines share
+
+Both engines run this section through the runtime's sysl (`runtime/`), so a message, a parsed
+value and a written number are the same compiled or interpreted. `Option`, `Result`, `IoError` and
+`Mode` are prelude enums, compiled as any enum is; a `File` is a counted handle like a string's,
+released through the same path (§11.4).
