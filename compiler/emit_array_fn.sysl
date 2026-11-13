@@ -77,6 +77,7 @@ impl Emitter
         if name == "reverse" then return self.reversed_at(span, args, t)
         if name == "transpose" then return self.transposed(span, self.ex(args[0]), args[0].ty, t)
         if name == "permute" then return self.permuted(span, args, t)
+        if name == "cshift" || name == "eoshift" || name == "spread" then return self.shifted(span, name, args, t)
         if name == "to_integers" || name == "to_bytes"
             var operands: Buf[TExpr] = buf()
 
@@ -472,7 +473,7 @@ impl Emitter
                 scalar = texpr(e.span, elem_of(e.ty), TBinary("*", scalar, fused_scalar(args[1], &leaves)))
 
             if quiet(scalar, self.fpe_trap)
-                var f = Fused(leaves, scalar, buf(), "", None)
+                var f = Fused(leaves, scalar, buf(), "", None, false, buf())
 
                 f.first = self.fused_leaves(a, &f)
 
@@ -525,7 +526,7 @@ impl Emitter
 
         leaves.push(leaf)
         vals.push(f)
-        self.reduce_fused(span, name, Fused(leaves, chain_leaf(leaf, 0), vals, "", Some(0)), t)
+        self.reduce_fused(span, name, Fused(leaves, chain_leaf(leaf, 0), vals, "", Some(0), false, buf()), t)
 
     // `name` over every element of the fused operand `op`, whose leaves are evaluated and checked, in
     // storage order, each element computed as the reduction reads it, giving a `t`.

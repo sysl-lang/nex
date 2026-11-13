@@ -192,6 +192,22 @@ Array literals and the rules for nesting them are in [Arrays](/spec/04-arrays/).
 | `reshape(a, (d1, …, dk))` | the same elements as rank k, column-major order; sizes must match | `RESHAPE(a, [d1, …, dk])` |
 | `reshape(a, m, n)` | rank 2, the same as `reshape(a, (m, n))` | `RESHAPE(a, [m, n])` |
 | `flatten(a)` | rank 1, every element in column-major order | `RESHAPE(a, [SIZE(a)])` |
+| `cshift(a, shift, dim = 1)` | `a` rotated along axis `dim`: element `k` of each lane is element `1 + modulo(k − 1 + shift, n)` of the source's, so a positive shift moves elements toward lower indices; `shift` is an integer, or an array of rank R − 1 giving each lane its own (then `dim` is written as a number) | `CSHIFT(a, shift, DIM=dim)` |
+| `eoshift(a, shift, boundary, dim = 1)` | the same shift, end-off: positions shifted in from outside hold `boundary`, a value converted to the element type as `+` converts it, zero (`false` for `bool`) when left out | `EOSHIFT(a, shift, BOUNDARY=b, DIM=dim)` |
+| `spread(a, dim, ncopies)` | rank R + 1: `ncopies` copies of `a` along a new axis at position `dim` (none if `ncopies` is negative); a scalar `a` gives a vector; `dim` is written as a number, since it fixes the rank | `SPREAD(a, dim, ncopies)` |
+
+`cshift`, `eoshift` and `spread` take arrays of numbers or `bool`, views and strided windows
+included, and return a new array with the source's element type and unit. Every argument after the
+array may be named (`shift =`, `boundary =`, `dim =`, `ncopies =`), and a `dim` computed at run time
+that is not an axis traps `not an axis`. A shift read by a quiet element-wise expression is read in
+that expression's own loop, so a stencil builds no array of its own:
+
+```nex
+def smooth(u: [real]): [real] = 0.5 * (cshift(u, 1) + cshift(u, -1)) - u   // one loop, periodic
+cshift([1, 2, 3, 4, 5], 2)            // [3, 4, 5, 1, 2]
+eoshift([1, 2, 3, 4, 5], -2)          // [0, 0, 1, 2, 3]
+spread([1, 2, 3], 1, 2)               // [[1, 2, 3], [1, 2, 3]]
+```
 
 `stride` and `ld` exist for passing arrays and views to C and Fortran libraries; see
 [Interop](/spec/11-interop/).

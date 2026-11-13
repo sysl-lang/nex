@@ -1,0 +1,100 @@
+// `cshift`, `eoshift` and `spread`, Fortran's CSHIFT, EOSHIFT and SPREAD (DESIGN §4.3): ranks 1 to
+// 3 along every axis; shifts positive, negative, zero and past the extent; a shift per lane; an axis
+// computed at run time; extent 0; a boundary given, named and left to default, on `bool` arrays too;
+// `spread` of a value and of arrays at every position; units kept and a boundary converted; `real32`
+// elements and strided, reversed and matrix windows as the source; a shift read inside arithmetic
+// and a reduction; and the traps of an axis that is not one and shifts of the wrong shape.
+
+def ax(k: integer) = k
+
+def main() =
+  val v = [1, 2, 3, 4, 5]
+  print(cshift(v, 1))
+  print(cshift(v, -1))
+  print(cshift(v, 0))
+  print(cshift(v, 7))
+  print(cshift(v, -12))
+  print(eoshift(v, 2))
+  print(eoshift(v, -2))
+  print(eoshift(v, 9))
+  print(eoshift(v, -1, 9))
+  print(eoshift(v, 1, boundary = -7))
+  print(eoshift(v, shift = -1, boundary = 9))
+
+  // Rank 2: axis 1 moves the rows, axis 2 the columns.
+  val m = [[1, 2, 3], [4, 5, 6]]
+  print(cshift(m, 1))
+  print(cshift(m, 1, dim = 2))
+  print(cshift(m, -1, 2))
+  print(cshift(m, [1, -1], dim = 2))
+  print(eoshift(m, 1, dim = 2))
+  print(eoshift(m, -1, 0, 1))
+  print(eoshift(m, [1, 2, 0], 9, 1))
+  print(cshift(m, 1, dim = ax(2)))
+  print(eoshift(m, 1, dim = ax(1)))
+
+  // Rank 3.
+  val c = reshape([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24], (2, 3, 4))
+  print(cshift(c, 1, dim = 3)[1, 1, 1..4])
+  print(cshift(c, -1, dim = 2)[2, 1..3, 2])
+  print(cshift(c, 3, dim = 1)[1..2, 3, 4])
+  print(eoshift(c, 2, dim = 3)[2, 2, 1..4])
+  print(eoshift(c, -1, 100, dim = 1)[1..2, 2, 2])
+  print(all(cshift(c, ax(1), dim = ax(3)) == cshift(c, 1, dim = 3)))
+  val r3 = cshift(c, [[0, 1, 2], [-1, 0, 5]], dim = 3)
+  print(r3[2, 3, 1..4])
+  print(r3[1, 2, 1..4])
+  print(r3[2, 1, 1..4])
+
+  // Extent 0.
+  val e: [real] = zeros(0)
+  print(cshift(e, 3))
+  print(eoshift(e, -2))
+  print(shape(spread(e, 1, 2)))
+  val z: [integer; :, :] = zeros((0, 3))
+  print(shape(cshift(z, 1, dim = 2)))
+  print(shape(eoshift(z, -4)))
+  print(shape(cshift(m[1..0, 1..3], 1)))
+
+  // `bool` elements: the boundary defaults to `false`.
+  val b = [true, false, true]
+  print(cshift(b, 1))
+  print(eoshift(b, 1))
+  print(eoshift(b, -1, true))
+
+  // `spread`: a value gives a vector, an array a new axis anywhere.
+  print(spread(7, 1, 3))
+  print(spread(2.5, 1, -1))
+  print(spread([1, 2, 3], 1, 2))
+  print(spread([1, 2, 3], 2, 2))
+  print(shape(spread([1, 2], 2, 0)))
+  print(shape(spread(m, 3, 4)))
+  print(spread(m, 1, 2)[2, 1..2, 3])
+  print(spread(m, 2, 2)[2, 1, 3])
+  print(spread(m, 3, 4)[2, 1, 4])
+
+  // Units are kept, and a boundary in another unit is converted.
+  val d = [1.0, 2.0, 3.0]<m>
+  print(cshift(d, 1))
+  print(eoshift(d, 1, boundary = 50.0<cm>))
+  print(eoshift(d, -1))
+  print(spread(d, 2, 2))
+  print(spread(1.0<s>, 1, 2))
+
+  // `real32` elements; windows as the source.
+  val f: [real32] = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5]
+  print(cshift(f[1..end by 2], 1))
+  print(eoshift(f[end..1 by -2], 1, 0.25))
+  print(cshift(m[1..2, 1..3 by 2], 1, dim = 2))
+  print(spread(f[2..3], 1, 2))
+  print(eoshift(reverse(v), -2, 0))
+
+  // Shifts read inside arithmetic and a reduction.
+  print(cshift(v, 1) + cshift(v, -1) - 2 * v)
+  print(sum(cshift(v, 2) * v))
+  print(0.5 * (cshift(d, 1) + cshift(d, -1)) - d)
+
+  assert_traps(() -> print(cshift(v, 1, dim = ax(2))), "not an axis")
+  assert_traps(() -> print(eoshift(m, 1, dim = ax(0))), "not an axis")
+  assert_traps(() -> print(cshift(m, [1, 2, 3], dim = 2)), "shape mismatch")
+  print("done")

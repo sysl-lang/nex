@@ -137,6 +137,9 @@ struct Emitter
     // writes is held rather than made, and the value held for each such array's one element.
     jam_defer: bool
     jam_held: Buf[JamHeld]
+    // The leaves of the fused expression about to be emitted that it reads through a shift
+    // (`emit_shift.sysl`), which its `linalg.generic` takes.
+    shift_reads: Buf[ShiftLeaf]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -936,7 +939,7 @@ emit_program(p: TProgram, fpe_trap: bool) -> Result[string, Buf[Diagnostic]]
 
     var e = Emitter(p, buf(), fpe_trap, str_builder(), str_builder(), str_builder(), str_builder(), 0, Void, "", "",
                     buf(), buf(), slots, boxed, buf(), buf(), done, buf(), None, false, false, buf(), buf(), buf(), buf(),
-                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf(), buf(), buf(), buf(), buf(), buf(), false, false, buf())
+                    buf(), buf(), selves, buf(), buf(), buf(), buf(), buf(), buf(), false, uses_parallel(p), "", None, buf(), buf(), buf(), buf(), buf(), buf(), buf(), false, false, buf(), buf())
     val text = e.whole_module()
 
     if e.diags.len() > 0 then return Err(e.diags)
