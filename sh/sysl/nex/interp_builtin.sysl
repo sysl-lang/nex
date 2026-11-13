@@ -70,6 +70,40 @@ impl Interp
 
         if name == "min" || name == "max" then return self.extreme(span, name, codes, t)
 
+        // Both values are computed, then the mask picks one.
+        if name == "merge"
+            val ft = codes[0]
+            val ff = codes[1]
+            val fm = codes[2]
+
+            return (c) ->
+                val x = ft(c)?
+                val y = ff(c)?
+
+                Ok(if bool_of(fm(c)?) then x else y)
+
+        if name == "modulo"
+            val fa = codes[0]
+            val fp = codes[1]
+            val bt = base_of(t)
+
+            if is_int(bt)
+                val signed = is_signed(bt)
+
+                return (c) ->
+                    val x = wide(int_of(fa(c)?), signed)
+
+                    int_modulo(x, wide(int_of(fp(c)?), signed))
+
+            val width = bits_of(bt)
+            val trap = m.fpe
+
+            return (c) ->
+                val x = real_of(fa(c)?)
+                val y = real_of(fp(c)?)
+
+                fpe_checked(real_modulo(x, y, width), x, y, trap)
+
         if name == "fma"
             val fa = codes[0]
             val fb = codes[1]

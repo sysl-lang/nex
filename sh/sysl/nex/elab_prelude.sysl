@@ -15,7 +15,7 @@ module sh.sysl.nex
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
-private val REDUCTIONS = ["sum", "product", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot"]
+private val REDUCTIONS = ["sum", "product", "minval", "maxval", "minloc", "maxloc", "findloc", "any", "all", "count", "norm2", "dot"]
 
 // The prelude functions an array of a rank parameter's rank may be given.
 private val RANK_GENERIC = ["sum", "product", "minval", "maxval", "any", "all", "count", "norm2", "map", "extent", "size", "rank", "flatten"]
@@ -60,17 +60,22 @@ impl Elab
 
         var pos: Buf[Expr] = buf()
         var dim: Option[Expr] = None
+        var back: Option[Expr] = None
 
         for a in args
             *a.kind match
                 NamedArg(n, v) ->
                     if n == "dim" && is_reduction(name) && name != "dot" && dim.is_none()
                         dim = Some(v)
+                    elif n == "back" && name == "findloc" && back.is_none()
+                        back = Some(v)
                     else
-                        self.fail(a.span, if is_reduction(name) && name != "dot" then s"`${name}` takes one named argument, `dim =`" else s"`${name}` takes no named arguments")
+                        self.fail(a.span, if name == "findloc" then "`findloc` takes two named arguments, `dim =` and `back =`"
+                                          elif is_reduction(name) && name != "dot" then s"`${name}` takes one named argument, `dim =`" else s"`${name}` takes no named arguments")
                         return self.invalid(span)
                 _ -> pos.push(a)
 
+        if name == "findloc" then return self.find_location(span, pos, dim, back)
         if is_reduction(name) then return self.reduction(span, name, pos, dim)
         if name == "origin" || name == "rebase" then return self.view_function(span, name, pos)
         if name == "zeros" || name == "ones" || name == "fill" || name == "identity" then return self.constructor(span, name, pos, want)
@@ -445,9 +450,62 @@ impl Elab
                 Some(pu) -> measured(per, pu)
                 None -> return self.invalid(span)
 
+        self.reduced(span, name, args, per, dim)
+    end reduction
+
+    // `findloc(a, value)`: the index of the first element equal to `value`, a tuple of indices for
+    // rank ≥ 2, every index 0 where there is none (DESIGN §7.4). `value` meets the elements as the
+    // right operand of `==` does, `back = true` takes the last instead, and `dim =` finds along an
+    // axis as `maxloc` does.
+    find_location(*self, span: Span, pos: Buf[Expr], dim: Option[Expr], back: Option[Expr]) -> TExpr
+        if pos.len() != 2 then return self.arity(span, "findloc", "an array and the value to find, and optionally `dim =` and `back =`")
+
+        var a = self.array_arg("findloc", pos[0])
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        val class = self.literal_class(pos[1])
+        var v = if class != NOT_LITERAL then self.elab(pos[1], Some(adoption(class, a.ty).unwrap_or(default_of(class)))) else self.infer(pos[1])
+
+        if is_error(v.ty) then return self.invalid(span)
+
+        if is_array(v.ty)
+            self.fail(pos[1].span, s"`findloc` finds one value, and this is ${self.shown(v)}")
+            return self.invalid(span)
+
+        val t = self.common_of(span, "findloc", elem_of(a.ty), v.ty) match
+            Some(t) -> t
+            None -> return self.invalid(span)
+
+        if !is_number_ty(t)
+            self.fail(pos[0].span, s"`findloc` takes an array of numbers or bools; this is ${self.shown(a)}")
+            return self.invalid(span)
+
+        a = promote(a, with_elem(a.ty, t))
+        v = promote(v, t)
+
+        var args: Buf[TExpr] = buf()
+
+        args.push(a)
+        args.push(v)
+        args.push(back match
+            Some(b) -> self.check(b, Bool, "`back`")
+            None -> texpr(span, Bool, TLiteral(BoolVal(false), false)))
+
+        self.reduced(span, "findloc", args, INTEGER, dim)
+    end find_location
+
+    // The reduction `name` of `args`, the array first, each lane of which gives a `per`: of the whole
+    // array, a location being a tuple of indices for rank ≥ 2, or along `dim =` an array of one rank
+    // less.
+    reduced(*self, span: Span, name: string, args: Buf[TExpr], per: Ty, dim: Option[Expr]) -> TExpr
+        val a = args[0]
+        val r = rank_of(a.ty)
+        val axes = axes_of(a.ty)
+
         dim match
             None ->
-                val ty = if (name == "minloc" || name == "maxloc") && r >= 2 then Ty.Tuple(ints(r)) else per
+                val ty = if (name == "minloc" || name == "maxloc" || name == "findloc") && r >= 2 then Ty.Tuple(ints(r)) else per
 
                 texpr(span, ty, TArray(TReduction(name, args, None)))
             Some(d) ->
@@ -469,7 +527,7 @@ impl Elab
                 val ty = if r == 1 then per else Ty.Array(per, kept)
 
                 texpr(span, ty, TArray(TReduction(name, args, Some(k))))
-    end reduction
+    end reduced
 
     // `dot(x, y)`: two vectors of one extent, met in one number type; their units multiply
     // (DESIGN §13.6).

@@ -21,7 +21,7 @@ module sh.sysl.nex
 // `rnd` before it is added, which keeps sysl from contracting it, as the compiled program does not.
 
 import nex_runtime.sh.sysl.nex_runtime.{COMPLEX_DIVISION_BY_ZERO, INT_DIVISION_BY_ZERO, REAL_DIVISION_BY_ZERO, REAL_INVALID, REAL_OVERFLOW,
-                                        REMAINDER_BY_ZERO, bool_text, complex_text, format_real_nex, int_spec_text, int_text, ipow_checked, out_of_range_message,
+                                        MODULO_BY_ZERO, REMAINDER_BY_ZERO, bool_text, complex_text, format_real_nex, int_spec_text, int_text, ipow_checked, out_of_range_message,
                                         overflow_message, real_spec_text, str_spec_text, uint_text}
 import sysl.buf.{Buf, buf}
 
@@ -225,6 +225,15 @@ private int_rem(x: i128, y: i128) -> Answer
 
     Ok(VInt(long.wrap(x % y)))
 
+// `modulo` takes the divisor's sign: a remainder of the other sign has the divisor added once, which
+// cannot overflow, since the remainder is smaller than the divisor. By zero it traps as `%` does.
+private[nex] int_modulo(x: i128, y: i128) -> Answer
+    if y == 0 then return trapped(MODULO_BY_ZERO)
+
+    val r = x % y
+
+    Ok(VInt(long.wrap(if r != 0 && (r < 0) != (y < 0) then r + y else r)))
+
 // `base ^ n`, the base's type kept, through the runtime's power (DESIGN §2.2).
 private[nex] int_pow(base: long, n: long, bits: int, signed: bool, n_signed: bool) -> Answer = ipow_checked(base, n, bits, signed, n_signed) match
     Ok(v) -> Ok(VInt(wrapped(i128(v), bits, signed)))
@@ -264,6 +273,18 @@ private[nex] fpe_checked3(r: real, a: real, b: real, c: real, fpe: bool) -> Answ
 // halves is exact there, and rounding the sum to a half afterwards is the one rounding that matters.
 private[nex] fused_multiply_add(a: real, b: real, c: real, bits: int) -> real =
     if bits == 32 then real(f32(a).mul_add(f32(b), f32(c))) else rnd(a.mul_add(b, c), bits)
+
+// `modulo` of reals at `bits` bits, as gfortran computes it: `fmod`'s remainder, which is exact, with
+// the divisor added once where its sign differs from the divisor's, and a zero given the divisor's
+// sign. The one addition rounds at the width: a `real32` adds in `real32`, and two halves add exactly
+// in `real64` before rounding to a half.
+private[nex] real_modulo(x: real, y: real, bits: int) -> real
+    val r = x.fmod(y)
+
+    if r == 0.0 then return (0.0).copysign(y)
+    if (r < 0.0) == (y < 0.0) then return r
+
+    if bits == 32 then real(f32(r) + f32(y)) else rnd(r + y, bits)
 
 // `a op b` on reals of `bits` bits.
 private[nex] real_op(op: string, bits: int, fpe: bool) -> Option[Op2]

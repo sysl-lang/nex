@@ -188,6 +188,40 @@ array_elemental_rules()
     assert_eq(refused("@elemental def e(x: real) =\n  eprint(x)\n  x\n" + MAIN), "ok")
     assert_eq(refused("@elemental def e(x: real) =\n  write_bytes(\"f\", to_bytes([1]))\n  x\n" + MAIN), "error: an `@elemental` function may be run in any order, so it cannot do I/O with `write_bytes` @1:1")
 
+@test("merge meets its two values as + does, broadcasts a scalar and takes a bool or [bool] mask")
+array_merge()
+    assert_eq(elaborated("def f(a: [real32], b: [bool], m: [integer]) =\n  print(merge(a, 0.0, b))\n  print(merge(m, 2.5, true))\n  print(merge(1, 2, b))\n  print(merge(1, 2.0, false))\n" + MAIN),
+        "(def f ((a#0 [real32]) (b#1 [bool]) (m#2 [int64])) void (block (print (.merge:[real32] a#0 (adopt:real32 0.0) b#1)) (print (.merge:[real64] (promote:[real64] m#2) 2.5 true)) (print (.merge:[int64] 1 2 b#1)) (print (merge:real64 (promote:real64 1) 2.0 false))))\n(def main () void ())")
+    assert_eq(refused("def f(a: [real; 2], b: [real; 3], c: bool) = merge(a, b, c)\n" + MAIN), "error: `merge` combines arrays of one shape; axis 1 is 2 in one and 3 in the other @1:46")
+    assert_eq(refused("def f(a: [real; 2], m: [bool; 3]) = merge(a, 0.0, m)\n" + MAIN), "error: `merge` combines arrays of one shape; axis 1 is 2 in one and 3 in the other @1:37")
+    assert_eq(refused("def f(a: [real]) = merge(a, 0.0, a)\n" + MAIN), "error: `merge`'s mask must be bool or [bool], but this is [real] @1:34")
+    assert_eq(refused("def f(a: [real]) = merge(a, 0.0)\n" + MAIN), "error: `merge` takes the value where true, the value where false and the mask @1:20")
+    assert_eq(refused("def f(a: real<m>, b: real<s>) = merge(a, b, true)\n" + MAIN), "error: `merge` cannot combine m and s: length and time are different dimensions @1:33")
+    assert_eq(refused("def f(a: string) = merge(a, \"b\", true)\n" + MAIN), "error: `merge` chooses between numbers or bools; these are string: choose between other values with `if c then a else b` @1:20")
+
+@test("modulo takes integers or reals of one dimension, keeps the first's unit and applies element by element")
+array_modulo()
+    assert_eq(elaborated("def f(a: [integer], x: real32, d: real<m>) =\n  print(modulo(a, 3))\n  print(modulo(x, 2.0))\n  print(modulo(d, 30.0<cm>))\n" + MAIN),
+        "(def f ((a#0 [int64]) (x#1 real32) (d#2 real64<m>)) void (block (print (.modulo:[int64] a#0 3)) (print (modulo:real32 x#1 (adopt:real32 2.0))) (print (s (strip:real64 (modulo:real64<m> d#2 (rescale:real64<m> 0.01 30.0<cm>))) \" m\"))))\n(def main () void ())")
+    assert_eq(refused("def f(z: complex) = modulo(z, z)\n" + MAIN), "error: `modulo` takes integers or reals; these are complex[real64] @1:21")
+    assert_eq(refused("def f(b: bool) = modulo(b, b)\n" + MAIN), "error: `modulo` takes integers or reals; these are bool @1:18")
+    assert_eq(refused("def f(d: real<m>) = modulo(d, 2.0<s>)\n" + MAIN), "error: `modulo` cannot combine m and s: length and time are different dimensions @1:21")
+    assert_eq(refused("def f(a: [real; 2], b: [real; 3]) = modulo(a, b)\n" + MAIN), "error: `modulo` combines arrays of one shape; axis 1 is 2 in one and 3 in the other @1:37")
+    assert_eq(refused("def f(a: real) = modulo(a)\n" + MAIN), "error: `modulo` takes two values @1:18")
+
+@test("findloc gives an index or a tuple of them, takes dim = and back =, and meets its value as == does")
+array_findloc()
+    assert_eq(elaborated("def f(v: [integer], m: [real; 2, 3], b: bool) =\n  print(findloc(v, 3))\n  print(findloc(m, 2))\n  print(findloc(m, 2.0, dim = 1, back = b))\n  print(findloc(v, 2.5, back = true))\n" + MAIN),
+        "(def f ((v#0 [int64]) (m#1 [real64; 2, 3]) (b#2 bool)) void (block (print (findloc:int64 v#0 3 false)) (print (findloc:(int64, int64) m#1 (adopt:real64 2) false)) (print (findloc:[int64; 3] m#1 2.0 b#2 (dim 1))) (print (findloc:int64 (promote:[real64] v#0) 2.5 true))))\n(def main () void ())")
+    assert_eq(refused("def f(v: [string]) = findloc(v, \"a\")\n" + MAIN), "error: `findloc` takes an array of numbers or bools; this is [string] @1:30")
+    assert_eq(refused("def f(v: [real]) = findloc(v, [1.0])\n" + MAIN), "error: `findloc` finds one value, and this is [real64] @1:31")
+    assert_eq(refused("def f(v: [real]) = findloc(v)\n" + MAIN), "error: `findloc` takes an array and the value to find, and optionally `dim =` and `back =` @1:20")
+    assert_eq(refused("def f(v: [real]) = findloc(v, 1.0, last = true)\n" + MAIN), "error: `findloc` takes two named arguments, `dim =` and `back =` @1:36")
+    assert_eq(refused("def f(v: [real]) = findloc(v, 1.0, back = 1)\n" + MAIN), "error: `back` must be bool, but this is int64 @1:43")
+    assert_eq(refused("def f(m: [real; :, :]) = findloc(m, 1.0, dim = 3)\n" + MAIN), "error: there is no axis 3: this array has rank 2 @1:48")
+    assert_eq(refused("def f(v: [real<m>]) = findloc(v, 1.0<s>)\n" + MAIN), "error: `findloc` cannot combine m and s: length and time are different dimensions @1:23")
+    assert_eq(refused("def f(x: real) = findloc(x, 1.0)\n" + MAIN), "error: `findloc` takes an array; this is real @1:26")
+
 // -- the prelude ------------------------------------------------------------------------------------
 
 @test("a reduction gives a scalar, or along dim = an array of one rank less")

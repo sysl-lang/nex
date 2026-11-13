@@ -121,6 +121,9 @@ Inside a subscript, `end` means the last index of that axis. nex also has a half
 | `max(a, 0.0)` (elemental) | `max(a, 0.0)` |
 | `x**2`, `x**n`, `-x**2` | `x^2`, `x^n`, `-x^2` (also `-(x^2)`) |
 | `mod(a, b)` | `a % b` |
+| `modulo(a, p)` | `modulo(a, p)` — the sign of `p`, integers and reals |
+| `merge(a, b, mask)` (elemental) | `merge(a, b, mask)` |
+| `findloc(a, x)`, `findloc(a, x, back=.true.)` | `findloc(a, x)`, `findloc(a, x, back = true)` |
 | `a / b` on two integers | `a div b` (`a / b` on two integers gives a `real`) |
 | `a /= b`, `.and.`, `.or.`, `.not.` | `a != b`, `and`, `or`, `not` |
 | `lo <= x .and. x <= hi` | `lo <= x <= hi` (a chained comparison; `x` evaluated once) |
@@ -142,7 +145,7 @@ first argument.
 | `stop`, `stop 2` | `stop`, `stop 2` |
 | `do while (err > tol)` | `while err > tol` |
 | `if (x > 0) then` … `else if` … `else` … `end if` | `if x > 0` … `else if` … `else` (indented bodies) |
-| `y = merge(a, b, x > 0)` | `val y = if x > 0 then a else b` (`if` is an expression) |
+| `y = merge(a, b, x > 0)` | `val y = merge(a, b, x > 0)`, or `val y = if x > 0 then a else b`, which computes only the branch taken (`if` is an expression) |
 | `select case` | `match` ([Control flow](/spec/07-control-flow/)) |
 | `do concurrent (i = 1:n)` | `parallel for i in 1..n` |
 | `!$omp parallel do` | `parallel for i in 1..n` |

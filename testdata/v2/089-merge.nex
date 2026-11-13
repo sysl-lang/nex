@@ -1,0 +1,59 @@
+// DESIGN §7.3: `merge(t, f, mask)` is `t` where the mask is true and `f` elsewhere, element by
+// element, as Fortran's MERGE. Any argument may be a scalar, which broadcasts; `t` and `f` meet as `+`
+// operands do, `f` converted to `t`'s unit; both are computed whatever the mask says.
+
+@elemental def twice(x: real) = 2.0 * x
+
+def main() =
+  // Scalars: integers, reals, bools, a literal pair meeting in real64.
+  print(merge(1, 2, true))
+  print(merge(1, 2, false))
+  print(merge(1, 2.5, true))
+  print(merge(true, false, 3 > 4))
+
+  // Rank 1: arrays everywhere, then each argument a scalar in turn.
+  val a = [1.0, -2.0, 3.0, -4.0]
+  val b = [10.0, 20.0, 30.0, 40.0]
+  val m = [true, false, false, true]
+  print(merge(a, b, m))
+  print(merge(a, 0.0, a > 0.0))
+  print(merge(-1.0, b, m))
+  print(merge(a, b, true))
+  print(merge(a, b, false))
+  print(merge(1, 0, m))
+
+  // Inside a whole-array expression: a clamp, a choice of two expressions, and a sum of it.
+  print(merge(a * a, sqrt(b), a < 0.0) + 1.0)
+  print(sum(merge(a, 0.0, a > 0.0)))
+  print(merge(twice(a), a, m))
+
+  // Rank 2, a column, a strided view and a reversed one.
+  val g = [[1, 2, 3], [4, 5, 6]]
+  print(merge(g, -g, g % 2 == 0))
+  print(merge(g[:, 2], 0, [true, false]))
+  print(merge(a[1..end by 2], b[2..end by 2], [false, true]))
+  print(merge(a[end..1 by -1], b, m))
+
+  // Integer widths and real32: a narrower operand widens, a literal adopts the other's type.
+  val s: [int8] = [1, -2, 3]
+  val w: [int32] = [100, 200, 300]
+  print(merge(s, w, [true, true, false]))
+  val f: [real32] = [0.5, 1.5, 2.5]
+  print(merge(f, 9.0, f > 1.0))
+
+  // Units: the second value is converted to the first's unit.
+  val len = [1.0<m>, 2.0<m>]
+  print(merge(len, 50.0<cm>, [false, true]))
+  print(merge(3.0<m>, 20.0<cm>, false))
+
+  // A shape that differs only at run time traps.
+  val n = length(a) - 1
+  assert_traps(() -> print(merge(a, zeros(n), m)), "shape mismatch")
+  assert_traps(() -> print(merge(a, b, fill(n, true))), "shape mismatch")
+
+  // Under `parallel for`, each element its own iteration.
+  var out: [real] = zeros(4)
+  parallel for i in 1..4
+    out[i] = merge(a[i], b[i], m[i])
+  print(out)
+  print("done")

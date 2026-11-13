@@ -4,7 +4,7 @@
 // statement, or one that never yields (`return`, `exit`, `stop`), after which the block has ended.
 
 import nex.sh.sysl.nex.*
-import nex_runtime.sh.sysl.nex_runtime.{COMPLEX_DIVISION_BY_ZERO, INT_DIVISION_BY_ZERO, REAL_DIVISION_BY_ZERO, REAL_INVALID, REAL_OVERFLOW, REMAINDER_BY_ZERO, ZERO_STEP, int_name,
+import nex_runtime.sh.sysl.nex_runtime.{COMPLEX_DIVISION_BY_ZERO, INT_DIVISION_BY_ZERO, MODULO_BY_ZERO, REAL_DIVISION_BY_ZERO, REAL_INVALID, REAL_OVERFLOW, REMAINDER_BY_ZERO, ZERO_STEP, int_name,
                                         out_of_range_message, overflow_message}
 import sysl.buf.{Buf, buf}
 import sysl.fmt.hex
@@ -315,6 +315,48 @@ impl Emitter
 
         self.def(s"arith.cmpi ${int_predicate(op, signed)}, $a, $b : $t")
     end int_binary
+
+    // `modulo(a, p)` of integers: the remainder `%` gives, with `p` added where the two signs differ,
+    // which cannot overflow. A zero `p` traps as `%` does, and `min` by -1 is 0.
+    int_modulo(*self, a: string, p: string, bits: int, signed: bool) -> string
+        val t = s"i$bits"
+        val zero = self.int_const("0", bits)
+        val one = self.int_const("1", bits)
+        val by_zero = self.def(s"arith.cmpi eq, $p, $zero : $t")
+
+        self.trap_if(by_zero, MODULO_BY_ZERO)
+
+        // Where something may have left the statement the trap above is skipped, and the zero
+        // divisor a skipped operand stands in with must not reach the division.
+        val d = if self.dirty then self.def(s"arith.select $by_zero, $one, $p : $t") else p
+
+        if !signed then return self.def(s"arith.remui $a, $d : $t")
+
+        val minus_one = self.int_const("-1", bits)
+        val r = self.def(s"arith.remsi $a, ${self.def(s"arith.select ${self.def(s"arith.cmpi eq, $d, $minus_one : $t")}, $one, $d : $t")} : $t")
+        val nonzero = self.def(s"arith.cmpi ne, $r, $zero : $t")
+        val differ = self.def(s"arith.cmpi slt, ${self.def(s"arith.xori $r, $d : $t")}, $zero : $t")
+        val moved = self.def(s"arith.andi $nonzero, $differ : i1")
+
+        self.def(s"arith.select $moved, ${self.def(s"arith.addi $r, $d : $t")}, $r : $t")
+
+    // `modulo(a, p)` of reals at `bits` bits, as gfortran computes it: `fmod`'s remainder, which is
+    // exact, with `p` added where its sign differs from `p`'s, and a zero given `p`'s sign. A `real16`
+    // computes in `real64`, where the one addition of two halves is exact, and rounds once.
+    real_modulo(*self, a: string, p: string, bits: int) -> string
+        val at = if bits == 16 then 64 else bits
+        val f = s"f$at"
+        val x = if bits == 16 then self.def(s"arith.extf $a : f16 to f64") else a
+        val y = if bits == 16 then self.def(s"arith.extf $p : f16 to f64") else p
+        val zero = self.real_const(0.0, at)
+        val r = self.def(s"arith.remf $x, $y : $f")
+        val differ = self.def(s"arith.xori ${self.def(s"arith.cmpf olt, $r, $zero : $f")}, ${self.def(s"arith.cmpf olt, $y, $zero : $f")} : i1")
+        val moved = self.def(s"arith.select $differ, ${self.def(s"arith.addf $r, $y : $f")}, $r : $f")
+        val is_zero = self.def(s"arith.cmpf oeq, $r, $zero : $f")
+        val v = self.def(s"arith.select $is_zero, ${self.def(s"math.copysign $zero, $y : $f")}, $moved : $f")
+        val out = if bits == 16 then self.def(s"arith.truncf $v : f64 to f16") else v
+
+        self.fpe_check(out, a, p, bits)
 
     // An integer of `bits` bits widened to 64 by its signedness.
     widen64(*self, v: string, bits: int, signed: bool) -> string =

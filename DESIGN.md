@@ -812,7 +812,7 @@ threshold it is a BLAS call (§10.4).
 
 **Every prelude scalar math function is elemental** — `sqrt`, `exp`, `log`, `sin`, `cos`, `tan` and
 the rest of the elementary functions, `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `sign`,
-`hypot`, `atan2`, `fma`, `min`, `max`: applied to an array of any rank it applies element by element and
+`hypot`, `atan2`, `fma`, `min`, `max`, `modulo`, `merge`: applied to an array of any rank it applies element by element and
 returns an array of the same shape, and it fuses into the surrounding expression's loop nest like an
 operator (§7.1). `sqrt(a) + 1.0` is one loop. Arguments of a several-argument elemental function broadcast
 as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps every element.
@@ -828,6 +828,15 @@ single rounding; write the two operations. Under `--fpe-trap` it traps an overfl
 result from three finite operands) and an invalid operation (a NaN from three non-NaN operands).
 `fma` is the only fused operation: `a * b + c` is never contracted (§2.5).
 
+**`merge(t, f, mask)` is Fortran's `MERGE`**: `t` where the mask is true, `f` elsewhere, over
+numbers and bools. Its three arguments broadcast as an operator's do; `t` and `f` meet as `+`'s
+operands do, `f` converted to `t`'s unit; both are computed whatever the mask holds. It can neither
+trap nor print, so it fuses wherever its operands do. **`modulo(a, p)` is Fortran's `MODULO`**: the
+sign of `p`, over integers and reals, where `%` is `MOD` with the sign of `a`. An integer `p` of 0
+traps (`` `modulo` by zero ``) as `%` does. A real one is gfortran's: `fmod`'s exact remainder, `p`
+added once where the signs differ, a zero result taking `p`'s sign; the one addition rounds at the
+width (a `real16` adds exactly in `real64` and rounds once). Units as for `min` (§13.4).
+
 **A user function opts in with `@elemental`**: `@elemental def f(x: real) = …`. Its body obeys the
 parallel-body rules of §9.4 — no `inout` parameters, no writes to module variables, no I/O except
 `print` and `eprint`, no `parallel`, directly or through anything it calls — so `parallel` may
@@ -840,7 +849,12 @@ a compile error that suggests `@elemental` or `map`.
 ### 7.4 Reductions
 
 The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `minval`, `maxval`,
-`minloc`, `maxloc`, `any`, `all`, `count`, `norm2`, `dot`.
+`minloc`, `maxloc`, `findloc`, `any`, `all`, `count`, `norm2`, `dot`.
+
+- `findloc(a, value)` is Fortran 2008's `FINDLOC`: the index of the first element equal to `value`
+  in storage order, a tuple of indices for rank ≥ 2, `0` (every index `0`) where there is none.
+  `value` is compared as `==`'s right operand is, converted to the elements' unit; the named
+  `back = true` (a `bool`, computed or written) takes the last match. Numbers and bools.
 
 - `minloc(a)` and `maxloc(a)` return the index of the extreme element, a tuple of indices for rank
   ≥ 2; ties go to the first in storage order. A `nan` is never the extreme unless every element is
@@ -852,7 +866,7 @@ The prelude's whole-array reductions take Fortran's names: `sum`, `product`, `mi
   beats). The elemental `min` and `max` (§7.3), and a `min` or `max` operator of a `parallel for`
   `reduce` clause (§9.2), are not reductions of an array and carry a `nan` through.
 - **Every reduction takes a named `dim =` argument**, reducing along that axis to rank R − 1:
-  `sum(m, dim = 2)`, `maxval(a, dim = 1)`, `maxloc(a, dim = 1)`.
+  `sum(m, dim = 2)`, `maxval(a, dim = 1)`, `maxloc(a, dim = 1)`, `findloc(a, x, dim = 1)`.
 - `min` and `max` are elemental (§7.3), never reductions: `max(a, 0.0)` clamps, and the extremes of
   one array are `minval` / `maxval`.
 - `norm2` is the Euclidean norm, the Frobenius norm of a matrix, and is real: an integer array is
@@ -2792,6 +2806,8 @@ unit psi = lbf / in^2
 - `sqrt` halves every exponent: `sqrt(a)` for `a: real<m^2>` is `real<m>`.
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
+  `modulo` does the same and keeps its first argument's unit; `merge` converts `f` to `t`'s, and
+  `findloc` converts the value it seeks to the elements'.
   `sign(x)` and `arg(z)` return a plain number: the sign is −1, 0 or 1 whatever `x` measures, and
   `arg(z)` is in radians.
   `atan2(y, x)` takes two values of one dimension and returns an angle, a `real<rad>`: the unit

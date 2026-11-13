@@ -80,6 +80,8 @@ of its argument (an integer argument to a transcendental function gives `real64`
 | `round(x)` | round to nearest, halves away from zero | `ANINT` |
 | `trunc(x)` | round toward zero | `AINT` |
 | `min(x, y, …)`, `max(x, y, …)` | the smallest, the largest of the arguments, element by element | `MIN`, `MAX` |
+| `modulo(a, p)` | `a` modulo `p`, with the sign of `p`, over integers and reals; an integer `p` of 0 traps | `MODULO` |
+| `merge(t, f, mask)` | `t` where `mask` is true and `f` elsewhere, element by element; numbers or bools | `MERGE` |
 
 A `real32` argument is computed in `real32` arithmetic, never widened to `real64` and rounded back.
 For a `real16` argument, `sqrt` is computed natively and the transcendental functions compute in
@@ -103,6 +105,19 @@ val c = max(a, 0.0)          // clamps every element at zero
 `min` and `max` are elemental over their arguments: a scalar argument is broadcast, and arrays must
 agree in shape. They are not reductions — `max(a)` of one array is a compile error. The extremes of
 an array are `minval` and `maxval` (§12.6).
+
+`merge(t, f, mask)` broadcasts in the same way: any of its three arguments may be a scalar, and the
+arrays must agree in shape — a compile error when both shapes are static, a trap otherwise. `t` and
+`f` meet in one type as the operands of `+` do, `f` converted to `t`'s unit, and both are computed
+whatever the mask holds, as in Fortran. Choosing between strings or other values is
+`if c then a else b`.
+
+`modulo(a, p)` has the sign of `p`, where `%` has the sign of `a` (Fortran's `MOD`):
+`modulo(-7, 3)` is `2` and `-7 % 3` is `-1`. An integer `p` of 0 traps with "`modulo` by zero", as
+`%` does. For reals it is `a - floor(a / p) * p` computed exactly, as gfortran computes it: the
+remainder `fmod` gives, plus `p` once where its sign differs from `p`'s, and a zero result has the
+sign of `p` (`modulo(-0.0, 3.0)` is `0.0`, `modulo(0.0, -3.0)` is `-0.0`). With units, `a` and `p`
+share a dimension, `p` is converted to `a`'s unit, and the result is in it.
 
 A user function is elemental when it is marked `@elemental` (see
 [Functions](/spec/06-functions/)). Applying an unmarked scalar function to an array is a compile
@@ -204,6 +219,7 @@ flatten(m)            // [1.0, 4.0, 2.0, 5.0, 3.0, 6.0] — column-major
 | `minval(a: [T; R]): T` | the smallest element (ordered types); a `nan` is passed over, and the result is `nan` only where every element is one | `MINVAL(a)` |
 | `maxval(a: [T; R]): T` | the largest element (ordered types); a `nan` is passed over, and the result is `nan` only where every element is one | `MAXVAL(a)` |
 | `minloc(a)`, `maxloc(a)` | the index of the smallest, the largest element; a tuple of indices for rank ≥ 2; ties go to the first in storage order; a `nan` is passed over, and where every element is one the location is the first | `MINLOC(a)`, `MAXLOC(a)` |
+| `findloc(a, value)` | the index of the first element equal to `value`, in storage order; a tuple of indices for rank ≥ 2; `0` (every index `0`) where there is none; `back = true` takes the last | `FINDLOC(a, value)` |
 | `any(a: [bool; R])`, `all(a: [bool; R])` | whether any, every element is `true` | `ANY(a)`, `ALL(a)` |
 | `count(a: [bool; R]): integer` | the number of `true` elements | `COUNT(a)` |
 | `norm2(a)` | the Euclidean norm √(Σ \|aₖ\|²); the Frobenius norm of a matrix | `NORM2(a)` |
@@ -230,6 +246,21 @@ count(m > 2)           // 4
 `dot` conjugates its first argument when it is complex, as Fortran's `DOT_PRODUCT` and BLAS's
 `zdotc` do, so `dot(z, z)` is the squared norm of `z`. `@` never conjugates: `x @ y` of two complex
 vectors is Σ xₖ yₖ.
+
+`findloc(a, value)` compares as `a[k] == value` would: `value` meets the elements in their common
+type, a literal adopting the element type, and with units it is converted to the elements' unit; a
+`nan` is never found, and `-0.0` finds `0.0`. It takes numbers and bools. Besides `dim =` it takes a
+named `back =`, a `bool` that may be computed, and with `true` the location is the last match
+instead of the first:
+
+```nex
+val v = [3, 1, 4, 1, 5]
+findloc(v, 1)                // 2
+findloc(v, 1, back = true)   // 4
+findloc(v, 7)                // 0
+findloc(m, 5)                // (2, 2)
+findloc(m, 2, dim = 2)       // [2, 0]
+```
 
 `min` and `max` are not reductions: they are elemental over their arguments (§12.2). The extremes of
 an array are `minval` and `maxval`.

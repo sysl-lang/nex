@@ -113,6 +113,22 @@ impl Emitter
 
             return v
 
+        // Both values are computed, then the mask picks one.
+        if name == "merge"
+            val x = self.ex(args[0])
+            val y = self.ex(args[1])
+            val mask = self.ex(args[2])
+
+            return self.def(s"arith.select $mask, $x, $y : ${self.ty(span, t)}")
+
+        if name == "modulo"
+            val a = self.ex(args[0])
+            val p = self.ex(args[1])
+
+            return base_of(t) match
+                Int(bits, signed) -> self.int_modulo(a, p, bits, signed)
+                _ -> self.real_modulo(a, p, bits_of(base_of(t)))
+
         if name == "fma"
             val bits = bits_of(base_of(t))
             val p = self.ex(args[0])

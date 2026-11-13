@@ -33,6 +33,19 @@ point_distance_one_generic()
     assert(m.contains("ins(%v23, %v9, %v28, %v18 : tensor<?xf64>, tensor<?xf64>, tensor<?xf64>, tensor<?xf64>)"), m)
     assert(m.contains("math.sqrt"), m)
 
+@test("merge and a real modulo fuse into the expression around them, the mask a comparison: one linalg.generic")
+merge_modulo_one_generic()
+    val b = bench()
+    val program = "def main() =\n  val x = [1.0, -2.0, 3.0]\n  val y = [4.0, 5.0, 6.0]\n  var d: [real] = zeros(3)\n  d = merge(x * 2.0, modulo(y, -4.0), x > 0.0) + 1.0\n  print(d)\n"
+    val m = emitted(program).unwrap()
+    val out = ran(b, program)
+
+    finish(b)
+    assert_eq(occurrences(m, "linalg.generic"), 1)
+    assert(m.contains("arith.select"), m)
+    assert(m.contains("arith.remf"), m)
+    assert_eq(out.text, "[3.0, -2.0, 7.0]\n")
+
 @test("sum(x * y), dot(x, y) and sqrt(sum(x * x)) never build the products: no linalg.generic at all")
 reductions_fused()
     val b = bench()

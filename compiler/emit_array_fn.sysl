@@ -446,6 +446,8 @@ impl Emitter
     // -- reductions -------------------------------------------------------------------------------
 
     reduction(*self, e: TExpr, name: string, args: Buf[TExpr], dim: Option[TExpr]) -> string
+        if name == "findloc" then return self.find_location(e, args, dim)
+
         val a = args[0]
 
         if (name == "minloc" || name == "maxloc") && dim.is_none()
@@ -511,7 +513,7 @@ impl Emitter
 
         dim match
             None -> self.reduce_flat(e.span, name, v, vt, e.ty)
-            Some(d) -> self.reduce_along(e, name, v, vt, d)
+            Some(d) -> self.reduce_along(e, name, v, vt, d, buf())
 
     // `name` over every element of `f`, of array type `ft` at any rank, in storage order, giving a `t`.
     reduce_flat(*self, span: Span, name: string, f: string, ft: Ty, t: Ty) -> string
@@ -824,13 +826,14 @@ impl Emitter
         _ -> self.def("arith.constant false")
 
     // `sum(a, dim = k)` and the like: each lane along axis `k` reduced. A `k` computed at run time
-    // that is not an axis traps.
-    reduce_along(*self, e: TExpr, name: string, v: string, vt: Ty, d: TExpr) -> string
+    // that is not an axis traps. `sought` is what `findloc` looks for and its `back`, and empty for
+    // the others.
+    reduce_along(*self, e: TExpr, name: string, v: string, vt: Ty, d: TExpr, sought: Buf[string]) -> string
         val r = rank_of(vt)
 
         *d.kind match
             TLiteral(IntVal(x), _) ->
-                if x >= 1 && x <= i128(r) then return if r == 1 then self.reduce_whole(e.span, name, v, vt, e.ty) else self.reduce_lanes(e, name, v, vt, usize(x))
+                if x >= 1 && x <= i128(r) then return if r == 1 then self.reduce_whole(e.span, name, v, vt, e.ty, sought) else self.reduce_lanes(e, name, v, vt, usize(x), sought)
             _ -> ()
 
         val k = self.widen64(self.ex(d), bits_of(d.ty), is_signed(d.ty))
@@ -838,7 +841,7 @@ impl Emitter
 
         self.trap_if(outside, NOT_AN_AXIS)
 
-        if r == 1 then return self.reduce_whole(e.span, name, v, vt, e.ty)
+        if r == 1 then return self.reduce_whole(e.span, name, v, vt, e.ty, sought)
 
         // One case per axis; where the trap is taken, the first axis's stands in.
         val tt = self.tensor_ty(e.span, e.ty)
@@ -849,18 +852,60 @@ impl Emitter
 
         for a in 1..r
             self.op(s"case $a {")
-            self.op(s"scf.yield ${self.reduce_lanes(e, name, v, vt, a)} : $tt")
+            self.op(s"scf.yield ${self.reduce_lanes(e, name, v, vt, a, sought)} : $tt")
             self.op("}")
 
         self.op("default {")
-        self.op(s"scf.yield ${self.reduce_lanes(e, name, v, vt, 1)} : $tt")
+        self.op(s"scf.yield ${self.reduce_lanes(e, name, v, vt, 1, sought)} : $tt")
         self.op("}")
         res
 
     // The reduction `name` of all of `v`, rank 1 or the lane of one, as a `t`.
-    reduce_whole(*self, span: Span, name: string, v: string, vt: Ty, t: Ty) -> string =
+    reduce_whole(*self, span: Span, name: string, v: string, vt: Ty, t: Ty, sought: Buf[string]) -> string =
         if name == "minloc" || name == "maxloc" then self.location(span, name, self.flat(span, v, vt), elem_of(vt), t)
+        elif name == "findloc" then self.found(span, self.flat(span, v, vt), elem_of(vt), sought[0], sought[1], t)
         else self.reduce_flat(span, name, v, vt, t)
+
+    // `findloc(a, value, back)` (DESIGN §7.4): the array, then the value and `back`, computed once,
+    // and the location of the value in all of `a` or along `dim =` in each lane.
+    find_location(*self, e: TExpr, args: Buf[TExpr], dim: Option[TExpr]) -> string
+        val a = args[0]
+        val v = self.ex(a)
+        var sought: Buf[string] = buf()
+
+        sought.push(self.ex(args[1]))
+        sought.push(self.ex(args[2]))
+
+        dim match
+            Some(d) -> self.reduce_along(e, "findloc", v, a.ty, d, sought)
+            None ->
+                if rank_of(a.ty) == 1 then return self.found(e.span, self.flat(e.span, v, a.ty), elem_of(a.ty), sought[0], sought[1], e.ty)
+
+                self.unflattened(e.span, self.found(e.span, self.flat(e.span, v, a.ty), elem_of(a.ty), sought[0], sought[1], INTEGER), v, a.ty, e.ty)
+
+    // The 1-based position in the rank-1 `f` of the first element equal to `x`, of the last where
+    // `back`, or 0, as a `t`. Every element is compared, so the loop has no exit: an element equal to
+    // `x` is taken where `back` is set or nothing has been found yet.
+    found(*self, span: Span, f: string, et: Ty, x: string, back: string, t: Ty) -> string
+        val ft = Ty.Array(et, dynamic_axes(1))
+        val ftt = self.tensor_ty(span, ft)
+        val n = self.dim(span, f, ft, 1)
+        val iv = self.fresh()
+        val at = self.fresh()
+        val r = self.fresh()
+        val zero = self.def("arith.constant 0 : i64")
+
+        self.op(s"$r = scf.for $iv = ${self.index_const(0)} to $n step ${self.index_const(1)} iter_args($at = $zero) -> (i64) {")
+
+        val y = self.def(s"tensor.extract $f[$iv] : $ftt")
+        val equal = self.binary(span, "==", y, x, et)
+        val open = self.def(s"arith.ori $back, ${self.def(s"arith.cmpi eq, $at, $zero : i64")} : i1")
+        val take = self.def(s"arith.andi $equal, $open : i1")
+        val k = self.def(s"arith.addi ${self.to_i64(iv)}, %one : i64")
+
+        self.op(s"scf.yield ${self.def(s"arith.select $take, $k, $at : i64")} : i64")
+        self.op("}")
+        self.convert(span, r, INTEGER, t, false)
 
     // The 1-based nex index, one per axis of `v` (of type `vt`), of the element at 1-based storage
     // position `k` (an integer), as the tuple `t`; every index 0 where `k` is.
@@ -883,7 +928,7 @@ impl Emitter
         self.make(self.ty(span, t), vals, tys)
 
     // Each lane along nex axis `k` (a rank-2-or-more `v`) reduced.
-    reduce_lanes(*self, e: TExpr, name: string, v: string, vt: Ty, k: usize) -> string
+    reduce_lanes(*self, e: TExpr, name: string, v: string, vt: Ty, k: usize, sought: Buf[string]) -> string
         val r = rank_of(vt)
 
         // The result's extents: every axis but `k`, nex order.
@@ -938,7 +983,7 @@ impl Emitter
 
         val lt = Ty.Array(elem_of(vt), dynamic_axes(1))
         val lane = self.def(s"tensor.extract_slice $v${self.slice_text(subs, offs, sizes, strides)} : ${self.tensor_ty(e.span, vt)} to ${self.tensor_ty(e.span, lt)}")
-        val x = self.reduce_whole(e.span, name, lane, lt, elem_of(t))
+        val x = self.reduce_whole(e.span, name, lane, lt, elem_of(t), sought)
         var idx: Buf[string] = buf()
 
         for iv in nest.ivs

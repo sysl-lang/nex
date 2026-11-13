@@ -87,7 +87,7 @@ fused_operands(e: TExpr) -> Buf[TExpr]
 // operation over whole arrays. Real and complex arithmetic is quiet without `--fpe-trap` (`fpe`), but
 // complex division, which traps on a zero divisor; a comparison is quiet over any numbers; integer
 // arithmetic traps on overflow, a conversion that checks its range traps, and an `@elemental`
-// function may trap or print, so none of them is.
+// function may trap or print, so none of them is. `merge` is as quiet as its three operands.
 quiet(s: TExpr, fpe: bool) -> bool = *s.kind match
     TChainOperand(_) -> true
     TPromote(v) -> quiet(v, fpe) && (is_floating(s.ty) && !fpe || is_int(base_of(s.ty)) && is_int(base_of(v.ty)))
@@ -104,7 +104,14 @@ quiet(s: TExpr, fpe: bool) -> bool = *s.kind match
         if !is_floating(a.ty) || !is_floating(b.ty) then return false
 
         o == "+" || o == "-" || o == "*" || o == "/" && is_real(base_of(b.ty)) && is_real(base_of(a.ty))
-    TBuiltin(_, args) ->
+    TBuiltin(name, args) ->
+        // `merge` only picks one of two values it was given, which cannot trap.
+        if name == "merge"
+            for a in args
+                if !quiet(a, fpe) then return false
+
+            return true
+
         if fpe || !is_floating(s.ty) then return false
 
         for a in args

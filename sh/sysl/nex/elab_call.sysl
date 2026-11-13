@@ -24,11 +24,11 @@ private val REAL_FUNCTIONS = ["sqrt", "cbrt", "exp", "log", "log2", "log10", "si
 // Those of them that also take a complex and give one.
 private val COMPLEX_FUNCTIONS = ["sqrt", "exp", "log", "sin", "cos", "tan"]
 
-private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "fma", "min", "max", "assert", "assert_eq", "to_real", "to_integer", "to_complex"]
+private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "fma", "min", "max", "merge", "modulo", "assert", "assert_eq", "to_real", "to_integer", "to_complex"]
 
 // The prelude's array functions (DESIGN §4.2, §4.3, §7.4), which come with arrays, and the
 // assertions over arrays and lambdas.
-private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "flatten", "transpose", "shape", "rows", "cols", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "to_integers", "to_bytes", "assert_approx", "assert_traps"]
+private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "findloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "flatten", "transpose", "shape", "rows", "cols", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "to_integers", "to_bytes", "assert_approx", "assert_traps"]
 
 private among(name: string, set: []const string) -> bool
     for s in set
@@ -544,6 +544,38 @@ impl Elab
         texpr(span, ret, TBuiltin("fma", out))
     end fused_multiply_add
 
+    // `merge(t, f, mask)`: `t` where the mask is true and `f` elsewhere, element by element (DESIGN
+    // §7.3). `t` and `f` meet in one type as `+` operands do, `f` converted to `t`'s unit, and any of
+    // the three may be a scalar that broadcasts. Both values are computed whatever the mask says.
+    merged(*self, span: Span, args: Buf[Expr]) -> TExpr
+        if args.len() != 3 then return self.arity(span, "merge", "the value where true, the value where false and the mask")
+
+        var pair: Buf[Expr] = buf()
+
+        pair.push(args[0])
+        pair.push(args[1])
+
+        var out = self.unified(span, "merge", pair)
+        val ty = elem_of(out[0].ty)
+        val mask = self.infer(args[2])
+
+        if is_error(ty) || is_error(mask.ty) then return self.invalid(span)
+
+        if !ty_eq(elem_of(mask.ty), Bool)
+            self.fail(args[2].span, s"`merge`'s mask must be bool or [bool], but this is ${self.shown(mask)}")
+            return self.invalid(span)
+
+        if !is_number_ty(ty)
+            self.fail(span, s"`merge` chooses between numbers or bools; these are ${show_ty(ty)}: choose between other values with `if c then a else b`")
+            return self.invalid(span)
+
+        out.push(mask)
+
+        if any_array(out) then return self.elemental(span, "merge", out, ty)
+
+        texpr(span, ty, TBuiltin("merge", out))
+    end merged
+
     builtin(*self, span: Span, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
         for a in args
             *a.kind match
@@ -584,6 +616,25 @@ impl Elab
             return texpr(span, ty, TBuiltin(name, out))
 
         if name == "fma" then return self.fused_multiply_add(span, args)
+        if name == "merge" then return self.merged(span, args)
+
+        // `modulo(a, p)` has the sign of `p`, where `%` has the dividend's (DESIGN §7.3); `p` is
+        // converted to `a`'s unit as `min` converts its second argument.
+        if name == "modulo"
+            if args.len() != 2 then return self.arity(span, name, "two values")
+
+            val out = self.unified(span, name, args)
+            val ty = elem_of(out[0].ty)
+
+            if is_error(ty) then return self.invalid(span)
+
+            if !is_ordered(base_of(ty))
+                self.fail(span, s"`modulo` takes integers or reals; these are ${show_ty(ty)}")
+                return self.invalid(span)
+
+            if any_array(out) then return self.elemental(span, name, out, ty)
+
+            return texpr(span, ty, TBuiltin(name, out))
 
         if name == "atan2" || name == "hypot"
             if args.len() != 2 then return self.arity(span, name, "two values")

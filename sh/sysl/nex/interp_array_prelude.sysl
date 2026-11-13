@@ -105,6 +105,19 @@ private[nex] location(better: Op2, start: Value, xs: Buf[Value]) -> Result[long,
 
     Ok(at)
 
+// The position (from 1) of the first element of `xs` that `eq` finds equal to `sought`, or of the last
+// where `last`; 0 where none is.
+private[nex] found(eq: Op2, sought: Value, last: bool, xs: Buf[Value]) -> Result[long, Signal]
+    var at: long = 0
+
+    for k in 0..<xs.len()
+        if bool_of(eq(xs[k], sought)?)
+            at = long(k) + 1
+
+            if !last then return Ok(at)
+
+    Ok(at)
+
 // Whether `v` is a real `nan`.
 private[nex] nan_value(v: Value) -> bool = v match
     VReal(x) -> x.is_nan()
@@ -154,6 +167,8 @@ impl Interp
         val t = e.ty
         val r = rank_of(a.ty)
         val loc = name == "minloc" || name == "maxloc"
+
+        if name == "findloc" then return self.find_location(e, args, dim)
 
         if loc && dim.is_none()
             val v = self.lent(a)
@@ -270,6 +285,47 @@ impl Interp
 
                     lanes(x, usize(axis - 1), lane, elem_of(t))
     end reduction
+
+    // `findloc(a, value, back)`: where `value` is in `a`, in storage order, as `minloc` gives a
+    // location; along `dim =`, in each lane. The array, the value, `back` and the axis are computed
+    // in that order.
+    find_location(*self, e: TExpr, args: Buf[TExpr], dim: Option[TExpr]) -> Code
+        val et = elem_of(args[0].ty)
+        val t = e.ty
+        val r = rank_of(args[0].ty)
+        val v = self.lent(args[0])
+        val want = self.ex(args[1])
+        val back = self.ex(args[2])
+        val lane_t = if r == 1 then t else elem_of(t)
+        val eq = self.operator(e.span, "==", et, et) match
+            Some(f) -> f
+            None -> return self.later(e.span, s"`findloc` of ${show_ty(et)}")
+        val axis_code: Option[Code] = dim match
+            Some(d) -> Some(self.ex(d))
+            None -> None
+        val signed = dim match
+            Some(d) -> is_signed(base_of(d.ty))
+            None -> false
+
+        (c) ->
+            val x = arr_of(v(c)?)
+            val sought = want(c)?
+            val last = bool_of(back(c)?)
+
+            axis_code match
+                None ->
+                    val k = found(eq, sought, last, elements(x))?
+
+                    Ok(if r == 1 then int_value(k, t) else unflattened(k, x.ext))
+                Some(f) ->
+                    val axis = long.wrap(wide(int_of(f(c)?), signed))
+                    val lane: &Fn(&Arr) -> Answer = (a) -> Ok(int_value(found(eq, sought, last, elements(a))?, lane_t))
+
+                    if ulong.wrap(axis - 1) >= ulong(r) then return trapped(NOT_AN_AXIS)
+                    if r == 1 then return lane(x)
+
+                    lanes(x, usize(axis - 1), lane, elem_of(t))
+    end find_location
 
     // How an element of type `et` beats the best so far for `minloc` or `maxloc`, and the best to
     // start from.
