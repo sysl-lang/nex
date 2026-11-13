@@ -35,8 +35,8 @@ private one_of(name: string, names: []const string) -> bool
     false
 
 // Whether `name` is one of Fortran's inquiry functions, whose value is a constant of its argument's
-// type.
-is_inquiry(name: string) -> bool = name == "epsilon" || name == "huge" || name == "tiny"
+// type: `bit_size` of an integer's (spec §12.2.2) beside the numeric ones.
+is_inquiry(name: string) -> bool = name == "epsilon" || name == "huge" || name == "tiny" || name == "bit_size"
 
 // Whether `name` is a special function, a representation function or an inquiry function.
 is_special(name: string) -> bool =
@@ -50,9 +50,9 @@ real_tiny(bits: int) -> real = if bits == 64 then 2.2250738585072014e-308 elif b
 
 // The value of inquiry function `name` for type `t`, a real or (for `huge`) an integer: `epsilon` is
 // `2^(1-p)` for a significand of `p` digits, `huge` the largest finite value, `tiny` the smallest
-// positive normal one.
+// positive normal one; `bit_size` the integer's number of bits.
 inquiry_value(name: string, t: Ty) -> Lit = base_of(t) match
-    Int(bits, signed) -> IntVal(if signed then (i128(1) << (bits - 1)) - 1 else (i128(1) << bits) - 1)
+    Int(bits, signed) -> IntVal(if name == "bit_size" then i128(bits) elif signed then (i128(1) << (bits - 1)) - 1 else (i128(1) << bits) - 1)
     Real(bits) ->
         if name == "tiny" then RealVal(real_tiny(bits))
         elif name == "epsilon" then RealVal(if bits == 64 then 2.220446049250313e-16 elif bits == 32 then 1.1920928955078125e-07 else 0.0009765625)

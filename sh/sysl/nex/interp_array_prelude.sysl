@@ -352,6 +352,21 @@ impl Interp
 
             return Some(Red(false, VBool(all), f, f, same, false, VBool(all)))
 
+        // `iany`, `iall` and `iparity` combine the words, which stay as their type holds them; `iall`
+        // starts from every bit set.
+        if is_bit_reduction(name)
+            val (bits, signed) = base_of(t) match
+                Int(b, s) -> (b, s)
+                _ -> return None
+            val logic = if name == "iany" then "ior" elif name == "iall" then "iand" else "ieor"
+            val start = VInt(wrapped(if name == "iall" then word_mask(bits) else 0, bits, signed))
+            val f: Op2 = (a, b) ->
+                val x = wide(int_of(a), signed) & word_mask(bits)
+
+                Ok(VInt(wrapped(bit_word(logic, x, wide(int_of(b), signed) & word_mask(bits), 0, bits), bits, signed)))
+
+            return Some(Red(false, start, f, f, same, false, start))
+
         if name == "minval" || name == "maxval"
             val high = name == "maxval"
 

@@ -28,6 +28,11 @@ val REAL_OVERFLOW = "floating-point overflow"
 
 val ZERO_STEP = "a `for` step of 0"
 
+// A bit function's shift count, or its bit position or field, outside the word (spec §12.2.2).
+bit_shift_message(name: string) -> string = s"`$name`: shift count out of range"
+
+bit_position_message(name: string) -> string = s"`$name`: bit position out of range"
+
 // Arrays (DESIGN §3–§7).
 val INDEX_OUT_OF_BOUNDS = "index out of bounds"
 val SLICE_OUT_OF_BOUNDS = "slice out of bounds"

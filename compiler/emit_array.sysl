@@ -1036,8 +1036,9 @@ impl Emitter
         if self.par_kernel || !fusible(e) then return false
 
         var leaves: Buf[TExpr] = buf()
+        val scalar = fused_scalar(e, &leaves)
 
-        quiet(fused_scalar(e, &leaves), self.fpe_trap)
+        quiet(scalar, self.fpe_trap, leaves)
 
     // The leaves of the fusible `e` evaluated in source order into `vals`, each operation's array
     // operands checked to agree in shape at the point the operation alone checks them (after its

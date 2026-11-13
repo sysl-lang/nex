@@ -437,11 +437,16 @@ private[nex] elemental_kernel(name: string, ets: Buf[Ty], t: Ty, arrays: Buf[boo
             if bits == 16 then (x, y) -> reals2[f16](x, y, xa, ya, g) elif bits == 32 then (x, y) -> reals2[f32](x, y, xa, ya, g)
             else (x, y) -> reals2[real](x, y, xa, ya, g)
         Int(_, _) ->
-            if name != "min" && name != "max" then return None
+            if name != "min" && name != "max" && !is_bit_logic(name) then return None
 
             val low = name == "min"
-            // The first where it is the lower (for `min`), else the second, as the scalar `min` picks.
-            val g: Int2 = (p, q) -> Ok(if (p < q) == low then p else q)
+            // The first where it is the lower (for `min`), else the second, as the scalar `min` picks;
+            // the bits of two values of one type, each sign- or zero-extended as its type is, combine
+            // into the value of that type the bits make.
+            val g: Int2 = if name == "iand" then (p, q) -> Ok(p & q)
+                          elif name == "ior" then (p, q) -> Ok(p | q)
+                          elif name == "ieor" then (p, q) -> Ok(p ^ q)
+                          else (p, q) -> Ok(if (p < q) == low then p else q)
 
             et match
                 Int(8, true) -> (x, y) -> ints2[i8](x, y, xa, ya, g)

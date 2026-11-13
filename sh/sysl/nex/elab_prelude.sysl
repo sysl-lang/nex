@@ -15,10 +15,10 @@ module sh.sysl.nex
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
-private val REDUCTIONS = ["sum", "product", "minval", "maxval", "minloc", "maxloc", "findloc", "any", "all", "count", "norm2", "dot"]
+private val REDUCTIONS = ["sum", "product", "minval", "maxval", "minloc", "maxloc", "findloc", "any", "all", "count", "iany", "iall", "iparity", "norm2", "dot"]
 
 // The prelude functions an array of a rank parameter's rank may be given.
-private val RANK_GENERIC = ["sum", "product", "minval", "maxval", "any", "all", "count", "norm2", "map", "extent", "size", "rank", "flatten"]
+private val RANK_GENERIC = ["sum", "product", "minval", "maxval", "any", "all", "count", "iany", "iall", "iparity", "norm2", "map", "extent", "size", "rank", "flatten"]
 
 private is_reduction(name: string) -> bool
     for r in REDUCTIONS
@@ -404,6 +404,12 @@ impl Elab
             if !ty_eq(e, Bool) then need = "bools"
 
             per = INTEGER
+        elif is_bit_reduction(name)
+            if has_unit(elem_of(a.ty))
+                self.fail(pos[0].span, s"`${name}` works on the bits of integers, which carry no unit, and this is ${self.shown(a)}; strip the unit and convert: `${name}(to_integer(strip(a)))`")
+                return self.invalid(span)
+
+            if !is_int(e) then need = "integers"
         else
             // `norm2`: a real or complex array, an integer one widened to `real64`.
             if is_int(e)

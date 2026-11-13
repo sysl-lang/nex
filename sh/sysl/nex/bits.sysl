@@ -1,0 +1,133 @@
+module sh.sysl.nex
+
+// Fortran's bit intrinsics (spec §12.2.2), named once here for both engines, and what each computes
+// on the bits of an integer.
+//
+// **They work on the two's-complement bits of a word of `bit_size` bits and never overflow**: they
+// are bit operations, not arithmetic, so `ishft(int8(1), 7)` is -128 and no overflow trap is raised.
+// A word is held here as an unsigned value below `2^bits`, the caller cutting the result back to the
+// type (`wrapped`).
+//
+// **Bits are numbered from 0 at the least significant end**, as Fortran numbers them. A shift count,
+// bit position or field that does not fit the word traps; within it, a shift by the whole word gives 0
+// (or every bit the sign bit, for `shifta`) and a circular shift by it leaves the word as it was.
+
+// The elemental bit functions.
+val BIT_FUNCTIONS = ["iand", "ior", "ieor", "ishft", "ishftc", "shiftl", "shiftr", "shifta", "btest", "ibset", "ibclr", "ibits", "popcnt", "poppar", "leadz", "trailz"]
+
+// The reductions of an integer array by its bits: `iany` ORs its elements, `iall` ANDs them and
+// `iparity` XORs them.
+val BIT_REDUCTIONS = ["iany", "iall", "iparity"]
+
+private one_of(name: string, names: []const string) -> bool
+    for n in names
+        if n == name then return true
+
+    false
+
+is_bit_function(name: string) -> bool = one_of(name, BIT_FUNCTIONS[..])
+
+is_bit_reduction(name: string) -> bool = one_of(name, BIT_REDUCTIONS[..])
+
+// Whether `name` is `iand`, `ior` or `ieor`, whose two words meet as `+`'s operands do.
+is_bit_logic(name: string) -> bool = name == "iand" || name == "ior" || name == "ieor"
+
+// Whether `name` counts the bits of its one word and gives an `integer`.
+is_bit_count(name: string) -> bool = name == "popcnt" || name == "poppar" || name == "leadz" || name == "trailz"
+
+// Whether `name`'s second argument is a shift count.
+is_bit_shift(name: string) -> bool = name == "ishft" || name == "ishftc" || name == "shiftl" || name == "shiftr" || name == "shifta"
+
+// Whether `name`'s second argument is a bit position (and `ibits`'s third a field length).
+is_bit_position(name: string) -> bool = name == "btest" || name == "ibset" || name == "ibclr" || name == "ibits"
+
+// The number of arguments `name` takes.
+bit_arity(name: string) -> usize = if is_bit_count(name) then 1 elif name == "ibits" then 3 else 2
+
+// Whether `n` is a shift count `name` takes on a word of `bits` bits: `ishft` and `ishftc` shift either
+// way by at most the word, `shiftl`, `shiftr` and `shifta` by `0` to the word.
+shift_in_range(name: string, n: i128, bits: int) -> bool =
+    if name == "ishft" || name == "ishftc" then n >= -i128(bits) && n <= i128(bits) else n >= 0 && n <= i128(bits)
+
+// Whether bit `pos`, and the field of `len` bits from it for `ibits` (`len` 1 for the others), lies in
+// a word of `bits` bits.
+position_in_range(name: string, pos: i128, len: i128, bits: int) -> bool =
+    if name == "ibits" then pos >= 0 && len >= 0 && pos + len <= i128(bits) else pos >= 0 && pos < i128(bits)
+
+// Every bit of a word of `bits` bits set.
+word_mask(bits: int) -> i128 = (i128(1) << bits) - 1
+
+// The number of bits set in `x`, a word.
+private ones(x: i128) -> i128
+    var n: i128 = 0
+    var w = x
+
+    while w != 0
+        n += w & 1
+        w = w >> 1
+
+    n
+
+// The number of bits from the least significant up to the first set one; `bits` for a zero word.
+private trailing(x: i128, bits: int) -> i128
+    if x == 0 then return i128(bits)
+
+    var n: i128 = 0
+
+    while (x >> n) & 1 == 0
+        n += 1
+
+    n
+
+// The number of bits from the most significant down to the first set one; `bits` for a zero word.
+private leading(x: i128, bits: int) -> i128
+    var n = i128(bits)
+    var w = x
+
+    while w != 0
+        n -= 1
+        w = w >> 1
+
+    n
+
+// Bit function `name` of the word `x` of `bits` bits and its counts or words `y` and `z`, each already
+// in range: the result's word, or for `btest` 1 or 0 and for the counting functions the count.
+bit_word(name: string, x: i128, y: i128, z: i128, bits: int) -> i128
+    val mask = word_mask(bits)
+    val b = i128(bits)
+
+    if name == "iand" then return x & y
+    if name == "ior" then return x | y
+    if name == "ieor" then return x ^ y
+    if name == "popcnt" then return ones(x)
+    if name == "poppar" then return ones(x) & 1
+    if name == "leadz" then return leading(x, bits)
+    if name == "trailz" then return trailing(x, bits)
+    if name == "btest" then return (x >> int(y)) & 1
+    if name == "ibset" then return x | (i128(1) << int(y))
+    if name == "ibclr" then return x & (mask ^ (i128(1) << int(y)))
+    if name == "ibits" then return (x >> int(y)) & ((i128(1) << int(z)) - 1)
+
+    if name == "ishft"
+        if y >= b || y <= -b then return 0
+
+        return if y >= 0 then (x << int(y)) & mask else x >> int(-y)
+
+    if name == "ishftc"
+        val s = int(((y % b) + b) % b)
+
+        return if s == 0 then x else ((x << s) | (x >> (bits - s))) & mask
+
+    if y == b
+        if name != "shifta" || (x >> (bits - 1)) & 1 == 0 then return 0
+
+        return mask
+
+    val n = int(y)
+
+    if name == "shiftl" then return (x << n) & mask
+    if name == "shiftr" || (x >> (bits - 1)) & 1 == 0 then return x >> n
+
+    // `shifta` of a word whose sign bit is set: the vacated bits are copies of it.
+    (x >> n) | (mask ^ (mask >> n))
+end bit_word

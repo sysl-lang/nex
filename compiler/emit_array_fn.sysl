@@ -472,7 +472,7 @@ impl Emitter
 
                 scalar = texpr(e.span, elem_of(e.ty), TBinary("*", scalar, fused_scalar(args[1], &leaves)))
 
-            if quiet(scalar, self.fpe_trap)
+            if quiet(scalar, self.fpe_trap, leaves)
                 var f = Fused(leaves, scalar, buf(), "", None, false, buf())
 
                 f.first = self.fused_leaves(a, &f)
@@ -750,6 +750,9 @@ impl Emitter
         if name == "maxval" then return self.min_max_number("max", a, b, t)
         if name == "any" then return self.def(s"arith.ori $a, $b : i1")
         if name == "all" then return self.def(s"arith.andi $a, $b : i1")
+        if name == "iany" then return self.def(s"arith.ori $a, $b : ${self.ty(span, t)}")
+        if name == "iall" then return self.def(s"arith.andi $a, $b : ${self.ty(span, t)}")
+        if name == "iparity" then return self.def(s"arith.xori $a, $b : ${self.ty(span, t)}")
 
         self.unsupported(span, s"the reduction `$name`")
 
@@ -780,6 +783,7 @@ impl Emitter
         if name == "product" then return self.one_or_zero(span, t, true)
         if name == "all" then return self.def("arith.constant true")
         if name == "any" then return self.def("arith.constant false")
+        if name == "iall" then return self.int_const("-1", bits_of(base_of(t)))
 
         if name == "minval" || name == "maxval"
             val low = name == "maxval"
