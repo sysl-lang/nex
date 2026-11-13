@@ -1,0 +1,85 @@
+// Fortran's bit functions over arrays (spec §12.2.2): element by element with scalars broadcast,
+// fused into whole-array expressions, over views, inside a `parallel for`; and the reductions `iany`,
+// `iall` and `iparity` over the whole array and along `dim =`, an empty one giving 0, all ones and 0.
+// Every value was checked against gfortran's.
+
+def main() =
+  val a: [int8] = [-100, 77, 0, -1, 127, -128]
+  val w: [int32] = [-123456789, 987654321, 0, 1, -1, 2147483647]
+  val m: [int64; :, :] = reshape([-1234567890123456789, 81985529216486895, 255, -256, 4096, -1], (2, 3))
+  val u: [uint64] = [18364758544493064720, 1311768467294899695, 0, 18446744073709551615]
+  val sh: [int32] = [-3, -1, 0, 1, 2, 3]
+
+  print("elemental")
+  print(iand(a, 15))
+  print(ior(a, int8(-128)))
+  print(ieor(a, a))
+  print(ishft(a, 1))
+  print(ishft(w, sh))
+  print(ishftc(a, -2))
+  print(shifta(w, 4))
+  print(shiftr(w, 4))
+  print(shiftl(u, 4))
+  print(btest(a, 7))
+  print(ibset(a, 0))
+  print(ibclr(u, 63))
+  print(ibits(w, 8, 8))
+  print(popcnt(a))
+  print(poppar(w))
+  print(leadz(u))
+  print(trailz(a))
+  print(popcnt(m))
+  print(bit_size(a))
+  print(bit_size(m))
+
+  // Fused into arithmetic: the sum of a byte's two nibbles, counts weighed, a word folded.
+  print("fused")
+  print(iand(a, 15) + ishft(iand(a, -16), -4))
+  print(popcnt(w) + leadz(w) * 100)
+  print(ieor(w, ishft(w, -16)) + 1)
+  print(sum(popcnt(a)))
+  print(iany(iand(w, 255)))
+
+  // Over views: a strided window, a reversed one and a column.
+  print("views")
+  print(popcnt(a[1..6 by 2]))
+  print(ishft(w[6..1 by -1], -28))
+  print(ior(m[:, 2], 1))
+  print(iparity(a[2..5]))
+
+  print("reductions")
+  print(s"${iany(a)} ${iall(a)} ${iparity(a)}")
+  print(s"${iany(w)} ${iall(w)} ${iparity(w)}")
+  print(s"${iany(u)} ${iall(u)} ${iparity(u)}")
+  print(iany(m, dim = 1))
+  print(iall(m, dim = 2))
+  print(iparity(m, dim = 1))
+  print(iparity(m, dim = 2))
+
+  val none: [int8] = zeros(0)
+  val nothing: [uint64] = zeros(0)
+  val flat: [int32; :, :] = zeros((0, 3))
+
+  print(s"${iany(none)} ${iall(none)} ${iparity(none)} ${iall(nothing)} ${iany(nothing)}")
+  print(iall(flat, dim = 1))
+  print(iany(flat, dim = 1))
+
+  // Inside a `parallel for`, each element's bits computed alone.
+  print("parallel")
+  var c: [integer] = zeros(6)
+  var t: [int32] = zeros(6)
+
+  parallel for k in 1..6
+    c[k] = popcnt(w[k]) + trailz(w[k])
+    t[k] = ishftc(w[k], k)
+
+  print(c)
+  print(t)
+
+  // A computed shift past the word traps on both engines, in a whole-array expression too.
+  print("traps")
+  val big: [int32] = [1, 2, 40]
+
+  assert_traps(() -> print(ishft(w[1..3], big)), "`ishft`: shift count out of range")
+  assert_traps(() -> print(ibset(a, big[3])), "`ibset`: bit position out of range")
+  print("trapped")

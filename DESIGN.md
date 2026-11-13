@@ -816,7 +816,10 @@ threshold it is a BLAS call (§10.4).
 
 **Every prelude scalar math function is elemental** — `sqrt`, `exp`, `log`, `sin`, `cos`, `tan` and
 the rest of the elementary functions, `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `sign`,
-`hypot`, `atan2`, `fma`, `min`, `max`, `modulo`, `merge`: applied to an array of any rank it applies element by element and
+`hypot`, `atan2`, `fma`, `min`, `max`, `modulo`, `merge`, and Fortran's bit functions (`iand`,
+`ishft`, `btest`, `popcnt` and the rest, spec §12.2.2, on two's-complement bits that never overflow; a
+shift or position function fuses where its counts are literals the word takes, since a computed one
+can trap): applied to an array of any rank it applies element by element and
 returns an array of the same shape, and it fuses into the surrounding expression's loop nest like an
 operator (§7.1). `sqrt(a) + 1.0` is one loop. Arguments of a several-argument elemental function broadcast
 as operators do (scalar-only, equal shapes otherwise): `max(a, 0.0)` clamps every element.
@@ -2808,6 +2811,9 @@ unit psi = lbf / in^2
 - `fma(a, b, c)` types `a * b` as `*` does and takes `c` as `+` takes a right operand: `c` must have the
   product's dimension, is converted to its unit, and the result has that unit (§7.3).
 - `sqrt` halves every exponent: `sqrt(a)` for `a: real<m^2>` is `real<m>`.
+- **The bit functions** (`iand`, `ishft`, `btest`, `popcnt`, `bit_size`, the reductions `iany`,
+  `iall` and `iparity`, spec §12.2.2) take integers, which carry no unit: a value with a unit is a
+  compile error that suggests `to_integer(strip(x))`.
 - `abs`, `conj`, `floor`, `ceil`, `round`, `trunc`, `min`, `max`, `minval`, `maxval`, `sum` and
   `norm2` keep the unit; `min`, `max` and `hypot` convert their second argument as `+` does.
   `modulo` does the same and keeps its first argument's unit; `merge` converts `f` to `t`'s, and

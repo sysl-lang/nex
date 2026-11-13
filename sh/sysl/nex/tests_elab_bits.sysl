@@ -1,0 +1,35 @@
+module sh.sysl.nex
+@tests
+
+// The typing of Fortran's bit functions (spec §12.2.2): their result types, the counts of any integer
+// type, `bit_size` as a constant, the reductions, and the arguments they refuse.
+
+private val MAIN = "def main() = ()\n"
+
+@test("a bit function gives its word's type, `btest` a bool and the counting functions an integer; the two words of iand meet as + operands do")
+elab_bits_types()
+    assert_eq(elaborated("def f(x: int8, n: uint16) =\n  print(ishft(x, n))\n  print(iand(x, 3))\n  print(btest(x, 7))\n  print(popcnt(x))\n  print(bit_size(x))\n" + MAIN),
+        "(def f ((x#0 int8) (n#1 uint16)) void (block (print (ishft:int8 x#0 n#1)) (print (iand:int8 x#0 (adopt:int8 3))) (print (btest:bool x#0 7)) (print (popcnt:int64 x#0)) (print bit_size)))\n(def main () void ())")
+    assert_eq(refused("def f(a: [uint64], b: [int32; :, :], k: int16) =\n  val c: [uint64] = ibits(a, k, 8)\n  val d: [int32; :, :] = ior(b, 1)\n  val p: [integer; :, :] = leadz(b)\n  val q: [bool] = btest(a, [1, 2])\n  val s: uint64 = bit_size(a)\n  val r: [int32] = iparity(b, dim = 2)\n  val t: int32 = iall(b)\n" + MAIN), "ok")
+
+@test("a bit function refuses a real, a complex, a bool and a value with a unit, which it tells to strip and convert")
+elab_bits_refused()
+    assert_eq(refused("def main() = print(iand(1.0, 2.0))\n"), "error: `iand` takes integers, and this is real64 @1:20")
+    assert_eq(refused("def main() = print(popcnt(true))\n"), "error: `popcnt` takes integers, and this is bool @1:20")
+    assert_eq(refused("def main() = print(ishft(3, 1.0 + 0.0i))\n"), "error: `ishft` takes the shift count as an integer, and this is complex[real64] @1:20")
+    assert_eq(refused("def main() = print(btest(3, 1.5))\n"), "error: `btest` takes the bit position as an integer, and this is real64 @1:20")
+    assert_eq(refused("def main() = print(ibits(3, 1, 2.0))\n"), "error: `ibits` takes the length as an integer, and this is real64 @1:20")
+    assert_eq(refused("def main() = print(leadz(2.0<m>))\n"),
+        "error: `leadz` works on the bits of integers, which carry no unit, and this is real64<m>; strip the unit and convert: `to_integer(strip(x))` @1:20")
+    assert_eq(refused("def main() = print(bit_size(1.0))\n"), "error: `bit_size` takes integers, and this is real64 @1:20")
+    assert_eq(refused("def main() = print(iany([1.0, 2.0]))\n"), "error: `iany` takes an array of integers; this is [real64] @1:25")
+    assert_eq(refused("def main() = print(iall([1.0<s>]))\n"),
+        "error: `iall` works on the bits of integers, which carry no unit, and this is [real64<s>]; strip the unit and convert: `iall(to_integer(strip(a)))` @1:25")
+
+@test("a bit function takes its own number of arguments, and the reductions only `dim =`")
+elab_bits_arity()
+    assert_eq(refused("def main() = print(ishft(3))\n"), "error: `ishft` takes an integer and a shift count @1:20")
+    assert_eq(refused("def main() = print(ibits(3, 1))\n"), "error: `ibits` takes an integer, a bit position and a length @1:20")
+    assert_eq(refused("def main() = print(popcnt(3, 1))\n"), "error: `popcnt` takes one integer @1:20")
+    assert_eq(refused("def main() = print(ieor(3))\n"), "error: `ieor` takes two integers @1:20")
+    assert_eq(refused("def main() = print(iparity([1, 2], back = true))\n"), "error: `iparity` takes one named argument, `dim =` @1:36")

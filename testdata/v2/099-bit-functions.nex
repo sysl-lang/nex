@@ -1,0 +1,82 @@
+// Fortran's bit functions (spec §12.2.2) on scalars: `iand`, `ior`, `ieor`, the shifts `ishft`,
+// `ishftc`, `shiftl`, `shiftr` and `shifta`, the bit-position functions `btest`, `ibset`, `ibclr` and
+// `ibits`, the counts `popcnt`, `poppar`, `leadz` and `trailz`, and the inquiry `bit_size`, at int8,
+// int32, int64 and uint64. They work on the two's-complement bits and never overflow: `ishft(1, 7)`
+// of an int8 is -128. A shift by the whole word gives 0 (or the sign bit everywhere, for `shifta`),
+// a circular one leaves the word as it was, and a count or position past the word traps. Bits are
+// numbered from 0 at the least significant end. Every value was checked against gfortran's.
+
+def main() =
+  val a: int8 = -100
+  val b: int8 = 77
+  val one8: int8 = 1
+  val i: int32 = -123456789
+  val j: int32 = 987654321
+  val k: int64 = -1234567890123456789
+  val l: int64 = 81985529216486895
+  val u: uint64 = 18364758544493064720
+  val v: uint64 = 1311768467294899695
+  val z8: int8 = 0
+  val z64: uint64 = 0
+
+  print("bit_size")
+  print(s"${bit_size(a)} ${bit_size(i)} ${bit_size(k)} ${bit_size(u)} ${bit_size(uint8(0))} ${bit_size(int16(0))}")
+
+  print("iand ior ieor")
+  print(s"${iand(a, b)} ${ior(a, b)} ${ieor(a, b)} ${iand(a, 15)} ${ior(b, -128)}")
+  print(s"${iand(i, j)} ${ior(i, j)} ${ieor(i, j)}")
+  print(s"${iand(k, l)} ${ior(k, l)} ${ieor(k, l)}")
+  print(s"${iand(u, v)} ${ior(u, v)} ${ieor(u, v)}")
+
+  print("ishft")
+  print(s"${ishft(one8, 7)} ${ishft(a, 1)} ${ishft(a, -1)} ${ishft(a, 0)} ${ishft(a, 8)} ${ishft(a, -8)} ${ishft(a, 3)} ${ishft(a, -5)}")
+  print(s"${ishft(i, 4)} ${ishft(i, -4)} ${ishft(i, 31)} ${ishft(i, -31)} ${ishft(i, 32)} ${ishft(i, -32)}")
+  print(s"${ishft(k, 13)} ${ishft(k, -13)} ${ishft(k, 63)} ${ishft(k, 64)} ${ishft(k, -64)}")
+  print(s"${ishft(u, 9)} ${ishft(u, -9)} ${ishft(u, -63)} ${ishft(u, 64)}")
+
+  print("ishftc")
+  print(s"${ishftc(a, 3)} ${ishftc(a, -3)} ${ishftc(a, 0)} ${ishftc(a, 8)} ${ishftc(a, -8)} ${ishftc(one8, 7)} ${ishftc(one8, -1)}")
+  print(s"${ishftc(i, 5)} ${ishftc(i, -5)} ${ishftc(i, 32)}")
+  print(s"${ishftc(k, 17)} ${ishftc(k, -17)} ${ishftc(k, 64)}")
+  print(s"${ishftc(u, 1)} ${ishftc(u, -1)} ${ishftc(u, 40)}")
+
+  print("shiftl shiftr shifta")
+  print(s"${shiftl(a, 2)} ${shiftr(a, 2)} ${shifta(a, 2)} ${shiftl(a, 0)} ${shiftr(a, 8)} ${shifta(a, 8)} ${shifta(b, 8)} ${shiftl(a, 8)}")
+  print(s"${shiftl(i, 3)} ${shiftr(i, 3)} ${shifta(i, 3)} ${shifta(i, 32)} ${shiftr(i, 32)}")
+  print(s"${shiftl(k, 5)} ${shiftr(k, 5)} ${shifta(k, 5)} ${shifta(k, 64)} ${shifta(l, 64)}")
+  print(s"${shiftl(u, 7)} ${shiftr(u, 7)} ${shifta(u, 7)} ${shifta(v, 7)} ${shiftr(u, 64)}")
+
+  print("btest ibset ibclr ibits")
+  print(s"${btest(a, 0)} ${btest(a, 2)} ${btest(a, 7)} ${ibset(b, 7)} ${ibclr(a, 7)} ${ibset(z8, 0)} ${ibclr(a, 2)}")
+  print(s"${ibits(a, 0, 8)} ${ibits(a, 2, 3)} ${ibits(a, 7, 1)} ${ibits(a, 8, 0)} ${ibits(a, 4, 0)}")
+  print(s"${btest(i, 31)} ${ibset(j, 31)} ${ibclr(i, 31)} ${ibits(i, 4, 12)} ${ibits(i, 0, 32)} ${ibits(i, 16, 16)}")
+  print(s"${btest(k, 63)} ${ibset(l, 63)} ${ibclr(k, 63)} ${ibits(k, 20, 30)} ${ibits(k, 0, 64)} ${ibits(k, 60, 4)}")
+  print(s"${btest(u, 63)} ${btest(u, 0)} ${ibclr(u, 63)} ${ibset(v, 63)} ${ibits(u, 32, 32)} ${ibits(u, 0, 64)}")
+
+  print("popcnt poppar leadz trailz")
+  print(s"${popcnt(a)} ${poppar(a)} ${leadz(a)} ${trailz(a)} ${popcnt(b)} ${poppar(b)} ${leadz(b)} ${trailz(b)}")
+  print(s"${popcnt(z8)} ${poppar(z8)} ${leadz(z8)} ${trailz(z8)} ${leadz(int8(-1))} ${trailz(int8(-128))}")
+  print(s"${popcnt(i)} ${poppar(i)} ${leadz(i)} ${trailz(i)} ${leadz(j)} ${trailz(j)} ${leadz(int32(0))} ${trailz(int32(0))}")
+  print(s"${popcnt(k)} ${poppar(k)} ${leadz(k)} ${trailz(k)} ${leadz(l)} ${trailz(l)} ${leadz(0)} ${trailz(0)}")
+  print(s"${popcnt(u)} ${poppar(u)} ${leadz(u)} ${trailz(u)} ${leadz(v)} ${trailz(v)} ${leadz(z64)} ${trailz(z64)}")
+
+  // Counts of any integer type; a computed count is checked when the call runs.
+  val by: uint8 = 3
+  val back: int16 = -2
+
+  print(s"${ishft(i, by)} ${ishft(i, back)} ${ibits(k, by, by)} ${btest(u, back + 3)}")
+
+  print("traps")
+  assert_traps(() -> print(ishft(a, 9)), "`ishft`: shift count out of range")
+  assert_traps(() -> print(ishft(i, -33)), "shift count out of range")
+  assert_traps(() -> print(ishftc(k, 65)), "`ishftc`: shift count out of range")
+  assert_traps(() -> print(shiftl(u, 65)), "`shiftl`: shift count out of range")
+  assert_traps(() -> print(shiftr(a, -1)), "`shiftr`: shift count out of range")
+  assert_traps(() -> print(shifta(i, back)), "`shifta`: shift count out of range")
+  assert_traps(() -> print(btest(a, 8)), "`btest`: bit position out of range")
+  assert_traps(() -> print(ibset(k, -1)), "`ibset`: bit position out of range")
+  assert_traps(() -> print(ibclr(u, 64)), "`ibclr`: bit position out of range")
+  assert_traps(() -> print(ibits(i, 30, 3)), "`ibits`: bit position out of range")
+  assert_traps(() -> print(ibits(i, -1, 2)), "`ibits`: bit position out of range")
+  assert_traps(() -> print(ibits(a, 0, 9)), "`ibits`: bit position out of range")
+  print("trapped")

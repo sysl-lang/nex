@@ -46,6 +46,23 @@ merge_modulo_one_generic()
     assert(m.contains("arith.remf"), m)
     assert_eq(out.text, "[3.0, -2.0, 7.0]\n")
 
+@test("bit functions fuse into one linalg.generic where every count is a literal the word takes; a computed count can trap, so it does not fuse")
+bit_functions_fused()
+    val b = bench()
+    val program = "def main() =\n  val a: [int32] = [-100, 77, 255]\n  print(ieor(iand(ishft(a, -4), 15), ibset(a, 31)))\n  print(popcnt(ibits(a, 2, 30)) == leadz(shifta(a, 1)))\n"
+    val counted = "def main() =\n  val a: [int32] = [-100, 77, 255]\n  val k: [int32] = [1, 2, 3]\n  print(ior(ishft(a, k), 1))\n"
+    val m = emitted(program).unwrap()
+    val c = emitted(counted).unwrap()
+    val out = ran(b, program)
+    val shifted = ran(b, counted)
+
+    finish(b)
+    assert_eq(occurrences(m, "linalg.generic"), 2)
+    assert(m.contains("arith.shrui") && m.contains("arith.shrsi") && m.contains("math.ctpop") && m.contains("math.ctlz"), m)
+    assert_eq(occurrences(c, "linalg.generic"), 2)
+    assert_eq(out.text, "[-107, -2147483575, -2147483408]\n[false, false, false]\n")
+    assert_eq(shifted.text, "[-199, 309, 2041]\n")
+
 @test("a stencil of cshifts is one linalg.generic reading its source at shifted indices, and one assigned back to its source is right")
 shift_stencil_fused()
     val b = bench()

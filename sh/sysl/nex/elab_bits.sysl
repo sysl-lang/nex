@@ -1,0 +1,79 @@
+module sh.sysl.nex
+
+// The typing of Fortran's bit functions (spec §12.2.2, `bits.sysl`): `iand`, `ior` and `ieor` take
+// two words that meet as `+`'s operands do, literals adopting the other's type; the shifts and the
+// bit-position functions take a word and counts of any integer type; the counting functions take one
+// word and give an `integer`, `btest` gives a `bool`, and the rest give the word's type. Each is
+// elemental. `bit_size` is an inquiry function, a constant of its argument's type.
+//
+// **Integers carry no unit** (DESIGN §13.4), so a real, complex or bool argument is refused, and one
+// that carries a unit is told to strip it and convert.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Elab
+    // A call of bit function `name`, or of `bit_size`.
+    bit_call(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        if name == "bit_size" then return self.bit_size(span, args)
+
+        val n = bit_arity(name)
+
+        if args.len() != n
+            val wants = if n == 1 then "one integer"
+                        elif is_bit_logic(name) then "two integers"
+                        elif name == "ibits" then "an integer, a bit position and a length"
+                        elif is_bit_shift(name) then "an integer and a shift count"
+                        else "an integer and a bit position"
+
+            return self.arity(span, name, wants)
+
+        var out: Buf[TExpr] = buf()
+
+        if is_bit_logic(name)
+            out = self.unified(span, name, args)
+        else
+            for a in args
+                out.push(self.infer(a))
+
+        for k in 0..<out.len()
+            if !self.bit_operand(span, name, k, out[k]) then return self.invalid(span)
+
+        val word = base_of(elem_of(out[0].ty))
+        val result = if name == "btest" then Bool elif is_bit_count(name) then INTEGER else word
+
+        if any_array(out) then return self.elemental(span, name, out, result)
+
+        texpr(span, result, TBuiltin(name, out))
+    end bit_call
+
+    // Whether `v`, argument `k` of bit function `name`, is an integer; the refusal reported where not.
+    bit_operand(*self, span: Span, name: string, k: usize, v: TExpr) -> bool
+        val e = elem_of(v.ty)
+
+        if is_error(e) then return false
+        if is_int(base_of(e)) && !carries_unit(v.ty) then return true
+
+        val role = if k == 0 || is_bit_logic(name) then "integers"
+                   elif is_bit_shift(name) then "the shift count as an integer"
+                   elif k == 2 then "the length as an integer"
+                   else "the bit position as an integer"
+
+        if carries_unit(v.ty)
+            self.fail(span, s"`${name}` works on the bits of integers, which carry no unit, and this is ${show_ty(v.ty)}; strip the unit and convert: `to_integer(strip(x))`")
+        else
+            self.fail(span, s"`${name}` takes ${role}, and this is ${show_ty(v.ty)}")
+
+        false
+
+    // `bit_size(i)`: the number of bits in `i`'s integer type, a constant of that type, `i` never
+    // evaluated; on an array, that of its element type.
+    bit_size(*self, span: Span, args: Buf[Expr]) -> TExpr
+        if args.len() != 1 then return self.arity(span, "bit_size", "one integer, whose type it describes")
+
+        val v = self.infer(args[0])
+
+        if !self.bit_operand(span, "bit_size", 0, v) then return self.invalid(span)
+
+        texpr(span, base_of(elem_of(v.ty)), TConstant("bit_size", false))
+end Elab

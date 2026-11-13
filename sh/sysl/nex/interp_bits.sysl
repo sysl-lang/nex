@@ -1,0 +1,48 @@
+module sh.sysl.nex
+
+// The interpreter's bit functions (spec §12.2.2): each operand read as the word of its type's bits,
+// the counts checked against the word, `bit_word` computing the result, and a word cut back to the
+// type it is held as, which cannot overflow.
+
+import nex_runtime.sh.sysl.nex_runtime.{bit_position_message, bit_shift_message}
+import sysl.buf.Buf
+
+// The word of integer value `v` of a type of `bits` bits: its bits as an unsigned value.
+private word_of(v: Value, bits: int, signed: bool) -> i128 = wide(int_of(v), signed) & word_mask(bits)
+
+// The code of bit function `name` on scalar operands `codes` of types `ts`.
+private[nex] bit_code(name: string, codes: Buf[Code], ts: Buf[Ty]) -> Code
+    val (bits, signed) = base_of(ts[0]) match
+        Int(b, s) -> (b, s)
+        _ -> (64, true)
+    val x = codes[0]
+
+    if is_bit_count(name)
+        return (c) -> Ok(VInt(long.wrap(bit_word(name, word_of(x(c)?, bits, signed), 0, 0, bits))))
+
+    val y = codes[1]
+
+    if is_bit_logic(name)
+        return (c) ->
+            val a = word_of(x(c)?, bits, signed)
+
+            Ok(VInt(wrapped(bit_word(name, a, word_of(y(c)?, bits, signed), 0, bits), bits, signed)))
+
+    val y_signed = is_signed(base_of(ts[1]))
+    val z: Option[(Code, bool)] = if codes.len() == 3 then Some((codes[2], is_signed(base_of(ts[2])))) else None
+    val shift = is_bit_shift(name)
+
+    (c) ->
+        val a = word_of(x(c)?, bits, signed)
+        val n = wide(int_of(y(c)?), y_signed)
+        val len = z match
+            Some((f, s)) -> wide(int_of(f(c)?), s)
+            None -> i128(1)
+
+        if shift && !shift_in_range(name, n, bits) then return trapped(bit_shift_message(name))
+        if !shift && !position_in_range(name, n, len, bits) then return trapped(bit_position_message(name))
+
+        val r = bit_word(name, a, n, len, bits)
+
+        Ok(if name == "btest" then VBool(r != 0) else VInt(wrapped(r, bits, signed)))
+end bit_code

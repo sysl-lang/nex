@@ -87,14 +87,17 @@ fused_operands(e: TExpr) -> Buf[TExpr]
 // operation over whole arrays. Real and complex arithmetic is quiet without `--fpe-trap` (`fpe`), but
 // complex division, which traps on a zero divisor; a comparison is quiet over any numbers; integer
 // arithmetic traps on overflow, a conversion that checks its range traps, and an `@elemental`
-// function may trap or print, so none of them is. `merge` is as quiet as its three operands.
-quiet(s: TExpr, fpe: bool) -> bool = *s.kind match
+// function may trap or print, so none of them is. `merge` is as quiet as its three operands. A bit
+// function (spec §12.2.2) cannot overflow: `iand`, `ior`, `ieor` and the counting functions are quiet,
+// and a shift or a bit-position function is where each count is a literal, among `leaves`, that the
+// word takes.
+quiet(s: TExpr, fpe: bool, leaves: Buf[TExpr]) -> bool = *s.kind match
     TChainOperand(_) -> true
-    TPromote(v) -> quiet(v, fpe) && (is_floating(s.ty) && !fpe || is_int(base_of(s.ty)) && is_int(base_of(v.ty)))
-    TRescale(v, _) -> !fpe && is_floating(s.ty) && quiet(v, fpe)
-    TUnary(o, v) -> quiet(v, fpe) && (o == "not" || o == "-" && !fpe && is_floating(v.ty))
+    TPromote(v) -> quiet(v, fpe, leaves) && (is_floating(s.ty) && !fpe || is_int(base_of(s.ty)) && is_int(base_of(v.ty)))
+    TRescale(v, _) -> !fpe && is_floating(s.ty) && quiet(v, fpe, leaves)
+    TUnary(o, v) -> quiet(v, fpe, leaves) && (o == "not" || o == "-" && !fpe && is_floating(v.ty))
     TBinary(o, a, b) ->
-        if !quiet(a, fpe) || !quiet(b, fpe) then return false
+        if !quiet(a, fpe, leaves) || !quiet(b, fpe, leaves) then return false
 
         if o == "==" || o == "!=" || o == "<" || o == "<=" || o == ">" || o == ">=" then return true
         if fpe then return false
@@ -106,20 +109,50 @@ quiet(s: TExpr, fpe: bool) -> bool = *s.kind match
         o == "+" || o == "-" || o == "*" || o == "/" && is_real(base_of(b.ty)) && is_real(base_of(a.ty))
     TBuiltin(name, args) ->
         // `merge` only picks one of two values it was given, which cannot trap.
-        if name == "merge"
+        if name == "merge" || is_bit_function(name)
             for a in args
-                if !quiet(a, fpe) then return false
+                if !quiet(a, fpe, leaves) then return false
 
-            return true
+            if name == "merge" || is_bit_logic(name) || is_bit_count(name) then return true
+
+            return counts_fit(name, args, leaves)
 
         if fpe || !is_floating(s.ty) then return false
 
         for a in args
-            if !is_floating(a.ty) || !quiet(a, fpe) then return false
+            if !is_floating(a.ty) || !quiet(a, fpe, leaves) then return false
 
         true
-    TConvert(v, traps) -> !traps && !fpe && is_floating(s.ty) && is_floating(v.ty) && quiet(v, fpe)
+    TConvert(v, traps) -> !traps && !fpe && is_floating(s.ty) && is_floating(v.ty) && quiet(v, fpe, leaves)
     _ -> false
+
+// Whether the counts of shift or bit-position function `name` (its arguments after the word) are
+// literals that its word takes, so that it cannot trap.
+private counts_fit(name: string, args: Buf[TExpr], leaves: Buf[TExpr]) -> bool
+    val bits = bits_of(base_of(args[0].ty))
+    val n = written_count(args[1], leaves) match
+        Some(v) -> v
+        None -> return false
+
+    if is_bit_shift(name) then return shift_in_range(name, n, bits)
+
+    val len = if args.len() == 3 then (written_count(args[2], leaves) match
+        Some(v) -> v
+        None -> return false) else i128(1)
+
+    position_in_range(name, n, len, bits)
+
+// The integer `e` is, where it is a literal: written in the scalar, or a leaf that is one.
+private written_count(e: TExpr, leaves: Buf[TExpr]) -> Option[i128] = *e.kind match
+    TChainOperand(k) -> if k < leaves.len() then (*leaves[k].kind match
+        TChainOperand(_) -> None
+        _ -> written_count(leaves[k], leaves)) else None
+    TLiteral(IntVal(v), _) -> Some(v)
+    TPromote(v) -> written_count(v, leaves)
+    TUnary(o, v) -> if o == "-" then (written_count(v, leaves) match
+        Some(x) -> Some(-x)
+        None -> None) else None
+    _ -> None
 
 // Whether `t` is a real or a complex number, measured or not.
 private is_floating(t: Ty) -> bool = is_real(base_of(t)) || is_complex(base_of(t))

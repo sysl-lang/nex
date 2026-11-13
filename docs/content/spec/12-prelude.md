@@ -168,6 +168,54 @@ which may be any real, and a negative zero points toward −∞. `nearest` does 
 number. `huge`, `tiny`, `spacing`, `nearest` and `scale` keep the argument's unit; `epsilon`,
 `exponent`, `fraction` and `set_exponent` give a plain number; `is_nan` and `is_finite` take any.
 
+### 12.2.2 Bit functions
+
+Fortran's bit intrinsics, with Fortran's meaning, on every integer type (`int8` to `int64`, `uint8`
+to `uint64`). nex has no bitwise operators; these functions are how a program reaches an integer's
+bits. All but `bit_size` are elemental: on an array they apply element by element, a scalar argument
+broadcasting, and they fuse into the surrounding expression like `exp`. The reductions `iany`, `iall`
+and `iparity` are in §12.6.
+
+| Signature | Meaning | Fortran |
+|---|---|---|
+| `iand(i, j)`, `ior(i, j)`, `ieor(i, j)` | bitwise and, inclusive or, exclusive or | `IAND`, `IOR`, `IEOR` |
+| `ishft(i, shift)` | a logical shift, left for a positive `shift` and right for a negative one, zeros shifted in; `0` when \|`shift`\| is the word's size | `ISHFT` |
+| `ishftc(i, shift)` | a circular shift of the whole word, left for a positive `shift` | `ISHFTC` |
+| `shiftl(i, n)`, `shiftr(i, n)` | a logical shift left or right by `n`; `0` for the whole word | `SHIFTL`, `SHIFTR` |
+| `shifta(i, n)` | an arithmetic shift right by `n`: the vacated bits copy the leftmost bit | `SHIFTA` |
+| `btest(i, pos)` | whether bit `pos` is set; a `bool` | `BTEST` |
+| `ibset(i, pos)`, `ibclr(i, pos)` | `i` with bit `pos` set, or cleared | `IBSET`, `IBCLR` |
+| `ibits(i, pos, len)` | the `len` bits from bit `pos` up, right-adjusted, the rest zero | `IBITS` |
+| `popcnt(i)`, `poppar(i)` | the number of set bits, and its parity (`0` or `1`) | `POPCNT`, `POPPAR` |
+| `leadz(i)`, `trailz(i)` | the number of zero bits above the highest set bit, below the lowest; `bit_size(i)` for `0` | `LEADZ`, `TRAILZ` |
+| `bit_size(i)` | the number of bits in `i`'s type | `BIT_SIZE` |
+
+**Bits are numbered from 0 at the least significant end**, as in Fortran, and not from 1 as nex
+numbers array indices: `btest(i, 0)` is the lowest bit, and `ibset(int8(0), 7)` is `-128`.
+
+**A signed integer is its two's-complement bits, and no bit function overflows.** They are bit
+operations, not arithmetic, so the overflow trap of §2.5 never applies: `ishft(int8(1), 7)` is
+`-128`, and `ishft(int8(-100), -1)` is `78`, since a logical shift brings in a zero.
+
+**A count or position outside the word traps**, where Fortran leaves the result undefined:
+`ishft` and `ishftc` take a `shift` with \|`shift`\| ≤ `bit_size(i)`; `shiftl`, `shiftr` and
+`shifta` an `n` from `0` to `bit_size(i)`; `btest`, `ibset` and `ibclr` a `pos` from `0` to
+`bit_size(i) − 1`; and `ibits` a `pos` and a `len` of `0` or more with `pos + len ≤ bit_size(i)`.
+The traps read `` `ishft`: shift count out of range `` and `` `btest`: bit position out of range ``.
+A count or position may be of any integer type.
+
+**Types**: `iand`, `ior` and `ieor` take two integers that meet as `+`'s operands do, a literal
+adopting the other's type, and give that type. The shifts, `ibset`, `ibclr` and `ibits` give `i`'s
+type, `btest` gives a `bool`, and `popcnt`, `poppar`, `leadz` and `trailz` give an `integer`.
+`bit_size` is an inquiry function like `huge`: it gives a constant of `i`'s type, `i` is not
+evaluated, and an array gives the scalar of its element type. A real, complex or `bool` argument is a
+compile error, and so is one with a unit, since integers carry none (DESIGN §13.4); the diagnostic
+suggests `to_integer(strip(x))`.
+
+**Not provided**: `ishftc`'s optional third argument `size`, which rotates only the low `size` bits,
+is deferred. Fortran's `NOT` is absent because `not` is a nex keyword, the logical negation;
+`ieor(i, -1)` complements every bit.
+
 ## 12.3 Complex numbers
 
 A complex value is written with `i` and arithmetic, or with a constructor:
@@ -283,6 +331,7 @@ flatten(m)            // [1.0, 4.0, 2.0, 5.0, 3.0, 6.0] — column-major
 | `findloc(a, value)` | the index of the first element equal to `value`, in storage order; a tuple of indices for rank ≥ 2; `0` (every index `0`) where there is none; `back = true` takes the last | `FINDLOC(a, value)` |
 | `any(a: [bool; R])`, `all(a: [bool; R])` | whether any, every element is `true` | `ANY(a)`, `ALL(a)` |
 | `count(a: [bool; R]): integer` | the number of `true` elements | `COUNT(a)` |
+| `iany(a: [T; R]): T`, `iall(a: [T; R]): T`, `iparity(a: [T; R]): T` | the bitwise or, and, exclusive or of every element of an integer array (§12.2.2); an empty array gives `0`, every bit set (`-1` signed) and `0` | `IANY(a)`, `IALL(a)`, `IPARITY(a)` |
 | `norm2(a)` | the Euclidean norm √(Σ \|aₖ\|²); the Frobenius norm of a matrix | `NORM2(a)` |
 | `dot(x: [T], y: [T]): T` | Σ conj(xₖ) yₖ — `x` is conjugated when complex; lengths must match, else trap | `DOT_PRODUCT(x, y)` |
 | `minloc(acc, x, k)`, `maxloc(acc, x, k)` | combine a running `(value, index)` pair with the candidate `x` at index `k`; ties go to the lower index | — |

@@ -24,11 +24,11 @@ private val REAL_FUNCTIONS = ["sqrt", "cbrt", "exp", "log", "log2", "log10", "si
 // Those of them that also take a complex and give one.
 private val COMPLEX_FUNCTIONS = ["sqrt", "exp", "log", "sin", "cos", "tan"]
 
-private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "fma", "min", "max", "merge", "modulo", "assert", "assert_eq", "to_real", "to_integer", "to_complex", "spacing", "fraction", "exponent", "nearest", "scale", "set_exponent", "is_nan", "is_finite", "epsilon", "huge", "tiny", "bessel_jn", "bessel_yn"]
+private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "fma", "min", "max", "merge", "modulo", "assert", "assert_eq", "to_real", "to_integer", "to_complex", "spacing", "fraction", "exponent", "nearest", "scale", "set_exponent", "is_nan", "is_finite", "epsilon", "huge", "tiny", "bessel_jn", "bessel_yn", "iand", "ior", "ieor", "ishft", "ishftc", "shiftl", "shiftr", "shifta", "btest", "ibset", "ibclr", "ibits", "popcnt", "poppar", "leadz", "trailz", "bit_size"]
 
 // The prelude's array functions (DESIGN §4.2, §4.3, §7.4), which come with arrays, and the
 // assertions over arrays and lambdas.
-private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "findloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "flatten", "transpose", "cshift", "eoshift", "spread", "pack", "unpack", "shape", "rows", "cols", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "to_integers", "to_bytes", "assert_approx", "assert_traps"]
+private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "findloc", "any", "all", "count", "iany", "iall", "iparity", "norm2", "dot", "zeros", "ones", "fill", "reshape", "flatten", "transpose", "cshift", "eoshift", "spread", "pack", "unpack", "shape", "rows", "cols", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "to_integers", "to_bytes", "assert_approx", "assert_traps"]
 
 private among(name: string, set: []const string) -> bool
     for s in set
@@ -585,6 +585,7 @@ impl Elab
                 _ -> ()
 
         if name == "print" || name == "eprint" then return self.print_call(span, name, args)
+        if is_bit_function(name) || name == "bit_size" then return self.bit_call(span, name, args)
         if name == "to_real" then return self.conversion(span, name, REAL, args)
         if name == "to_integer" then return self.conversion(span, name, INTEGER, args)
         if name == "to_complex" then return self.conversion(span, name, COMPLEX, args)

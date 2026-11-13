@@ -70,6 +70,14 @@ impl Interp
 
         if name == "min" || name == "max" then return self.extreme(span, name, codes, t)
 
+        if is_bit_function(name)
+            var ts: Buf[Ty] = buf()
+
+            for a in args
+                ts.push(a.ty)
+
+            return bit_code(name, codes, ts)
+
         // Both values are computed, then the mask picks one.
         if name == "merge"
             val ft = codes[0]

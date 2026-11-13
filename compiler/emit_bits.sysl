@@ -1,0 +1,122 @@
+// Emission of Fortran's bit functions (spec §12.2.2) on scalars; in an array expression each is the
+// body of the loop nest, as any elemental function is.
+//
+// **Each is an `arith` or `math` operation on the word's own type**, which has no sign, so the bits
+// are the two's-complement ones and nothing overflows: `arith.andi`, `ori`, `xori`, `shli`, `shrui`
+// and `shrsi`, and `math.ctpop`, `ctlz` and `cttz`, which give the word's width for a zero word. A
+// count is widened to `i64` and checked against the word, trapping as the interpreter does
+// (`sh/sysl/nex/interp_bits.sysl`); `arith.select` then gives the answer of a shift by the whole word,
+// and the count a shift operation is given is always below the width, so no operation sees one it
+// leaves undefined, even where a skipped trap let a bad count through.
+
+import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{bit_position_message, bit_shift_message}
+import sysl.buf.Buf
+import sh.sysl.parsing.Span
+
+impl Emitter
+    // Bit function `name` of scalar operands `args`, its result of type `t`.
+    bit_function(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        val bits = bits_of(base_of(args[0].ty))
+        val w = s"i$bits"
+        val x = self.ex(args[0])
+
+        if is_bit_count(name)
+            val op = if name == "leadz" then "ctlz" elif name == "trailz" then "cttz" else "ctpop"
+            var n = self.def(s"math.$op $x : $w")
+
+            if name == "poppar" then n = self.def(s"arith.andi $n, ${self.int_const("1", bits)} : $w")
+
+            return self.widen64(n, bits, false)
+
+        val y = self.ex(args[1])
+
+        if is_bit_logic(name)
+            val op = if name == "iand" then "andi" elif name == "ior" then "ori" else "xori"
+
+            return self.def(s"arith.$op $x, $y : $w")
+
+        val n = self.count64(y, args[1].ty)
+        val zero = self.int_const("0", 64)
+        val width = self.int_const(s"$bits", 64)
+
+        if name == "ishft" || name == "ishftc"
+            val low = self.int_const(s"-$bits", 64)
+            val outside = self.def(s"arith.ori ${self.def(s"arith.cmpi slt, $n, $low : i64")}, ${self.def(s"arith.cmpi sgt, $n, $width : i64")} : i1")
+
+            self.trap_if(outside, bit_shift_message(name))
+
+            if name == "ishftc"
+                // The count brought into `0 ..< bits`: a rotation left by it.
+                val r = self.def(s"arith.remsi $n, $width : i64")
+                val s = self.def(s"arith.select ${self.def(s"arith.cmpi slt, $r, $zero : i64")}, ${self.def(s"arith.addi $r, $width : i64")}, $r : i64")
+                val still = self.def(s"arith.cmpi eq, $s, $zero : i64")
+                val back = self.def(s"arith.select $still, $zero, ${self.def(s"arith.subi $width, $s : i64")} : i64")
+                val turned = self.def(s"arith.ori ${self.def(s"arith.shli $x, ${self.narrow(s, bits)} : $w")}, ${self.def(s"arith.shrui $x, ${self.narrow(back, bits)} : $w")} : $w")
+
+                return self.def(s"arith.select $still, $x, $turned : $w")
+
+            // A left shift for a positive count, a logical right one for a negative; 0 for the whole
+            // word either way.
+            val left = self.def(s"arith.cmpi sge, $n, $zero : i64")
+            val size = self.def(s"arith.select $left, $n, ${self.def(s"arith.subi $zero, $n : i64")} : i64")
+            val whole = self.def(s"arith.cmpi uge, $size, $width : i64")
+            val by = self.narrow(self.def(s"arith.select $whole, $zero, $size : i64"), bits)
+            val moved = self.def(s"arith.select $left, ${self.def(s"arith.shli $x, $by : $w")}, ${self.def(s"arith.shrui $x, $by : $w")} : $w")
+
+            return self.def(s"arith.select $whole, ${self.int_const("0", bits)}, $moved : $w")
+
+        if is_bit_shift(name)
+            // A count read as unsigned: a negative one is above the width too.
+            self.trap_if(self.def(s"arith.cmpi ugt, $n, $width : i64"), bit_shift_message(name))
+
+            val whole = self.def(s"arith.cmpi uge, $n, $width : i64")
+
+            if name == "shifta"
+                // By the whole word, every bit a copy of the sign bit: a shift by one less.
+                val top = self.int_const(s"${bits - 1}", 64)
+
+                return self.def(s"arith.shrsi $x, ${self.narrow(self.def(s"arith.select $whole, $top, $n : i64"), bits)} : $w")
+
+            val by = self.narrow(self.def(s"arith.select $whole, $zero, $n : i64"), bits)
+            val moved = self.def(s"arith.${if name == "shiftl" then "shli" else "shrui"} $x, $by : $w")
+
+            return self.def(s"arith.select $whole, ${self.int_const("0", bits)}, $moved : $w")
+
+        if name == "ibits"
+            val len = self.count64(self.ex(args[2]), args[2].ty)
+            val past = self.def(s"arith.cmpi ugt, ${self.def(s"arith.addi $n, $len : i64")}, $width : i64")
+            val outside = self.def(s"arith.ori ${self.def(s"arith.ori ${self.def(s"arith.cmpi ugt, $n, $width : i64")}, ${self.def(s"arith.cmpi ugt, $len, $width : i64")} : i1")}, $past : i1")
+
+            self.trap_if(outside, bit_position_message(name))
+
+            // A field may start at the word's end when it is empty, and may be the whole word.
+            val from = self.narrow(self.def(s"arith.select ${self.def(s"arith.cmpi uge, $n, $width : i64")}, $zero, $n : i64"), bits)
+            val whole = self.def(s"arith.cmpi uge, $len, $width : i64")
+            val one = self.int_const("1", bits)
+            val part = self.def(s"arith.subi ${self.def(s"arith.shli $one, ${self.narrow(self.def(s"arith.select $whole, $zero, $len : i64"), bits)} : $w")}, $one : $w")
+            val mask = self.def(s"arith.select $whole, ${self.int_const("-1", bits)}, $part : $w")
+
+            return self.def(s"arith.andi ${self.def(s"arith.shrui $x, $from : $w")}, $mask : $w")
+
+        // `btest`, `ibset` and `ibclr`: one bit, at a position below the width.
+        val outside = self.def(s"arith.cmpi uge, $n, $width : i64")
+
+        self.trap_if(outside, bit_position_message(name))
+
+        val bit = self.def(s"arith.shli ${self.int_const("1", bits)}, ${self.narrow(self.def(s"arith.select $outside, $zero, $n : i64"), bits)} : $w")
+
+        if name == "btest" then return self.def(s"arith.cmpi ne, ${self.def(s"arith.andi $x, $bit : $w")}, ${self.int_const("0", bits)} : $w")
+        if name == "ibset" then return self.def(s"arith.ori $x, $bit : $w")
+
+        self.def(s"arith.andi $x, ${self.def(s"arith.xori $bit, ${self.int_const("-1", bits)} : $w")} : $w")
+    end bit_function
+
+    // The count `v` of integer type `t`, widened to `i64` by its own signedness.
+    count64(*self, v: string, t: Ty) -> string = base_of(t) match
+        Int(b, signed) -> self.widen64(v, b, signed)
+        _ -> v
+
+    // `n`, an `i64` below `bits`, as a count for a word of `bits` bits.
+    narrow(*self, n: string, bits: int) -> string = if bits == 64 then n else self.def(s"arith.trunci $n : i64 to i$bits")
+end Emitter
