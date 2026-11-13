@@ -1069,6 +1069,7 @@ impl Interp
         val bits = bits_of(b)
 
         if name == "i" then return VComplex(0.0, 1.0)
+        if is_inquiry(name) then return self.literal(span, inquiry_value(name, b), t)
 
         val x = if name == "nan" then 0.0 / 0.0 elif name == "pi" then 3.141592653589793 elif name == "e" then 2.718281828459045 else 1.0 / 0.0
         val r = rnd(x, bits)

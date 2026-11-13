@@ -239,6 +239,7 @@ impl Emitter
         val bits = bits_of(t)
 
         if name == "i" then return self.complex_const(self.real_const(0.0, bits), self.real_const(1.0, bits), bits)
+        if is_inquiry(name) then return self.literal(span, inquiry_value(name, t), t)
 
         val v = if name == "nan" then self.nan_const(bits)
                 else self.real_const(if name == "pi" then 3.141592653589793 elif name == "e" then 2.718281828459045 else 1.0 / 0.0, bits)

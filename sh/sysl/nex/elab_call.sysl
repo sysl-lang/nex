@@ -19,12 +19,12 @@ import sh.sysl.parsing.Span
 
 // The prelude functions of one real argument whose result is a real of the argument's width (an
 // integer argument is first widened to `real64`).
-private val REAL_FUNCTIONS = ["sqrt", "cbrt", "exp", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "floor", "ceil", "round", "trunc"]
+private val REAL_FUNCTIONS = ["sqrt", "cbrt", "exp", "log", "log2", "log10", "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "floor", "ceil", "round", "trunc", "erf", "erfc", "gamma", "log_gamma", "bessel_j0", "bessel_j1", "bessel_y0", "bessel_y1"]
 
 // Those of them that also take a complex and give one.
 private val COMPLEX_FUNCTIONS = ["sqrt", "exp", "log", "sin", "cos", "tan"]
 
-private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "fma", "min", "max", "merge", "modulo", "assert", "assert_eq", "to_real", "to_integer", "to_complex"]
+private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "atan2", "hypot", "fma", "min", "max", "merge", "modulo", "assert", "assert_eq", "to_real", "to_integer", "to_complex", "spacing", "fraction", "exponent", "nearest", "scale", "set_exponent", "is_nan", "is_finite", "epsilon", "huge", "tiny", "bessel_jn", "bessel_yn"]
 
 // The prelude's array functions (DESIGN §4.2, §4.3, §7.4), which come with arrays, and the
 // assertions over arrays and lambdas.
@@ -655,6 +655,9 @@ impl Elab
 
             return texpr(span, result, TBuiltin(name, out))
 
+        if is_inquiry(name) then return self.inquiry(span, name, args)
+        if name == "nearest" || name == "scale" || name == "set_exponent" || name == "bessel_jn" || name == "bessel_yn" then return self.special_pair(span, name, args)
+
         if args.len() != 1 then return self.arity(span, name, "one value")
 
         val v = self.infer(args[0])
@@ -709,6 +712,11 @@ impl Elab
             if is_complex(t) then return t
         elif name == "arg"
             if is_complex(t) then return Real(bits_of(t))
+        elif among(name, REPRESENTATION_FUNCTIONS[..])
+            if is_real(t) then return if name == "exponent" then INTEGER elif name == "is_nan" || name == "is_finite" then Bool else t
+
+            self.fail(span, s"`${name}` takes a real, and this is ${show_ty(t)}")
+            return Error
         else
             if is_int(t) then return inverse_angle(name, REAL)
             if is_real(t) then return inverse_angle(name, t)

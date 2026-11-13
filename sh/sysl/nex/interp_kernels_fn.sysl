@@ -466,9 +466,13 @@ private real_fn1(name: string, bits: int, fpe: bool) -> Option[Real1]
                    elif name == "round" then (v) -> Ok(v.round())
                    elif name == "abs" then (v) -> Ok(real_abs(v))
                    elif name == "sign" then (v) -> Ok(real_sign(v))
+                   elif name == "spacing" then (v) -> Ok(real_spacing(v, bits))
+                   elif name == "fraction" then (v) -> Ok(real_fraction(v))
                    else position(name, PRELUDE_LIBM[..]) match
                        Some(k) -> (v) -> fpe_real(libm1(k, v, bits), v, v, fpe)
-                       None -> return None
+                       None -> position(name, SPECIAL_FUNCTIONS[..]) match
+                           Some(k) -> (v) -> fpe_real(special1(k, v, bits), v, v, fpe)
+                           None -> return None
 
     Some(f)
 

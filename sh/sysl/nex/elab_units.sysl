@@ -30,9 +30,10 @@ private val TRIG = ["sin", "cos", "tan"]
 private val COMPARISON_OPS = ["==", "!=", "<", "<=", ">", ">="]
 
 // The prelude functions that keep their argument's unit, and those whose result is a plain number
-// whatever the argument's unit.
-private val KEEP_UNIT = ["abs", "floor", "ceil", "round", "trunc", "conj"]
-private val DROP_UNIT = ["sign", "arg"]
+// whatever the argument's unit: `fraction` and `exponent` describe the number the value is held as,
+// and `is_nan` and `is_finite` classify it.
+private val KEEP_UNIT = ["abs", "floor", "ceil", "round", "trunc", "conj", "spacing"]
+private val DROP_UNIT = ["sign", "arg", "fraction", "exponent", "is_nan", "is_finite"]
 
 // A `unit` declaration as written, the module's or the prelude's.
 struct UnitSrc
@@ -92,7 +93,7 @@ private constant_exponent(e: TExpr) -> Option[Ratio] = *e.kind match
 private bare_literal(v: TExpr) -> Option[string] = *v.kind match
     TLiteral(IntVal(n), _) -> Some(s"${n}")
     TLiteral(RealVal(x), _) -> Some(real_text(x))
-    TConstant(name, _) -> Some(name)
+    TConstant(name, _) -> if is_inquiry(name) then None else Some(name)
     TPromote(x) -> bare_literal(x)
     _ -> None
 
