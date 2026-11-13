@@ -1,0 +1,36 @@
+// `pack` and `unpack` beside the rest of the prelude: `pack(a, a > 0)` gives what
+// `filter(a, x -> x > 0)` gives; `unpack(pack(a, m), m, a)` gives `a` back at ranks 1 to 3; `count`
+// of a mask is the length of what it packs; and both run inside a `parallel for`, each iteration on
+// a mask of its own, as the sequential loop does.
+
+def main() =
+  val a = [3.0, -1.0, 0.0, 2.5, -7.0, 4.0]
+  print(pack(a, a > 0.0))
+  print(filter(a, x -> x > 0.0))
+  print(all(pack(a, a > 0.0) == filter(a, x -> x > 0.0)))
+  val ints = [5, -3, 8, 0, -1, 9, 2]
+  print(all(pack(ints, ints > 0) == filter(ints, x -> x > 0)))
+  print(length(pack(ints, ints > 100)) == length(filter(ints, x -> x > 100)))
+
+  // Round trips.
+  val m = reshape([1, -2, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12], (3, 4))
+  val mk = m > 0
+  print(all(unpack(pack(m, mk), mk, m) == m))
+  print(unpack(pack(m, mk), mk, 0))
+  val c = reshape([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24], (2, 3, 4))
+  print(all(unpack(pack(c, c % 3 == 0), c % 3 == 0, c) == c))
+  print(all(unpack(pack(a, a < 0.0), a < 0.0, a) == a))
+  print(count(m > 0) == length(pack(m, m > 0)))
+
+  // Inside `parallel for`: each iteration packs and unpacks under a mask of its own.
+  val n = 8
+  val base = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  var p: [integer] = zeros(n)
+  var q: [integer] = zeros(n)
+  parallel for i in 1..n do p[i] = sum(pack(base, base % i == 0))
+  for i in 1..n do q[i] = sum(pack(base, base % i == 0))
+  print(p)
+  print(all(p == q))
+  var r: [integer] = zeros(n)
+  parallel for i in 1..n do r[i] = sum(unpack(pack(base, base > i), base > i, -1))
+  print(r)

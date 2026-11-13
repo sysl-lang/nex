@@ -58,6 +58,7 @@ impl Elab
     array_builtin(*self, span: Span, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
         if is_lapack(name) then return self.lapack(span, name, args)
         if name == "cshift" || name == "eoshift" || name == "spread" then return self.shifting(span, name, args)
+        if name == "pack" || name == "unpack" then return self.packing(span, name, args)
 
         var pos: Buf[Expr] = buf()
         var dim: Option[Expr] = None

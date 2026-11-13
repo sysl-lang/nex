@@ -78,6 +78,7 @@ impl Emitter
         if name == "transpose" then return self.transposed(span, self.ex(args[0]), args[0].ty, t)
         if name == "permute" then return self.permuted(span, args, t)
         if name == "cshift" || name == "eoshift" || name == "spread" then return self.shifted(span, name, args, t)
+        if name == "pack" || name == "unpack" then return self.pack_unpack(span, name, args, t)
         if name == "to_integers" || name == "to_bytes"
             var operands: Buf[TExpr] = buf()
 

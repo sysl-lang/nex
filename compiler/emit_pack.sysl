@@ -1,0 +1,162 @@
+// Emission of `pack` and `unpack` (`elab_pack.sysl`) as two passes over the elements in storage
+// order, each array flattened to a vector: the first counts the mask's trues, which sizes `pack`'s
+// result and checks `unpack`'s vector, and the second moves the elements, carrying the position in
+// the packed vector beside the result.
+
+import nex.sh.sysl.nex.*
+import nex_runtime.sh.sysl.nex_runtime.{PACK_VECTOR_SHORT, SHAPE_MISMATCH, UNPACK_TOO_FEW}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Emitter
+    // `pack(a, mask)`, `pack(a, mask, vector)` or `unpack(v, mask, field)`, of type `t`.
+    pack_unpack(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        if name == "unpack" then return self.unpacked(span, args, t)
+
+        val a = args[0]
+        val mask = args[1]
+        val av = self.ex(a)
+        val mv = self.ex(mask)
+        val vv = if args.len() == 3 then self.ex(args[2]) else ""
+        val ft = self.view_ty(t)
+        val tt = self.tensor_ty(span, ft)
+        val f = self.flat(span, av, a.ty)
+        val n = self.dim(span, f, ft, 1)
+        val fm = if is_array(mask.ty) then self.mask_flat(span, av, a.ty, mv, mask.ty) else ""
+        val zero = self.index_const(0)
+        val one = self.index_const(1)
+        val count = if fm == "" then self.def(s"arith.select $mv, $n, $zero : index") else self.trues(span, fm, n)
+        var start = ""
+
+        if vv == ""
+            start = self.def(s"tensor.empty($count) : $tt")
+        else
+            start = self.copied(span, self.flat(span, vv, args[2].ty), ft)
+            self.trap_if(self.def(s"arith.cmpi ult, ${self.dim(span, start, ft, 1)}, $count : index"), PACK_VECTOR_SHORT)
+
+        val iv = self.fresh()
+        val out = self.fresh()
+        val j = self.fresh()
+        val r = self.fresh()
+
+        self.op(s"$r:2 = scf.for $iv = $zero to $n step $one iter_args($out = $start, $j = $zero) -> ($tt, index) {")
+
+        val k = if fm == "" then mv else self.def(s"tensor.extract $fm[$iv] : ${self.bools_ty(span)}")
+        val x = self.def(s"tensor.extract $f[$iv] : $tt")
+        val w = self.fresh()
+
+        self.op(s"$w:2 = scf.if $k -> ($tt, index) {")
+        self.op(s"scf.yield ${self.def(s"tensor.insert $x into $out[$j] : $tt")}, ${self.def(s"arith.addi $j, $one : index")} : $tt, index")
+        self.op("} else {")
+        self.op(s"scf.yield $out, $j : $tt, index")
+        self.op("}")
+        self.op(s"scf.yield $w#0, $w#1 : $tt, index")
+        self.op("}")
+        s"$r#0"
+    end pack_unpack
+
+    // `unpack(v, mask, field)`: the result built flat, from the field, then given the mask's shape.
+    private unpacked(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        val mask = args[1]
+        val field = args[2]
+        val vv = self.ex(args[0])
+        val mv = self.ex(mask)
+        val fv = self.ex(field)
+        val ft = self.view_ty(Ty.Array(elem_of(t), dynamic_axes(1)))
+        val tt = self.tensor_ty(span, ft)
+        val v = self.flat(span, vv, args[0].ty)
+        val fm = self.flat(span, mv, mask.ty)
+        val n = self.dim(span, fm, Ty.Array(Bool, dynamic_axes(1)), 1)
+        val r = rank_of(mask.ty)
+        var dims: Buf[string] = buf()
+
+        for m in 1..r
+            dims.push(self.dim(span, mv, mask.ty, m))
+
+        var start = ""
+
+        if is_array(field.ty)
+            for m in 1..r
+                self.trap_if(self.def(s"arith.cmpi ne, ${self.dim(span, fv, field.ty, m)}, ${dims[m - 1]} : index"), SHAPE_MISMATCH)
+
+            start = self.copied(span, self.flat(span, fv, field.ty), ft)
+        else
+            var flat_dims: Buf[string] = buf()
+
+            flat_dims.push(n)
+            start = self.filled(span, ft, flat_dims, fv)
+
+        self.trap_if(self.def(s"arith.cmpi ult, ${self.dim(span, v, ft, 1)}, ${self.trues(span, fm, n)} : index"), UNPACK_TOO_FEW)
+
+        val zero = self.index_const(0)
+        val one = self.index_const(1)
+        val iv = self.fresh()
+        val out = self.fresh()
+        val j = self.fresh()
+        val res = self.fresh()
+
+        self.op(s"$res:2 = scf.for $iv = $zero to $n step $one iter_args($out = $start, $j = $zero) -> ($tt, index) {")
+
+        val k = self.def(s"tensor.extract $fm[$iv] : ${self.bools_ty(span)}")
+        val w = self.fresh()
+
+        self.op(s"$w:2 = scf.if $k -> ($tt, index) {")
+
+        val x = self.def(s"tensor.extract $v[$j] : $tt")
+
+        self.op(s"scf.yield ${self.def(s"tensor.insert $x into $out[$iv] : $tt")}, ${self.def(s"arith.addi $j, $one : index")} : $tt, index")
+        self.op("} else {")
+        self.op(s"scf.yield $out, $j : $tt, index")
+        self.op("}")
+        self.op(s"scf.yield $w#0, $w#1 : $tt, index")
+        self.op("}")
+
+        val flat_out = s"$res#0"
+
+        if r == 1 then return self.cast(span, flat_out, ft, t)
+
+        val dt = self.view_ty(t)
+        var group = ""
+        var sizes: Buf[string] = buf()
+        var q = r
+
+        while q > 0
+            q -= 1
+            sizes.push(dims[q])
+
+        for p in 0..<r
+            if p > 0 then group += ", "
+            group += s"$p"
+
+        val shaped = self.def(s"tensor.expand_shape $flat_out [[$group]] output_shape [${joined(sizes)}] : $tt into ${self.tensor_ty(span, dt)}")
+
+        self.cast(span, shaped, dt, t)
+    end unpacked
+
+    // The mask `mv` of type `mt` flattened, after trapping where its extents are not those of the
+    // array `av` of type `at`.
+    private mask_flat(*self, span: Span, av: string, at: Ty, mv: string, mt: Ty) -> string
+        for m in 1..rank_of(at)
+            self.trap_if(self.def(s"arith.cmpi ne, ${self.dim(span, av, at, m)}, ${self.dim(span, mv, mt, m)} : index"), SHAPE_MISMATCH)
+
+        self.flat(span, mv, mt)
+
+    // How many of the `n` elements of the flattened mask `fm` hold.
+    private trues(*self, span: Span, fm: string, n: string) -> string
+        val zero = self.index_const(0)
+        val one = self.index_const(1)
+        val iv = self.fresh()
+        val acc = self.fresh()
+        val r = self.fresh()
+
+        self.op(s"$r = scf.for $iv = $zero to $n step $one iter_args($acc = $zero) -> (index) {")
+
+        val k = self.def(s"tensor.extract $fm[$iv] : ${self.bools_ty(span)}")
+        val more = self.def(s"arith.addi $acc, $one : index")
+
+        self.op(s"scf.yield ${self.def(s"arith.select $k, $more, $acc : index")} : index")
+        self.op("}")
+        r
+
+    private bools_ty(*self, span: Span) -> string = self.tensor_ty(span, Ty.Array(Bool, dynamic_axes(1)))
+end Emitter

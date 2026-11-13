@@ -38,6 +38,8 @@ val NOT_AN_AXIS = "not an axis of the array"
 val NEGATIVE_EXTENT = "a negative extent"
 val RESHAPE_SIZE = "reshape to a different size"
 val NOT_A_PERMUTATION = "not a permutation of the axes"
+val PACK_VECTOR_SHORT = "pack: the vector is shorter than the elements packed"
+val UNPACK_TOO_FEW = "unpack: the vector has fewer elements than the mask has trues"
 
 val ASSERTION_FAILED = "assertion failed"
 val ASSERT_EQ_FAILED = "assert_eq failed"

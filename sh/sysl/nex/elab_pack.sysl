@@ -1,0 +1,107 @@
+module sh.sysl.nex
+
+// Fortran's PACK and UNPACK (DESIGN §4.3), over arrays of numbers or booleans, units included:
+//
+// - `pack(a, mask, vector = v)` is a vector of the elements of `a` where `mask` holds, in storage
+//   (column-major) order. `mask` is a `bool` array of `a`'s shape, or one `bool` for every element.
+//   Where `v` is given the result has its length: the packed elements, then `v`'s from that position
+//   on. A `v` shorter than the elements packed traps.
+// - `unpack(v, mask, field)` has `mask`'s shape: where `mask` holds, `v`'s elements in order, in
+//   storage order; elsewhere `field`, one value or an array of `mask`'s shape. A `v` with fewer
+//   elements than `mask` has trues traps.
+//
+// `vector` and `field` are converted to the element type as `+` converts. A shape mismatch between
+// arrays whose shapes are static is refused here, and traps where one is known only at run time.
+//
+// The node is `TBuiltin(name, args)`: `[a, mask]` or `[a, mask, vector]` for `pack`, and
+// `[v, mask, field]` for `unpack`.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Elab
+    packing(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        var params: Buf[string] = buf()
+
+        if name == "pack"
+            params.push("array")
+            params.push("mask")
+            params.push("vector")
+        else
+            params.push("vector")
+            params.push("mask")
+            params.push("field")
+
+        val usage = if name == "pack" then "an array and a mask, and optionally a vector, `pack(a, a > 0)` or `pack(a, m, vector = v)`"
+                    else "a vector, a mask and a field, `unpack(v, m, 0.0)`"
+        val given = self.fortran_args(span, name, params, usage, args) match
+            Some(g) -> g
+            None -> return self.invalid(span)
+
+        if given[0].is_none() || given[1].is_none() || name == "unpack" && given[2].is_none() then return self.arity(span, name, usage)
+
+        val source = given[0].unwrap()
+        val a = self.array_arg(name, source)
+
+        if is_error(a.ty) then return self.invalid(span)
+
+        val e = elem_of(a.ty)
+
+        if !is_number_ty(e)
+            self.fail(source.span, s"`${name}` moves numbers and booleans; these are ${show_ty(e)}")
+            return self.invalid(span)
+
+        if name == "unpack" && rank_of(a.ty) != 1
+            self.fail(source.span, s"`unpack` takes its elements as a vector (rank 1); this is ${self.shown(a)}")
+            return self.invalid(span)
+
+        val m = self.infer(given[1].unwrap())
+
+        if is_error(m.ty) then return self.invalid(span)
+
+        if !ty_eq(elem_of(m.ty), Bool) || name == "unpack" && !is_array(m.ty)
+            val wants = if name == "pack" then "`bool` or a `bool` array of the array's shape" else "an array of `bool`"
+
+            self.fail(given[1].unwrap().span, s"`${name}`'s mask is ${wants}; this is ${self.shown(m)}")
+            return self.invalid(span)
+
+        if name == "pack" && is_array(m.ty)
+            self.shape_meet(span, "`pack`", axes_of(a.ty), axes_of(m.ty)) match
+                Some(_) -> ()
+                None -> return self.invalid(span)
+
+        var out: Buf[TExpr] = buf()
+
+        out.push(a)
+        out.push(m)
+
+        if name == "pack"
+            given[2] match
+                Some(v) -> out.push(self.check(v, Ty.Array(e, dynamic_axes(1)), "`pack`'s vector"))
+                None -> ()
+
+            return texpr(span, Ty.Array(e, dynamic_axes(1)), TBuiltin(name, out))
+
+        val shape = Ty.Array(e, axes_of(m.ty))
+
+        out.push(self.unpack_field(given[2].unwrap(), e, shape))
+        texpr(span, shape, TBuiltin(name, out))
+    end packing
+
+    // `unpack`'s field: one value of the element type `e`, or an array of the mask's shape, `shape`.
+    // A literal takes its type from where it goes, as an array literal's elements do.
+    private unpack_field(*self, f: Expr, e: Ty, shape: Ty) -> TExpr
+        val what = "`unpack`'s field"
+
+        *f.kind match
+            Array(_) -> return self.check(f, shape, what)
+            _ -> ()
+
+        if self.literal_class(f) != NOT_LITERAL then return self.check(f, e, what)
+
+        val v = self.infer(f)
+
+        if is_error(v.ty) then return v
+
+        self.coerce(v, if is_array(v.ty) then shape else e, what)
+end Elab

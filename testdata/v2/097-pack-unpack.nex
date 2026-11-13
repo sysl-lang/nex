@@ -1,0 +1,86 @@
+// `pack` and `unpack`, Fortran's PACK and UNPACK (DESIGN §4.3): ranks 1 to 3 in column-major
+// order; a mask of the array's shape and one `bool` for every element; masks all false and all
+// true; extent 0; a `vector` longer than the elements packed; a `field` that is one value and one
+// that is an array; arguments by position and by name; `bool`, `real32` and `int8` elements; units
+// kept, with `vector` and `field` converted; strided, reversed and matrix windows as arguments; and
+// the traps of a short vector, of too few elements and of a shape mismatch known only at run time.
+
+def n_of(k: integer) = k
+
+def main() =
+  val v = [1, 2, 3, 4, 5, 6]
+  print(pack(v, v > 3))
+  print(pack(v, [true, false, true, false, true, false]))
+  print(pack(v, v % 2 == 0, vector = [10, 20, 30, 40, 50]))
+  print(pack(v, mask = v > 4, vector = [0, 0, 0, 0]))
+  print(pack(v, true))
+  print(pack(v, false))
+  print(pack(v, false, [7, 8]))
+  print(pack(v, v > 100))
+  print(pack(v, v > 0))
+  print(unpack([10, 20, 30], v % 2 == 0, 0))
+  print(unpack([10, 20, 30, 40], v > 2, v))
+  print(unpack([1, 2], v > 100, -1))
+  print(unpack([1, 2, 3, 4, 5, 6, 7], v > 0, 0))
+  print(unpack([9], mask = v == 3, field = 0))
+
+  // Rank 2: the elements in column-major order.
+  val m = [[1, 2, 3], [4, 5, 6]]
+  print(pack(m, m > 1))
+  print(pack(m, m % 2 == 1, vector = [0, 0, 0, 0, 0, 0]))
+  print(pack(m, true))
+  val mk = [[true, false, true], [false, true, false]]
+  print(unpack([7, 8, 9], mk, 0))
+  print(unpack([7, 8, 9], mk, m))
+
+  // Rank 3.
+  val c = reshape([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24], (2, 3, 4))
+  print(pack(c, c % 5 == 0))
+  print(pack(c, c > 20))
+  print(pack(c[2, 1..3, 1..4], c[1, 1..3, 1..4] > 10))
+  val u3 = unpack([100, 200], c % 12 == 0, c)
+  print(u3[2, 3, 1..4])
+  print(sum(u3) - sum(c))
+
+  // Extent 0.
+  val e: [real] = zeros(0)
+  print(pack(e, e > 0.0))
+  print(pack(e, true, vector = [1.5, 2.5]))
+  print(unpack(e, e > 0.0, 1.0))
+  val z: [integer; :, :] = zeros((0, 3))
+  print(length(pack(z, z == 0)))
+  print(shape(unpack([1], z > 0, 5)))
+
+  // `bool`, `real32` and `int8` elements.
+  val b = [true, false, true, true]
+  print(pack(b, [true, true, false, true]))
+  print(unpack([false, true, false], b, true))
+  val f: [real32] = [1.5, -2.5, 3.5, -4.5]
+  print(pack(f, f > 0.0, vector = [0.25, 0.25, 0.25]))
+  print(unpack(f, f < 0.0, 0.5))
+  val bytes: [int8] = [-5, 3, 120, -128, 7]
+  print(pack(bytes, bytes < 0))
+  print(pack(bytes, bytes > 0, vector = [1, 1, 1, 1]))
+  print(unpack(pack(bytes, bytes > 0), bytes > 0, 0))
+
+  // Units are kept, and a vector or a field in another unit is converted.
+  val d = [1.0, 2.0, 3.0]<m>
+  print(pack(d, d > 1.5<m>))
+  print(pack(d, d < 2.5<m>, vector = [10.0, 20.0, 30.0]<cm>))
+  print(unpack([4.0]<m>, d > 2.5<m>, 50.0<cm>))
+  print(unpack([4.0]<m>, d > 2.5<m>, [100.0, 200.0, 300.0]<cm>))
+
+  // Windows as arguments: strided, reversed, and a matrix's.
+  print(pack(v[1..end by 2], v[2..end by 2] > 3))
+  print(pack(reverse(v), reverse(v) < 3))
+  print(pack(m[1..2, 2..3], m[1..2, 1..2] > 1))
+  print(unpack(v[end..1 by -2], m > 3, m))
+  print(unpack(f[1..end by 2], b[1..2], f[2..3]))
+
+  assert_traps(() -> print(pack(v, v > 3, vector = [1, 2])), "shorter")
+  assert_traps(() -> print(unpack([1, 2], v > 3, 0)), "fewer")
+  val w: [integer] = zeros(n_of(4))
+  assert_traps(() -> print(pack(v, w == 0)), "shape mismatch")
+  assert_traps(() -> print(unpack(v, v > 0, w)), "shape mismatch")
+  assert_traps(() -> print(unpack(v, w > 0, v)), "shape mismatch")
+  print("done")

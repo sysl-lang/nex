@@ -1,0 +1,85 @@
+module sh.sysl.nex
+
+// `pack` and `unpack` as the interpreter computes them (`elab_pack.sysl`), each a new dense array, as
+// `compiler/emit_pack.sysl` makes it. Every argument is evaluated, in the node's order, before any
+// check traps.
+
+import nex_runtime.sh.sysl.nex_runtime.{PACK_VECTOR_SHORT, SHAPE_MISMATCH, UNPACK_TOO_FEW}
+import sysl.buf.{Buf, buf}
+
+impl Interp
+    pack_unpack(*self, name: string, args: Buf[TExpr], t: Ty) -> Code
+        val codes = self.operands(args)
+        val et = elem_of(t)
+        val mask_array = is_array(args[1].ty)
+        val field_array = name == "unpack" && is_array(args[2].ty)
+
+        (c) ->
+            var vals: Buf[Value] = buf()
+
+            for k in 0..<codes.len()
+                val f = codes[k]
+
+                vals.push(f(c)?)
+
+            if name == "pack"
+                val a = arr_of(vals[0])
+                val xs = elements(a)
+                var keep: Buf[bool] = buf()
+
+                if mask_array
+                    val m = arr_of(vals[1])
+
+                    if !same_shape(a, m) then return trapped(SHAPE_MISMATCH)
+
+                    for b in elements(m)
+                        keep.push(bool_of(b))
+
+                val every = !mask_array && bool_of(vals[1])
+                var out: Buf[Value] = buf()
+
+                for k in 0..<xs.len()
+                    if (if mask_array then keep[k] else every) then out.push(xs[k])
+
+                if vals.len() == 3
+                    val v = elements(arr_of(vals[2]))
+
+                    if v.len() < out.len() then return trapped(PACK_VECTOR_SHORT)
+
+                    for k in out.len()..<v.len()
+                        out.push(v[k])
+
+                return Ok(vector(et, out))
+
+            val v = elements(arr_of(vals[0]))
+            val m = arr_of(vals[1])
+            val ms = elements(m)
+            var fs: Buf[Value] = buf()
+
+            if field_array
+                val f = arr_of(vals[2])
+
+                if !same_shape(f, m) then return trapped(SHAPE_MISMATCH)
+
+                fs = elements(f)
+
+            var trues: usize = 0
+
+            for b in ms
+                if bool_of(b) then trues += 1
+
+            if v.len() < trues then return trapped(UNPACK_TOO_FEW)
+
+            var out: Buf[Value] = buf()
+            var j: usize = 0
+
+            for k in 0..<ms.len()
+                if bool_of(ms[k])
+                    out.push(v[j])
+                    j += 1
+                else
+                    out.push(if field_array then fs[k] else vals[2])
+
+            Ok(dense(et, out, m.ext))
+    end pack_unpack
+end Interp

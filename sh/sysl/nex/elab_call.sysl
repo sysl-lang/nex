@@ -28,7 +28,7 @@ private val OTHER_BUILTINS = ["print", "eprint", "abs", "sign", "conj", "arg", "
 
 // The prelude's array functions (DESIGN §4.2, §4.3, §7.4), which come with arrays, and the
 // assertions over arrays and lambdas.
-private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "findloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "flatten", "transpose", "cshift", "eoshift", "spread", "shape", "rows", "cols", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "to_integers", "to_bytes", "assert_approx", "assert_traps"]
+private val ARRAY_BUILTINS = ["sum", "product", "length", "size", "rank", "extent", "extents", "permute", "reverse", "map", "filter", "flatMap", "reduce", "enumerate", "zip", "minval", "maxval", "minloc", "maxloc", "findloc", "any", "all", "count", "norm2", "dot", "zeros", "ones", "fill", "reshape", "flatten", "transpose", "cshift", "eoshift", "spread", "pack", "unpack", "shape", "rows", "cols", "diag", "identity", "linspace", "origin", "rebase", "read_bytes", "write_bytes", "to_integers", "to_bytes", "assert_approx", "assert_traps"]
 
 private among(name: string, set: []const string) -> bool
     for s in set

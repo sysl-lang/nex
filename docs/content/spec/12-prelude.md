@@ -394,6 +394,8 @@ assert_approx(A @ x, b, 1e-12)
 |---|---|---|
 | `map(a: [T; R], f: T -> U): [U; R]` | `f` applied to every element; shape kept | an `ELEMENTAL` function applied to an array |
 | `filter(a: [T], p: T -> bool): [T]` | the elements for which `p` holds, in order | `PACK(a, mask)` |
+| `pack(a: [T; R], mask, vector = v): [T]` | the elements of `a` where `mask` holds, in column-major order; `mask` is a `bool` array of `a`'s shape or one `bool`; with `vector`, the result has `v`'s length and ends with `v`'s elements past those packed | `PACK(a, mask, VECTOR=v)` |
+| `unpack(v: [T], mask: [bool; R], field): [T; R]` | `mask`'s shape: `v`'s elements in order, in column-major order, where `mask` holds, and `field` (one value, or an array of `mask`'s shape) elsewhere | `UNPACK(v, mask, field)` |
 | `flatMap(a: [T], f: T -> [U]): [U]` | `f` applied to every element, the results concatenated | — |
 | `reduce(a: [T], init: U, f: (U, T) -> U): U` | left fold: `f(… f(f(init, a[1]), a[2]) …, a[n])` | `REDUCE` (Fortran 2018) |
 | `enumerate(a: [T])` | each element paired with its index, starting at **1** | — |
@@ -406,6 +408,20 @@ reduce(xs, 0, (acc, x) -> acc + x)               // 15, folded left to right
 
 for k, x in enumerate(xs)
   print(k, x)                                    // 1 1, 2 2, … 5 5
+```
+
+`pack` and `unpack` take arrays of numbers or `bool`, views and strided windows included, and keep
+the element type and unit; `vector` and `field` are converted to them as `+` converts. A mask whose
+shape differs from the array's is refused where both shapes are static and traps `shape mismatch`
+otherwise; a `vector` shorter than the elements packed, and a `v` with fewer elements than `mask`
+has trues, trap. Every argument after the first may be named (`mask =`, `vector =`, `field =`).
+
+```nex
+val a = [3, -1, 4, -1, 5]
+pack(a, a > 0)                          // [3, 4, 5], as filter(a, x -> x > 0)
+pack(a, a > 0, vector = [0, 0, 0, 0])   // [3, 4, 5, 0]
+unpack([7, 8], a < 0, 0)                // [0, 7, 0, 8, 0]
+unpack(pack(a, a > 0), a > 0, a) == a   // true at every element
 ```
 
 `map`, `sum`, `product`, `minval`, `maxval` and `dot` have parallel forms, written with the `parallel`

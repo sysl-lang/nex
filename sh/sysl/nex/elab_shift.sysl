@@ -42,44 +42,9 @@ impl Elab
         val usage = if name == "spread" then "an array or a value, an axis and a count, `spread(a, 2, n)`"
                     elif name == "cshift" then "an array, a shift and an optional axis, `cshift(a, 1)` or `cshift(a, 1, dim = 2)`"
                     else "an array, a shift, an optional boundary and an optional axis, `eoshift(a, 1)` or `eoshift(a, 1, boundary = 0.5, dim = 2)`"
-        var given: Buf[Option[Expr]] = buf()
-
-        for _ in params
-            given.push(None)
-
-        var next: usize = 0
-
-        for a in args
-            *a.kind match
-                NamedArg(n, v) ->
-                    var at: Option[usize] = None
-
-                    for k in 1..<params.len()
-                        if params[k] == n then at = Some(k)
-
-                    at match
-                        Some(k) ->
-                            if given[k].is_some()
-                                self.fail(a.span, s"`${n}` is given twice")
-                                return self.invalid(span)
-
-                            given[k] = Some(v)
-                        None ->
-                            var names = ""
-
-                            for k in 1..<params.len()
-                                names += (if k == 1 then "" elif k + 1 == params.len() then " and " else ", ") + s"`${params[k]} =`"
-
-                            self.fail(a.span, s"`${name}` takes the named arguments ${names}")
-                            return self.invalid(span)
-                _ ->
-                    while next < params.len() && given[next].is_some()
-                        next += 1
-
-                    if next == params.len() then return self.arity(span, name, usage)
-
-                    given[next] = Some(a)
-                    next += 1
+        val given = self.fortran_args(span, name, params, usage, args) match
+            Some(g) -> g
+            None -> return self.invalid(span)
 
         if given[0].is_none() || given[1].is_none() || name == "spread" && given[2].is_none() then return self.arity(span, name, usage)
         if name == "spread" then return self.spread(span, given[0].unwrap(), given[1].unwrap(), given[2].unwrap())
@@ -133,6 +98,55 @@ impl Elab
 
         texpr(span, a.ty, TBuiltin(name, out))
     end shifting
+
+    // The arguments of the prelude function `name`, whose parameters are `params` in Fortran's
+    // order, placed by position or by name: every one after the first may be named. Each is `None`
+    // where it is not given. A name that is not a parameter, one given twice or too many positional
+    // arguments is diagnosed, and the answer is `None`.
+    fortran_args(*self, span: Span, name: string, params: Buf[string], usage: string, args: Buf[Expr]) -> Option[Buf[Option[Expr]]]
+        var given: Buf[Option[Expr]] = buf()
+
+        for _ in params
+            given.push(None)
+
+        var next: usize = 0
+
+        for a in args
+            *a.kind match
+                NamedArg(n, v) ->
+                    var at: Option[usize] = None
+
+                    for k in 1..<params.len()
+                        if params[k] == n then at = Some(k)
+
+                    at match
+                        Some(k) ->
+                            if given[k].is_some()
+                                self.fail(a.span, s"`${n}` is given twice")
+                                return None
+
+                            given[k] = Some(v)
+                        None ->
+                            var names = ""
+
+                            for k in 1..<params.len()
+                                names += (if k == 1 then "" elif k + 1 == params.len() then " and " else ", ") + s"`${params[k]} =`"
+
+                            self.fail(a.span, s"`${name}` takes the named arguments ${names}")
+                            return None
+                _ ->
+                    while next < params.len() && given[next].is_some()
+                        next += 1
+
+                    if next == params.len()
+                        self.fail(span, s"`${name}` takes ${usage}")
+                        return None
+
+                    given[next] = Some(a)
+                    next += 1
+
+        Some(given)
+    end fortran_args
 
     // `spread(a, dim, ncopies)`: `a`, an array or a value, repeated along a new axis `dim`.
     private spread(*self, span: Span, source: Expr, d: Expr, n: Expr) -> TExpr

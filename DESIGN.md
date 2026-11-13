@@ -487,6 +487,7 @@ type lands"): `val z: [real32; :, :] = zeros((4, 4))`.
 | `cshift(a, shift, dim = 1)` | Fortran's CSHIFT: rotated along `dim`, a positive shift toward lower indices; `shift` an integer or a rank R−1 array of them, one per lane (then `dim` is a literal) |
 | `eoshift(a, shift, boundary, dim = 1)` | Fortran's EOSHIFT: shifted end-off, vacated positions `boundary` (converted as `+` converts; zero or `false` by default) |
 | `spread(a, dim, ncopies)` | Fortran's SPREAD: rank R+1, `ncopies` (at least 0) copies along a new axis `dim`, a literal; a scalar gives a vector |
+| `pack(a, mask, vector = v)`, `unpack(v, mask, field)` | Fortran's PACK and UNPACK, column-major order: `mask` of `a`'s shape (a scalar for `pack`), `vector` filling out the result from its tail, `field` a value or an array of `mask`'s shape, both converted as `+` converts; a short `v` and a shape mismatch found at run time trap; `filter` is the predicate form |
 | `sum(a, dim = k)` | sum over axis `k`: rank R−1 (at rank 2, `k` is 1 or 2); every reduction takes `dim =` (§7.4) |
 | `diag(v)`, `diag(m)` | the square matrix with the vector `v` on its diagonal; the diagonal of the matrix `m` |
 | `linspace(lo, hi, n)` | `n` reals evenly from `lo` to `hi` inclusive, `[real; :]` |
