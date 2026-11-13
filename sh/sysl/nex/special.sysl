@@ -4,7 +4,8 @@ module sh.sysl.nex
 // named once here for both engines.
 //
 // **The special functions are the C library's**: `erf`, `erfc`, `gamma` (`tgamma`), `log_gamma`
-// (`lgamma`) and the Bessel functions (`j0`, `j1`, `y0`, `y1`, `jn`, `yn`). A `real32` computes in
+// (`lgamma_r`, which writes the sign where the caller says rather than to a global every thread
+// shares) and the Bessel functions (`j0`, `j1`, `y0`, `y1`, `jn`, `yn`). A `real32` computes in
 // `real32` where the library has an `f` function and a `real16` computes in `real32` and rounds, as
 // the elementary functions do. The Bessel functions have no `f` function in every C library (Apple's
 // has none), so they compute in `real64` at every width and round once.

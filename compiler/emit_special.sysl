@@ -2,7 +2,7 @@
 // an array expression each is the body of the loop nest, as any elemental function is.
 //
 // **Each calls the C library function the interpreter calls** (`sh/sysl/nex/interp_special.sysl`),
-// at the same width, so the engines agree bit for bit: `erf`, `erfc`, `tgamma` and `lgamma` at the
+// at the same width, so the engines agree bit for bit: `erf`, `erfc`, `tgamma` and `lgamma_r` at the
 // argument's width (a `real16` through `real32`), the Bessel functions in `real64` and rounded once,
 // `ilogb` and `scalbln` for the representation of a real, and `nextafter` for `nearest`.
 
@@ -36,10 +36,10 @@ impl Emitter
 
                 if k >= FIRST_BESSEL then return self.fpe_check(self.from64(self.call(c, self.to64(x, bits), "f64", "f64"), bits), x, x, bits)
 
-                if bits == 64 then return self.fpe_check(self.call(c, x, "f64", "f64"), x, x, bits)
+                if bits == 64 then return self.fpe_check(self.library(k, c, x, 64), x, x, bits)
 
                 val v = if bits == 16 then self.def(s"arith.extf $x : f16 to f32") else x
-                val r = self.call(c + "f", v, "f32", "f32")
+                val r = self.library(k, c + "f", v, 32)
                 val out = if bits == 16 then self.def(s"arith.truncf $r : f32 to f16") else r
 
                 return self.fpe_check(out, x, x, bits)
@@ -88,6 +88,16 @@ impl Emitter
         // `set_exponent`: the fraction, exact at the width, scaled.
         self.scaled(fraction, self.ex(args[1]), args[1].ty, bits)
     end special
+
+    // Special function `k`, C function `c`, of `v`, a real of `bits` bits. `log_gamma` calls the
+    // reentrant `lgamma_r` (`lgammaf_r`), which writes the sign of Γ(x) to a slot of the calling
+    // function's frame, so each thread of a parallel region writes its own.
+    library(*self, k: usize, c: string, v: string, bits: int) -> string
+        val f = s"f$bits"
+
+        if SPECIAL_FUNCTIONS[k] != "log_gamma" then return self.call(c, v, f, f)
+
+        self.call(c + "_r", s"$v, ${self.alloca("i32")}", s"$f, !llvm.ptr", f)
 
     // Whether `x`, a real of `bits` bits, is finite: its magnitude is below infinity, which a NaN's is
     // not.

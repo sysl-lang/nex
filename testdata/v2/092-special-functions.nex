@@ -82,4 +82,27 @@ def main() =
 
   assert_approx(m, [1.0144904472102003, 0.0, -0.10704047110878781, 0.0], 1e-14)
   assert_approx(parallel erfc(xs) * 2.0, erfc(xs) * 2.0, 0.0)
+
+  // `log_gamma` of negative non-integers, where the sign of Γ flips from one to the next: every
+  // thread keeps the sign it computes to itself, so a parallel loop gives what the sequential one does.
+  assert_approx(log_gamma([-0.5, -1.5, -2.5]), [1.2655121234846454, 0.86004701537648098, -0.056243716497674123], 1e-14)
+
+  val n = 4000
+  var negs: [real] = zeros(n)
+  var seq: [real] = zeros(n)
+  var par: [real] = zeros(n)
+  var par32: [real32] = zeros(n)
+
+  for k in 1..n
+    negs[k] = -(real(k) - 0.5) / 7.0
+    seq[k] = log_gamma(negs[k])
+
+  parallel for k in 1..n
+    par[k] = log_gamma(negs[k])
+    par32[k] = log_gamma(real32(negs[k]))
+
+  assert_approx(par, seq, 0.0)
+  assert_approx(parallel map(negs, t -> log_gamma(t)), seq, 0.0)
+  assert_approx(parallel log_gamma(negs) + 1.0, seq + 1.0, 0.0)
+  assert_approx(real64(par32), real64(log_gamma(real32(negs))), 0.0)
   print("ok")

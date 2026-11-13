@@ -13,8 +13,10 @@ private extern "erfc" c_erfc(x: real) -> real
 private extern "erfcf" c_erfcf(x: f32) -> f32
 private extern "tgamma" c_tgamma(x: real) -> real
 private extern "tgammaf" c_tgammaf(x: f32) -> f32
-private extern "lgamma" c_lgamma(x: real) -> real
-private extern "lgammaf" c_lgammaf(x: f32) -> f32
+// The reentrant forms, which write the sign of Γ(x) through `sign` rather than to the global
+// `signgam`, so threads calling them at once do not race.
+private extern "lgamma_r" c_lgamma_r(x: real, sign: *i32) -> real
+private extern "lgammaf_r" c_lgammaf_r(x: f32, sign: *i32) -> f32
 private extern "j0" c_j0(x: real) -> real
 private extern "j1" c_j1(x: real) -> real
 private extern "y0" c_y0(x: real) -> real
@@ -28,6 +30,17 @@ private extern "scalblnf" c_scalblnf(x: f32, n: long) -> f32
 private val INF = 1.0 / 0.0
 private val NAN = 0.0 / 0.0
 
+// ln |Γ(x)| at `real64` and at `real32`, the sign of Γ(x) dropped.
+private log_gamma64(x: real) -> real
+    var sign: i32 = 0
+
+    c_lgamma_r(x, &sign)
+
+private log_gamma32(x: f32) -> f32
+    var sign: i32 = 0
+
+    c_lgammaf_r(x, &sign)
+
 // Special function `k` of `SPECIAL_FUNCTIONS` at the width: a `real32` through the library's `f`
 // function, a `real16` through it and rounded, and a Bessel function in `real64` and rounded.
 private[nex] special1(k: usize, x: real, bits: int) -> real
@@ -36,11 +49,11 @@ private[nex] special1(k: usize, x: real, bits: int) -> real
 
         return rnd(r, bits)
 
-    if bits == 64 then return if k == 0 then c_erf(x) elif k == 1 then c_erfc(x) elif k == 2 then c_tgamma(x) else c_lgamma(x)
+    if bits == 64 then return if k == 0 then c_erf(x) elif k == 1 then c_erfc(x) elif k == 2 then c_tgamma(x) else log_gamma64(x)
 
     val v = f32(x)
 
-    rnd(real(if k == 0 then c_erff(v) elif k == 1 then c_erfcf(v) elif k == 2 then c_tgammaf(v) else c_lgammaf(v)), bits)
+    rnd(real(if k == 0 then c_erff(v) elif k == 1 then c_erfcf(v) elif k == 2 then c_tgammaf(v) else log_gamma32(v)), bits)
 
 // `bessel_jn(n, x)` or `bessel_yn(n, x)` in `real64`, rounded to the width; an order beyond C's
 // `int` is held at its ends.
