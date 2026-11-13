@@ -62,10 +62,6 @@ impl Elab
             if !is_real(other)
                 self.fail(span, s"`nearest` takes the direction as a real, whose sign it reads, and this is ${show_ty(out[1].ty)}")
                 return self.invalid(span)
-
-            if bits_of(xb) == 16
-                self.fail(span, "`nearest` of a real16 is not supported: compute it in real32 and convert")
-                return self.invalid(span)
         elif !is_int(other)
             val what = if bessel then "the order" else "the power of two"
 

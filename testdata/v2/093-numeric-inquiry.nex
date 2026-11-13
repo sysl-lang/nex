@@ -58,6 +58,18 @@ def main() =
   // `real16` through `real32`.
   print(s"${exponent(h)} ${fraction(h)} ${spacing(h)} ${scale(h, 15)} ${scale(h, 16)} ${set_exponent(h, -3)}")
 
+  // `real16` `nearest` steps through the half's own neighbours, not `real32`'s: into and out of the
+  // infinities, across zero into the subnormals, and within them.
+  val zero16: real16 = 0.0
+  val sub16 = tiny(h) / 8.0
+
+  print(s"${nearest(h, 1.0)} ${nearest(h, -1.0)} ${nearest(-h, 1.0)} ${nearest(zero16, 1.0)} ${nearest(zero16, -1.0)} ${nearest(huge(h), 1.0)} ${nearest(-huge(h), -1.0)}")
+  print(s"${nearest(nearest(huge(h), 1.0), -1.0)} ${nearest(sub16, 1.0)} ${nearest(sub16, -1.0)}")
+
+  // Stepping from the smallest subnormal back to zero keeps the sign it came from, as IEEE
+  // `nextafter` does; `1 / x` shows it.
+  print(s"${1.0 / nearest(nearest(zero16, 1.0), -1.0)} ${1.0 / nearest(nearest(zero16, -1.0), 1.0)}")
+
   // Units: `spacing`, `nearest`, `scale`, `huge` and `tiny` keep the argument's; `epsilon`,
   // `exponent`, `fraction` and `set_exponent` give a plain number; the direction's unit is not read.
   val d = 3.0<m>

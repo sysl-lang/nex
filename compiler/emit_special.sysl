@@ -55,6 +55,12 @@ impl Emitter
             val inf = self.real_const(1.0 / 0.0, bits)
             val toward = self.def(s"arith.select $negative, ${self.real_const(-1.0 / 0.0, bits)}, $inf : $f")
 
+            if bits == 16
+                val x32 = self.def(s"arith.extf $x : f16 to f32")
+                val t32 = self.def(s"arith.extf $toward : f16 to f32")
+
+                return self.def(s"arith.truncf ${self.call("nex_nextafter_f16", s"$x32, $t32", "f32, f32", "f32")} : f32 to f16")
+
             return self.call(if bits == 64 then "nextafter" else "nextafterf", s"$x, $toward", s"$f, $f", f)
 
         if name == "scale" then return self.fpe_check(self.scaled(x, self.ex(args[1]), args[1].ty, bits), x, x, bits)

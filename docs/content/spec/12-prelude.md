@@ -162,7 +162,7 @@ an array gives the scalar of its element type, as in Fortran: `epsilon(a)` of a 
 
 **The representation functions** take reals only. `exponent` returns an `integer` and `is_nan` and
 `is_finite` a `bool`; the others return the argument's type. `nearest` reads only the sign of `s`,
-which may be any real, and a negative zero points toward −∞. `nearest` does not take a `real16`.
+which may be any real, and a negative zero points toward −∞.
 
 **Units** (DESIGN §13.4): a special function needs a dimensionless argument and gives a plain
 number. `huge`, `tiny`, `spacing`, `nearest` and `scale` keep the argument's unit; `epsilon`,
