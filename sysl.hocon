@@ -24,7 +24,7 @@
 package {
   name    = "nex"
   version = "0.0.3"
-  sysl    = "0.9.19"
+  sysl    = "0.10.3"
 }
 
 workspace = ["compiler", "runtime", "examples/embed"]
