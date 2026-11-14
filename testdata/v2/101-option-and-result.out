@@ -1,0 +1,44 @@
+Some(2)
+None
+None
+true
+true
+Some(2)
+None
+Some(2)
+None
+Ok(4)
+Err(Negative(-3))
+Err(Odd(5))
+Ok(12)
+Err(Odd(3))
+Ok([20.0, 5.0])
+Err(Negative(-2))
+Some(8)
+None
+-1
+5
+0
+8
+true
+false
+true
+true
+false
+true
+6
+-3
+[1, 2, 3]
+Some([1.0, 2.0, 3.0])
+6.0
+[40.0, 10.0]
+Reading { label=a, value=Ok(1.5) }
+Err(Odd(3))
+1.5
+Some(5.0)
+None
+9
+ok 3
+failed: no luck
+[1, 2, 3, 4]
+done

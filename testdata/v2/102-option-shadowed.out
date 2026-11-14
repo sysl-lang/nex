@@ -1,0 +1,9 @@
+Some(2.5)
+Nothing
+2.5
+Ok
+Err(-4)
+ran
+Taken([1.5, 2.5], 2)
+Empty
+Taken([0.5], 1)

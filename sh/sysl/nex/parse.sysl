@@ -5,7 +5,8 @@ module sh.sysl.nex
 // Each function reads one construct of spec chapters 4 to 9 and is named for it. Precedence is the
 // table of §4.3, loosest first: `,` (a tuple), `->` (a lambda), `or`, `and`, `not`, comparison, `..`,
 // `+ -`, `* / div % @`, juxtaposition, unary `-`, `^`, then calls, indexing, `.` and a
-// unit annotation `<unit>`, all postfix and chained left to right.
+// unit annotation `<unit>`, and the `!` and `?` of DESIGN §17.2, all postfix and chained left
+// to right, so `-x!` is `-(x!)`.
 // A postfix `match` may follow any expression short of a tuple. A loop label, `name:`, is told
 // from a name by the `for` or `while` two tokens on.
 //
@@ -1260,6 +1261,11 @@ struct Parser
                 val u = self.annotation()?
 
                 e = ex(self.toks.span_from(m), Measured(e, u))
+            elif self.accept("!")
+                // `e!` and `e?` (DESIGN §17.2), kept as unary operators written after their operand.
+                e = ex(self.toks.span_from(m), Unary("!", e))
+            elif self.accept("?")
+                e = ex(self.toks.span_from(m), Unary("?", e))
             else
                 break
         end loop

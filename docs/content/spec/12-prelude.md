@@ -1,6 +1,6 @@
 ---
 title: The Prelude
-summary: Every name available without an import — constants, elementary and complex math, array construction, shape queries, reductions, linear algebra, higher-order functions, views, conversions, I/O and testing — with its Fortran equivalent.
+summary: Every name available without an import — constants, elementary and complex math, array construction, shape queries, reductions, linear algebra, higher-order functions, views, conversions, I/O, testing, `Option` and `Result` — with its Fortran equivalent.
 weight: 120
 ---
 
@@ -625,3 +625,66 @@ def overflow_traps() =
   val big: int8 = 127
   assert_traps(() -> big + 1)       // int8 arithmetic traps at 128
 ```
+
+## 12.13 `Option` and `Result`
+
+A failure that a program may want to handle is reported as a value. The prelude declares two
+generic enums:
+
+```nex
+enum Option[T] =
+  Some(value: T)
+  None
+end Option
+
+enum Result[T, E] =
+  Ok(value: T)
+  Err(error: E)
+end Result
+```
+
+They are ordinary enums: built by their variants, taken apart by `match`, compared with `==` where
+their payloads can be, and printed as `Some(3)`, `None`, `Ok(1.5)`, `Err(NotFound(in.dat))`. A bare
+`None` or `Ok(…)` takes its type arguments from the type expected: `val n: Option[integer] = None`.
+
+| Signature | Meaning | Fortran |
+|---|---|---|
+| `get_or(x, default)` | the value of a `Some` or an `Ok`, else `default`; both arguments are evaluated | `MERGE` on a status |
+| `is_some(o)`, `is_none(o)` | whether an `Option` holds a value | `PRESENT` |
+| `is_ok(r)`, `is_err(r)` | whether a `Result` holds a value | `iostat == 0` |
+| `x!` | the value of a `Some` or an `Ok`; otherwise a **trap** | no `iostat=` |
+| `x?` | the value of a `Some` or an `Ok`; otherwise the enclosing function **returns** the `None` or the `Err` | `iostat=`, then `RETURN` |
+
+- **`!` traps with the failure's message.** On `None` the message is `` `!` found None ``; on
+  `Err(e)` it is `e` itself where `e` is a `string`, and `e` as `print` spells it otherwise
+  (`Bad(4, x)`). `!` is allowed wherever a trap is, a `parallel for` body included.
+- **`?` returns from the `def` it is written in**, so that `def` declares its result type: an
+  `Option[…]` for a `?` on an `Option`, a `Result[…, E]` with the same `E` for a `?` on a `Result`.
+  There is no conversion between error types, nor between `Option` and `Result`. A function whose
+  result type is inferred, a lambda and a `parallel for` body cannot use `?`; a local `def` that
+  declares its result can.
+- **A `Result` may not be dropped.** A statement whose value is a `Result` is a compile error: *the
+  `Result` of `check` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …`*.
+  `val _ = check(x)` discards one on purpose. An `Option` may be dropped.
+- **A program's own declarations hide them** in its module, as they hide any prelude name: a
+  program declaring its own `enum Opt[T]` with `Some` and `None` keeps working. Matching one of the
+  prelude's (`Option[integer]`) with a variant the module has hidden is a compile error naming both.
+
+```nex
+def half(n: integer): Option[integer] = if n % 2 == 0 then Some(n div 2) else None
+
+def quarter(n: integer): Option[integer] =
+  val h = half(n)?              // None here returns None from quarter
+  half(h)
+
+def main() =
+  print(quarter(8))             // Some(2)
+  print(quarter(6))             // None
+  print(get_or(half(3), -1))    // -1
+  print(half(10)! + 1)          // 6
+```
+
+{{< note >}}
+`main` returning `Result[void, E]`, whose `Err` would end the program with `error: <message>` and
+status 1, is proposed and not built yet: a `void` type argument is not allowed today.
+{{< /note >}}

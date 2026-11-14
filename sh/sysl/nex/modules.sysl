@@ -100,6 +100,62 @@ single_module() -> Modules
 
     Modules(names, test_only, buf(), None, false, buf(), buf(), buf(), buf(), false, None)
 
+// The module every program's prelude declarations are in: the source prelude's, and the one nex
+// ships.
+val PRELUDE_MODULE = "prelude"
+private val SHIPPED_FILE = "<nex>/prelude/prelude.nex"
+private val SHIPPED_SOURCE = embed("../../../prelude/prelude.nex")
+
+// `p` with the declarations of the prelude nex ships (`prelude/prelude.nex`, DESIGN §17.1) before
+// its own, and `mods` with them in the module `prelude`, made where there is no source prelude.
+// Their spans stand past every span of the program's text, so which module a span is in is still
+// read off it; `past` is where they begin. Every program has them, a script and a single file
+// among them, so a program's own declarations hide them as they hide a source prelude's.
+with_shipped_prelude(p: Program, mods: Modules) -> (Program, Modules, usize)
+    var past: usize = 0
+
+    for d in p.decls
+        if d.span.end > past then past = d.span.end
+
+    for f in mods.files
+        if f.end > past then past = f.end
+
+    past += 1
+
+    var text: Buf[u8] = buf()
+
+    for _ in 0..<past
+        text.push(u8('\n'))
+
+    text.extend(SHIPPED_SOURCE)
+
+    val all = source(SHIPPED_FILE, text.view())
+    val shipped = parse_tokens(all, lex_file(all, past, text.len()).unwrap(), prelude_unit_names()).unwrap()
+    var decls: Buf[Decl] = buf()
+
+    decls.extend(shipped.decls.view())
+    decls.extend(p.decls.view())
+
+    var names: Buf[string] = buf()
+    var test_only: Buf[bool] = buf()
+    var files: Buf[FileRange] = buf()
+
+    names.extend(mods.names.view())
+    test_only.extend(mods.test_only.view())
+    files.extend(mods.files.view())
+
+    val m = mods.find(PRELUDE_MODULE) match
+        Some(m) -> m
+        None ->
+            names.push(PRELUDE_MODULE)
+            test_only.push(false)
+            names.len() - 1
+
+    files.push(FileRange(past, text.len(), m))
+
+    (Program(decls), Modules(names, test_only, files, Some(m), mods.test_build, mods.imports, mods.refused, mods.privates, mods.qualified, mods.script, mods.mpi), past)
+end with_shipped_prelude
+
 // The name a value of a struct or an enum is printed with: its own, without its module's path.
 display_name(internal: string) -> string
     val head = split(internal, "[")[0]

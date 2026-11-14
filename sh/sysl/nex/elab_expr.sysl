@@ -212,7 +212,18 @@ impl Elab
 
     // -- the dispatch -----------------------------------------------------------------------------
 
+    // `e` elaborated against the type its position expects; where that is `void`, a statement's, its
+    // value is dropped, which a `Result`'s may not be.
     elab(*self, e: Expr, want: Option[Ty]) -> TExpr
+        val v = self.elab_node(e, want)
+
+        want match
+            Some(Void) -> self.dropped(v)
+            _ -> ()
+
+        v
+
+    private elab_node(*self, e: Expr, want: Option[Ty]) -> TExpr
         val span = e.span
 
         *self.qualified(e).kind match
@@ -262,7 +273,7 @@ impl Elab
                 self.fail(span, "`:` stands only in an index list")
                 self.invalid(span)
             End -> self.end_index(span)
-    end elab
+    end elab_node
 
     // Whether `n`, read inside a default, names its own parameter or a later one, or one of its
     // struct's fields: a default is evaluated at the call before any of them is bound, so it may not.
@@ -562,6 +573,9 @@ impl Elab
     end power_of
 
     unary(*self, span: Span, op: string, x: Expr, want: Option[Ty]) -> TExpr
+        if op == "!" then return self.unwrap_expr(span, x)
+        if op == "?" then return self.try_expr(span, x)
+
         if op == "not"
             val v = self.infer(x)
 
@@ -803,7 +817,7 @@ impl Elab
                 Some(x) -> x.ty
                 None -> Void
 
-            if !is_wild(ty) then self.fx.frames[top] = Frame(frame.lambda, ty, true, frame.loop_base)
+            if !is_wild(ty) then self.fx.frames[top] = Frame(frame.lambda, ty, true, frame.loop_base, frame.named, frame.declared)
 
         texpr(span, Never, TReturn(v))
     end return_expr
@@ -982,7 +996,7 @@ impl Elab
 
     // `written` holds each parameter's type as written, `""` where it was left out.
     lambda_body(*self, lid: usize, name: string, span: Span, names: Buf[string], tys: Buf[Ty], written: Buf[string], modes: Buf[Mode], ret: Option[Ty], body: Expr) -> Ty
-        self.fx.frames.push(Frame(Some(lid), ret.unwrap_or(Error), ret.is_some(), self.fx.loops.len()))
+        self.fx.frames.push(Frame(Some(lid), ret.unwrap_or(Error), ret.is_some(), self.fx.loops.len(), name != "", name != "" && ret.is_some()))
         self.open()
 
         var ids: Buf[usize] = buf()
@@ -1190,4 +1204,4 @@ copy_fx(fx: Fx) -> Fx
     var xch: Buf[XOpen] = buf()
 
     xch.extend(fx.xch.view())
-    Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance, fx.params, fx.owner, xch)
+    Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance, fx.params, fx.owner, xch, fx.par)

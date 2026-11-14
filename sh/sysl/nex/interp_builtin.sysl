@@ -38,6 +38,12 @@ impl Interp
                 emit(m, stream, text(c)? + "\n")
                 Ok(VVoid)
 
+        // `!` on a `None` or an `Err` (DESIGN §17.2): a trap whose message is the string given.
+        if name == "trap"
+            val message = self.ex(args[0])
+
+            return (c) -> trapped(str_of(message(c)?))
+
         if name == "assert_approx" && is_array(args[0].ty) then return self.approx_arrays(args)
 
         if !name.starts_with("assert") && (is_array(t) || (args.len() > 0 && is_array(args[0].ty) && !self.is_args(args[0])))

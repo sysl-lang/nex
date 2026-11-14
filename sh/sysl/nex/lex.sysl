@@ -68,13 +68,14 @@ private val reserved = ["and", "as", "const", "cycle", "def", "div", "do", "elif
     "var", "while"]
 
 // The operators and delimiters, longest first so that the first match is the longest one. `//` and
-// `/*` open comments and are taken before this table is asked. `.*` is a token of its own so that the
+// `/*` open comments and are taken before this table is asked. `!=` comes before `!`, so `a!=b` is a
+// comparison and only a `!` standing apart is the postfix unwrap (DESIGN §17.2). `.*` is a token of its own so that the
 // `*` of `import m.*` at the end of a line is not read as an operator continuing it. `..=` and `**`
 // are in the table only so that they are refused by name rather than read as `..` and `=`, or as two
 // `*`.
 private val operators = ["..=", "..<", "..", "->", ".*", "**", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
     "%=", "(", ")", "[", "]", "{", "}", "+", "-", "*", "/", "%", "^", "@", "<", ">", "=", ".", ",",
-    ";", ":"]
+    ";", ":", "!", "?"]
 
 // The words that may follow a unit annotation's `>`: none of them begins an operand.
 private val annotation_enders = ["then", "do", "else", "and", "or", "div", "as", "by"]

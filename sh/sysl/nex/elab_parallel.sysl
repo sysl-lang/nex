@@ -83,7 +83,13 @@ impl Elab
 
         self.fx.reds.extend(scope.view())
 
+        val outer = self.fx.par
+
+        self.fx.par = Some(self.fx.frames.len() - 1)
+
         val b = self.elab(body, Some(Void))
+
+        self.fx.par = outer
 
         while self.fx.reds.len() > base
             self.fx.reds.pop()

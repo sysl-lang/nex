@@ -1,0 +1,85 @@
+module sh.sysl.nex
+@tests
+
+// The prelude's `Option` and `Result` (DESIGN §17.1, §17.2) as the elaborator checks them: a
+// `Result` not dropped, the `def` a `?` returns from, the places `?` is refused, the functions on
+// them and a match through a shadowed variant. What the programs print is `testdata/v2/101` and
+// `102`'s, on both engines.
+
+private val HALF = "def half(n: integer): Option[integer] = if n % 2 == 0 then Some(n div 2) else None\n"
+private val CHECK = "def check(n: integer): Result[integer, string] = if n < 0 then Err(\"negative\") else Ok(n)\n"
+
+@test("a Result standing as a statement is refused; val _ discards it, and an Option may be dropped")
+elab_result_dropped()
+    val dropped = "error: the `Result` of `check` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …`"
+
+    assert_eq(refused(CHECK + "def main() =\n  check(1)\n  print(2)\n"), s"$dropped @3:3")
+    assert_eq(refused(CHECK + "def main() = check(1)\n"), s"$dropped @2:14")
+    assert_eq(refused(CHECK + "def main() =\n  for k in 1..3\n    check(k)\n"), s"$dropped @4:5")
+    assert_eq(refused(CHECK + "def main() =\n  if true then check(1) else check(2)\n"), s"$dropped @3:16\n$dropped @3:30")
+    assert_eq(refused(CHECK + "def main() =\n  val r = check(1)\n  r\n"), "error: this `Result` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …` @4:3")
+    assert_eq(refused(CHECK + "def main() =\n  val _ = check(1)\n  print(check(2))\n  check(3)!\n"), "ok")
+    assert_eq(refused(HALF + "def main() =\n  half(1)\n"), "ok")
+    // A function whose result is inferred returns the `Result`, which drops nothing.
+    assert_eq(refused(CHECK + "def again(n: integer) = check(n)\ndef main() = print(again(1))\n"), "ok")
+
+@test("? needs a def whose declared result is an Option for an Option, a Result with the same error for a Result")
+elab_try_needs_declared_result()
+    assert_eq(refused(HALF + "def f(n: integer) =\n  val v = half(n)?\n  v\ndef main() = print(f(2))\n"),
+        "error: `?` returns from this function, whose result type is not declared; declare it as an `Option[…]` @3:11")
+    assert_eq(refused(CHECK + "def main() =\n  val v = check(2)?\n  print(v)\n"),
+        "error: `?` returns from this function, whose result type is not declared; declare it as a `Result[…, string]` @3:11")
+    assert_eq(refused(CHECK + "def f(): Result[integer, integer] =\n  val v = check(1)?\n  Ok(v)\ndef main() = print(f())\n"),
+        "error: `?` would return `Err(string)` from this function, which returns Result[int64, int64]; there is no conversion between error types @3:11")
+    assert_eq(refused(CHECK + "def f(): Option[integer] =\n  val v = check(1)?\n  Some(v)\ndef main() = print(f())\n"),
+        "error: `?` would return `Err(string)` from this function, which returns Option[int64]; there is no conversion between `Option` and `Result` @3:11")
+    assert_eq(refused(HALF + "def f(): Result[integer, string] =\n  val v = half(1)?\n  Ok(v)\ndef main() = print(f())\n"),
+        "error: `?` would return `None` from this function, which returns Result[int64, string]; there is no conversion between `Option` and `Result` @3:11")
+    assert_eq(refused(HALF + "def f(): integer =\n  val v = half(2)?\n  v\ndef main() = print(f())\n"),
+        "error: `?` would return `None` from this function, which returns int64; a `?` on an `Option` needs a function returning Option[…] @3:11")
+    // The value type may differ: only the error type is the same.
+    assert_eq(refused(CHECK + "def f(): Result[bool, string] =\n  val v = check(1)?\n  Ok(v > 0)\ndef main() = print(f())\n"), "ok")
+
+@test("? is refused in a lambda and in a parallel for body; a local def with a declared result may use it")
+elab_try_refused_places()
+    assert_eq(refused(HALF + "def g(): Option[integer] =\n  val h = (n: integer) -> half(n)?\n  h(2)\ndef main() = print(g())\n"),
+        "error: a lambda cannot use `?`, which returns from the function it is written in; use a local `def` with a declared result type, or `!` or `match` @3:27")
+    assert_eq(refused(HALF + "def g(xs: [integer]): Option[integer] =\n  var t: [integer] = zeros(3)\n  parallel for i in 1..3\n    t[i] = half(xs[i])?\n  Some(t[1])\ndef main() = print(g([2, 4, 6]))\n"),
+        "error: `?` returns from the function, and a `parallel for` body cannot be left by `return`; use `!`, which traps, or `match` @5:12")
+    assert_eq(refused(HALF + "def g(): Option[integer] =\n  def inner(n: integer) =\n    half(n)?\n  inner(2)\ndef main() = print(g())\n"),
+        "error: `?` returns from this function, whose result type is not declared; declare it as an `Option[…]` @4:5")
+    assert_eq(refused(HALF + "def g(): Option[integer] =\n  def inner(n: integer): Option[integer] =\n    val q = half(n)?\n    half(q)\n  inner(8)\ndef main() = print(g())\n"), "ok")
+    assert_eq(refused(HALF + "def g(xs: [integer]): [integer] =\n  var t: [integer] = zeros(3)\n  parallel for i in 1..3\n    t[i] = half(xs[i])!\n  t\ndef main() = print(g([2, 4, 6]))\n"), "ok")
+
+@test("! and ? take only an Option or a Result, and the functions on them their own kind")
+elab_unwrap_operand()
+    assert_eq(refused("def main() = print(3!)\n"), "error: `!` takes the value out of an `Option` or a `Result`, and this is int64 @1:20")
+    assert_eq(refused("def f(): Option[integer] =\n  val v = 3?\n  Some(v)\ndef main() = print(f())\n"), "error: `?` takes the value out of an `Option` or a `Result`, and this is int64 @2:11")
+    assert_eq(refused(CHECK + "def main() = print(is_some(check(1)))\n"),
+        "error: `is_some` takes an `Option`, and this is Result[int64, string]; a `Result` is asked with `is_ok` or `is_err` @2:28")
+    assert_eq(refused(HALF + "def main() = print(is_err(half(1)))\n"),
+        "error: `is_err` takes a `Result`, and this is Option[int64]; an `Option` is asked with `is_some` or `is_none` @2:27")
+    assert_eq(refused(HALF + "def main() = print(get_or(half(1), \"x\"))\n"), "error: the default must be int64, but this is string @2:36")
+    assert_eq(refused("def main() = print(get_or(3, 4))\n"), "error: `get_or` takes an `Option` or a `Result`, and this is int64 @1:27")
+    // A program's own `get_or` is called in place of the prelude's.
+    assert_eq(refused("def get_or(a: integer, b: integer) = a + b\ndef main() = print(get_or(3, 4))\n"), "ok")
+
+@test("! and ? bind as tightly as a call, and != stays a comparison")
+elab_unwrap_binds_tightly()
+    assert_eq(refused(HALF + "def main() =\n  val a = 1\n  print(a!=2)\n  print(-half(4)! + 1)\n  print(half(half(8)!)!)\n"), "ok")
+    assert_eq(expr_tree("-x!"), "(- (! x))")
+    assert_eq(expr_tree("f(x)?!.y"), "(. (! (? (call f x))) y)")
+
+@test("matching a prelude Option with a variant the module's own declaration hides is refused")
+elab_match_shadowed_variant()
+    assert_eq(refused("enum Mine =\n  Some(v: integer)\n  Other\ndef main() =\n  val o: Option[integer] = None\n  o match\n    Some(v) -> print(v)\n    None -> print(0)\n"),
+        "error: `Some` here is the variant of `Mine`, declared in this module, which hides the prelude's `Some` of `Option`; this value is the prelude's Option[int64], so this module cannot match it @7:5")
+    // The variants the module does not hide still match: `None` is the prelude's here.
+    assert_eq(refused("enum Mine =\n  Some(v: integer)\n  Other\ndef main() =\n  val o: Option[integer] = None\n  o match\n    None -> print(0)\n    _ -> print(1)\n"), "ok")
+    assert_eq(refused(HALF + "def main() =\n  half(2) match\n    Some(v) -> print(v)\n    None -> print(0)\n"), "ok")
+
+@test("an instance of a generic enum a struct's field names has its arguments bound")
+elab_generic_enum_in_struct_field()
+    assert_eq(refused("enum Res[T, E] =\n  Good(v: T)\n  Bad(e: E)\nend Res\nstruct R\n  value: Res[real, integer]\ndef main() = print(R(Good(1.5)))\n"), "ok")
+    assert_eq(refused("struct R\n  value: Result[real, integer]\n  rest: Option[integer]\ndef main() = print(R(Ok(1.5), None))\n"), "ok")
+    assert_eq(refused("enum Tree =\n  Leaf\n  Node(child: Option[integer])\ndef main() = print(Node(Some(1)))\n"), "ok")

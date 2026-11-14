@@ -315,7 +315,7 @@ Operators, from the most tightly binding to the least:
 | Level | Operators | Associativity | Meaning |
 |---|---|---|---|
 | 1 | `.` | left | field access |
-| 2 | `f(…)`, `a[…]`, `x<unit>` | left | call, subscript, unit annotation |
+| 2 | `f(…)`, `a[…]`, `x<unit>`, `x!`, `x?` | left | call, subscript, unit annotation, unwrap, propagate (see [The Prelude](/spec/12-prelude/)) |
 | 3 | `^` | right | power (Fortran's `**`) |
 | 4 | unary `-` | right | negation |
 | 5 | juxtaposition | left | `2x`, `2pi`, `2(x + 1)` |
@@ -335,6 +335,9 @@ once. The operands are evaluated left to right, each at most once, and on scalar
 the first false comparison: in `0 < f() < g()`, `g` is not called when `0 < f()` is false. On arrays
 the comparisons combine element by element ([Array expressions](/spec/05-array-expressions/)).
 Parentheses end a chain: `(a < b) < c` compares the `bool` `a < b` with `c`.
+
+The postfix `!` and `?` bind as tightly as a call, so they chain with it: `f(x)?!`, and `-x!` is
+`-(x!)`. `!=` is read before `!`, so `a!=b` is a comparison.
 
 `not` binds below the comparisons and above `and`, as Fortran's `.not.` and Python's `not` do:
 `not a < b` is `not (a < b)`, `not a < b < c` negates the whole chain, and `not a and b` is

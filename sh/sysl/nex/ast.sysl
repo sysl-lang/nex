@@ -208,7 +208,7 @@ enum ExprKind
     // `a < b <= c`: two or more comparisons in a row, each operand evaluated once. A single
     // comparison is a `BinOp`.
     Chain(operands: Buf[Expr], ops: Buf[string])
-    // `-x` or `not x`.
+    // `-x` or `not x`; or, written after the operand, `x!` (op `!`) or `x?` (op `?`).
     Unary(op: string, operand: Expr)
     // `2x`, `2pi`, `2(x + 1)`: a numeric coefficient written against what it multiplies.
     Juxtapose(coeff: Expr, body: Expr)

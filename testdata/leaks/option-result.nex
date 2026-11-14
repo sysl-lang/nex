@@ -1,0 +1,29 @@
+// `Option` and `Result` holding arrays and strings (DESIGN §17.1, §17.2): what `?` returns early
+// with, what `!` takes out or traps on, what `get_or` chooses between and what a match through
+// them binds is each given back once.
+
+def rows(n: integer): Result[[real], string] =
+  if n < 0 then Err(s"no rows for $n") else Ok([real(n), real(n) + 0.5])
+
+def both(a: integer, b: integer): Result[[real], string] =
+  val held = [1.0, 2.0, 3.0]
+  val x = rows(a)?
+  val y = rows(b)?
+  Ok(x + y + held[1..2])
+
+def maybe(n: integer): Option[[real]] = if n > 0 then Some([real(n)]) else None
+
+def main() =
+  print(both(1, 2))
+  print(both(1, -2))
+  print(both(-1, 2))
+  print(sum(both(3, 4)!))
+  print(get_or(maybe(0), [9.0]))
+  print(get_or(maybe(2), [9.0]))
+  print(maybe(3)!)
+  both(5, -5) match
+    Ok(a) -> print(a)
+    Err(e) -> print(e)
+  assert_traps(() -> print(both(-7, 1)!), "no rows for -7")
+  assert_traps(() -> print(maybe(-1)!), "`!` found None")
+  print("done")

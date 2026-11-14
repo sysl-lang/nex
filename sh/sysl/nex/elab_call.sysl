@@ -91,6 +91,7 @@ impl Elab
                     Some(t) -> return self.conversion(span, n, t, args)
                     None -> ()
 
+                if is_family_function(n) then return self.family_call(span, n, args)
                 if is_builtin(n) then return self.builtin(span, n, args, want)
                 if is_array_builtin(n) then return self.array_builtin(span, n, args, want)
 

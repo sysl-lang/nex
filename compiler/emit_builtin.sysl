@@ -26,6 +26,20 @@ private among(name: string, names: []const string) -> bool
 
 impl Emitter
     builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        // `!` on a `None` or an `Err` (DESIGN §17.2): a trap whose message is the string given. A
+        // message built at run time is copied, and the trap releases the copy.
+        if name == "trap"
+            val message = self.ex(args[0])
+
+            *args[0].kind match
+                TLiteral(_, _) -> self.call("nex_trap", message, "!llvm.ptr", "")
+                _ ->
+                    val copy = self.call("nex_str_concat", s"${self.string_ref("")}, $message", "!llvm.ptr, !llvm.ptr", "!llvm.ptr")
+
+                    self.call("nex_trap_owned", copy, "!llvm.ptr", "")
+
+            return ""
+
         if name == "print" || name == "eprint"
             val dest = self.def(s"arith.constant ${if name == "print" then 1 else 2} : i64")
             // A program that runs threads gathers the line and writes it at once (DESIGN §9.4).

@@ -569,6 +569,9 @@ impl Emitter
                             if fields.len() > 0
                                 val p = self.payload(v, t, fields)
                                 val pt = self.payload_ty(span, fields)
+                                // An array field is held while it prints, and let go inside the case
+                                // that holds it, where its value is defined.
+                                val held = self.mark()
 
                                 self.put_text(sink, TUPLE_OPEN)
 
@@ -577,6 +580,7 @@ impl Emitter
                                     self.put_value(span, sink, self.field(p, pt, k, fields[k].ty), fields[k].ty)
 
                                 self.put_text(sink, TUPLE_CLOSE)
+                                self.release_from(held)
 
                             self.op("scf.yield")
                             self.op("}")

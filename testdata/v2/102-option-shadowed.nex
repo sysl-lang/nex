@@ -1,0 +1,36 @@
+// A program's own `Option`, `Some`, `None`, `Result`, `Ok` and `Err` hide the prelude's in its module
+// (DESIGN §17.1, §11.5): built, matched and printed as its own. A variant carrying an array prints it
+// in place.
+
+enum Option[T] =
+  Some(v: T)
+  Nothing
+
+enum Result =
+  Ok
+  Err(code: integer)
+
+enum Samples =
+  Taken(xs: [real], n: integer)
+  Empty
+
+def pick(flag: bool): Option[real] = if flag then Some(2.5) else Nothing
+
+def run(n: integer): Result = if n > 0 then Ok else Err(n)
+
+def main() =
+  print(pick(true))
+  print(pick(false))
+  val v = pick(true) match
+    Some(x) -> x
+    Nothing -> 0.0
+  print(v)
+  print(run(1))
+  print(run(-4))
+  run(2) match
+    Ok -> print("ran")
+    Err(c) -> print(c)
+  print(Taken([1.5, 2.5], 2))
+  print(Empty)
+  val samples = [Taken([0.5], 1), Empty]
+  print(samples[1])

@@ -1,0 +1,270 @@
+module sh.sysl.nex
+
+// Errors as values (DESIGN §17.1, §17.2): the prelude's `Option` and `Result`, the functions on
+// them, the postfix `!` and `?` that take them apart, and the rule that a `Result` is not dropped.
+//
+// **The two enums are nex source** (`prelude/prelude.nex`), declared in the module `prelude` of
+// every program, so they are built, matched and printed as any generic enum is and a program's own
+// `Some` hides the prelude's. What the compiler adds is written here as the typed IR a `match` would
+// give, so both engines run it with nothing of their own:
+//
+// - `e!` is `e match Some(v) -> v, None -> trap`, and `Ok(v) -> v, Err(err) -> trap` with the error
+//   as `print` spells it (a `string` as itself);
+// - `e?` is the same with `return None` or `return Err(err)` for the trap;
+// - `get_or`, `is_some`, `is_none`, `is_ok` and `is_err` are such a `match` over their argument.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.{join, split}
+import sh.sysl.parsing.Span
+
+// The internal names of the prelude's two enums.
+private val OPTION = "prelude.Option"
+private val RESULT = "prelude.Result"
+
+// The message `!` traps with on a `None`.
+val FOUND_NONE = "`!` found None"
+
+// A type that is an `Option` or a `Result` of the prelude: which, its value type and, for a
+// `Result`, its error type. Variant 0 (`Some`, `Ok`) holds the value and variant 1 (`None`, `Err`)
+// the rest.
+struct Family
+    result: bool
+    value: Ty
+    error: Ty
+
+// The prelude functions on `Option` and `Result`.
+is_family_function(name: string) -> bool =
+    name == "get_or" || name == "is_some" || name == "is_none" || name == "is_ok" || name == "is_err"
+
+// A type as a diagnostic about these names it: the prelude's enums by their own names.
+private family_text(t: Ty) -> string = join(split(show_ty(t), "prelude."), "")
+
+impl Elab
+    // Which of the prelude's enums `t` is an instance of, or, inside a generic's body being checked,
+    // an application of; none where it is neither.
+    family(self, t: Ty) -> Option[Family]
+        val (name, args) = base_of(t) match
+            Nominal(n, a) -> (n, a)
+            _ -> return None
+
+        // `Option[T]` as a generic's own signature writes it, its argument a type parameter.
+        if name == OPTION && args.len() == 1 then return Some(Family(false, args[0], Void))
+        if name == RESULT && args.len() == 2 then return Some(Family(true, args[0], args[1]))
+
+        for i in self.gen.agg_insts
+            if i.name != name then continue
+
+            val generic = self.gen.aggs[i.generic].name
+
+            if generic != OPTION && generic != RESULT then return None
+
+            val e = self.agg.enums[self.find_enum(name).unwrap()]
+            val value = e.variants[0].fields[0].ty
+
+            return if generic == OPTION then Some(Family(false, value, Void)) else Some(Family(true, value, e.variants[1].fields[0].ty))
+
+        None
+
+    // -- `!` and `?` ------------------------------------------------------------------------------
+
+    // `x!`: the value of a `Some` or an `Ok`, and a trap otherwise.
+    unwrap_expr(*self, span: Span, x: Expr) -> TExpr
+        val v = self.infer(x)
+
+        val f = self.family(v.ty) match
+            Some(f) -> f
+            None -> return self.not_family(span, "`!` takes the value out of", v)
+
+        var arms: Buf[TArm] = buf()
+
+        arms.push(self.value_arm(span, f))
+
+        if f.result
+            val err = self.new_local("error", f.error, LVal)
+            var parts: Buf[TPart] = buf()
+
+            interp_value(&parts, texpr(span, f.error, TLocal(err)), "")
+            arms.push(TArm(PVariant("Err", 1, one_bind(Some(err))), self.trap_with(span, texpr(span, Ty.Str, TInterp(parts, false)))))
+        else
+            arms.push(TArm(PVariant("None", 1, buf()), self.trap_with(span, texpr(span, Ty.Str, TLiteral(StrVal(FOUND_NONE), false)))))
+
+        texpr(span, f.value, TMatch(v, arms))
+
+    // `x?`: the value of a `Some` or an `Ok`; otherwise the enclosing `def` returns `None`, or the
+    // same `Err`. The `def` declares its result, an `Option` for an `Option` and a `Result` with the
+    // same error type for a `Result`; a lambda and a parallel body have no `?`.
+    try_expr(*self, span: Span, x: Expr) -> TExpr
+        val v = self.infer(x)
+
+        val f = self.family(v.ty) match
+            Some(f) -> f
+            None -> return self.not_family(span, "`?` takes the value out of", v)
+
+        val top = self.fx.frames.len() - 1
+        val frame = self.fx.frames[top]
+
+        if self.fx.par.map((p) -> p == top).unwrap_or(false)
+            self.fail(span, "`?` returns from the function, and a `parallel for` body cannot be left by `return`; use `!`, which traps, or `match`")
+            return self.invalid(span)
+
+        if !frame.named
+            self.fail(span, "a lambda cannot use `?`, which returns from the function it is written in; use a local `def` with a declared result type, or `!` or `match`")
+            return self.invalid(span)
+
+        val kind = if f.result then "Result[…, E]" else "Option[…]"
+
+        if !frame.declared
+            self.fail(span, s"`?` returns from this function, whose result type is not declared; declare it as ${if f.result then s"a `Result[…, ${family_text(f.error)}]`" else "an `Option[…]`"}")
+            return self.invalid(span)
+
+        val returned = if f.result then s"`Err(${family_text(f.error)})`" else "`None`"
+
+        val r = self.family(frame.ret) match
+            Some(r) -> r
+            None ->
+                self.fail(span, s"`?` would return ${returned} from this function, which returns ${family_text(frame.ret)}; a `?` on ${if f.result then "a `Result`" else "an `Option`"} needs a function returning ${kind}")
+                return self.invalid(span)
+
+        if r.result != f.result
+            self.fail(span, s"`?` would return ${returned} from this function, which returns ${family_text(frame.ret)}; there is no conversion between `Option` and `Result`")
+            return self.invalid(span)
+
+        if f.result && !ty_eq(r.error, f.error) && !is_wild(f.error) && !is_wild(r.error)
+            self.fail(span, s"`?` would return ${returned} from this function, which returns ${family_text(frame.ret)}; there is no conversion between error types")
+            return self.invalid(span)
+
+        for o in self.fx.xch
+            if o.frame == top
+                self.fail(span, "`?` would return, leaving the `exchange` block around it before its sends and receives complete")
+                return self.invalid(span)
+
+        var arms: Buf[TArm] = buf()
+
+        arms.push(self.value_arm(span, f))
+
+        if f.result
+            val err = self.new_local("error", f.error, LVal)
+            var args: Buf[TExpr] = buf()
+
+            args.push(texpr(span, f.error, TLocal(err)))
+            arms.push(TArm(PVariant("Err", 1, one_bind(Some(err))), texpr(span, Never, TReturn(Some(texpr(span, frame.ret, TVariant("prelude.Err", 1, args)))))))
+        else
+            arms.push(TArm(PVariant("None", 1, buf()), texpr(span, Never, TReturn(Some(texpr(span, frame.ret, TVariant("prelude.None", 1, buf())))))))
+
+        texpr(span, f.value, TMatch(v, arms))
+    end try_expr
+
+    // The arm taking the value out of a `Some` or an `Ok`.
+    private value_arm(*self, span: Span, f: Family) -> TArm
+        val name = if f.result then "Ok" else "Some"
+        val id = self.new_local("value", f.value, LVal)
+
+        TArm(PVariant(name, 0, one_bind(Some(id))), texpr(span, f.value, TLocal(id)))
+
+    private trap_with(self, span: Span, message: TExpr) -> TExpr
+        var args: Buf[TExpr] = buf()
+
+        args.push(message)
+        texpr(span, Never, TBuiltin("trap", args))
+
+    private not_family(*self, span: Span, what: string, v: TExpr) -> TExpr
+        if !is_wild(v.ty) then self.fail(span, s"${what} an `Option` or a `Result`, and this is ${family_text(v.ty)}")
+
+        self.invalid(span)
+
+    // -- the functions on them ---------------------------------------------------------------------
+
+    // `get_or(x, default)`, `is_some(o)`, `is_none(o)`, `is_ok(r)` or `is_err(r)`.
+    family_call(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        val n: usize = if name == "get_or" then 2 else 1
+
+        if args.len() != n
+            return self.arity(span, name, if n == 2 then "an `Option` or a `Result` and a default" elif name == "is_some" || name == "is_none" then "an `Option`" else "a `Result`")
+
+        val v = self.infer(args[0])
+
+        val f = self.family(v.ty) match
+            Some(f) -> f
+            None -> return self.not_family(args[0].span, s"`${name}` takes", v)
+
+        if (name == "is_some" || name == "is_none") && f.result
+            self.fail(args[0].span, s"`${name}` takes an `Option`, and this is ${family_text(v.ty)}; a `Result` is asked with `is_ok` or `is_err`")
+            return self.invalid(span)
+
+        if (name == "is_ok" || name == "is_err") && !f.result
+            self.fail(args[0].span, s"`${name}` takes a `Result`, and this is ${family_text(v.ty)}; an `Option` is asked with `is_some` or `is_none`")
+            return self.invalid(span)
+
+        val first = if f.result then "Ok" else "Some"
+        val second = if f.result then "Err" else "None"
+        var arms: Buf[TArm] = buf()
+
+        if name != "get_or"
+            val holds = name == "is_some" || name == "is_ok"
+
+            arms.push(TArm(PVariant(first, 0, one_bind(None)), texpr(span, Bool, TLiteral(BoolVal(holds), false))))
+            arms.push(TArm(PVariant(second, 1, if f.result then one_bind(None) else buf()), texpr(span, Bool, TLiteral(BoolVal(!holds), false))))
+
+            return texpr(span, Bool, TMatch(v, arms))
+
+        // The arguments are evaluated as a call's are, both and in order, before either is chosen.
+        val d = self.check(args[1], f.value, "the default")
+        val x = self.new_local("option", v.ty, LVal)
+        val dflt = self.new_local("default", f.value, LVal)
+        var items: Buf[TExpr] = buf()
+
+        items.push(texpr(span, Void, TLet(x, v)))
+        items.push(texpr(span, Void, TLet(dflt, d)))
+        arms.push(self.value_arm(span, f))
+        arms.push(TArm(PVariant(second, 1, if f.result then one_bind(None) else buf()), texpr(span, f.value, TLocal(dflt))))
+
+        texpr(span, f.value, TBlock(items, texpr(span, f.value, TMatch(texpr(span, v.ty, TLocal(x)), arms))))
+    end family_call
+
+    // Whether the arm `n`, matched against `sty`, a prelude `Option` or `Result`, names a variant the
+    // module's own declaration hides, which is refused naming both (DESIGN §17.1).
+    shadowed_arm(*self, span: Span, sty: Ty, n: string) -> bool
+        if self.family(sty).is_none() then return false
+
+        val g = self.global(span, n)
+
+        if g == s"prelude.${n}" then return false
+
+        val v = self.find_variant(g) match
+            Some(v) -> v
+            None -> return false
+
+        self.fail(span, s"`${n}` here is the variant of `${display_name(self.agg.enums[v.owner].name)}`, declared in this module, which hides the prelude's `${n}` of `${if self.family(sty).unwrap().result then "Result" else "Option"}`; this value is the prelude's ${family_text(sty)}, so this module cannot match it")
+        true
+
+    // -- a `Result` not dropped ---------------------------------------------------------------------
+
+    // `v`, an expression whose value is dropped, refused where that value is a `Result` (DESIGN
+    // §17.1). A block, an `if` or a `match` is judged by the expressions that give its value.
+    dropped(*self, v: TExpr)
+        *v.kind match
+            TBlock(_, _) -> return
+            TIf(_, _, _) -> return
+            TMatch(_, _) -> return
+            _ -> ()
+
+        val f = self.family(v.ty) match
+            Some(f) -> f
+            None -> return
+
+        if !f.result then return
+
+        val what = *v.kind match
+            TCall(callee, _) -> *callee.kind match
+                TFnRef(n) -> s"the `Result` of `${display_name(n)}`"
+                _ -> "this `Result`"
+            _ -> "this `Result`"
+
+        self.fail(v.span, s"${what} is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …`")
+end Elab
+
+private one_bind(id: Option[usize]) -> Buf[Option[usize]]
+    var out: Buf[Option[usize]] = buf()
+
+    out.push(id)
+    out

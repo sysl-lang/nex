@@ -30,12 +30,21 @@ elaborate(p: Program) -> Result[TProgram, Buf[Diagnostic]] = elaborate_modules(p
 
 // A program of several modules, `mods` saying which module each span is in (`modules.sysl`).
 elaborate_modules(p: Program, mods: Modules) -> Result[TProgram, Buf[Diagnostic]]
-    var e = elab(p, mods)
+    val (all, with_prelude, past) = with_shipped_prelude(p, mods)
+    var e = elab(all, with_prelude)
 
     e.run()
     e.finish_views()
 
-    if e.diags.len() > 0 then return Err(e.diags)
+    if e.diags.len() > 0
+        // The shipped prelude has no text a diagnostic could be shown against; one found inside it,
+        // where an instance of its enums is made, stands at the start of the program.
+        var out: Buf[Diagnostic] = buf()
+
+        for d in e.diags
+            out.push(if d.span.start >= past then Diagnostic(d.severity, Span(0, 0), s"in the prelude: ${d.message}", d.label, d.note) else d)
+
+        return Err(out)
 
     Ok(e.program())
 
@@ -90,12 +99,16 @@ struct ScopeEntry
     local: usize
 
 // One function or lambda being elaborated: the lambda it is (none for a top-level function), its
-// result type and whether that is known yet, and where its loops begin in `Fx.loops`.
+// result type and whether that is known yet, and where its loops begin in `Fx.loops`. `named` is
+// false only for a lambda, and `declared` where a `def` wrote its result type, which `?` needs
+// (DESIGN §17.2).
 struct Frame
     lambda: Option[usize]
     ret: Ty
     ret_known: bool
     loop_base: usize
+    named: bool
+    declared: bool
 
 struct Fx
     scope: Buf[ScopeEntry]
@@ -119,6 +132,8 @@ struct Fx
     owner: string
     // The `exchange` blocks around the cursor, innermost last (`elab_mpi.sysl`).
     xch: Buf[XOpen]
+    // The frame whose `parallel for` body the cursor is in, if any, which a `?` may not leave.
+    par: Option[usize]
 
 // An open `exchange` block: the frame it is in and how many loops were around it, which a `return`,
 // `exit` or `cycle` inside it may not leave.
@@ -126,7 +141,7 @@ struct XOpen
     frame: usize
     loops: usize
 
-empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None, buf(), "", buf())
+empty_fx() -> Fx = Fx(buf(), buf(), buf(), buf(), false, buf(), buf(), None, buf(), "", buf(), None)
 
 // A lambda bound by `val f = x -> ...` whose parameter types are not written: it is elaborated at
 // the first use that fixes them, inside the copy of the scope it was written in.
@@ -529,7 +544,7 @@ struct Elab
         var first: Option[string] = None
 
         self.fx = self.fx_for(k)
-        self.fx.frames.push(Frame(None, Void, true, 0))
+        self.fx.frames.push(Frame(None, Void, true, 0, true, false))
         self.open()
 
         for j in 0..<f.params.len()
@@ -590,7 +605,7 @@ struct Elab
         val saved_units = self.enter_unit_params(f.uparams)
 
         self.fx = self.fx_for(k)
-        self.fx.frames.push(Frame(None, self.fret[k], self.fret_known[k], 0))
+        self.fx.frames.push(Frame(None, self.fret[k], self.fret_known[k], 0, true, f.ret.is_some()))
         self.open()
 
         for id in sig.params
@@ -649,7 +664,7 @@ struct Elab
         // A `return` inside fixed the type first; the body's own value has to agree with it.
         if now.ret_known then return self.escaping(self.coerce(v, now.ret, "the result"), "returned")
 
-        self.fx.frames[top] = Frame(now.lambda, v.ty, true, now.loop_base)
+        self.fx.frames[top] = Frame(now.lambda, v.ty, true, now.loop_base, now.named, now.declared)
         self.escaping(v, "returned")
     end body_of
 

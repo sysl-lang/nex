@@ -178,12 +178,17 @@ impl Elab
     // The field types of every struct and every variant, once every name is collected; then the
     // structs and enums that would contain themselves.
     resolve_aggregates(*self)
-        for k in 0..<self.agg.structs.len()
+        // Only the declared ones: an instance of a generic a field names (`value: Result[real, E]`)
+        // is made, its fields resolved with its arguments bound, while these are resolved.
+        val structs = self.agg.structs.len()
+        val enums = self.agg.enums.len()
+
+        for k in 0..<structs
             val s = self.agg.structs[k]
 
             if !s.generic then self.agg.structs[k] = StructSrc(s.decl, s.name, false, s.src, self.resolve_fields(s.decl.span, s.name, s.src))
 
-        for k in 0..<self.agg.enums.len()
+        for k in 0..<enums
             val e = self.agg.enums[k]
 
             if e.generic then continue
@@ -957,6 +962,7 @@ impl Elab
                             Some(j) ->
                                 val count = self.agg.enums[e].variants[j].fields.len()
 
+                                if self.shadowed_arm(pat.span, sty, n) then return ArmShape(Some(j), n, buf(), buf(), false)
                                 if count == 0 then return ArmShape(Some(j), n, buf(), buf(), true)
 
                                 self.fail(pat.span, s"`${n}` carries ${fields_text(count)}; match it as `${n}(${blanks(count)})`")
@@ -993,6 +999,8 @@ impl Elab
                         return ArmShape(None, n, binds, tys, false)
 
                 val fields = self.agg.enums[e].variants[j].fields
+
+                if self.shadowed_arm(pat.span, sty, n) then return ArmShape(Some(j), n, binds, tys, false)
 
                 if fields.len() != args.len()
                     self.fail(pat.span, s"`${n}` carries ${fields_text(fields.len())}, and this pattern names ${args.len()}")

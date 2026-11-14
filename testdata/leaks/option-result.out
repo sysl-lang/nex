@@ -1,0 +1,9 @@
+Ok([4.0, 6.0])
+Err(no rows for -2)
+Err(no rows for -1)
+18.0
+[9.0]
+[2.0]
+[3.0]
+no rows for -5
+done
