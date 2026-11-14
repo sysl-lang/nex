@@ -89,7 +89,7 @@ impl Elab
 
                 scalar_named(n) match
                     Some(t) ->
-                        val v = self.conversion(span, n, t, args)
+                        val v = self.conversion(span, n, t, args, self.text_unit(span, want))
 
                         // A conversion from text answers a `Result`, which a statement may not drop
                         // (DESIGN §17.1).
@@ -120,7 +120,7 @@ impl Elab
                                 _ -> None
 
                             part match
-                                Some(Real(b)) -> return self.conversion(span, s"complex[real${b}]", Complex(b), args)
+                                Some(Real(b)) -> return self.conversion(span, s"complex[real${b}]", Complex(b), args, self.text_unit(span, want))
                                 _ ->
                                     self.fail(indices[0].span, "a complex type names a real part type: `complex[real32]`")
                                     return self.invalid(span)
@@ -398,8 +398,9 @@ impl Elab
 
     // -- conversions ------------------------------------------------------------------------------
 
-    // `real32(x)`, `int16(n)`, `complex[real32](re, im)`: a type name called (DESIGN §2.4).
-    conversion(*self, span: Span, name: string, target: Ty, args: Buf[Expr]) -> TExpr
+    // `real32(x)`, `int16(n)`, `complex[real32](re, im)`: a type name called (DESIGN §2.4). A
+    // conversion from text gives its value `unit` where its position expects one (DESIGN §17.5).
+    conversion(*self, span: Span, name: string, target: Ty, args: Buf[Expr], unit: Option[Unit] = None) -> TExpr
         if is_str(target) then return self.string_of(span, args)
 
         if !is_numeric(target)
@@ -417,7 +418,7 @@ impl Elab
         val from = v.ty
 
         if is_error(from) then return self.invalid(span)
-        if is_str(elem_of(from)) then return self.text_conversion(span, target, v)
+        if is_str(elem_of(from)) then return self.text_conversion(span, target, v, unit)
         if is_array(from) then return self.elemental_conversion(span, name, target, v)
         if has_unit(from) then return self.measured_conversion(span, name, target, v)
         if ty_eq(from, target) then return v

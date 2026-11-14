@@ -71,9 +71,10 @@ impl Elab
 
     // -- `!` and `?` ------------------------------------------------------------------------------
 
-    // `x!`: the value of a `Some` or an `Ok`, and a trap otherwise.
-    unwrap_expr(*self, span: Span, x: Expr) -> TExpr
-        val v = self.infer(x)
+    // `x!`: the value of a `Some` or an `Ok`, and a trap otherwise. `want` is what the position
+    // expects of that value.
+    unwrap_expr(*self, span: Span, x: Expr, want: Option[Ty]) -> TExpr
+        val v = self.unwrapped_operand(x, want)
 
         val f = self.family(v.ty) match
             Some(f) -> f
@@ -102,8 +103,8 @@ impl Elab
     // `x?`: the value of a `Some` or an `Ok`; otherwise the enclosing `def` returns `None`, or the
     // same `Err`. The `def` declares its result, an `Option` for an `Option` and a `Result` with the
     // same error type for a `Result`; a lambda and a parallel body have no `?`.
-    try_expr(*self, span: Span, x: Expr) -> TExpr
-        val v = self.infer(x)
+    try_expr(*self, span: Span, x: Expr, want: Option[Ty]) -> TExpr
+        val v = self.unwrapped_operand(x, want)
 
         val f = self.family(v.ty) match
             Some(f) -> f

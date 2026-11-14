@@ -573,8 +573,8 @@ impl Elab
     end power_of
 
     unary(*self, span: Span, op: string, x: Expr, want: Option[Ty]) -> TExpr
-        if op == "!" then return self.unwrap_expr(span, x)
-        if op == "?" then return self.try_expr(span, x)
+        if op == "!" then return self.unwrap_expr(span, x, want)
+        if op == "?" then return self.try_expr(span, x, want)
 
         if op == "not"
             val v = self.infer(x)

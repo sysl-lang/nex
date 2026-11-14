@@ -45,6 +45,12 @@ is_io_error(t: Ty) -> bool = t match
     Nominal(n, _) -> n == IO_ERROR
     _ -> false
 
+// The operand a `!` or `?` is elaborating, by its span, and the type its position expects of the
+// value taken out of it.
+struct Unwrapping
+    at: Span
+    want: Ty
+
 private one(e: TExpr) -> Buf[TExpr]
     var out: Buf[TExpr] = buf()
 
@@ -216,34 +222,77 @@ impl Elab
 
     // -- numbers from text --------------------------------------------------------------------------
 
-    // `T(s)` of a string, `Result[T, IoError]`, or of a `[string]`, `Result[[T], IoError]`.
-    text_conversion(*self, span: Span, target: Ty, v: TExpr) -> TExpr
+    // The operand of a `!` or `?`, elaborated knowing what its position expects of the value taken
+    // out of it, which a conversion from text there takes its unit from.
+    unwrapped_operand(*self, x: Expr, want: Option[Ty]) -> TExpr
+        val outer = self.unwrapping
+
+        self.unwrapping = want match
+            Some(t) -> Some(Unwrapping(x.span, t))
+            None -> None
+
+        val v = self.infer(x)
+
+        self.unwrapping = outer
+
+        v
+
+    // The unit a conversion from text at `span` takes from its position (DESIGN §17.5): the one
+    // expected of the value a `!` or `?` takes out of it, or of the `Ok` of the `Result` it is bound
+    // as. The text carries no unit, so this is the only place one comes from; none where the
+    // position expects a plain number.
+    text_unit(self, span: Span, want: Option[Ty]) -> Option[Unit]
+        val unwrapped = self.unwrapping match
+            Some(u) -> if u.at.start == span.start && u.at.end == span.end then Some(u.want) else None
+            None -> None
+
+        val value = unwrapped match
+            Some(t) -> t
+            None ->
+                val w = want match
+                    Some(w) -> w
+                    None -> return None
+
+                self.family(w) match
+                    Some(f) -> if f.result then f.value else return None
+                    None -> return None
+
+        if has_unit(elem_of(value)) then Some(unit_of(elem_of(value))) else None
+
+    // `T(s)` of a string, `Result[T, IoError]`, or of a `[string]`, `Result[[T], IoError]`; a real
+    // or complex `T` carries `unit` where its position gives one (`text_unit`).
+    text_conversion(*self, span: Span, target: Ty, v: TExpr, unit: Option[Unit]) -> TExpr
+        val measure = unit match
+            Some(u) -> if is_int(target) then None else Some(u)
+            None -> None
+
         if is_array(v.ty)
             if rank_of(v.ty) != 1
                 self.fail(v.span, s"a conversion from text reads a `[string]` of one axis; this is ${self.shown(v)}")
                 return self.invalid(span)
 
-            return self.texts_read(span, target, v)
+            return self.texts_read(span, target, v, measure)
 
         val s = self.new_local("text", Ty.Str, LVal)
         var items: Buf[TExpr] = buf()
 
         items.push(texpr(span, Void, TLet(s, v)))
 
-        val r = self.text_read(span, target, local(span, Ty.Str, s), &items)
+        val r = self.text_read(span, target, local(span, Ty.Str, s), &items, measure)
 
         texpr(span, r.ty, TBlock(items, r))
 
     // The `Result` of reading the string `s`, a local, as `target`, its column bound by a statement
-    // added to `items`.
-    private text_read(*self, span: Span, target: Ty, s: TExpr, items: *Buf[TExpr]) -> TExpr
+    // added to `items`; the value read carries `measure` where there is one.
+    private text_read(*self, span: Span, target: Ty, s: TExpr, items: *Buf[TExpr], measure: Option[Unit]) -> TExpr
         val kind = str_lit(span, show_ty(target))
-        val result = self.prelude_instance(span, RESULT, types2(target, io_error_ty()))
+        val value = measured_as(target, measure)
+        val result = self.prelude_instance(span, RESULT, types2(value, io_error_ty()))
         val column = self.new_local("column", INTEGER, LVal)
 
         items.push(texpr(span, Void, TLet(column, texpr(span, INTEGER, TBuiltin("text_bad", two(s, kind))))))
 
-        val ok = texpr(span, result, TVariant("prelude.Ok", 0, one(read_value(span, target, s, kind))))
+        val ok = texpr(span, result, TVariant("prelude.Ok", 0, one(unit_as(value, read_value(span, target, s, kind)))))
         val err = texpr(span, result, TVariant("prelude.Err", 1, one(malformed(span, local(span, INTEGER, column), texpr(span, Ty.Str, TBuiltin("text_bad_message", two(s, kind)))))))
 
         texpr(span, result, TIf(equal(span, local(span, INTEGER, column), int_lit(span, 0)), ok, Some(err)))
@@ -258,11 +307,14 @@ impl Elab
     //         val column = text_bad(texts[k], kind)
     //         if column == 0 then out[k] = T(texts[k]) else at = k
     //     if at == 0 then Ok(out) else Err(Malformed("", 1, at, text_bad_message(texts[at], kind)))
-    private texts_read(*self, span: Span, target: Ty, v: TExpr) -> TExpr
+    //
+    // The array is read as plain numbers, and the `Ok` gives it `measure`'s unit.
+    private texts_read(*self, span: Span, target: Ty, v: TExpr, measure: Option[Unit]) -> TExpr
         val strings = v.ty
         val numbers = Ty.Array(target, dynamic_axes(1))
+        val measured_numbers = Ty.Array(measured_as(target, measure), dynamic_axes(1))
         val kind = str_lit(span, show_ty(target))
-        val result = self.prelude_instance(span, RESULT, types2(numbers, io_error_ty()))
+        val result = self.prelude_instance(span, RESULT, types2(measured_numbers, io_error_ty()))
         val texts = self.new_local("texts", strings, LVal)
         val out = self.new_local("numbers", numbers, LVar)
         val at = self.new_local("failed", INTEGER, LVar)
@@ -294,7 +346,7 @@ impl Elab
         items.push(texpr(span, Void, TFor(self.new_loop(None), k, int_lit(span, 1), count_again, true, None, each)))
 
         val failed = self.element(span, strings, texts, local(span, INTEGER, at))
-        val ok = texpr(span, result, TVariant("prelude.Ok", 0, one(local(span, numbers, out))))
+        val ok = texpr(span, result, TVariant("prelude.Ok", 0, one(unit_as(measured_numbers, local(span, numbers, out)))))
         val err = texpr(span, result, TVariant("prelude.Err", 1, one(malformed(span, local(span, INTEGER, at), texpr(span, Ty.Str, TBuiltin("text_bad_message", two(failed, kind)))))))
 
         texpr(span, result, TBlock(items, texpr(span, result, TIf(equal(span, local(span, INTEGER, at), int_lit(span, 0)), ok, Some(err)))))
@@ -392,6 +444,15 @@ private read_value(span: Span, target: Ty, s: TExpr, kind: TExpr) -> TExpr
 
             texpr(span, target, TMakeComplex(re, im))
         _ -> texpr(span, Error, TInvalid)
+
+// `target` carrying `measure`'s unit, or plain where there is none.
+private measured_as(target: Ty, measure: Option[Unit]) -> Ty = measure match
+    Some(u) -> measured(target, u)
+    None -> target
+
+// `v`, plain numbers, as a value of type `t`: the same where `t` carries no unit, the unit attached
+// where it does.
+private unit_as(t: Ty, v: TExpr) -> TExpr = if ty_eq(t, v.ty) then v else texpr(v.span, t, TUnitAs(v))
 
 // A `real64` that holds a value of `bits` bits exactly, at that width.
 private narrowed(span: Span, bits: int, v: TExpr) -> TExpr = if bits == 64 then v else texpr(span, Real(bits), TConvert(v, false))

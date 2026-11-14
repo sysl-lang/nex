@@ -1,0 +1,16 @@
+2.5 mm
+27.9 mm
+0.09842519685039369 in
+2.5
+0.1 mm
+Ok(3.0 s)
+Err(Malformed(, 1, 1, expected a real64, found "x"))
+Ok(5.0 mm)
+Err(Malformed(, 1, 2, expected a real64, found "4x"))
+[1.0, 2.5, -0.0] mm
+1003.5 mm
+Ok([1.0 m, 2.0 m])
+Err(Malformed(, 1, 2, expected a real64, found "q"))
+1.5-2.0i V
+1.0+2.0i V
+7.0

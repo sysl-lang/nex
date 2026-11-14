@@ -3357,7 +3357,13 @@ can be wrong where a number cannot: `real64("2.5")` is `Ok(2.5)`, `int32("4x")` 
   value** (§2.5's shortest form), NaN as a NaN, `-0.0` as `-0.0`; that is the contract
   `write_table` and `read_table` rest on.
 - **Units**: `val d: real<mm> = real64(s)!` is a number taken in millimetres; the text carries no
-  unit and none is parsed.
+  unit and none is parsed. The unit is the one the position expects of the value: of what `!` or
+  `?` takes out of the conversion, or of the `Ok` where the `Result` itself is bound
+  (`val r: Result[real<s>, IoError] = real64(s)`), and on a `[string]` of every element
+  (`val v: [real<mm>] = real64(split(line))!`). A real or complex conversion takes it; an integer
+  one cannot, since integers carry no unit (§13.3), so `val n: real<mm> = int64(s)!` is refused as
+  any plain number there is. Only the conversion's own position gives it: in
+  `real64(s)! + 1.0<mm>` the `+` expects nothing of its operand, and the plain number is refused.
 
 ### 17.6 Files
 

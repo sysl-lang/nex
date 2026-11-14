@@ -765,6 +765,9 @@ wrong where a number cannot: `real64("2.5")` is `Ok(2.5)`, and `int32("4x")` is
   `real64(split("1 2 x"))` is `Err(Malformed("", 1, 3, "expected a real64, found \"x\""))`.
 - **The column of a failure** is the byte where reading stopped, from 1: `int32("4x")` stops at 2.
   A number out of range is placed where it starts.
+- **A unit comes from the expected type**, never from the text: `val d: real<mm> = real64(s)!`
+  reads millimetres, through `?` as well, and `val v: [real<m>] = real64(split(line))!` gives
+  every element the unit. An integer carries no unit, so `val n: real<mm> = int64(s)!` is refused.
 
 The failure is an `IoError`, the prelude enum every failure of reading and writing text and files
 is:
