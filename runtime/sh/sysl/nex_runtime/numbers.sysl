@@ -9,17 +9,14 @@ module sh.sysl.nex_runtime
 // writes one, its exponent letter `e`, `E`, `d` or `D`, or `inf`, `infinity` or `nan` in any case. A
 // complex is `1.5+2.0i` as `print` writes one, or Fortran's `(1.5, 2.0)`.
 //
-// **A real is rounded once, at its own width**: a `real64` and a `real32` by `sysl.text`'s correctly
-// rounded readers of that width. A `real16` is the `real64` nearest the decimal, rounded to 16 bits;
-// that rounds twice only where the `real64` lands exactly half way between two `real16`s, and there
-// the decimal is compared with the halfway point at 113 bits instead, so only a decimal of more
-// than thirty-odd digits lying within 2^-113 of the halfway point could still round the wrong way.
+// **A real is rounded once, at its own width**: a `real64`, a `real32` and a `real16` by `sysl.text`'s
+// correctly rounded readers of that width.
 //
 // **A failure names where reading stopped**: the column, from 1 and in bytes, of the first byte that
 // does not belong to the number, and for a number outside its type's range the column it starts at.
 
 import sysl.buf.{Buf, buf}
-import sysl.text.{f128_prefix, f32_prefix, from_utf8_unchecked, real_prefix}
+import sysl.text.{f16_prefix, f32_prefix, from_utf8_unchecked, real_prefix}
 
 // What reading a number found: `column` 0 where the text reads, and otherwise where it stopped and
 // the sentence that says why. Of the values, the one the kind reads is set: `int` for a signed
@@ -155,53 +152,10 @@ end real_number
 // The value of `text`, a number as `real_number` answers it, at `bits` bits, widened exactly to a
 // `real`.
 private value_at(text: string, bits: int) -> real
+    if bits == 16 then return real(f16_prefix(text.bytes).0)
     if bits == 32 then return real(f32_prefix(text.bytes).0)
 
-    val r = real_prefix(text.bytes).0
-
-    if bits == 64 then return r
-
-    nearest16(r, text)
-
-// The `real16` nearest the decimal `text`, whose nearest `real64` is `r`, widened to a `real`.
-private nearest16(r: real, text: string) -> real
-    val h = real(f16(r))
-
-    if h == r || r != r then return h
-
-    // The other `real16` beside `r`, and the point half way between the two, both exact as `real`s.
-    // Past the largest finite `real16`, 65504, the neighbour is that and the halfway point 65520.
-    val huge = 65504.0
-    val inf = 1.0 / 0.0
-    var other = 0.0
-    var half = 0.0
-
-    if h == inf || h == -inf
-        other = if h > 0.0 then huge else -huge
-        half = if h > 0.0 then 65520.0 else -65520.0
-    else
-        // One step of the magnitude, keeping the sign: away from zero where `r` is larger in size.
-        val bits = f16(h).bits()
-        val sign = bits & 0x8000
-        val mag = bits & 0x7FFF
-        val up = (if h < 0.0 then -h else h) < (if r < 0.0 then -r else r)
-
-        other = real(f16.from_bits(sign | (if up then mag + 1 else mag - 1)))
-        half = (h + other) / 2.0
-
-    if r != half then return h
-
-    // Exactly half way at 53 bits: the decimal's side of the halfway point, read at 113 bits.
-    val q = f128_prefix(text.bytes).0
-    val m = f128(half)
-    val lo = if h < other then h else other
-    val hi = if h < other then other else h
-
-    if q > m then return hi
-    if q < m then return lo
-
-    h
-end nearest16
+    real_prefix(text.bytes).0
 
 // One integer from `k`: an optional sign and digits. Answers where it ends, whether there were
 // digits, the sign and the magnitude, and whether the magnitude passes 64 bits.

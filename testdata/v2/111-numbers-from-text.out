@@ -101,4 +101,5 @@ in.dat:4:13: expected a real64, found "1.2.3"
 out.dat: no space left on device
 true
 Err(NotFound(in.dat))
+real16 ties: 18 of 18 read to the nearest, even on a tie
 done
