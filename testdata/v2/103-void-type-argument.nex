@@ -1,0 +1,98 @@
+// `void` as a type argument (DESIGN §2.6): its one value `()`, held by a generic struct's field and
+// an enum's payload, built, matched, compared and printed; `Option[void]`; `Result[void, string]`
+// with `?` passing an `Err` out of a `def` and `!` taking `()` out; generic functions instanced at
+// `void`; an array of `Result[void, string]`; a struct holding a `Box[void]` beside other fields.
+
+struct Box[T]
+  value: T
+
+struct Tagged[T]
+  label: string
+  inner: Box[T]
+  count: integer
+
+enum Maybe[T] =
+  Just(value: T)
+  Nothing
+
+def check(n: integer): Result[void, string] =
+  if n < 0 then return Err(s"negative: $n")
+  Ok(())
+
+def all_ok(xs: [integer]): Result[void, string] =
+  for x in xs
+    check(x)?
+  Ok(())
+
+def first_bad(xs: [integer]): integer =
+  var k = 0
+  for x in xs
+    k += 1
+    if is_err(check(x)) then return k
+  0
+
+def wrap[T](x: T): Box[T] = Box(x)
+
+def unbox[T](b: Box[T]): T = b.value
+
+def present[T](m: Maybe[T]): bool =
+  m match
+    Just(_) -> true
+    Nothing -> false
+
+def noisy(): void = print("evaluated")
+
+def main() =
+  // A generic struct at void.
+  val b = Box(())
+  print(b)
+  print(b.value)
+  print(b == Box(()))
+  val w = wrap(())
+  print(unbox(w))
+  print(wrap(noisy()))
+
+  // Beside other fields, which keep their values.
+  val t = Tagged("x", Box(()), 7)
+  print(t)
+  print(t.label)
+  print(t.count)
+
+  // A generic enum at void.
+  val m: Maybe[void] = Just(())
+  val n: Maybe[void] = Nothing
+  print(m)
+  print(n)
+  print(present(m))
+  print(present(n))
+  print(m == n)
+  m match
+    Just(v) -> print(s"just ${v}")
+    Nothing -> print("nothing")
+
+  // Option[void].
+  val o: Option[void] = Some(())
+  val none: Option[void] = None
+  print(o)
+  print(none)
+  print(o == Some(()))
+  print(is_some(o))
+  print(is_none(none))
+  o!
+
+  // Result[void, string], with ? passing an Err out.
+  val r: Result[void, string] = Ok(())
+  print(r)
+  print(r!)
+  print(all_ok([1, 2, 3]))
+  print(all_ok([1, -2, -3]))
+  print(is_ok(all_ok([])))
+  print(first_bad([4, 5, -6, 7]))
+
+  // An array of them.
+  val rs: [Result[void, string]] = [check(1), check(-1), Ok(()), Err("x")]
+  print(rs)
+  print(rs[1] == rs[3])
+  print(rs[1] == rs[2])
+  print(count(map(rs, x -> is_ok(x))))
+  print(s"${rs[2]} and ${()}")

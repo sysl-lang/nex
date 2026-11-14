@@ -93,6 +93,7 @@ impl Emitter
         base_of(t) match
             Complex(b) -> return if b == 64 then 2 else 1
             Fn(_) -> return 2
+            Void -> return 0
             Tuple(es) -> return self.words_of(es)
             Nominal(name, _) ->
                 self.struct_of(name) match
@@ -130,14 +131,19 @@ impl Emitter
 
     // -- values -----------------------------------------------------------------------------------
 
-    // Field `k` of `v`, an aggregate of MLIR type `m`, as a value of `t`.
-    field(*self, v: string, m: string, k: usize, t: Ty) -> string = self.from_mem(self.def(s"llvm.extractvalue $v[$k] : $m"), t)
+    // Field `k` of `v`, an aggregate of MLIR type `m`, as a value of `t`; a `void` one has no value to
+    // read.
+    field(*self, v: string, m: string, k: usize, t: Ty) -> string =
+        if is_void(t) then "" else self.from_mem(self.def(s"llvm.extractvalue $v[$k] : $m"), t)
 
-    // An aggregate of MLIR type `m` from its fields' values.
+    // An aggregate of MLIR type `m` from its fields' values. A `void` field is an empty struct, which
+    // has nothing to write.
     make(*self, m: string, vals: Buf[string], tys: Buf[Ty]) -> string
         var v = self.def(s"llvm.mlir.undef : $m")
 
         for k in 0..<vals.len()
+            if is_void(tys[k]) then continue
+
             v = self.def(s"llvm.insertvalue ${self.to_mem(vals[k], tys[k])}, $v[$k] : $m")
 
         v
@@ -151,8 +157,9 @@ impl Emitter
             vals.push(self.ex(e))
             tys.push(e.ty)
 
-        for v in vals
-            if v == "" then return ""
+        // An element that left the code makes nothing; a `void` one is `""` and is there.
+        for k in 0..<vals.len()
+            if vals[k] == "" && !is_void(tys[k]) then return ""
 
         self.make(self.ty(span, t), vals, tys)
 
@@ -425,6 +432,8 @@ impl Emitter
     // else as its own `==` compares it.
     part_equal(*self, span: Span, a: string, b: string, t: Ty) -> string = t match
         Array(_, _) -> self.array_equal(span, a, b, t)
+        // `void`'s one value `()` equals itself.
+        Void -> self.def("arith.constant true")
         _ -> self.binary(span, "==", a, b, t)
 
     // Whether the arrays `a` and `b` of type `t` hold the same shape and equal elements. Arrays of

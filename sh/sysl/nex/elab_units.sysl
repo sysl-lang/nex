@@ -146,8 +146,16 @@ unit_note(v: TExpr, ty: Ty) -> string
     s": ${dimension_name(ua)} and ${dimension_name(ut)} are different dimensions"
 
 // `v` as `print` and an interpolation see it: a value with a unit is its number followed by a
-// space and the unit's spelling, so emission never sees the unit (DESIGN §13.4).
+// space and the unit's spelling, so emission never sees the unit (DESIGN §13.4); a `void` one is
+// evaluated, and spelled `()`.
 interp_value(out: *Buf[TPart], v: TExpr, spec: string)
+    if is_void(v.ty)
+        var items: Buf[TExpr] = buf()
+
+        items.push(v)
+        out.push(TValue(texpr(v.span, Ty.Str, TBlock(items, texpr(v.span, Ty.Str, TLiteral(StrVal("()"), false)))), spec))
+        return
+
     if !carries_unit(v.ty)
         out.push(TValue(v, spec))
         return

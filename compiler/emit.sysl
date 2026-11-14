@@ -336,10 +336,12 @@ struct Emitter
             "i64"
 
     // The type a value of `t` is stored as, in memory and inside an aggregate: a complex as a struct
-    // of its parts, an array as the address of the object holding it (`emit_array.sysl`).
+    // of its parts, an array as the address of the object holding it (`emit_array.sysl`), and `void`,
+    // whose one value `()` needs no bits, as an empty struct of no size, never read or written.
     mem_ty(*self, span: Span, t: Ty) -> string = base_of(t) match
         Complex(b) -> s"!llvm.struct<(f$b, f$b)>"
         Array(_, _) -> "!llvm.ptr"
+        Void -> VOID_PARAM
         _ -> self.ty(span, t)
 
     // A value of `t` read in its stored form; an array of numbers as a view pinned for the statement.
@@ -366,9 +368,13 @@ struct Emitter
         _ -> v
 
     load(*self, span: Span, ptr: string, t: Ty) -> string
+        if is_void(t) then return ""
+
         self.from_mem(self.def(s"llvm.load $ptr : !llvm.ptr -> ${self.mem_ty(span, t)}"), t)
 
     store(*self, span: Span, ptr: string, v: string, t: Ty)
+        if is_void(t) then return
+
         if is_arr(t)
             self.store_array(span, ptr, v, t)
             return
@@ -570,9 +576,11 @@ struct Emitter
     inout_array(*self, id: usize) -> bool = is_inout(self.prog.locals[id].kind) && is_arr(self.prog.locals[id].ty)
 
     // A parameter's MLIR type: an `inout` one is its caller's place, but for an array, which is
-    // passed and returned.
-    param_ty(*self, span: Span, id: usize) -> string =
-        if is_inout(self.prog.locals[id].kind) && !is_arr(self.prog.locals[id].ty) then "!llvm.ptr" else self.ty(span, self.prog.locals[id].ty)
+    // passed and returned; a `void` one, which has no value, an empty struct.
+    param_ty(*self, span: Span, id: usize) -> string
+        val t = self.prog.locals[id].ty
+
+        if is_inout(self.prog.locals[id].kind) && !is_arr(t) then "!llvm.ptr" elif is_void(t) then VOID_PARAM else self.ty(span, t)
 
     // The parameters bound in the prologue, from block arguments `%a0`, `%a1`, ...
     bind_params(*self, span: Span, params: Buf[usize])
@@ -886,7 +894,7 @@ struct Emitter
 
             self.release_from(m)
 
-        if self.prog.test_build then self.run_test(self.prog.tests) else self.op("func.call @\"n.main\"() : () -> ()")
+        if self.prog.test_build then self.run_test(self.prog.tests) else self.op(s"func.call @\"n.${self.prog.entry}\"() : () -> ()")
 
         self.call("nex_finish", "", "", "")
 
@@ -914,6 +922,9 @@ struct Emitter
 end Emitter
 
 val CLOSURE = "!llvm.struct<(ptr, ptr)>"
+
+// A `void` parameter or argument: an empty struct, of no size, standing for `()`.
+val VOID_PARAM = "!llvm.struct<()>"
 
 // The runtime functions that never return: each traps or ends the program.
 private never_returns(name: string) -> bool = name == "nex_trap" || name == "nex_trap_owned" || name == "nex_trap_info" || name == "nex_trap_complex_div_zero" || name == "nex_stop"

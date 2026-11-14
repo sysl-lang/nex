@@ -418,7 +418,7 @@ impl Interp
 
         out.push(self.entry(test match
             Some(k) -> self.prog.tests[k]
-            None -> "main"
+            None -> self.prog.entry
         ))
         out
 
@@ -1166,6 +1166,11 @@ impl Interp
             var ops: Buf[Op2] = buf()
 
             for f in ts
+                // A `void` field's one value `()` always equals itself.
+                if is_void(f)
+                    ops.push((a, b) -> Ok(VBool(true)))
+                    continue
+
                 self.op2(span, "==", f) match
                     Some(eq) -> ops.push(eq)
                     None -> return None

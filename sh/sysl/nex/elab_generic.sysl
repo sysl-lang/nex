@@ -1030,7 +1030,8 @@ impl Elab
 
         true
 
-    // Whether each type argument is a type its constraint admits, and holds a value.
+    // Whether each type argument is a type its constraint admits. `void` is one, whose one value is
+    // `()`; `never` has no value at all, and is not.
     private constraints_hold(*self, span: Span, inf: *Infer) -> bool
         for k in 0..<inf.tparams.len()
             val tp = inf.tparams[k]
@@ -1042,8 +1043,8 @@ impl Elab
 
             if has_error(t) then return false
 
-            if is_void(t) || is_never(t)
-                self.fail(span, s"`${tp.name}` of `${inf.owner}` would be ${show_ty(t)}, which holds no value")
+            if is_never(t)
+                self.fail(span, s"`${tp.name}` of `${inf.owner}` would be never, which has no value")
                 return false
 
             if !(admits(c, t) || admits_aggregate(c, t))

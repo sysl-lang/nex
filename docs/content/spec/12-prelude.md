@@ -689,10 +689,24 @@ def main() =
   print(half(10)! + 1)          // 6
 ```
 
-{{< note >}}
-`main` returning `Result[void, E]`, whose `Err` would end the program with `error: <message>` and
-status 1, is proposed and not built yet: a `void` type argument is not allowed today.
-{{< /note >}}
+`T` may be `void` ([§3.10](/spec/03-types/)): an `Option[void]` or a `Result[void, E]` carries `()`,
+printed `Some(())` and `Ok(())`, and a `Result[void, E]` is what a function that can fail but has
+nothing to give back returns. **`main` may return `Result[void, E]`**, so a `?` reaches the top of
+the program: on `Err(e)` the program writes `error: <message>` to standard error, the message as
+`!` would word it, and exits with status 1; `Ok(())` exits 0. Any other `Result` is not a result
+`main` may have.
+
+```nex
+def check(n: integer): Result[void, string] =
+  if n < 0 then return Err(s"negative: $n")
+  Ok(())
+
+def main(): Result[void, string] =
+  check(4)?                     // Ok(()): carries on
+  check(-1)?                    // writes "error: negative: -1" and exits 1
+  print("unreached")
+  Ok(())
+```
 
 ## 12.14 Strings
 

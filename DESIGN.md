@@ -298,7 +298,16 @@ Generic functions, structs and enums (ref §3.6, §3.8, §6.10) stand, with thes
   at, and an argument that disagrees with them is converted or refused against its field:
   `val n: Option[integer] = None`, `val r: Result[integer, string] = Ok(7)` (§17.1). A type names all of a
   generic's arguments (`Pair[integer, string]`); `Pair` alone or `Pair[integer]` is a compile error.
-- **A type argument holds a value**: `void` and `never` are not type arguments.
+- **`void` is a type argument of any generic; `never` is not.** `void`'s one value is `()`, as
+  Rust's `()` and Scala's `Unit` are, and it is what an expression giving nothing gives: `Box(())`
+  is a `Box[void]`, `Ok(())` a `Result[void, E]` (§17.2), and `Box(print(1))` a `Box[void]` made
+  after printing. A field or payload of type `void` holds nothing, and the compiled engine gives it
+  no size; two of them are always equal, and `print` and an interpolation spell one `()`:
+  `Box { value=() }`, `Ok(())`, and `s"${()}"` is `"()"`. A `void` value is evaluated where it
+  stands, as any other is (`print(f())` with `f` giving nothing calls `f`, then prints `()`).
+  `never` has no value at all, so a `T` that would be `never` (`Box(stop 1)`) is a compile error.
+  A struct's or a variant's own field written as `void` is still a compile error: only a type
+  argument makes a `void` field.
 - **A name holds at most one generic `def` and one concrete `def`.** The concrete one is called
   wherever it takes the arguments, each as it is or widened, a literal adopting its parameter's
   type; the generic one otherwise. The arguments to such a name are passed by position.
@@ -3063,7 +3072,9 @@ kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
   next. A trap while they initialize answers that request and every later one, the bindings never
   having been made.
 - **`run(args)`** calls `main` with `args` as the program's arguments and answers the status: 0 when
-  `main` returns, the code `stop` gives. **`call(name, args)`** calls the top-level function `name`
+  `main` returns, the code `stop` gives. A `main` returning `Result[void, E]` (§17.2) that gives an
+  `Err` answers 1, its `error: <message>` line written through `write` to standard error, as a
+  compiled program writes it; `call("main", …)` instead answers the `Result` as it is. **`call(name, args)`** calls the top-level function `name`
   with values, each checked against its parameter's type (§16.3), and answers its result.
   **`call_named(name, positional, named)`** names arguments as a nex call does: `positional` fills
   the leading parameters, `named` (each a `NexField`) any others by name. **A parameter a host's call
@@ -3231,7 +3242,8 @@ end Result
 ```
 
 - **They are ordinary enums**: built by their variants, taken apart by `match`, compared with `==`
-  where their payloads are `Eq`, printed as `Some(3)`, `None`, `Ok(1.5)`, `Err(NotFound(in.dat))`.
+  where their payloads are `Eq`, printed as `Some(3)`, `None`, `Ok(1.5)`, `Ok(())`, `Err(NotFound(in.dat))`. `T` may be `void`
+  (§2.6): `Option[void]` and `Result[void, E]` carry `()`.
   A bare `None` or `Ok(…)` takes its arguments from the type expected (§2.6): `val n: Option[integer]
   = None`.
 - **They are prelude names, so a program's own declarations shadow them** (§11.5): a program
@@ -3267,9 +3279,11 @@ appears only in `!=`, which the lexer reads first, so `a!=b` is a comparison).
 - **`?` is a `return`**, so it is a compile error in a parallel body (§9.4 rule 6), and it releases
   what the function holds as `return` does (§11.4).
 - **`main` may return `Result[void, E]`** (§11.2), so a program's `?` reaches the top: an `Err`
-  ends the program as an unhandled trap does, writing `error: <message>` (the message as `!` would
-  word it) to standard error, with status 1. `main` returning `Ok(())` exits 0. `?` inside `main`
-  needs this form; plain `main()` uses `!`.
+  ends the program after what it printed, writing `error: <message>` (the message as `!` would
+  word it: a `string` as itself, anything else as `print` spells it) to standard error, and exits
+  with status 1 — where a trap aborts. `main` returning `Ok(())` exits 0, and `stop n` inside it
+  still exits `n`. `?` inside `main` needs this form; plain `main()` uses `!`. Any other `Result`,
+  and an `Option`, is not a result `main` may have (`Result[integer, string]` is a compile error).
 
 ### 17.3 `IoError`
 
