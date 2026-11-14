@@ -14,7 +14,6 @@ module sh.sysl.nex
 // - `get_or`, `is_some`, `is_none`, `is_ok` and `is_err` are such a `match` over their argument.
 
 import sysl.buf.{Buf, buf}
-import sysl.text.{join, split}
 import sh.sysl.parsing.Span
 
 // The internal names of the prelude's two enums.
@@ -39,9 +38,6 @@ struct Family
 // The prelude functions on `Option` and `Result`.
 is_family_function(name: string) -> bool =
     name == "get_or" || name == "is_some" || name == "is_none" || name == "is_ok" || name == "is_err"
-
-// A type as a diagnostic about these names it: the prelude's enums by their own names.
-private family_text(t: Ty) -> string = join(split(show_ty(t), "prelude."), "")
 
 impl Elab
     // Which of the prelude's enums `t` is an instance of, or, inside a generic's body being checked,
@@ -124,23 +120,23 @@ impl Elab
         val kind = if f.result then "Result[…, E]" else "Option[…]"
 
         if !frame.declared
-            self.fail(span, s"`?` returns from this function, whose result type is not declared; declare it as ${if f.result then s"a `Result[…, ${family_text(f.error)}]`" else "an `Option[…]`"}")
+            self.fail(span, s"`?` returns from this function, whose result type is not declared; declare it as ${if f.result then s"a `Result[…, ${show_ty(f.error)}]`" else "an `Option[…]`"}")
             return self.invalid(span)
 
-        val returned = if f.result then s"`Err(${family_text(f.error)})`" else "`None`"
+        val returned = if f.result then s"`Err(${show_ty(f.error)})`" else "`None`"
 
         val r = self.family(frame.ret) match
             Some(r) -> r
             None ->
-                self.fail(span, s"`?` would return ${returned} from this function, which returns ${family_text(frame.ret)}; a `?` on ${if f.result then "a `Result`" else "an `Option`"} needs a function returning ${kind}")
+                self.fail(span, s"`?` would return ${returned} from this function, which returns ${show_ty(frame.ret)}; a `?` on ${if f.result then "a `Result`" else "an `Option`"} needs a function returning ${kind}")
                 return self.invalid(span)
 
         if r.result != f.result
-            self.fail(span, s"`?` would return ${returned} from this function, which returns ${family_text(frame.ret)}; there is no conversion between `Option` and `Result`")
+            self.fail(span, s"`?` would return ${returned} from this function, which returns ${show_ty(frame.ret)}; there is no conversion between `Option` and `Result`")
             return self.invalid(span)
 
         if f.result && !ty_eq(r.error, f.error) && !is_wild(f.error) && !is_wild(r.error)
-            self.fail(span, s"`?` would return ${returned} from this function, which returns ${family_text(frame.ret)}; there is no conversion between error types")
+            self.fail(span, s"`?` would return ${returned} from this function, which returns ${show_ty(frame.ret)}; there is no conversion between error types")
             return self.invalid(span)
 
         for o in self.fx.xch
@@ -181,7 +177,7 @@ impl Elab
         texpr(span, Never, TBuiltin("trap", args))
 
     private not_family(*self, span: Span, what: string, v: TExpr) -> TExpr
-        if !is_wild(v.ty) then self.fail(span, s"${what} an `Option` or a `Result`, and this is ${family_text(v.ty)}")
+        if !is_wild(v.ty) then self.fail(span, s"${what} an `Option` or a `Result`, and this is ${show_ty(v.ty)}")
 
         self.invalid(span)
 
@@ -201,11 +197,11 @@ impl Elab
             None -> return self.not_family(args[0].span, s"`${name}` takes", v)
 
         if (name == "is_some" || name == "is_none") && f.result
-            self.fail(args[0].span, s"`${name}` takes an `Option`, and this is ${family_text(v.ty)}; a `Result` is asked with `is_ok` or `is_err`")
+            self.fail(args[0].span, s"`${name}` takes an `Option`, and this is ${show_ty(v.ty)}; a `Result` is asked with `is_ok` or `is_err`")
             return self.invalid(span)
 
         if (name == "is_ok" || name == "is_err") && !f.result
-            self.fail(args[0].span, s"`${name}` takes a `Result`, and this is ${family_text(v.ty)}; an `Option` is asked with `is_some` or `is_none`")
+            self.fail(args[0].span, s"`${name}` takes a `Result`, and this is ${show_ty(v.ty)}; an `Option` is asked with `is_some` or `is_none`")
             return self.invalid(span)
 
         val first = if f.result then "Ok" else "Some"
@@ -247,7 +243,7 @@ impl Elab
             Some(v) -> v
             None -> return false
 
-        self.fail(span, s"`${n}` here is the variant of `${display_name(self.agg.enums[v.owner].name)}`, declared in this module, which hides the prelude's `${n}` of `${if self.family(sty).unwrap().result then "Result" else "Option"}`; this value is the prelude's ${family_text(sty)}, so this module cannot match it")
+        self.fail(span, s"`${n}` here is the variant of `${display_name(self.agg.enums[v.owner].name)}`, declared in this module, which hides the prelude's `${n}` of `${if self.family(sty).unwrap().result then "Result" else "Option"}`; this value is the prelude's ${show_ty(sty)}, so this module cannot match it")
         true
 
     // -- a `Result` not dropped ---------------------------------------------------------------------
@@ -316,7 +312,7 @@ impl Elab
         TFun(span, MAIN_ENTRY, buf(), buf(), Void, texpr(span, Void, TMatch(call, arms)))
 
     // The shape `main` may return, for a diagnostic about one that returns something else.
-    main_result_text(self, t: Ty) -> string = family_text(t)
+    main_result_text(self, t: Ty) -> string = show_ty(t)
 end Elab
 
 private one_bind(id: Option[usize]) -> Buf[Option[usize]]

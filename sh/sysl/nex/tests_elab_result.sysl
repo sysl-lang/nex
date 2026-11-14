@@ -78,6 +78,15 @@ elab_match_shadowed_variant()
     assert_eq(refused("enum Mine =\n  Some(v: integer)\n  Other\ndef main() =\n  val o: Option[integer] = None\n  o match\n    None -> print(0)\n    _ -> print(1)\n"), "ok")
     assert_eq(refused(HALF + "def main() =\n  half(2) match\n    Some(v) -> print(v)\n    None -> print(0)\n"), "ok")
 
+@test("a diagnostic names the prelude's types and variants as a program writes them, and keeps prelude. only beside a declaration of the same name")
+elab_prelude_names_as_written()
+    assert_eq(refused("def main() = print(Ok(1))\n"), "error: cannot infer `E` of `Result` here: write the type where it is bound, `val x: Result[...] = Ok(...)` @1:20")
+    assert_eq(refused("def main() =\n  val o: Option[integer] = Ok(1)\n  print(o)\n"), "error: cannot infer `E` of `Result` here: write the type where it is bound, `val x: Result[...] = Ok(...)` @2:28")
+    // A struct named `Ok` is no type named `Result`, so `Result` still needs no module.
+    assert_eq(refused("struct Ok\n  v: integer\ndef main() =\n  val r: Result[integer, string] = Err(\"x\")\n  val s: string = r\n  print(s)\n"), "error: `s` must be string, but this is Result[integer, string] @5:19")
+    // The module's own `Result` is `Result`, so the prelude's is told apart by its module; `IoError` is not hidden.
+    assert_eq(refused("enum Result =\n  Good\n  Bad\ndef main() =\n  val x: real64 = real64(\"1\")\n  print(x)\n"), "error: `x` must be real64, but this is prelude.Result[real64, IoError] @5:19")
+
 @test("an instance of a generic enum a struct's field names has its arguments bound")
 elab_generic_enum_in_struct_field()
     assert_eq(refused("enum Res[T, E] =\n  Good(v: T)\n  Bad(e: E)\nend Res\nstruct R\n  value: Res[real, integer]\ndef main() = print(R(Good(1.5)))\n"), "ok")
