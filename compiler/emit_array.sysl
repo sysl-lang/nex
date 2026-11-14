@@ -120,6 +120,14 @@ is_items(t: Ty) -> bool = t match
     Array(e, _) -> !is_number_ty(*e)
     _ -> false
 
+// Whether none of a fused expression's leaves is an array of non-numbers, which is no tensor, so a
+// `linalg.generic` or a fused reduction cannot read it: such an operation is computed whole first.
+tensor_leaves(leaves: Buf[TExpr]) -> bool
+    for x in leaves
+        if is_items(x.ty) then return false
+
+    true
+
 copy_strings(xs: Buf[string]) -> Buf[string]
     var out: Buf[string] = buf()
 
@@ -873,11 +881,17 @@ impl Emitter
         var mismatch = ""
 
         for k in 0..<operands.len()
-            if !is_arr(operands[k].ty) then continue
+            if !is_arr(operands[k].ty) && !is_items(operands[k].ty) then continue
 
             first match
                 Some(f) -> mismatch = self.agree(span, rank_of(out), vals[f], operands[f].ty, vals[k], operands[k].ty, mismatch)
                 None -> first = Some(k)
+
+        // An array of non-numbers is no tensor: its elements are read, or written, one at a time.
+        if is_items(out) then return self.items_mapped(span, out, operands, vals, scalar, first)
+
+        for o in operands
+            if is_items(o.ty) then return self.items_mapped(span, out, operands, vals, scalar, first)
 
         if self.par_kernel
             val dims = first match
@@ -1038,7 +1052,7 @@ impl Emitter
         var leaves: Buf[TExpr] = buf()
         val scalar = fused_scalar(e, &leaves)
 
-        quiet(scalar, self.fpe_trap, leaves)
+        tensor_leaves(leaves) && quiet(scalar, self.fpe_trap, leaves)
 
     // The leaves of the fusible `e` evaluated in source order into `vals`, each operation's array
     // operands checked to agree in shape at the point the operation alone checks them (after its
