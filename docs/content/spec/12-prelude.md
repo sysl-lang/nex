@@ -804,9 +804,11 @@ def main() =
 
 A `File` is an open file. It is counted like a string: every copy shares the one file, and **the file
 closes when the last reference goes**, flushing what was written first. Where that flush fails
-there is nobody to hand the failure to, so the program ends as a trap nothing catches would end it;
-a program that must handle the failure calls `close` and matches its `Result`. A file still open
-when the program ends, by returning or by `stop`, is closed the same way.
+there is nobody to hand the failure to, so it is a warning, not a trap: `warning: <path>: <reason>`
+goes to standard error (an embedded script's goes to its host) and the program carries on. A file
+still open when the program ends, by returning or by `stop`, is closed the same way. An explicit
+`close(f)` or `flush(f)` answers the failure as its `Result`, so a program that must know calls
+`close(f)?`.
 
 | Signature | Meaning | Fortran |
 |---|---|---|

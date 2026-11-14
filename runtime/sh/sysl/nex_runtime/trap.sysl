@@ -43,14 +43,11 @@ trap_with(message: string) -> never
     note_trap(message)
     raise_trap()
 
-// A failure nobody is left to hand to — a file's close as its last reference goes — ending the
-// program as a trap nothing catches ends it, whatever catch is open: the call it happens in is one
-// no frame may be abandoned across.
-ended_by_failure(message: string)
+// A failure nobody is left to hand to — a file's close as its last reference goes — written to
+// standard error as a warning, after what was printed; the program goes on.
+warned(message: string)
     flush_output()
-    put(2, job_prefix() + uncaught_text(message))
-    abort_job(TRAP_STATUS)
-    abort()
+    put(2, job_prefix() + dropped_warning(message))
 
 // A trap's message, kept for the catch; with nothing catching, written out, and the program ends.
 // A message built from values is noted here, in a call that returns, so that no frame holds it across
