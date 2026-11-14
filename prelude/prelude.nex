@@ -1,7 +1,7 @@
 // The prelude nex ships as source (DESIGN §17.1): every program sees these names without an import,
 // and a program's own declarations of the same names hide them in its module (§11.5). The
-// functions on them — `get_or`, `is_some`, `is_none`, `is_ok`, `is_err` — and the `!` and `?` that
-// take them apart are the compiler's own.
+// functions on them — `get_or`, `is_some`, `is_none`, `is_ok`, `is_err`, `message` — and the `!`
+// and `?` that take them apart are the compiler's own.
 
 // A value that may be absent: `Some(v)`, or `None`.
 enum Option[T] =
@@ -14,3 +14,13 @@ enum Result[T, E] =
   Ok(value: T)
   Err(error: E)
 end Result
+
+// What went wrong reading or writing text and files (DESIGN §17.3). `message(e)` is its sentence:
+// `in.dat: no such file`, `in.dat:4:13: expected a real64, found "1.2.3"`; a `Malformed` read from a
+// string rather than a file has `source` empty and reads `1:3: expected an int32, found "4x"`.
+enum IoError =
+  NotFound(path: string)                       // no such file or directory
+  Denied(path: string)                         // permission, or outside a sandbox's grant
+  Malformed(source: string, line: integer, column: integer, message: string)
+  Failed(path: string, message: string)        // anything else the system reports
+end IoError

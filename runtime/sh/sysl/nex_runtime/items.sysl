@@ -86,6 +86,9 @@ private at(p: *u8, t: long) -> *u8
 
     at(a.base, window_at(a.base, a.base_rank, a.win, t))
 
+// The address of element `k`, counted from 1 and inside the array, of the array at `p`.
+cell_at(p: *u8, k: long) -> *u8 = at(p, k - 1)
+
 // A copy of the array at `p` with its elements counted again, of `rank` axes: its own extents where
 // that is its rank, else one axis of its count.
 private copied(p: *u8, rank: long) -> *u8

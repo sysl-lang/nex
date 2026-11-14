@@ -128,6 +128,8 @@ format_real_nex(v: real, bits: int = 64) -> string
     if v != v then return "nan"
     if v == 1.0 / 0.0 then return "inf"
     if v == -1.0 / 0.0 then return "-inf"
+    // A negative zero keeps its sign, so it reads back as itself (DESIGN §17.5).
+    if v == 0.0 && 1.0 / v < 0.0 then return "-0.0"
     if (if v < 0.0 then -v else v) < 1e15 && v == real(long(v)) then return s"${long(v)}.0"
 
     val (digits, e) = shortest_digits(v)
@@ -148,9 +150,12 @@ private digits32(x: f32) -> (string, int)
 
     (d.digits, d.exponent)
 
-// A complex of parts of `bits` bits: `<re><sign><|im|>i`, the sign taken from `im >= 0`.
-complex_text(re: real, im: real, bits: int = 64) -> string =
-    format_real_nex(re, bits) + (if im >= 0.0 then "+" else "-") + format_real_nex(if im < 0.0 then -im else im, bits) + "i"
+// A complex of parts of `bits` bits: `<re><sign><|im|>i`, the sign `-` where `im` is negative or a
+// negative zero, so the text reads back to the same parts.
+complex_text(re: real, im: real, bits: int = 64) -> string
+    val negative = im < 0.0 || (im == 0.0 && 1.0 / im < 0.0)
+
+    format_real_nex(re, bits) + (if negative then "-" else "+") + format_real_nex(if negative then -im else im, bits) + "i"
 
 private put_complex(re: real, im: real)
     prints(complex_text(re, im))

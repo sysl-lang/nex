@@ -494,6 +494,22 @@ impl Elab
         Some(n) -> Nominal(n, buf())
         None -> Error
 
+    // The instance of the prelude's generic enum `name` (`prelude.Option`, `prelude.Result`) at
+    // `args`: the type a prelude function answers.
+    prelude_instance(*self, span: Span, name: string, args: Buf[Ty]) -> Ty
+        val g = self.find_generic_agg(name) match
+            Some(g) -> g
+            None -> return Error
+
+        var targs: Buf[TArg] = buf()
+
+        for t in args
+            targs.push(TypeArg(t))
+
+        self.instantiate_agg(span, g, targs) match
+            Some(n) -> Nominal(n, buf())
+            None -> Error
+
     // -- instances --------------------------------------------------------------------------------
 
     // The struct or enum instance of `g` at `args`, created on its first use.

@@ -1,0 +1,438 @@
+module sh.sysl.nex
+
+// Text (DESIGN §17.3–§17.5): the string toolkit, `string(x)`, the numeric conversions of a string
+// and of a `[string]`, and `message(e)` of the prelude's `IoError`.
+//
+// **Each string function is one call of the runtime** (`runtime/strings.sysl`), a `TBuiltin` both
+// engines answer with the same sysl. `find`, which answers an `Option`, and a slice `s[i..j]`, whose
+// bounds may say `end`, are such a call inside the typed IR that builds the rest.
+//
+// **A conversion from text is the typed IR a `match` would give**, built here over four runtime
+// calls on the string (`runtime/numbers.sysl`): where reading stops (`text_bad`, 0 where it reads),
+// why (`text_bad_message`), and the value read (`text_int`, `text_uint`, `text_real`, `text_imag`,
+// at 64 bits and narrowed exactly). So `real64(s)` is
+//
+//     val column = text_bad(s, "real64")
+//     if column == 0 then Ok(real64(text_real(s, "real64")))
+//     else Err(Malformed("", 1, column, text_bad_message(s, "real64")))
+//
+// and a `[string]` is a loop over its elements that stops at the first that does not read, whose
+// position in the array is the column of its `Malformed`. `message(e)` is a `match` over the
+// variants, so neither engine has anything of its own for it.
+
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The prelude functions on strings; `length` and `string(x)` are found as an array function and a
+// conversion are.
+private val TEXT_FUNCTIONS = ["trim", "split", "join", "find", "contains", "starts_with", "ends_with", "replace", "upper", "lower", "message"]
+
+is_text_function(name: string) -> bool
+    for n in TEXT_FUNCTIONS
+        if n == name then return true
+
+    false
+
+// The internal names of the prelude's enums this file builds.
+private val OPTION = "prelude.Option"
+private val RESULT = "prelude.Result"
+private val IO_ERROR = "prelude.IoError"
+
+// The prelude's `IoError`.
+io_error_ty() -> Ty = Nominal(IO_ERROR, buf())
+
+is_io_error(t: Ty) -> bool = t match
+    Nominal(n, _) -> n == IO_ERROR
+    _ -> false
+
+private one(e: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    out.push(e)
+    out
+
+private two(a: TExpr, b: TExpr) -> Buf[TExpr]
+    var out = one(a)
+
+    out.push(b)
+    out
+
+private types1(t: Ty) -> Buf[Ty]
+    var out: Buf[Ty] = buf()
+
+    out.push(t)
+    out
+
+private types2(a: Ty, b: Ty) -> Buf[Ty]
+    var out = types1(a)
+
+    out.push(b)
+    out
+
+private int_lit(span: Span, v: i128) -> TExpr = texpr(span, INTEGER, TLiteral(IntVal(v), false))
+
+private str_lit(span: Span, s: string) -> TExpr = texpr(span, Ty.Str, TLiteral(StrVal(s), false))
+
+private local(span: Span, ty: Ty, id: usize) -> TExpr = texpr(span, ty, TLocal(id))
+
+private equal(span: Span, a: TExpr, b: TExpr) -> TExpr = texpr(span, Bool, TBinary("==", a, b))
+
+impl Elab
+    // -- the toolkit --------------------------------------------------------------------------------
+
+    // `trim(s)`, `split(s)`, `split(s, sep)`, `join(parts, sep)`, `find(s, sub)`, `contains`,
+    // `starts_with`, `ends_with`, `replace(s, old, new)`, `upper(s)`, `lower(s)` and `message(e)`.
+    text_call(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
+        for a in args
+            *a.kind match
+                NamedArg(_, _) ->
+                    self.fail(a.span, s"`${name}` takes no named arguments")
+                    return self.invalid(span)
+                _ -> ()
+
+        if name == "message" then return self.message_call(span, args)
+
+        if name == "trim" || name == "upper" || name == "lower"
+            if args.len() != 1 then return self.arity(span, name, "a string")
+
+            return texpr(span, Ty.Str, TBuiltin(s"str_${name}", one(self.check(args[0], Ty.Str, s"the argument of `${name}`"))))
+
+        if name == "split"
+            if args.len() != 1 && args.len() != 2 then return self.arity(span, name, "a string and an optional separator")
+
+            val s = self.check(args[0], Ty.Str, "the string `split` takes apart")
+            val strings = Ty.Array(Ty.Str, dynamic_axes(1))
+
+            if args.len() == 1 then return texpr(span, strings, TBuiltin("str_words", one(s)))
+
+            return texpr(span, strings, TBuiltin("str_split", two(s, self.check(args[1], Ty.Str, "the separator"))))
+
+        if name == "join"
+            if args.len() != 2 then return self.arity(span, name, "the parts, `[string]`, and a separator")
+
+            val parts = self.check(args[0], Ty.Array(Ty.Str, dynamic_axes(1)), "the parts `join` puts together")
+
+            return texpr(span, Ty.Str, TBuiltin("str_join", two(parts, self.check(args[1], Ty.Str, "the separator"))))
+
+        if name == "replace"
+            if args.len() != 3 then return self.arity(span, name, "a string, the text to replace and its replacement")
+
+            var out = one(self.check(args[0], Ty.Str, "the string `replace` searches"))
+
+            out.push(self.check(args[1], Ty.Str, "the text to replace"))
+            out.push(self.check(args[2], Ty.Str, "the replacement"))
+            return texpr(span, Ty.Str, TBuiltin("str_replace", out))
+
+        if args.len() != 2 then return self.arity(span, name, if name == "find" || name == "contains" then "a string and the text to look for" else "a string and the text to compare its end with")
+
+        val s = self.check(args[0], Ty.Str, s"the string `${name}` searches")
+        val sub = self.check(args[1], Ty.Str, if name == "find" || name == "contains" then "the text to look for" else "the text to compare with")
+
+        if name != "find" then return texpr(span, Bool, TBuiltin(s"str_${name}", two(s, sub)))
+
+        // `find`: the position, `Some(k)`, or `None` where the runtime answers 0.
+        val opt = self.prelude_instance(span, OPTION, types1(INTEGER))
+        val at = self.new_local("position", INTEGER, LVal)
+        var items: Buf[TExpr] = buf()
+
+        items.push(texpr(span, Void, TLet(at, texpr(span, INTEGER, TBuiltin("str_find", two(s, sub))))))
+
+        val none = texpr(span, opt, TVariant("prelude.None", 1, buf()))
+        val some = texpr(span, opt, TVariant("prelude.Some", 0, one(local(span, INTEGER, at))))
+
+        texpr(span, opt, TBlock(items, texpr(span, opt, TIf(equal(span, local(span, INTEGER, at), int_lit(span, 0)), none, Some(some)))))
+    end text_call
+
+    // `length(s)` of the string the local `id` holds.
+    text_length(self, span: Span, id: usize) -> TExpr = texpr(span, INTEGER, TBuiltin("str_length", one(local(span, Ty.Str, id))))
+
+    // `s[i..j]`, `s[i..<j]`, `s[i..end]`, `s[..j]`, `s[i..]`: the bytes `i` to `j` as a string, which
+    // the runtime checks lie in `1..length(s)` and on character boundaries.
+    text_slice(*self, span: Span, base: TExpr, indices: Buf[Expr]) -> TExpr
+        if indices.len() != 1
+            self.fail(span, "a string takes one range of byte positions: `s[i..j]`")
+            return self.invalid(span)
+
+        val (lo, hi, inclusive, stride) = *indices[0].kind match
+            Range(lo, hi, inclusive, stride) -> (lo, hi, inclusive, stride)
+            AxisAll -> return base
+            _ ->
+                self.fail(indices[0].span, "a string has no `s[i]`, since there is no character type; one character is `s[i..i]`")
+                return self.invalid(span)
+
+        if stride.is_some()
+            self.fail(indices[0].span, "a string slice takes no step")
+            return self.invalid(span)
+
+        val s = self.new_local("text", Ty.Str, LVal)
+
+        self.ends.push(0)
+        self.text_ends.push(s)
+
+        val first = lo match
+            Some(x) -> self.check(x, INTEGER, "a bound")
+            None -> int_lit(span, 1)
+
+        var last = hi match
+            Some(x) -> self.check(x, INTEGER, "a bound")
+            None -> self.text_length(span, s)
+
+        self.ends.pop()
+        self.text_ends.pop()
+
+        if !inclusive && hi.is_some() then last = texpr(span, INTEGER, TBinary("-", last, int_lit(span, 1)))
+
+        var items: Buf[TExpr] = buf()
+        var args = two(local(span, Ty.Str, s), first)
+
+        items.push(texpr(span, Void, TLet(s, base)))
+        args.push(last)
+        texpr(span, Ty.Str, TBlock(items, texpr(span, Ty.Str, TBuiltin("str_slice", args))))
+    end text_slice
+
+    // `string(x)`: `x` as `print` spells it, as `s"$x"` is.
+    string_of(*self, span: Span, args: Buf[Expr]) -> TExpr
+        if args.len() != 1
+            self.fail(span, "`string(...)` converts one value")
+            return self.invalid(span)
+
+        val v = self.infer(args[0])
+
+        v.ty match
+            Str -> return v
+            Error -> return self.invalid(span)
+            Void ->
+                self.fail(args[0].span, "this has no value to spell as a string: it is void")
+                return self.invalid(span)
+            Fn(_) ->
+                self.fail(args[0].span, "a function has no spelling as a string")
+                return self.invalid(span)
+            _ -> ()
+
+        var parts: Buf[TPart] = buf()
+
+        interp_value(&parts, v, "")
+        texpr(span, Ty.Str, TInterp(parts, false))
+
+    // -- numbers from text --------------------------------------------------------------------------
+
+    // `T(s)` of a string, `Result[T, IoError]`, or of a `[string]`, `Result[[T], IoError]`.
+    text_conversion(*self, span: Span, target: Ty, v: TExpr) -> TExpr
+        if is_array(v.ty)
+            if rank_of(v.ty) != 1
+                self.fail(v.span, s"a conversion from text reads a `[string]` of one axis; this is ${self.shown(v)}")
+                return self.invalid(span)
+
+            return self.texts_read(span, target, v)
+
+        val s = self.new_local("text", Ty.Str, LVal)
+        var items: Buf[TExpr] = buf()
+
+        items.push(texpr(span, Void, TLet(s, v)))
+
+        val r = self.text_read(span, target, local(span, Ty.Str, s), &items)
+
+        texpr(span, r.ty, TBlock(items, r))
+
+    // The `Result` of reading the string `s`, a local, as `target`, its column bound by a statement
+    // added to `items`.
+    private text_read(*self, span: Span, target: Ty, s: TExpr, items: *Buf[TExpr]) -> TExpr
+        val kind = str_lit(span, show_ty(target))
+        val result = self.prelude_instance(span, RESULT, types2(target, io_error_ty()))
+        val column = self.new_local("column", INTEGER, LVal)
+
+        items.push(texpr(span, Void, TLet(column, texpr(span, INTEGER, TBuiltin("text_bad", two(s, kind))))))
+
+        val ok = texpr(span, result, TVariant("prelude.Ok", 0, one(read_value(span, target, s, kind))))
+        val err = texpr(span, result, TVariant("prelude.Err", 1, one(malformed(span, local(span, INTEGER, column), texpr(span, Ty.Str, TBuiltin("text_bad_message", two(s, kind)))))))
+
+        texpr(span, result, TIf(equal(span, local(span, INTEGER, column), int_lit(span, 0)), ok, Some(err)))
+
+    // A `[string]` read element by element into a `[T]`, stopping at the first that does not read:
+    //
+    //     val texts = v
+    //     var out: [T] = zeros(length(texts))
+    //     var at = 0
+    //     for k in 1..length(texts)
+    //       if at == 0
+    //         val column = text_bad(texts[k], kind)
+    //         if column == 0 then out[k] = T(texts[k]) else at = k
+    //     if at == 0 then Ok(out) else Err(Malformed("", 1, at, text_bad_message(texts[at], kind)))
+    private texts_read(*self, span: Span, target: Ty, v: TExpr) -> TExpr
+        val strings = v.ty
+        val numbers = Ty.Array(target, dynamic_axes(1))
+        val kind = str_lit(span, show_ty(target))
+        val result = self.prelude_instance(span, RESULT, types2(numbers, io_error_ty()))
+        val texts = self.new_local("texts", strings, LVal)
+        val out = self.new_local("numbers", numbers, LVar)
+        val at = self.new_local("failed", INTEGER, LVar)
+        val k = self.new_local("k", INTEGER, LLoop)
+        val column = self.new_local("column", INTEGER, LVal)
+        val count = texpr(span, INTEGER, TBuiltin("length", one(local(span, strings, texts))))
+        var items: Buf[TExpr] = buf()
+
+        items.push(texpr(span, Void, TLet(texts, self.stored(local(span, strings, texts), v))))
+        items.push(texpr(span, Void, TLet(out, texpr(span, numbers, TBuiltin("zeros", one(count))))))
+        items.push(texpr(span, Void, TLet(at, int_lit(span, 0))))
+
+        val element = self.element(span, strings, texts, local(span, INTEGER, k))
+        var body: Buf[TExpr] = buf()
+
+        body.push(texpr(span, Void, TLet(column, texpr(span, INTEGER, TBuiltin("text_bad", two(element, kind))))))
+
+        var subs: Buf[TSub] = buf()
+
+        subs.push(TSubAt(local(span, INTEGER, k)))
+
+        val place = texpr(span, target, TArray(TIndex(local(span, numbers, out), subs)))
+        val store = texpr(span, Void, TAssign("=", place, read_value(span, target, self.element(span, strings, texts, local(span, INTEGER, k)), kind)))
+        val note = texpr(span, Void, TAssign("=", local(span, INTEGER, at), local(span, INTEGER, k)))
+        val read = texpr(span, Void, TBlock(body, texpr(span, Void, TIf(equal(span, local(span, INTEGER, column), int_lit(span, 0)), store, Some(note)))))
+        val each = texpr(span, Void, TIf(equal(span, local(span, INTEGER, at), int_lit(span, 0)), read, None))
+        val count_again = texpr(span, INTEGER, TBuiltin("length", one(local(span, strings, texts))))
+
+        items.push(texpr(span, Void, TFor(self.new_loop(None), k, int_lit(span, 1), count_again, true, None, each)))
+
+        val failed = self.element(span, strings, texts, local(span, INTEGER, at))
+        val ok = texpr(span, result, TVariant("prelude.Ok", 0, one(local(span, numbers, out))))
+        val err = texpr(span, result, TVariant("prelude.Err", 1, one(malformed(span, local(span, INTEGER, at), texpr(span, Ty.Str, TBuiltin("text_bad_message", two(failed, kind)))))))
+
+        texpr(span, result, TBlock(items, texpr(span, result, TIf(equal(span, local(span, INTEGER, at), int_lit(span, 0)), ok, Some(err)))))
+    end texts_read
+
+    // Element `k` of the `[string]` the local `id` holds.
+    private element(self, span: Span, strings: Ty, id: usize, k: TExpr) -> TExpr
+        var subs: Buf[TSub] = buf()
+
+        subs.push(TSubAt(k))
+        texpr(span, Ty.Str, TArray(TIndex(local(span, strings, id), subs)))
+
+    // -- `IoError` ----------------------------------------------------------------------------------
+
+    // `message(e)`.
+    private message_call(*self, span: Span, args: Buf[Expr]) -> TExpr
+        if args.len() != 1 then return self.arity(span, "message", "an `IoError`")
+
+        val v = self.infer(args[0])
+
+        if is_wild(v.ty) then return self.invalid(span)
+
+        if !is_io_error(v.ty)
+            self.fail(args[0].span, s"`message` takes an `IoError`, and this is ${show_ty(v.ty)}")
+            return self.invalid(span)
+
+        self.io_message(span, v)
+
+    // The sentence of the `IoError` `e` (DESIGN §17.3): `in.dat: no such file`, `/etc/x: permission
+    // denied`, `in.dat:4:13: expected a real64, found "1.2.3"` (`1:3: …` where the source is a
+    // string), `out.dat: no space left on device`.
+    io_message(*self, span: Span, e: TExpr) -> TExpr
+        var arms: Buf[TArm] = buf()
+
+        val path = self.new_local("path", Ty.Str, LVal)
+
+        arms.push(TArm(PVariant("NotFound", 0, binds(one_id(path))), sentence(span, local(span, Ty.Str, path), ": no such file")))
+
+        val denied = self.new_local("path", Ty.Str, LVal)
+
+        arms.push(TArm(PVariant("Denied", 1, binds(one_id(denied))), sentence(span, local(span, Ty.Str, denied), ": permission denied")))
+
+        val source = self.new_local("source", Ty.Str, LVal)
+        val line = self.new_local("line", INTEGER, LVal)
+        val column = self.new_local("column", INTEGER, LVal)
+        val text = self.new_local("message", Ty.Str, LVal)
+        var ids = one_id(source)
+
+        ids.push(line)
+        ids.push(column)
+        ids.push(text)
+
+        val place = position(span, local(span, INTEGER, line), local(span, INTEGER, column), local(span, Ty.Str, text))
+        var at_source: Buf[TPart] = buf()
+
+        at_source.push(TValue(local(span, Ty.Str, source), ""))
+        at_source.push(TText(":"))
+        at_source.extend(place.view())
+
+        val in_string = texpr(span, Ty.Str, TInterp(place, false))
+        val in_file = texpr(span, Ty.Str, TInterp(at_source, false))
+        val unnamed = equal(span, local(span, Ty.Str, source), str_lit(span, ""))
+
+        arms.push(TArm(PVariant("Malformed", 2, binds(ids)), texpr(span, Ty.Str, TIf(unnamed, in_string, Some(in_file)))))
+
+        val failed = self.new_local("path", Ty.Str, LVal)
+        val why = self.new_local("message", Ty.Str, LVal)
+        var pair = one_id(failed)
+
+        pair.push(why)
+
+        var parts: Buf[TPart] = buf()
+
+        parts.push(TValue(local(span, Ty.Str, failed), ""))
+        parts.push(TText(": "))
+        parts.push(TValue(local(span, Ty.Str, why), ""))
+        arms.push(TArm(PVariant("Failed", 3, binds(pair)), texpr(span, Ty.Str, TInterp(parts, false))))
+
+        texpr(span, Ty.Str, TMatch(e, arms))
+    end io_message
+end Elab
+
+// The value read from the string `s` as `target`, at 64 bits from the runtime and narrowed exactly.
+private read_value(span: Span, target: Ty, s: TExpr, kind: TExpr) -> TExpr
+    target match
+        Int(bits, signed) ->
+            val wide = Int(64, signed)
+            val v = texpr(span, wide, TBuiltin(if signed then "text_int" else "text_uint", two(s, kind)))
+
+            if bits == 64 then v else texpr(span, target, TConvert(v, true))
+        Real(bits) -> narrowed(span, bits, texpr(span, REAL, TBuiltin("text_real", two(s, kind))))
+        Complex(bits) ->
+            val re = narrowed(span, bits, texpr(span, REAL, TBuiltin("text_real", two(s, kind))))
+            val im = narrowed(span, bits, texpr(span, REAL, TBuiltin("text_imag", two(s, kind))))
+
+            texpr(span, target, TMakeComplex(re, im))
+        _ -> texpr(span, Error, TInvalid)
+
+// A `real64` that holds a value of `bits` bits exactly, at that width.
+private narrowed(span: Span, bits: int, v: TExpr) -> TExpr = if bits == 64 then v else texpr(span, Real(bits), TConvert(v, false))
+
+// `Malformed("", 1, column, message)`: a failure to read a string.
+private malformed(span: Span, column: TExpr, message: TExpr) -> TExpr
+    var args = two(str_lit(span, ""), int_lit(span, 1))
+
+    args.push(column)
+    args.push(message)
+    texpr(span, io_error_ty(), TVariant("prelude.Malformed", 2, args))
+
+// `line:column: message`.
+private position(span: Span, line: TExpr, column: TExpr, message: TExpr) -> Buf[TPart]
+    var out: Buf[TPart] = buf()
+
+    out.push(TValue(line, ""))
+    out.push(TText(":"))
+    out.push(TValue(column, ""))
+    out.push(TText(": "))
+    out.push(TValue(message, ""))
+    out
+
+// `path` followed by `text`.
+private sentence(span: Span, path: TExpr, text: string) -> TExpr
+    var parts: Buf[TPart] = buf()
+
+    parts.push(TValue(path, ""))
+    parts.push(TText(text))
+    texpr(span, Ty.Str, TInterp(parts, false))
+
+private one_id(id: usize) -> Buf[usize]
+    var out: Buf[usize] = buf()
+
+    out.push(id)
+    out
+
+private binds(ids: Buf[usize]) -> Buf[Option[usize]]
+    var out: Buf[Option[usize]] = buf()
+
+    for id in ids
+        out.push(Some(id))
+
+    out

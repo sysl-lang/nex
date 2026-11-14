@@ -1,0 +1,370 @@
+module sh.sysl.nex_runtime
+
+// Numbers from text (DESIGN §17.5), for both engines: `read_number` reads a string as one of nex's
+// numeric types, and the interpreter calls it as it is while a compiled program calls the
+// `nex_text_*` entries beside it.
+//
+// **What reads**: blanks around the number are ignored. An integer is an optional sign and decimal
+// digits, `_` allowed between digits as in a literal. A real is an optional sign and a literal as nex
+// writes one, its exponent letter `e`, `E`, `d` or `D`, or `inf`, `infinity` or `nan` in any case. A
+// complex is `1.5+2.0i` as `print` writes one, or Fortran's `(1.5, 2.0)`.
+//
+// **A real is rounded once, at its own width**: a `real64` and a `real32` by `sysl.text`'s correctly
+// rounded readers of that width. A `real16` is the `real64` nearest the decimal, rounded to 16 bits;
+// that rounds twice only where the `real64` lands exactly half way between two `real16`s, and there
+// the decimal is compared with the halfway point at 113 bits instead, so only a decimal of more
+// than thirty-odd digits lying within 2^-113 of the halfway point could still round the wrong way.
+//
+// **A failure names where reading stopped**: the column, from 1 and in bytes, of the first byte that
+// does not belong to the number, and for a number outside its type's range the column it starts at.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.{f128_prefix, f32_prefix, from_utf8_unchecked, real_prefix}
+
+// What reading a number found: `column` 0 where the text reads, and otherwise where it stopped and
+// the sentence that says why. Of the values, the one the kind reads is set: `int` for a signed
+// integer, `uint` for an unsigned one, `re` for a real, `re` and `im` for a complex.
+struct NumberRead
+    column: long
+    message: string
+    int: long
+    uint: ulong
+    re: real
+    im: real
+
+// The numeric type a kind names: `int32`, `uint8`, `real16`, `complex[real32]`.
+private struct Kind
+    family: int
+    bits: int
+
+private val SIGNED = 0
+private val UNSIGNED = 1
+private val REAL = 2
+private val COMPLEX = 3
+
+private kind_of(name: string) -> Kind
+    if name.starts_with("complex[real") then return Kind(COMPLEX, digits_value(name[12..<name.len - 1]))
+    if name.starts_with("uint") then return Kind(UNSIGNED, digits_value(name[4..]))
+    if name.starts_with("int") then return Kind(SIGNED, digits_value(name[3..]))
+
+    Kind(REAL, digits_value(name[4..]))
+
+private digits_value(s: string) -> int
+    var v = 0
+
+    for c in s.bytes
+        v = v * 10 + int(c - u8('0'))
+
+    v
+
+// `a int32`, `a real64`: the article a type name takes.
+private article(name: string) -> string = if name.starts_with("int") then "an" else "a"
+
+private is_blank(c: u8) -> bool = c == u8(' ') || c == u8('\t') || c == u8('\r') || c == u8('\n')
+
+private is_digit(c: u8) -> bool = c >= u8('0') && c <= u8('9')
+
+private lower(c: u8) -> u8 = if c >= u8('A') && c <= u8('Z') then c + 32 else c
+
+private skip_blanks(b: []const u8, k: usize) -> usize
+    var at = k
+
+    while at < b.len && is_blank(b[at])
+        at += 1
+
+    at
+
+// A run of decimal digits from `k`, `_` allowed between two of them: where it ends, the digits
+// appended to `out`. A separator counts only where a digit follows the run of them, as in a literal.
+private digit_run(b: []const u8, k: usize, out: *Buf[u8]) -> usize
+    var at = k
+
+    loop
+        if at < b.len && is_digit(b[at])
+            out.push(b[at])
+            at += 1
+            continue
+
+        if at == k then return at
+
+        var n = at
+
+        while n < b.len && b[n] == u8('_')
+            n += 1
+
+        if n == at || n >= b.len || !is_digit(b[n]) then return at
+
+        at = n
+
+// Whether the bytes from `k` spell `word`, in any case.
+private spells(b: []const u8, k: usize, word: string) -> bool
+    if k + word.len > b.len then return false
+
+    for j in 0..<word.len
+        if lower(b[k + j]) != word.bytes[j] then return false
+
+    true
+
+// One real number from `k`: an optional sign, then `inf`, `infinity`, `nan` or a decimal. Answers
+// where it ends and the number as `sysl.text`'s readers take it (no `_`, the exponent letter `e`),
+// or `None` and where reading stopped.
+private struct Number
+    end: usize
+    text: Option[string]
+
+private real_number(b: []const u8, k: usize) -> Number
+    var out: Buf[u8] = buf()
+    var at = k
+
+    if at < b.len && (b[at] == u8('+') || b[at] == u8('-'))
+        out.push(b[at])
+        at += 1
+
+    for word in ["infinity", "inf", "nan"]
+        if spells(b, at, word)
+            out.extend(word.bytes)
+            return Number(at + word.len, Some(from_utf8_unchecked(out.view()).copy()))
+
+    val first = at
+
+    at = digit_run(b, at, &out)
+
+    if at == first then return Number(at, None)
+
+    if at + 1 < b.len && b[at] == u8('.') && is_digit(b[at + 1])
+        out.push(u8('.'))
+        at = digit_run(b, at + 1, &out)
+
+    if at < b.len && (lower(b[at]) == u8('e') || lower(b[at]) == u8('d'))
+        var e = at + 1
+        var exp: Buf[u8] = buf()
+
+        exp.push(u8('e'))
+
+        if e < b.len && (b[e] == u8('+') || b[e] == u8('-'))
+            exp.push(b[e])
+            e += 1
+
+        if e < b.len && is_digit(b[e])
+            at = digit_run(b, e, &exp)
+            out.extend(exp.view())
+
+    Number(at, Some(from_utf8_unchecked(out.view()).copy()))
+end real_number
+
+// The value of `text`, a number as `real_number` answers it, at `bits` bits, widened exactly to a
+// `real`.
+private value_at(text: string, bits: int) -> real
+    if bits == 32 then return real(f32_prefix(text.bytes).0)
+
+    val r = real_prefix(text.bytes).0
+
+    if bits == 64 then return r
+
+    nearest16(r, text)
+
+// The `real16` nearest the decimal `text`, whose nearest `real64` is `r`, widened to a `real`.
+private nearest16(r: real, text: string) -> real
+    val h = real(f16(r))
+
+    if h == r || r != r then return h
+
+    // The other `real16` beside `r`, and the point half way between the two, both exact as `real`s.
+    // Past the largest finite `real16`, 65504, the neighbour is that and the halfway point 65520.
+    val huge = 65504.0
+    val inf = 1.0 / 0.0
+    var other = 0.0
+    var half = 0.0
+
+    if h == inf || h == -inf
+        other = if h > 0.0 then huge else -huge
+        half = if h > 0.0 then 65520.0 else -65520.0
+    else
+        // One step of the magnitude, keeping the sign: away from zero where `r` is larger in size.
+        val bits = f16(h).bits()
+        val sign = bits & 0x8000
+        val mag = bits & 0x7FFF
+        val up = (if h < 0.0 then -h else h) < (if r < 0.0 then -r else r)
+
+        other = real(f16.from_bits(sign | (if up then mag + 1 else mag - 1)))
+        half = (h + other) / 2.0
+
+    if r != half then return h
+
+    // Exactly half way at 53 bits: the decimal's side of the halfway point, read at 113 bits.
+    val q = f128_prefix(text.bytes).0
+    val m = f128(half)
+    val lo = if h < other then h else other
+    val hi = if h < other then other else h
+
+    if q > m then return hi
+    if q < m then return lo
+
+    h
+end nearest16
+
+// One integer from `k`: an optional sign and digits. Answers where it ends, whether there were
+// digits, the sign and the magnitude, and whether the magnitude passes 64 bits.
+private struct Integer
+    end: usize
+    digits: bool
+    neg: bool
+    mag: ulong
+    big: bool
+
+private integer_number(b: []const u8, k: usize) -> Integer
+    var at = k
+    var neg = false
+
+    if at < b.len && (b[at] == u8('+') || b[at] == u8('-'))
+        neg = b[at] == u8('-')
+        at += 1
+
+    var ds: Buf[u8] = buf()
+    val end = digit_run(b, at, &ds)
+    var mag: ulong = 0
+    var big = false
+
+    for c in ds
+        val d = ulong(c - u8('0'))
+
+        if mag > (0xFFFF_FFFF_FFFF_FFFF - d) / 10 then big = true
+        else mag = mag * 10 + d
+
+    Integer(end, ds.len() > 0, neg, mag, big)
+
+// Whether an integer of sign `neg` and magnitude `mag` lies in the range of `kind`.
+private in_range(kind: Kind, neg: bool, mag: ulong) -> bool
+    if kind.family == UNSIGNED
+        if neg then return mag == 0
+
+        return kind.bits == 64 || mag <= (ulong(1) << ulong(kind.bits)) - 1
+
+    val limit = ulong(1) << ulong(kind.bits - 1)
+
+    if neg then mag <= limit else mag < limit
+
+// `s` read as the numeric type `kind_name` names.
+read_number(s: string, kind_name: string) -> NumberRead
+    val b = s.bytes
+    val kind = kind_of(kind_name)
+    val found = text_trim(s)
+    var out = NumberRead(0, "", 0, 0, 0.0, 0.0)
+    val start = skip_blanks(b, 0)
+    var at = start
+
+    if kind.family == SIGNED || kind.family == UNSIGNED
+        val n = integer_number(b, at)
+
+        at = skip_blanks(b, n.end)
+
+        if n.digits && at == b.len
+            if n.big || !in_range(kind, n.neg, n.mag)
+                out.column = long(start) + 1
+                out.message = s"out of range for $kind_name, found \"$found\""
+                return out
+
+            if kind.family == UNSIGNED then out.uint = n.mag
+            elif n.neg then out.int = if n.mag == ulong(1) << 63 then long.wrap(n.mag) else -long(n.mag)
+            else out.int = long(n.mag)
+
+            return out
+
+        at = if n.digits then at else n.end
+    elif kind.family == REAL
+        val n = real_number(b, at)
+
+        n.text match
+            Some(t) ->
+                at = skip_blanks(b, n.end)
+
+                if at == b.len
+                    out.re = value_at(t, kind.bits)
+                    return out
+            None -> at = n.end
+    else
+        val c = complex_number(b, at, kind.bits)
+
+        if c.ok
+            out.re = c.re
+            out.im = c.im
+            return out
+
+        at = c.end
+
+    out.column = long(at) + 1
+    out.message = s"expected ${article(kind_name)} $kind_name, found \"$found\""
+    out
+end read_number
+
+// A complex number from `k`, both its parts at `bits` bits: whether it reads, and where reading
+// stopped where it does not.
+private struct ComplexRead
+    ok: bool
+    end: usize
+    re: real
+    im: real
+
+private complex_number(b: []const u8, k: usize, bits: int) -> ComplexRead
+    val fortran = k < b.len && b[k] == u8('(')
+    var at = if fortran then skip_blanks(b, k + 1) else k
+
+    val re = real_number(b, at)
+
+    val re_text = re.text match
+        Some(t) -> t
+        None -> return ComplexRead(false, re.end, 0.0, 0.0)
+
+    at = re.end
+
+    if fortran
+        at = skip_blanks(b, at)
+
+        if at >= b.len || b[at] != u8(',') then return ComplexRead(false, at, 0.0, 0.0)
+
+        at = skip_blanks(b, at + 1)
+    elif at >= b.len || (b[at] != u8('+') && b[at] != u8('-'))
+        return ComplexRead(false, at, 0.0, 0.0)
+
+    val im = real_number(b, at)
+
+    val im_text = im.text match
+        Some(t) -> t
+        None -> return ComplexRead(false, im.end, 0.0, 0.0)
+
+    at = im.end
+
+    if fortran then at = skip_blanks(b, at)
+
+    val close = if fortran then u8(')') else u8('i')
+
+    if at >= b.len || b[at] != close then return ComplexRead(false, at, 0.0, 0.0)
+
+    at = skip_blanks(b, at + 1)
+
+    if at != b.len then return ComplexRead(false, at, 0.0, 0.0)
+
+    ComplexRead(true, at, value_at(re_text, bits), value_at(im_text, bits))
+end complex_number
+
+// -- the compiled program's entries ----------------------------------------------------------------
+
+// Where reading the string `s` as the type `kind` names stops, from 1; 0 where it reads.
+@export("nex_text_bad")
+text_bad(s: *u8, kind: *u8) -> long = read_number(c_text(s), c_text(kind)).column
+
+// Why `s` does not read as the type `kind` names.
+@export("nex_text_bad_message")
+text_bad_message(s: *u8, kind: *u8) -> *u8 = c_string(read_number(c_text(s), c_text(kind)).message)
+
+@export("nex_text_int")
+text_int(s: *u8, kind: *u8) -> long = read_number(c_text(s), c_text(kind)).int
+
+@export("nex_text_uint")
+text_uint(s: *u8, kind: *u8) -> ulong = read_number(c_text(s), c_text(kind)).uint
+
+@export("nex_text_real")
+text_real(s: *u8, kind: *u8) -> real = read_number(c_text(s), c_text(kind)).re
+
+@export("nex_text_imag")
+text_imag(s: *u8, kind: *u8) -> real = read_number(c_text(s), c_text(kind)).im

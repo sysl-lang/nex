@@ -1,0 +1,112 @@
+module sh.sysl.nex
+
+// The string toolkit and numbers from text (DESIGN §17.4, §17.5) as the interpreter computes them:
+// each by the runtime's own function (`runtime/strings.sysl`, `runtime/numbers.sysl`), which a
+// compiled program calls through its `nex_str_*` and `nex_text_*` entries, so both engines answer
+// and trap alike.
+
+import nex_runtime.sh.sysl.nex_runtime.{read_number, text_case, text_contains, text_ends_with, text_find, text_join, text_pieces, text_replace, text_slice,
+                                        text_starts_with, text_trim, text_words}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// Whether `name` is a runtime call the elaborator makes for text.
+is_text_builtin(name: string) -> bool = name.starts_with("str_") || name.starts_with("text_")
+
+// The strings as an interpreter array of one axis.
+private strings_value(strings: Buf[string]) -> Value
+    var vs: Buf[Value] = buf()
+
+    for s in strings
+        vs.push(VStr(s))
+
+    vector(Ty.Str, vs)
+
+// The strings an array of them holds, in storage order.
+private strings_of(v: Value) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for e in elements(arr_of(v))
+        out.push(str_of(e))
+
+    out
+
+private string_answer(r: Result[string, string]) -> Answer = r match
+    Ok(s) -> Ok(VStr(s))
+    Err(m) -> trapped(m)
+
+impl Interp
+    text_builtin(*self, span: Span, name: string, args: Buf[TExpr]) -> Code
+        var codes: Buf[Code] = buf()
+
+        for a in args
+            codes.push(self.ex(a))
+
+        val a = codes[0]
+
+        if name == "str_length" then return (c) -> Ok(VInt(long(str_of(a(c)?).len)))
+        if name == "str_trim" then return (c) -> Ok(VStr(text_trim(str_of(a(c)?))))
+        if name == "str_upper" then return (c) -> Ok(VStr(text_case(str_of(a(c)?), true)))
+        if name == "str_lower" then return (c) -> Ok(VStr(text_case(str_of(a(c)?), false)))
+        if name == "str_words" then return (c) -> Ok(strings_value(text_words(str_of(a(c)?))))
+
+        val b = codes[1]
+
+        if name == "str_slice"
+            val j = codes[2]
+
+            return (c) ->
+                val s = str_of(a(c)?)
+                val lo = int_of(b(c)?)
+
+                string_answer(text_slice(s, lo, int_of(j(c)?)))
+
+        if name == "str_split"
+            return (c) ->
+                val s = str_of(a(c)?)
+
+                text_pieces(s, str_of(b(c)?)) match
+                    Ok(parts) -> Ok(strings_value(parts))
+                    Err(m) -> trapped(m)
+
+        if name == "str_join"
+            return (c) ->
+                val parts = strings_of(a(c)?)
+
+                Ok(VStr(text_join(parts.view(), str_of(b(c)?))))
+
+        if name == "str_replace"
+            val n = codes[2]
+
+            return (c) ->
+                val s = str_of(a(c)?)
+                val old = str_of(b(c)?)
+
+                string_answer(text_replace(s, old, str_of(n(c)?)))
+
+        if name == "str_find"
+            return (c) ->
+                val s = str_of(a(c)?)
+
+                Ok(VInt(text_find(s, str_of(b(c)?))))
+
+        if name == "str_contains" || name == "str_starts_with" || name == "str_ends_with"
+            return (c) ->
+                val s = str_of(a(c)?)
+                val p = str_of(b(c)?)
+
+                Ok(VBool(if name == "str_contains" then text_contains(s, p) elif name == "str_starts_with" then text_starts_with(s, p) else text_ends_with(s, p)))
+
+        // Numbers from text: the string, then the name of the type it is read as.
+        (c) ->
+            val s = str_of(a(c)?)
+            val r = read_number(s, str_of(b(c)?))
+
+            if name == "text_bad" then Ok(VInt(r.column))
+            elif name == "text_bad_message" then Ok(VStr(r.message))
+            elif name == "text_int" then Ok(VInt(r.int))
+            elif name == "text_uint" then Ok(VInt(long.wrap(r.uint)))
+            elif name == "text_real" then Ok(VReal(r.re))
+            else Ok(VReal(r.im))
+    end text_builtin
+end Interp

@@ -1029,7 +1029,14 @@ impl Elab
             Name(n) -> n
             Field(receiver, name) -> return self.select_field(span, self.place(receiver), name)
             TupleField(receiver, index) -> return self.select_element(span, self.place(receiver), index)
-            Index(t, indices) -> return self.index(span, self.place(t), indices)
+            Index(t, indices) ->
+                val base = self.place(t)
+
+                if is_str(base.ty)
+                    self.fail(span, "a string is immutable, and a slice of one cannot be assigned; build a new string, `s[1..i-1] + t + s[j+1..end]`")
+                    return self.invalid(span)
+
+                return self.index(span, base, indices)
             _ ->
                 self.fail(span, "only a variable, an element or a field can be assigned")
                 return self.invalid(span)

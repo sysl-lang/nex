@@ -50,6 +50,12 @@ private[nex] int_written(e: Expr) -> Option[i128] = *e.kind match
         _ -> None) else None
     _ -> None
 
+private one_arg(v: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    out.push(v)
+    out
+
 private fn_ret(t: Ty) -> Ty = t match
     Fn(sig) -> sig.ret
     _ -> Error
@@ -121,9 +127,17 @@ impl Elab
             return texpr(span, Void, TBuiltin(name, out))
 
         // The rest take an array first.
-        if pos.len() == 0 then return self.arity(span, name, "an array")
+        if pos.len() == 0 then return self.arity(span, name, if name == "length" then "an array or a string" else "an array")
 
-        val a = self.array_arg(name, pos[0])
+        // `length(s)` of a string is its length in bytes (DESIGN §17.4).
+        val first = self.infer(pos[0])
+
+        if name == "length" && is_str(first.ty)
+            if pos.len() != 1 then return self.arity(span, name, "one string")
+
+            return texpr(span, INTEGER, TBuiltin("str_length", one_arg(first)))
+
+        val a = self.array_value(name, pos[0], first)
 
         if is_error(a.ty) then return self.invalid(span)
 
@@ -220,9 +234,10 @@ impl Elab
     end array_builtin
 
     // An argument that must be an array.
-    array_arg(*self, name: string, e: Expr) -> TExpr
-        val v = self.infer(e)
+    array_arg(*self, name: string, e: Expr) -> TExpr = self.array_value(name, e, self.infer(e))
 
+    // `v`, the argument `e` elaborated, which must be an array.
+    private array_value(*self, name: string, e: Expr, v: TExpr) -> TExpr
         // An array whose rank is a rank parameter goes only where the rank does not matter (DESIGN §3.4).
         self.rank_param_of(v.ty) match
             Some(r) ->
@@ -238,7 +253,7 @@ impl Elab
 
         if is_array(v.ty) || is_error(v.ty) then return v
 
-        self.fail(e.span, s"`${name}` takes an array; this is ${self.shown(v)}")
+        self.fail(e.span, s"`${name}` takes ${if name == "length" then "an array or a string" else "an array"}; this is ${self.shown(v)}")
         self.invalid(e.span)
 
     // An axis number of an array of rank `rank`, checked at compile time where it is written as one.

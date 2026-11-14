@@ -1,0 +1,14 @@
+1.5| 2.5|x | 4
+1.5,_2.5,x_,_4
+.5,
+1.5
+2.5
+x
+4
+Ok([1.0, 2.0, 3.0])
+Err(Malformed(, 1, 3, expected a real64, found "x"))
+1:1: expected an int16, found "x"
+[1, 2, 3]
+[1.5, 2.5]Some(a)
+Some(12)
+done

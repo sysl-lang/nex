@@ -181,6 +181,10 @@ is_void(t: Ty) -> bool = t match
     Void -> true
     _ -> false
 
+is_str(t: Ty) -> bool = t match
+    Str -> true
+    _ -> false
+
 // Whether `Error` stands anywhere inside a type, as a function's result whose body was refused.
 has_error(t: Ty) -> bool = t match
     Error -> true

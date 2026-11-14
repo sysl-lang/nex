@@ -1,0 +1,106 @@
+// The string toolkit (DESIGN §17.4): positions are 1-based and count bytes, a slice ends on
+// character boundaries, `split` with and without a separator, `find` answering an `Option`, and
+// `upper` and `lower` changing ASCII letters only.
+
+def initials(name: string): string = join(split(name), "")[1..1]
+
+def main() =
+  // Lengths in bytes: one-, two-, three- and four-byte characters.
+  print(length(""))
+  print(length("abc"))
+  print(length("é"))
+  print(length("日本"))
+  print(length("🙂"))
+  print("héllo".length())
+
+  // Slices: inclusive, exclusive, open at either end, `end`, empty.
+  val w = "héllo"
+  print(w[1..1])
+  print(w[2..3])
+  print(w[4..end])
+  print(w[1..<4])
+  print(w[..3])
+  print(w[4..])
+  print(w[end - 1..end])
+  print(w[:])
+  print("[" + w[3..2] + "]")
+  print("[" + w[7..6] + "]")
+  print("[" + ""[1..0] + "]")
+  val k = 2
+  print(w[k..k + 1] + w[k + 2..end])
+  print("日本語"[4..6])
+  print("a🙂b"[2..5])
+
+  // Blanks are space, tab, carriage return and line feed.
+  print("[" + trim("  héllo, wörld  ") + "]")
+  print("[" + trim("") + "]")
+  print("[" + trim(" \t\r\n ") + "]")
+  print("[" + trim("\tx  y\n") + "]")
+  print("[" + " x ".trim() + "]")
+
+  // Words, and pieces with every empty one kept.
+  print(split("  a  b\tc\n"))
+  print(split(""))
+  print(split("   "))
+  print(length(split("one")))
+  print(split("a,,b", ","))
+  print(split(",a,", ","))
+  print(split("", ","))
+  print(length(split("", ",")))
+  print(length(split("", ",")[1]))
+  print(split(",", ","))
+  print(split("a::b::c", "::"))
+  print(split("abc", "x"))
+  print(split("éxéxé", "x"))
+  print(join(["a", "b", "c"], ", "))
+  print(join(["x"], "-"))
+  print("[" + join(split(""), "-") + "]")
+  print(join(split("a,,b", ","), "|"))
+  print(join(split("a b  c"), ""))
+  print(initials("  Ada   Lovelace "))
+
+  // `find` answers the first position, or `None`.
+  print(find("hello", "l"))
+  print(find("hello", "z"))
+  print(find("hello", "lo"))
+  print(find("hello", ""))
+  print(find("", "a"))
+  print(find("héllo", "l"))
+  print(get_or(find("abc", "c"), 0))
+  find("x=1", "=") match
+    Some(at) -> print("key " + "x=1"[1..at - 1] + ", value " + "x=1"[at + 1..end])
+    None -> print("no =")
+  print(s"${contains("hello", "ell")} ${contains("hello", "le")} ${contains("", "")}")
+  print(s"${starts_with("hello", "he")} ${starts_with("he", "hello")} ${ends_with("hello", "lo")} ${ends_with("hello", "")}")
+
+  // `replace`, left to right, each search after the last replacement.
+  print(replace("a.b.c", ".", "::"))
+  print(replace("aaa", "aa", "b"))
+  print(replace("abc", "x", "y"))
+  print(replace("héllo", "é", "e"))
+  print("[" + replace("abab", "ab", "") + "]")
+
+  // ASCII letters only.
+  print(upper("héllo wörld 123"))
+  print(lower("ÀBC Déf"))
+  print(upper(""))
+
+  // `string(x)` spells `x` as `print` does.
+  print(string(42) + "|" + string(2.5) + "|" + string(true) + "|" + string("s"))
+  print(string(int8(-3)) + "|" + string(real32(0.1)) + "|" + string(3 + 4i))
+  print(string([1, 2, 3]))
+  print(string((1, "a")))
+  print(string(Some(2)))
+  print(length(string(1.0e300)))
+
+  // What traps.
+  assert_traps(() -> print(w[2..2]), "string slice 2..2 cuts a character")
+  assert_traps(() -> print(w[3..3]), "string slice 3..3 cuts a character")
+  assert_traps(() -> print("🙂"[1..3]), "cuts a character")
+  assert_traps(() -> print(w[0..2]), "string slice 0..2 out of bounds 1..6")
+  assert_traps(() -> print(w[1..7]), "string slice 1..7 out of bounds 1..6")
+  assert_traps(() -> print(w[5..3]), "string slice 5..3 out of bounds 1..6")
+  assert_traps(() -> print(w[8..7]), "out of bounds")
+  assert_traps(() -> print(split("abc", "")), "split: the separator is empty")
+  assert_traps(() -> print(replace("abc", "", "x")), "replace: the text to replace is empty")
+  print("done")

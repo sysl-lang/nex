@@ -49,7 +49,7 @@ elaborate_modules(p: Program, mods: Modules) -> Result[TProgram, Buf[Diagnostic]
     Ok(e.program())
 
 private elab(p: Program, mods: Modules) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf(), buf(), buf())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf(), buf(), buf(), buf())
 
 // How far a declaration has got.
 enum Progress
@@ -211,6 +211,9 @@ struct Elab
     // The `@intrinsic` functions of the `mpi` module, by internal name: declared there, typed at each
     // call by the compiler (`elab_mpi.sysl`).
     intrinsics: Buf[string]
+    // The locals holding the strings that the open index lists slice, innermost last, beside an
+    // `ends` entry of 0: what an `end` in a string's subscript is the length of.
+    text_ends: Buf[usize]
 
     // -- diagnostics ------------------------------------------------------------------------------
 

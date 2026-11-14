@@ -44,6 +44,7 @@ impl Interp
 
             return (c) -> trapped(str_of(message(c)?))
 
+        if is_text_builtin(name) then return self.text_builtin(span, name, args)
         if name == "assert_approx" && is_array(args[0].ty) then return self.approx_arrays(args)
 
         if !name.starts_with("assert") && (is_array(t) || (args.len() > 0 && is_array(args[0].ty) && !self.is_args(args[0])))

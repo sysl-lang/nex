@@ -9,7 +9,7 @@ module sh.sysl.nex
 // give, so both engines run it with nothing of their own:
 //
 // - `e!` is `e match Some(v) -> v, None -> trap`, and `Ok(v) -> v, Err(err) -> trap` with the error
-//   as `print` spells it (a `string` as itself);
+//   as `print` spells it (a `string` as itself, an `IoError` as its sentence, `message(err)`);
 // - `e?` is the same with `return None` or `return Err(err)` for the trap;
 // - `get_or`, `is_some`, `is_none`, `is_ok` and `is_err` are such a `match` over their argument.
 
@@ -81,10 +81,15 @@ impl Elab
 
         if f.result
             val err = self.new_local("error", f.error, LVal)
+            val error = texpr(span, f.error, TLocal(err))
             var parts: Buf[TPart] = buf()
 
-            interp_value(&parts, texpr(span, f.error, TLocal(err)), "")
-            arms.push(TArm(PVariant("Err", 1, one_bind(Some(err))), self.trap_with(span, texpr(span, Ty.Str, TInterp(parts, false)))))
+            // An `IoError` traps with its sentence, `message(e)` (DESIGN §17.3).
+            if !is_io_error(f.error) then interp_value(&parts, error, "")
+
+            val message = if is_io_error(f.error) then self.io_message(span, error) else texpr(span, Ty.Str, TInterp(parts, false))
+
+            arms.push(TArm(PVariant("Err", 1, one_bind(Some(err))), self.trap_with(span, message)))
         else
             arms.push(TArm(PVariant("None", 1, buf()), self.trap_with(span, texpr(span, Ty.Str, TLiteral(StrVal(FOUND_NONE), false)))))
 

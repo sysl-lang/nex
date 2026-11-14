@@ -1,6 +1,6 @@
 ---
 title: The Prelude
-summary: Every name available without an import — constants, elementary and complex math, array construction, shape queries, reductions, linear algebra, higher-order functions, views, conversions, I/O, testing, `Option` and `Result` — with its Fortran equivalent.
+summary: Every name available without an import — constants, elementary and complex math, array construction, shape queries, reductions, linear algebra, higher-order functions, views, conversions, I/O, testing, `Option` and `Result`, strings and numbers from text — with its Fortran equivalent.
 weight: 120
 ---
 
@@ -537,6 +537,10 @@ array:
 | complex → real or integer | not a conversion: take `.re`, `abs` or `arg` |
 | any widening | happens implicitly; the function may also be called explicitly |
 
+A conversion also takes a string, or a `[string]`, and answers a `Result`: the number the text
+spells or why it does not read ([Numbers from text](#1215-numbers-from-text)). `string(x)` is the
+other direction ([Strings](#1214-strings)).
+
 Arrays never convert implicitly as a whole: a `[real32]` does not pass where a `[real64]` is
 expected, and `real64(a)` makes the converted copy visibly. The full promotion rules are in
 [Types](/spec/03-types/).
@@ -580,7 +584,7 @@ in [Units of measure](/spec/13-units/).
 | `write_bytes(path: string, data: [uint8])` | writes `data` as the file's contents | `OPEN(…, ACCESS='stream')` + `WRITE` |
 
 A real prints as the shortest decimal that reads back to the same value at its own width, so the
-`real32` nearest 0.3 prints as `0.3`. A complex prints as its two parts do. Text is formatted with
+`real32` nearest 0.3 prints as `0.3`, and a negative zero prints as `-0.0`. A complex prints as its two parts do. Text is formatted with
 interpolated strings: `s"…"` substitutes values, `f"…"` adds printf-style specs such as
 `$x%10.3f` (see [Lexical structure](/spec/02-lexical/)).
 
@@ -656,7 +660,8 @@ their payloads can be, and printed as `Some(3)`, `None`, `Ok(1.5)`, `Err(NotFoun
 | `x?` | the value of a `Some` or an `Ok`; otherwise the enclosing function **returns** the `None` or the `Err` | `iostat=`, then `RETURN` |
 
 - **`!` traps with the failure's message.** On `None` the message is `` `!` found None ``; on
-  `Err(e)` it is `e` itself where `e` is a `string`, and `e` as `print` spells it otherwise
+  `Err(e)` it is `e` itself where `e` is a `string`, its sentence `message(e)` where `e` is an
+  `IoError` ([Numbers from text](#1215-numbers-from-text)), and `e` as `print` spells it otherwise
   (`Bad(4, x)`). `!` is allowed wherever a trap is, a `parallel for` body included.
 - **`?` returns from the `def` it is written in**, so that `def` declares its result type: an
   `Option[…]` for a `?` on an `Option`, a `Result[…, E]` with the same `E` for a `?` on a `Result`.
@@ -688,3 +693,91 @@ def main() =
 `main` returning `Result[void, E]`, whose `Err` would end the program with `error: <message>` and
 status 1, is proposed and not built yet: a `void` type argument is not allowed today.
 {{< /note >}}
+
+## 12.14 Strings
+
+A `string` is immutable UTF-8. **Positions are 1-based and count bytes**, as Fortran's do; a slice
+must begin and end on a character's boundary, so a string is never invalid UTF-8.
+
+| Signature | Meaning | Fortran |
+|---|---|---|
+| `length(s): integer` | its length in bytes | `LEN` |
+| `s[i..j]`, `s[i..<j]`, `s[i..end]`, `s[..j]`, `s[i..]` | the bytes `i` to `j` as a string | `s(i:j)` |
+| `trim(s)` | without leading and trailing blanks (space, tab, CR, LF) | `TRIM(ADJUSTL(s))` |
+| `split(s): [string]` | the words between runs of blanks; no empty words | list-directed `READ` |
+| `split(s, sep): [string]` | the pieces between each `sep`, empty ones kept | — |
+| `join(parts: [string], sep): string` | `parts` with `sep` between | — |
+| `find(s, sub): Option[integer]` | the position where `sub` first occurs | `INDEX` (0 for absent) |
+| `contains(s, sub)`, `starts_with(s, p)`, `ends_with(s, p)` | `bool` | `INDEX(…) > 0` |
+| `replace(s, old, new)` | every `old` replaced, left to right | — |
+| `upper(s)`, `lower(s)` | ASCII letters changed, everything else kept | — |
+| `string(x)` | `x` as `print` spells it, the same as `s"$x"` | internal `WRITE` |
+
+- **A slice traps** outside `1..length(s)` (`string slice 0..2 out of bounds 1..6`) and where it
+  would cut a character (`string slice 2..2 cuts a character`). As for an array, `s[i..i-1]` is
+  empty and legal for `i` from 1 to `length(s) + 1`, and `end` is `length(s)`.
+- **There is no character type and no `s[i]`**: one character is `s[i..i]` where it is one byte.
+  A slice of a string cannot be assigned; a new string is built instead.
+- `split("a,,b", ",")` is `["a", "", "b"]`, and `split("", ",")` is `[""]`; `split("")` is `[]`.
+  An empty separator traps (`split: the separator is empty`), as does `replace` with an empty `old`.
+- `find(s, "")` is `Some(1)`. Strings compare with `==` and `!=`; ordering them is left out.
+
+```nex
+val line = "  x = 1.5, 2.5  "
+val at = find(line, "=")!
+print(trim(line[1..at - 1]))        // x
+print(split(trim(line[at + 1..end]), ","))   // [1.5,  2.5]
+print(upper("héllo"))               // HéLLO
+print(length("héllo"))              // 6
+```
+
+## 12.15 Numbers from text
+
+**Every numeric conversion function also takes a string**, and answers a `Result`, since text can be
+wrong where a number cannot: `real64("2.5")` is `Ok(2.5)`, and `int32("4x")` is
+`Err(Malformed("", 1, 2, "expected an int32, found \"4x\""))`. `real64(s)!` is Fortran's
+`READ(s, *) x` without `iostat=`.
+
+- **What reads**: blanks around the number are ignored. An integer is an optional sign and decimal
+  digits, `_` allowed between digits as in a literal; one outside its type's range is `Malformed`
+  (`out of range for int8, found "300"`). A real is an optional sign and a literal as nex writes
+  one, with the exponent letter `e`, `E`, `d` or `D` (Fortran's `1.5d0`), or `inf`, `infinity` or
+  `nan` in any case. A complex is `1.5+2.0i` as `print` writes one, or Fortran's `(1.5, 2.0)`.
+- **A real is rounded correctly at its own width**: `real32("0.1")` is the `real32` nearest 0.1,
+  never the `real64` nearest rounded again. **Everything `print` writes reads back to the same
+  value**, NaN as a NaN and `-0.0` as `-0.0`.
+- **On a `[string]` each element converts**, answering `Result[[T], IoError]`; the first element
+  that does not read is the failure, its position in the array the column:
+  `real64(split("1 2 x"))` is `Err(Malformed("", 1, 3, "expected a real64, found \"x\""))`.
+- **The column of a failure** is the byte where reading stopped, from 1: `int32("4x")` stops at 2.
+  A number out of range is placed where it starts.
+
+The failure is an `IoError`, the prelude enum every failure of reading and writing text and files
+is:
+
+```nex
+enum IoError =
+  NotFound(path: string)
+  Denied(path: string)
+  Malformed(source: string, line: integer, column: integer, message: string)
+  Failed(path: string, message: string)
+end IoError
+```
+
+`message(e)` is its sentence, and the message `!` traps with on an `Err(e)`: `in.dat: no such
+file`, `/etc/x: permission denied`, `in.dat:4:13: expected a real64, found "1.2.3"`,
+`out.dat: no space left on device`. A `Malformed` read from a string rather than a file has
+`source` empty and reads `1:2: expected an int32, found "4x"`.
+
+```nex
+def total(line: string): Result[real64, IoError] =
+  val xs = real64(split(line))?     // the first number that does not read returns its Err
+  Ok(sum(xs))
+
+def main() =
+  print(total("1 2.5 3d0"))         // Ok(6.5)
+  total("1 two") match
+    Ok(t) -> print(s"total $t")
+    Err(e) -> print(message(e))     // 1:2: expected a real64, found "two"
+  print(int64(" 42 ")! + 1)         // 43
+```

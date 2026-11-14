@@ -1,0 +1,27 @@
+// Strings and numbers from text (DESIGN §17.4, §17.5): every string `split`, `join`, a slice,
+// `trim`, `replace`, `upper` and `string(x)` make, every array a conversion of a `[string]` fills,
+// and every `IoError` a malformed number is, given back once, the traps among them included.
+
+def fields(line: string): Result[[real], IoError] = real64(split(line, ","))
+
+def main() =
+  val line = "  1.5, 2.5,x , 4  "
+  val words = split(trim(line), ",")
+  print(join(words, "|"))
+  print(join(split(line), "_"))
+  print(upper(replace(line, " ", ""))[2..4])
+  for w in words
+    print(trim(w)[1..end])
+  print(fields("1,2,3"))
+  print(fields(line))
+  int16(words[3]) match
+    Ok(_) -> print("read")
+    Err(e) -> print(message(e))
+  print(int32(split("1 2 3"))!)
+  print(string([1.5, 2.5]) + string(Some("a")))
+  print(find(line, "x"))
+  assert_traps(() -> print(line[1..3] + string(int8("300")!)), "out of range for int8")
+  assert_traps(() -> print(real64(split("1 2 z"))!), "1:3: expected a real64")
+  assert_traps(() -> print(split(line, "")), "the separator is empty")
+  assert_traps(() -> print("é"[1..1]), "cuts a character")
+  print("done")

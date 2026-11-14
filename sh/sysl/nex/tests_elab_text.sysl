@@ -1,0 +1,65 @@
+module sh.sysl.nex
+@tests
+
+// Strings and numbers from text (DESIGN §17.3–§17.5) as the elaborator checks them: the argument
+// types of the string functions, a slice's index list, what a conversion from text takes and that
+// its `Result` is not dropped, and `message`. What the programs print is `testdata/v2/110` to `112`'s,
+// on both engines.
+
+@test("the string functions take strings, and join a [string]; each names the argument that is wrong")
+elab_text_argument_types()
+    assert_eq(refused("def main() = print(trim(3))\n"), "error: the argument of `trim` must be string, but this is int64 @1:25")
+    assert_eq(refused("def main() = print(upper([\"a\"]))\n"), "error: the argument of `upper` must be string, but this is [string] @1:26")
+    assert_eq(refused("def main() = print(split(\"a b\", 1))\n"), "error: the separator must be string, but this is int64 @1:33")
+    assert_eq(refused("def main() = print(join(\"a\", \",\"))\n"), "error: the parts `join` puts together must be [string], but this is string @1:25")
+    assert_eq(refused("def main() = print(join([1, 2], \",\"))\n"), "error: an element of this array must be string, but this is int64 @1:26\nerror: an element of this array must be string, but this is int64 @1:29")
+    assert_eq(refused("def main() = print(contains(1.5, \"b\"))\n"), "error: the string `contains` searches must be string, but this is real64 @1:29")
+    assert_eq(refused("def main() = print(replace(\"abc\", \"b\", 2))\n"), "error: the replacement must be string, but this is int64 @1:40")
+    assert_eq(refused("def main() = print(length(2))\n"), "error: `length` takes an array or a string; this is int64 @1:27")
+
+@test("each string function takes its own number of arguments, and none named")
+elab_text_arity()
+    assert_eq(refused("def main() = print(trim(\"a\", \"b\"))\n"), "error: `trim` takes a string @1:20")
+    assert_eq(refused("def main() = print(split())\n"), "error: `split` takes a string and an optional separator @1:20")
+    assert_eq(refused("def main() = print(join([\"a\"]))\n"), "error: `join` takes the parts, `[string]`, and a separator @1:20")
+    assert_eq(refused("def main() = print(find(\"a\"))\n"), "error: `find` takes a string and the text to look for @1:20")
+    assert_eq(refused("def main() = print(replace(\"a\", \"b\"))\n"), "error: `replace` takes a string, the text to replace and its replacement @1:20")
+    assert_eq(refused("def main() = print(split(\"a\", sep = \",\"))\n"), "error: `split` takes no named arguments @1:31")
+    assert_eq(refused("def main() = print(length(\"a\", \"b\"))\n"), "error: `length` takes one string @1:20")
+
+@test("find answers an Option[integer], which may be dropped; the other functions answer strings, arrays and bools")
+elab_text_result_types()
+    assert_eq(refused("def main() =\n  val p: Option[integer] = find(\"ab\", \"b\")\n  val w: [string] = split(\"a b\")\n  val b: bool = starts_with(\"ab\", \"a\")\n  val n: integer = length(\"ab\")\n  find(\"a\", \"a\")\n  print(s\"$p $w $b $n\")\n"), "ok")
+    assert_eq(refused("def main() =\n  val p: integer = find(\"ab\", \"b\")\n  print(p)\n"), "error: `p` must be integer, but this is prelude.Option[int64] @2:20")
+
+@test("a string takes one range: no s[i], no step, no second axis, and a slice is not assigned")
+elab_text_slices()
+    assert_eq(refused("def main() =\n  val s = \"abc\"\n  print(s[1..end] + s[..2] + s[2..] + s[1..<end] + s[:])\n"), "ok")
+    assert_eq(refused("def main() = print(\"abc\"[2])\n"), "error: a string has no `s[i]`, since there is no character type; one character is `s[i..i]` @1:26")
+    assert_eq(refused("def main() = print(\"abc\"[1..3 by 2])\n"), "error: a string slice takes no step @1:26")
+    assert_eq(refused("def main() = print(\"abc\"[1..2, 1..2])\n"), "error: a string takes one range of byte positions: `s[i..j]` @1:20")
+    assert_eq(refused("def main() = print(\"abc\"[1.0..2])\n"), "error: a bound must be int64, but this is real64: that would narrow it; convert it explicitly, `int64(...)` @1:26")
+    assert_eq(refused("def main() =\n  var s = \"abc\"\n  s[1..1] = \"x\"\n"), "error: a string is immutable, and a slice of one cannot be assigned; build a new string, `s[1..i-1] + t + s[j+1..end]` @3:3")
+    // `end` inside a string's subscript is its length, and inside an array's subscript nested in it the array's.
+    assert_eq(refused("def main() =\n  val a = [1, 2]\n  print(\"abcd\"[a[end]..end])\n"), "ok")
+
+@test("a numeric conversion takes a string or a [string] and answers a Result, which a statement may not drop")
+elab_text_conversions()
+    assert_eq(refused("def main() =\n  val r: Result[real32, IoError] = real32(\"1\")\n  val a: Result[[int8], IoError] = int8(split(\"1 2\"))\n  val z: Result[complex[real32], IoError] = complex[real32](\"1+2i\")\n  print(s\"$r $a $z\")\n"), "ok")
+    assert_eq(refused("def main() =\n  real64(\"1\")\n  print(1)\n"), "error: the `Result` of `real64` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …` @2:3")
+    assert_eq(refused("def main() =\n  val x: real64 = real64(\"1\")\n  print(x)\n"), "error: `x` must be real64, but this is prelude.Result[real64, prelude.IoError] @2:19")
+    assert_eq(refused("def main() = print(int32([[\"1\"], [\"2\"]]))\n"), "error: a conversion from text reads a `[string]` of one axis; this is [string; :, :] @1:26")
+    assert_eq(refused("def main() = print(int32(true))\n"), "error: `int32(...)` converts a number, and this is bool @1:26")
+    assert_eq(refused("def main() = print(string(1, 2))\n"), "error: `string(...)` converts one value @1:20")
+    assert_eq(refused("def f() = 1\ndef main() = print(string(f))\n"), "error: a function has no spelling as a string @2:27")
+    // `?` passes the `IoError` on from a function declared to return one, and no other error type.
+    assert_eq(refused("def f(s: string): Result[integer, IoError] = Ok(int64(s)? + 1)\ndef main() = print(f(\"1\"))\n"), "ok")
+    assert_eq(refused("def f(s: string): Result[integer, string] = Ok(int64(s)? + 1)\ndef main() = print(f(\"1\"))\n"),
+        "error: `?` would return `Err(IoError)` from this function, which returns Result[int64, string]; there is no conversion between error types @1:56")
+
+@test("message takes an IoError, and a program's own message hides the prelude's")
+elab_text_message()
+    assert_eq(refused("def main() = print(message(NotFound(\"x\")))\n"), "ok")
+    assert_eq(refused("def main() = print(message(\"x\"))\n"), "error: `message` takes an `IoError`, and this is string @1:28")
+    assert_eq(refused("def main() = print(message())\n"), "error: `message` takes an `IoError` @1:20")
+    assert_eq(refused("def message(n: integer): string = s\"#$n\"\ndef main() = print(message(3))\n"), "ok")

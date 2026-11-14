@@ -88,10 +88,23 @@ impl Elab
                     None -> ()
 
                 scalar_named(n) match
-                    Some(t) -> return self.conversion(span, n, t, args)
+                    Some(t) ->
+                        val v = self.conversion(span, n, t, args)
+
+                        // A conversion from text answers a `Result`, which a statement may not drop
+                        // (DESIGN §17.1).
+                        val statement = want match
+                            Some(Void) -> true
+                            _ -> false
+
+                        if statement && is_numeric(t) && self.family(v.ty).is_some()
+                            self.fail(span, s"the `Result` of `${n}` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …`")
+
+                        return v
                     None -> ()
 
                 if is_family_function(n) then return self.family_call(span, n, args)
+                if is_text_function(n) then return self.text_call(span, n, args)
                 if is_builtin(n) then return self.builtin(span, n, args, want)
                 if is_array_builtin(n) then return self.array_builtin(span, n, args, want)
 
@@ -387,6 +400,8 @@ impl Elab
 
     // `real32(x)`, `int16(n)`, `complex[real32](re, im)`: a type name called (DESIGN §2.4).
     conversion(*self, span: Span, name: string, target: Ty, args: Buf[Expr]) -> TExpr
+        if is_str(target) then return self.string_of(span, args)
+
         if !is_numeric(target)
             self.fail(span, s"`${name}` is a type, not a conversion; only the numeric types convert")
             return self.invalid(span)
@@ -402,6 +417,7 @@ impl Elab
         val from = v.ty
 
         if is_error(from) then return self.invalid(span)
+        if is_str(elem_of(from)) then return self.text_conversion(span, target, v)
         if is_array(from) then return self.elemental_conversion(span, name, target, v)
         if has_unit(from) then return self.measured_conversion(span, name, target, v)
         if ty_eq(from, target) then return v

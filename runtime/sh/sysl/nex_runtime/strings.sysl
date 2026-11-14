@@ -1,0 +1,232 @@
+module sh.sysl.nex_runtime
+
+// The string toolkit (DESIGN §17.4), for both engines: each function is written once here on sysl
+// strings, the interpreter calls it as it is, and a compiled program calls the `nex_str_*` entry
+// beside it, which reads its arguments as nex strings and answers a new one of the counted heap.
+//
+// **Positions are 1-based and count bytes.** A slice must begin and end on a character's boundary,
+// so every string these functions answer is valid UTF-8; a byte is a character's first where it is
+// not a continuation byte (`10xxxxxx`).
+//
+// **Blanks are space, tab, carriage return and line feed**, what `trim` removes and what `split(s)`
+// separates words by.
+
+import sysl.buf.{Buf, buf}
+import sysl.raw.ptr_cast
+import sysl.text.from_utf8_unchecked
+
+private is_blank(c: u8) -> bool = c == u8(' ') || c == u8('\t') || c == u8('\r') || c == u8('\n')
+
+// Whether byte `k` (from 0) of `s` begins a character, the end of the string included.
+private on_boundary(s: string, k: usize) -> bool = k >= s.len || (s.bytes[k] & 0xC0) != 0x80
+
+// The bytes `i` to `j` of `s`, counted from 1 and both included: empty where `j` is `i - 1`, and
+// otherwise inside `1..length(s)` and on character boundaries, or the trap's message.
+text_slice(s: string, i: long, j: long) -> Result[string, string]
+    val n = long(s.len)
+
+    if i < 1 || i > n + 1 || j < i - 1 || j > n then return Err(s"string slice $i..$j out of bounds 1..$n")
+    if j == i - 1 then return Ok("")
+    if !on_boundary(s, usize(i - 1)) || !on_boundary(s, usize(j)) then return Err(s"string slice $i..$j cuts a character")
+
+    Ok(s[usize(i - 1)..<usize(j)])
+
+// `s` without its leading and trailing blanks.
+text_trim(s: string) -> string
+    var lo: usize = 0
+    var hi = s.len
+
+    while lo < hi && is_blank(s.bytes[lo])
+        lo += 1
+
+    while hi > lo && is_blank(s.bytes[hi - 1])
+        hi -= 1
+
+    s[lo..<hi]
+
+// The words of `s`: its runs of non-blank bytes, with no empty ones.
+text_words(s: string) -> Buf[string]
+    var out: Buf[string] = buf()
+    var k: usize = 0
+
+    while k < s.len
+        while k < s.len && is_blank(s.bytes[k])
+            k += 1
+
+        if k >= s.len then break
+
+        val start = k
+
+        while k < s.len && !is_blank(s.bytes[k])
+            k += 1
+
+        out.push(s[start..<k])
+
+    out
+
+// The message `split` traps with on an empty separator.
+val EMPTY_SEPARATOR = "split: the separator is empty"
+
+// The pieces of `s` between each occurrence of `sep`, empty ones kept, so there is always one more
+// piece than there are separators; an empty separator is refused.
+text_pieces(s: string, sep: string) -> Result[Buf[string], string]
+    if sep.len == 0 then return Err(EMPTY_SEPARATOR)
+
+    var out: Buf[string] = buf()
+    var start: usize = 0
+
+    loop
+        s.index_of_from(sep, start) match
+            Some(at) ->
+                out.push(s[start..<at])
+                start = at + sep.len
+            None ->
+                out.push(s[start..])
+                return Ok(out)
+
+// `parts` with `sep` between each two.
+text_join(parts: []const string, sep: string) -> string
+    var out = ""
+
+    for k in 0..<parts.len
+        if k > 0 then out += sep
+
+        out += parts[k]
+
+    out
+
+// The position (from 1) where `sub` first occurs in `s`, or 0 where it does not; an empty `sub`
+// occurs at 1.
+text_find(s: string, sub: string) -> long = s.index_of(sub) match
+    Some(at) -> long(at) + 1
+    None -> 0
+
+text_contains(s: string, sub: string) -> bool = s.contains(sub)
+
+text_starts_with(s: string, p: string) -> bool = s.starts_with(p)
+
+text_ends_with(s: string, p: string) -> bool = s.ends_with(p)
+
+// The message `replace` traps with on an empty `old`.
+val EMPTY_REPLACED = "replace: the text to replace is empty"
+
+// `s` with every occurrence of `old` replaced by `new`, left to right, each search starting after
+// the last replacement; an empty `old` is refused.
+text_replace(s: string, old: string, new: string) -> Result[string, string]
+    if old.len == 0 then return Err(EMPTY_REPLACED)
+
+    var out = ""
+    var start: usize = 0
+
+    loop
+        s.index_of_from(old, start) match
+            Some(at) ->
+                out += s[start..<at]
+                out += new
+                start = at + old.len
+            None ->
+                out += s[start..]
+                return Ok(out)
+
+// `s` with its ASCII letters in upper case (`upper`) or lower case, every other byte kept, which
+// keeps every multi-byte character whole.
+text_case(s: string, upper: bool) -> string
+    var b: Buf[u8] = buf()
+
+    for c in s.bytes
+        if upper && c >= u8('a') && c <= u8('z') then b.push(c - 32)
+        elif !upper && c >= u8('A') && c <= u8('Z') then b.push(c + 32)
+        else b.push(c)
+
+    from_utf8_unchecked(b.view()).copy()
+
+// -- the compiled program's entries ----------------------------------------------------------------
+
+// What a cell of an array of strings holds counted again, as an array copied counts each element.
+@export("nex_hold_cell")
+hold_cell(slot: *u8)
+    val p: **u8 = ptr_cast(slot)
+
+    retain(p[0])
+
+// `strings` as a new rank-1 array of nex strings, which the caller owns.
+private string_items(strings: Buf[string]) -> *u8
+    val p = items_new(long(strings.len()), 8, &hold_cell, &release_slot, 1)
+
+    for k in 0..<strings.len()
+        val cell: **u8 = ptr_cast(cell_at(p, long(k) + 1))
+
+        cell[0] = c_string(strings[k])
+
+    p
+
+// The strings of the array `p` holds, in storage order.
+private item_strings(p: *u8) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for k in 1..items_count(p)
+        val cell: **u8 = ptr_cast(cell_at(p, k))
+
+        out.push(c_text(cell[0]))
+
+    out
+
+// The trap's message noted, in a call that returns so that no frame holds it across the trap's
+// `longjmp`; null, which the entry answers by raising the trap.
+private noted(message: string) -> *u8
+    note_trap(message)
+    null
+
+// `p`, or the trap noted where it is null.
+private or_trap(p: *u8) -> *u8
+    if p == null then raise_trap()
+
+    p
+
+private sliced(s: *u8, i: long, j: long) -> *u8 = text_slice(c_text(s), i, j) match
+    Ok(t) -> c_string(t)
+    Err(m) -> noted(m)
+
+@export("nex_str_slice")
+str_slice(s: *u8, i: long, j: long) -> *u8 = or_trap(sliced(s, i, j))
+
+@export("nex_str_trim")
+str_trim(s: *u8) -> *u8 = c_string(text_trim(c_text(s)))
+
+@export("nex_str_words")
+str_words(s: *u8) -> *u8 = string_items(text_words(c_text(s)))
+
+private pieces(s: *u8, sep: *u8) -> *u8 = text_pieces(c_text(s), c_text(sep)) match
+    Ok(parts) -> string_items(parts)
+    Err(m) -> noted(m)
+
+@export("nex_str_split")
+str_split(s: *u8, sep: *u8) -> *u8 = or_trap(pieces(s, sep))
+
+@export("nex_str_join")
+str_join(parts: *u8, sep: *u8) -> *u8 = c_string(text_join(item_strings(parts).view(), c_text(sep)))
+
+@export("nex_str_find")
+str_find(s: *u8, sub: *u8) -> long = text_find(c_text(s), c_text(sub))
+
+@export("nex_str_contains")
+str_contains(s: *u8, sub: *u8) -> bool = text_contains(c_text(s), c_text(sub))
+
+@export("nex_str_starts_with")
+str_starts_with(s: *u8, p: *u8) -> bool = text_starts_with(c_text(s), c_text(p))
+
+@export("nex_str_ends_with")
+str_ends_with(s: *u8, p: *u8) -> bool = text_ends_with(c_text(s), c_text(p))
+
+private replaced(s: *u8, old: *u8, new: *u8) -> *u8 = text_replace(c_text(s), c_text(old), c_text(new)) match
+    Ok(t) -> c_string(t)
+    Err(m) -> noted(m)
+
+@export("nex_str_replace")
+str_replace(s: *u8, old: *u8, new: *u8) -> *u8 = or_trap(replaced(s, old, new))
+
+@export("nex_str_upper")
+str_upper(s: *u8) -> *u8 = c_string(text_case(c_text(s), true))
+
+@export("nex_str_lower")
+str_lower(s: *u8) -> *u8 = c_string(text_case(c_text(s), false))

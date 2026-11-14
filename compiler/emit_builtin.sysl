@@ -54,6 +54,7 @@ impl Emitter
 
             return ""
 
+        if is_text_builtin(name) then return self.text_builtin(span, name, args, t)
         if name == "assert_approx" then return self.assert_approx(span, args)
         if is_lapack(name) then return self.lapack(span, name, args, t)
         if is_items(t) || (args.len() > 0 && is_items(args[0].ty) && !self.is_args(args[0])) then return self.items_builtin(span, name, args, t)

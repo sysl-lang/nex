@@ -1,0 +1,92 @@
+// Everything `print` writes reads back to the same value (DESIGN §17.5): `T(string(x))!` is `x` for
+// every numeric type, bit for bit for the reals — every finite `real16`, `real32` and `real64`
+// across their ranges down to the subnormals, the extremes, `-0.0`, the infinities and NaN — and
+// the extremes of every integer width.
+
+def same64(x: real64, y: real64): bool = if is_nan(x) then is_nan(y) else x == y and (x != 0.0 or 1.0 / x == 1.0 / y)
+
+def same32(x: real32, y: real32): bool = if is_nan(x) then is_nan(y) else x == y and (x != 0.0 or 1.0 / x == 1.0 / y)
+
+def same16(x: real16, y: real16): bool = if is_nan(x) then is_nan(y) else x == y and (x != 0.0 or 1.0 / x == 1.0 / y)
+
+def back64(x: real64): bool = same64(x, real64(string(x))!)
+
+def back32(x: real32): bool = same32(x, real32(string(x))!)
+
+def back16(x: real16): bool = same16(x, real16(string(x))!)
+
+// The values of a geometric walk from 1 by `ratio` up to the largest value and down past the
+// smallest subnormal, where dividing no longer moves it, each tried with both signs; how many
+// failed to read back.
+def walk64(ratio: real64): integer =
+  var bad = 0
+  var x = 1.0
+  while is_finite(x)
+    if not back64(x) or not back64(-x) then bad += 1
+    x = x * ratio
+  x = 1.0
+  while x > 0.0 and x / ratio != x
+    if not back64(x) or not back64(-x) then bad += 1
+    x = x / ratio
+  bad
+
+def walk32(ratio: real32): integer =
+  var bad = 0
+  var x: real32 = 1.0
+  while is_finite(x)
+    if not back32(x) or not back32(-x) then bad += 1
+    x = x * ratio
+  x = 1.0
+  while x > 0.0 and x / ratio != x
+    if not back32(x) or not back32(-x) then bad += 1
+    x = x / ratio
+  bad
+
+def main() =
+  // Every finite real16, from the most negative up through both subnormal ranges.
+  var h: real16 = -huge(real16(0))
+  var seen = 0
+  var bad16 = 0
+  while is_finite(h)
+    if not back16(h) then bad16 += 1
+    seen += 1
+    h = nearest(h, 1.0)
+  print(s"real16: $seen read, $bad16 differ")
+
+  print(s"real32: ${walk32(1.37)} ${walk32(3.1)} ${walk32(1.01)} differ")
+  print(s"real64: ${walk64(1.37)} ${walk64(3.1)} ${walk64(1.07)} differ")
+
+  // The extremes and the special values, spelled out.
+  for x in [huge(0.0), -huge(0.0), tiny(0.0), 4.9e-324, -4.9e-324, 0.1, 1.0 / 3.0, -0.0, 0.0, inf, -inf, nan, 1.0e15, 123456789012345680.0]
+    print(s"$x ${back64(x)}")
+  for x in [huge(real32(0)), tiny(real32(0)), real32(1.4e-45), real32(0.1), real32(-0.0), real32(inf), real32(nan)]
+    print(s"$x ${back32(x)}")
+  for x in [huge(real16(0)), tiny(real16(0)), real16(6.0e-8), real16(0.1), real16(-0.0), real16(-inf), real16(nan)]
+    print(s"$x ${back16(x)}")
+
+  // Complex numbers at each width, both forms.
+  for z in [1.5 - 2.0i, complex(-0.0, 0.0), complex(1.0, -0.0), complex(inf, nan), complex(tiny(0.0), -huge(0.0))]
+    val back = complex(string(z))!
+    print(s"$z ${same64(z.re, back.re) and same64(z.im, back.im)}")
+  val z32 = complex[real32](0.1, -1.0e-40)
+  val b32 = complex[real32](string(z32))!
+  print(s"$z32 ${same32(z32.re, b32.re) and same32(z32.im, b32.im)}")
+  val z16 = complex[real16](65504.0, -6.0e-8)
+  val b16 = complex[real16](string(z16))!
+  print(s"$z16 ${same16(z16.re, b16.re) and same16(z16.im, b16.im)}")
+
+  // Every int8 and uint8, and the extremes of the wider integers.
+  var ints = 0
+  for k in -128..127
+    if int8(string(int8(k)))! == int8(k) then ints += 1
+  for k in 0..255
+    if uint8(string(uint8(k)))! == uint8(k) then ints += 1
+  print(s"8-bit integers: $ints read back")
+  print(int16(string(huge(int16(0))))! == huge(int16(0)) and int16(string(-huge(int16(0)) - 1))! == -huge(int16(0)) - 1)
+  print(int32(string(huge(int32(0))))! == huge(int32(0)) and int32(string(-huge(int32(0)) - 1))! == -huge(int32(0)) - 1)
+  print(int64(string(huge(0)))! == huge(0) and int64(string(-huge(0) - 1))! == -huge(0) - 1)
+  print(uint16(string(huge(uint16(0))))! == huge(uint16(0)))
+  print(uint32(string(huge(uint32(0))))! == huge(uint32(0)))
+  print(uint64(string(huge(uint64(0))))! == huge(uint64(0)))
+  // A real's spelling as an integer is not an integer.
+  print(int32(string(2.0)))

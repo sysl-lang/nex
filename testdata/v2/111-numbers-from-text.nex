@@ -1,0 +1,140 @@
+// Numbers from text (DESIGN §17.5) and the `IoError` a malformed one is (§17.3): every numeric
+// conversion takes a string and answers a `Result`; blanks around the number are ignored; `_`
+// between digits, Fortran's `d` exponent, `inf` and `nan` in any case, and a complex as `print`
+// writes one or as Fortran's `(re, im)`; an integer outside its type's range is `Malformed`; a
+// `[string]` converts each element, its first failure's position the column.
+
+def sum_of(a: string, b: string): Result[real64, IoError] =
+  val x = real64(a)?
+  val y = real64(b)?
+  Ok(x + y)
+
+def doubled(line: string): Result[integer, IoError] = Ok(2 * int64(trim(line))?)
+
+def total(line: string): Result[real64, IoError] =
+  val xs = real64(split(line))?
+  Ok(sum(xs))
+
+def why(r: Result[int32, IoError]): string =
+  r match
+    Ok(v) -> s"read $v"
+    Err(e) -> message(e)
+
+def main() =
+  // Integers.
+  print(int32("42"))
+  print(int32(" \t42 \n"))
+  print(int32("4x"))
+  print(int16("+7"))
+  print(int32("-0"))
+  print(int32("1_000_000"))
+  print(int32(""))
+  print(int32("   "))
+  print(int32("-"))
+  print(int32("1__000"))
+  print(int32("1_"))
+  print(int32("_1"))
+  print(int32("1.0"))
+  print(int32("0x10"))
+  print(int32("4 2"))
+  print(int8("127"))
+  print(int8("-128"))
+  print(int8("300"))
+  print(int8("-129"))
+  print(int8("99999999999999999999999"))
+  print(int64("9_223_372_036_854_775_807"))
+  print(int64("-9223372036854775808"))
+  print(int64("9223372036854775808"))
+  print(uint8("255"))
+  print(uint8("256"))
+  print(uint8("-1"))
+  print(uint8("-0"))
+  print(uint64("18446744073709551615"))
+  print(uint64("18446744073709551616"))
+  print(integer("12"))
+  print(to_integer("13"))
+
+  // Reals.
+  print(real64("2.5"))
+  print(real64("1.5d3"))
+  print(real64("1.5D-3"))
+  print(real64("2E2"))
+  print(real64("7"))
+  print(real64("-0.0"))
+  print(real64("1_000.000_1"))
+  print(real64("inf"))
+  print(real64("-Infinity"))
+  print(real64("NaN"))
+  print(real64("+INF"))
+  print(real64("1.2.3"))
+  print(real64("1."))
+  print(real64(".5"))
+  print(real64("1e"))
+  print(real64("1e+"))
+  print(real64("infinite"))
+  print(real64("1e999"))
+  print(real64("-1e-999"))
+  print(real64("4.9e-324"))
+  print(real32("0.1"))
+  print(real64(real32("0.1")!))
+  print(real32("3.4028235e38"))
+  print(real32("3.4028236e38"))
+  print(real32("1.4e-45"))
+  print(real16("0.1"))
+  print(real16("65504"))
+  print(real16("65519"))
+  print(real16("65520"))
+  print(real16("6.0e-8"))
+  print(real16("2.9e-8"))
+  print(real16("3.0e-8"))
+  print(to_real("1.25"))
+
+  // Complex numbers.
+  print(complex("1.5+2.0i"))
+  print(complex("1.5-2.0i"))
+  print(complex("(1.5, 2.0)"))
+  print(complex(" ( -1 , 2d0 ) "))
+  print(complex("1.0E15-1.0E-5i"))
+  print(complex("inf-nani"))
+  print(complex[real32]("0.1-0.2i"))
+  print(complex[real16]("(0.1,65504)"))
+  print(complex("1.5"))
+  print(complex("1.5+2.0"))
+  print(complex("1.5 + 2.0i"))
+  print(complex("(1.5 2.0)"))
+  print(complex("(1.5, 2.0"))
+  print(complex("(1.5, 2.0) x"))
+
+  // A `[string]`, each element read, the first failure's position the column.
+  print(real64(split("1 2.5 3e1")))
+  print(int32(split("1 2 x 4 y")))
+  print(int8(split("1 300")))
+  print(real64(split("")))
+  print(complex(split("1+2i (3,4)")))
+  print(sum(real64(split("0.5 0.25 0.125"))!))
+  print(int32(["7", "8"])!)
+
+  // `?` in a `def`, `!`, and `message`.
+  print(sum_of("1", "2"))
+  print(sum_of("1", "two"))
+  print(doubled(" 21 "))
+  print(doubled("2l"))
+  print(total("1 2 3"))
+  print(total("1 2 three"))
+  print(why(int32("7")))
+  print(why(int32("4x")))
+  print(why(int32(" 1e3")))
+  print(why(int32("70000000000")))
+  print(message(NotFound("in.dat")))
+  print(message(Denied("/etc/x")))
+  print(message(Malformed("in.dat", 4, 13, "expected a real64, found \"1.2.3\"")))
+  print(message(Failed("out.dat", "no space left on device")))
+  print(Malformed("in.dat", 4, 13, "bad") == Malformed("in.dat", 4, 13, "bad"))
+  val bad: Result[real64, IoError] = Err(NotFound("in.dat"))
+  print(bad)
+  assert_traps(() -> print(int32("4x")!), "1:2: expected an int32, found \"4x\"")
+  assert_traps(() -> print(int8("300")!), "1:1: out of range for int8, found \"300\"")
+  assert_traps(() -> print(real64(split("1 2 x"))!), "1:3: expected a real64, found \"x\"")
+  assert_traps(() -> print(bad!), "in.dat: no such file")
+  val _ = real64("discarded")
+  print("done")

@@ -1,0 +1,45 @@
+// Emission of the string toolkit and of numbers from text (DESIGN §17.4, §17.5): each is one call of
+// the runtime (`runtime/strings.sysl`, `runtime/numbers.sysl`), the function the interpreter calls
+// too. A string or an array of strings the runtime answers is new, and the statement owns it.
+
+import nex.sh.sysl.nex.*
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+private val PTR = "!llvm.ptr"
+
+impl Emitter
+    text_builtin(*self, span: Span, name: string, args: Buf[TExpr], t: Ty) -> string
+        var vals: Buf[string] = buf()
+        var tys: Buf[string] = buf()
+
+        for a in args
+            vals.push(self.ex(a))
+            tys.push(if is_str(a.ty) || is_items(a.ty) then PTR else "i64")
+
+        val operands = join_all(vals, ", ")
+        val types = join_all(tys, ", ")
+
+        if name == "str_length" then return self.call("nex_str_bytes", operands, types, "i64")
+
+        val ret = t match
+            Str -> PTR
+            Array(_, _) -> PTR
+            Bool -> "i1"
+            Real(_) -> "f64"
+            _ -> "i64"
+
+        val r = self.call(s"nex_${name}", operands, types, ret)
+
+        if ret == PTR then self.own(r, t) else r
+end Emitter
+
+private join_all(parts: Buf[string], sep: string) -> string
+    var out = ""
+
+    for k in 0..<parts.len()
+        if k > 0 then out += sep
+
+        out += parts[k]
+
+    out

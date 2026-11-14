@@ -456,6 +456,7 @@ impl Elab
     // axes a short list leaves are written out whole.
     index(*self, span: Span, base: TExpr, indices: Buf[Expr]) -> TExpr
         if is_error(base.ty) then return self.invalid(span)
+        if is_str(base.ty) then return self.text_slice(span, base, indices)
 
         val axes = base.ty match
             Array(_, axes) -> axes
@@ -511,7 +512,12 @@ impl Elab
             self.fail(span, "`end` as an index stands only in an index list")
             return self.invalid(span)
 
-        texpr(span, INTEGER, TArray(TEnd(self.ends[self.ends.len() - 1])))
+        val axis = self.ends[self.ends.len() - 1]
+
+        // A string's subscript: its length in bytes (DESIGN §17.4).
+        if axis == 0 then return self.text_length(span, self.text_ends[self.text_ends.len() - 1])
+
+        texpr(span, INTEGER, TArray(TEnd(axis)))
 
     // -- assignment -------------------------------------------------------------------------------
 
