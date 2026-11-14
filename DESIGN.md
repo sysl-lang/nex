@@ -3248,7 +3248,8 @@ end Result
   where their payloads are `Eq`, printed as `Some(3)`, `None`, `Ok(1.5)`, `Ok(())`, `Err(NotFound(in.dat))`. `T` may be `void`
   (§2.6): `Option[void]` and `Result[void, E]` carry `()`.
   A bare `None` or `Ok(…)` takes its arguments from the type expected (§2.6): `val n: Option[integer]
-  = None`.
+  = None`. Beside `==` or `!=` the other side is the type expected, either way round: `rs[1] ==
+  Ok(())`, `None == x`, `n == Some(Err(e))`, and an array literal of them, `[Ok(()), Err("x")] == rs`.
 - **They are prelude names, so a program's own declarations shadow them** (§11.5): a program
   declaring its own `enum Opt[T]` with `Some` and `None` keeps working, its `Some` hiding the
   prelude's in its module. Matching a prelude `Option` (one from `read_line`, say) with variants that

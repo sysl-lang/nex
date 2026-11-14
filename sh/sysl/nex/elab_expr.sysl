@@ -28,10 +28,12 @@ private val PRELUDE_CONSTANTS = ["pi", "e", "inf", "nan", "i"]
 
 private val COMPARISONS = ["==", "!=", "<", "<=", ">", ">="]
 
-// The type a tuple or a variant on one side of `==` is elaborated expecting, from the other side.
+// The type a tuple, a variant or an array literal of them on one side of `==` is elaborated
+// expecting, from the other side.
 private aggregate_context(t: Ty) -> Option[Ty] = t match
     Ty.Tuple(_) -> Some(t)
     Nominal(_, _) -> Some(t)
+    Ty.Array(_, _) -> Some(t)
     _ -> None
 
 private is_comparison(op: string) -> bool

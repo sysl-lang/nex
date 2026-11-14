@@ -87,6 +87,18 @@ elab_prelude_names_as_written()
     // The module's own `Result` is `Result`, so the prelude's is told apart by its module; `IoError` is not hidden.
     assert_eq(refused("enum Result =\n  Good\n  Bad\ndef main() =\n  val x: real64 = real64(\"1\")\n  print(x)\n"), "error: `x` must be real64, but this is prelude.Result[real64, IoError] @5:19")
 
+@test("a variant built or named beside == or != takes its type from the other side, either way round, nested, and in an array literal")
+elab_compare_variant_takes_context()
+    val rs = "def main() =\n  val rs: [Result[void, string]] = [Ok(()), Err(\"x\")]\n  val o: Option[int32] = None\n"
+    assert_eq(refused(rs + "  print(rs[1] == Ok(()))\n  print(Ok(()) == rs[1])\n  print(rs[2] != Err(\"x\"))\n  print(Err(\"y\") == rs[2])\n"), "ok")
+    assert_eq(refused(rs + "  print(None == o)\n  print(o == None)\n  print(Some(3) == o)\n  print(o != Some(3))\n"), "ok")
+    assert_eq(refused(rs + "  val n: Option[Result[int32, string]] = Some(Err(\"e\"))\n  print(n == Some(Err(\"e\")))\n  print(Some(Ok(1)) != n)\n"), "ok")
+    assert_eq(refused(rs + "  print([Ok(()), Err(\"x\")] == rs)\n  print(rs != [Ok(()), Err(\"y\")])\n"), "ok")
+    // The other side gives the type; a variant of another enum is still refused, and two variants give none.
+    assert_eq(refused(rs + "  print(None == rs[1])\n"), "error: cannot infer `T` of `Option` here: give it a type, `val x: Option[...] = None` @4:9")
+    assert_eq(refused(rs + "  print(Ok(()) == Ok(()))\n"),
+        "error: cannot infer `E` of `Result` here: write the type where it is bound, `val x: Result[...] = Ok(...)` @4:9\nerror: cannot infer `E` of `Result` here: write the type where it is bound, `val x: Result[...] = Ok(...)` @4:19")
+
 @test("an instance of a generic enum a struct's field names has its arguments bound")
 elab_generic_enum_in_struct_field()
     assert_eq(refused("enum Res[T, E] =\n  Good(v: T)\n  Bad(e: E)\nend Res\nstruct R\n  value: Res[real, integer]\ndef main() = print(R(Good(1.5)))\n"), "ok")
