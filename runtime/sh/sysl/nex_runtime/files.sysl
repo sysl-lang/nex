@@ -21,6 +21,7 @@ import sysl.buf.{Buf, buf}
 import sysl.fs as fs
 import sysl.io as sio
 import sysl.raw.ptr_cast
+import sysl.slices.copy
 import sysl.text.{from_utf8, from_utf8_unchecked}
 
 // What the last file operation of a thread came to.
@@ -496,8 +497,8 @@ file_remove(path: string)
         Ok(_) -> succeeded()
         Err(e) -> reported(path, e)
 
-// The bytes `read_bytes` read, which the typed IR copies out one at a time; and the bytes
-// `write_bytes` writes, which it puts in one at a time.
+// The bytes `read_bytes` read, held between the call that reads them and the one that hands them
+// to the new array, whole.
 @thread_local private var bytes_held: Option[&Buf[u8]] = None
 
 // This thread's held bytes, made the first time it needs them.
@@ -511,7 +512,7 @@ private held_bytes() -> &Buf[u8]
     bytes_held = Some(b)
     b
 
-// The bytes of `path` held for `file_byte`, and how many there are.
+// The bytes of `path` held for `file_bytes_taken`, and how many there are.
 file_read_bytes(path: string) -> long
     val held = held_bytes()
 
@@ -523,19 +524,22 @@ file_read_bytes(path: string) -> long
             long(b.len)
         None -> 0
 
-// Byte `k` of those `file_read_bytes` holds, from 1.
-file_byte(k: long) -> long = long(held_bytes()[usize(k - 1)])
+// The bytes `file_read_bytes` holds, handed over: the storage of the interpreter's new array. The
+// thread holds none after.
+file_bytes_taken() -> Buf[u8]
+    var out: Buf[u8] = buf()
 
-// The bytes `write_bytes` writes begun, put in one at a time and written by `file_write_bytes`.
-file_bytes_begin() = held_bytes().clear()
+    out.extend(held_bytes().view())
+    bytes_held = None
+    out
 
-file_bytes_put(b: long) = held_bytes().push(u8.wrap(b))
-
-file_write_bytes(path: string)
+// The bytes `file_read_bytes` holds copied to `dest`, which has room for them all: the storage of the
+// compiled program's new array. The thread holds none after.
+private bytes_taken_to(dest: *u8)
     val held = held_bytes()
 
-    file_write_all(path, held.view(), false)
-    held.clear()
+    _ = copy(dest[0..<held.len()], held.view())
+    bytes_held = None
 
 // -- the compiled program's entries ----------------------------------------------------------------
 //
@@ -663,17 +667,12 @@ file_remove_c(path: *u8) = file_remove(c_text(path))
 @export("nex_file_read_bytes")
 file_read_bytes_c(path: *u8) -> long = file_read_bytes(c_text(path))
 
-@export("nex_file_byte")
-file_byte_c(k: long) -> long = file_byte(k)
+@export("nex_file_bytes_taken")
+file_bytes_taken_c(dest: *u8) = bytes_taken_to(dest)
 
-@export("nex_file_bytes_begin")
-file_bytes_begin_c() = file_bytes_begin()
-
-@export("nex_file_bytes_put")
-file_bytes_put_c(b: long) = file_bytes_put(b)
-
-@export("nex_file_write_bytes")
-file_write_bytes_c(path: *u8) = file_write_bytes(c_text(path))
+// `write_bytes(path, data)`: the `n` bytes from `data`, a dense buffer, made the whole of `path`.
+@export("nex_file_write_buffer")
+file_write_buffer_c(path: *u8, data: *u8, n: long) = file_write_all(c_text(path), data[0..<usize(n)], false)
 
 @export("nex_file_status")
 file_status_c() -> long = file_status()

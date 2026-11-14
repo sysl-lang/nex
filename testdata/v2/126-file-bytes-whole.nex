@@ -1,0 +1,26 @@
+// args: a scratch directory
+// Binary files move an array's storage whole (DESIGN §17.6): 8 MB written by `write_bytes` and read
+// back by `read_bytes`, checked by a weighted sum that sees every byte and its place; a slice that
+// starts inside its array, a strided one and a reversed one, each written as the elements it shows.
+
+def main(args: [string]) =
+  val path = s"${args[1]}/whole.bin"
+  val n = 8388608
+  val k = integer(linspace(0.0, real(n - 1), n))
+  val data = uint8(modulo(k * 31 + 7, 251))
+
+  write_bytes(path, data)!
+  val back = read_bytes(path)!
+  print(length(back))
+  print(all(back == data))
+  print(s"${back[1]} ${back[2]} ${back[n]}")
+  print(sum(integer(back) * (modulo(k, 7) + 1)))
+
+  write_bytes(path, data[3..10])!
+  print(read_bytes(path)!)
+  write_bytes(path, data[1..20 by 3])!
+  print(read_bytes(path)!)
+  write_bytes(path, reverse(data[1..5]))!
+  print(read_bytes(path)!)
+
+  remove(path)!

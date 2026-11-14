@@ -88,3 +88,4 @@ file	category	name
 123-file-large	prelude	a file of 100000 lines written and read back by `read_line` and `read_lines`, `append_text` twice, and a line longer than every buffer
 124-standard-input	prelude	`read_line(stdin)` of the `.in` beside it (DESIGN §17.6): a CRLF line, an empty line, a last line without a newline, `Ok(None)` at its end and past it, every `stdin` sharing one input
 125-standard-output	prelude	`stdout` and `stderr` as files (DESIGN §17.6): `write` and `write_line` in order with `print`, `flush`, a standard file passed to a `def`, `close` leaving it open, reading one a misuse
+126-file-bytes-whole	prelude	`write_bytes` and `read_bytes` moving an array's storage whole (DESIGN §17.6): 8 MB round-tripped and checked by a weighted sum, and slices inside an array, strided and reversed, written as the elements they show

@@ -10,10 +10,10 @@ module sh.sysl.nex
 // and a script the host sandboxes (§16.6, §17.8) reaches no file — every operation on a path
 // answers `Denied`, `exists` answers false, and standard input reads as empty.
 
-import nex_runtime.sh.sysl.nex_runtime.{NexFile, dropped_warning, file_byte, file_bytes_begin, file_bytes_put, file_close, file_denied,
+import nex_runtime.sh.sysl.nex_runtime.{NexFile, dropped_warning, file_bytes_taken, file_close, file_denied,
                                         file_dropped, file_exists, file_fail_column, file_fail_line, file_fail_message, file_fail_path, file_flush, file_name,
                                         file_open, file_read_bytes, file_read_line, file_read_lines, file_read_text, file_remove, file_status, file_usable,
-                                        file_write, file_write_all, file_write_bytes, file_write_lines, is_standard_output, std_file, text_input}
+                                        file_write, file_write_all, file_write_lines, is_standard_output, std_file, text_input}
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
@@ -58,6 +58,33 @@ private strings_answer(strings: Buf[string]) -> Value
 
     vector(Ty.Str, vs)
 
+// The array of bytes `a` made the whole of `path`: its storage handed to the runtime where it lies
+// in order, else its bytes gathered first.
+private written_bytes(path: string, a: &Arr)
+    val n = usize(count_of(a))
+
+    a.store.d match
+        DU8(v) ->
+            if contiguous(a)
+                val o = usize(a.offset)
+
+                file_write_all(path, v.view()[o..<o + n], false)
+                return
+
+            var gathered: Buf[u8] = buf()
+
+            for p in positions(a)
+                gathered.push(v[usize(p)])
+
+            file_write_all(path, gathered.view(), false)
+        _ ->
+            var gathered: Buf[u8] = buf()
+
+            for e in elements(a)
+                gathered.push(u8.wrap(int_of(e)))
+
+            file_write_all(path, gathered.view(), false)
+
 impl Interp
     file_builtin(*self, span: Span, name: string, args: Buf[TExpr]) -> Code
         val m = self.m
@@ -72,9 +99,6 @@ impl Interp
         if name == "file_fail_message" then return (c) -> Ok(VStr(file_fail_message()))
         if name == "file_fail_line" then return (c) -> Ok(VInt(file_fail_line()))
         if name == "file_fail_column" then return (c) -> Ok(VInt(file_fail_column()))
-        if name == "file_bytes_begin" then return (c) ->
-            file_bytes_begin()
-            Ok(VVoid)
 
         val a = codes[0]
 
@@ -89,10 +113,21 @@ impl Interp
 
                 Ok(VFile(FileBox(std_file(k), m.write)))
 
-        if name == "file_byte" then return (c) -> Ok(VInt(file_byte(int_of(a(c)?))))
-        if name == "file_bytes_put" then return (c) ->
-            file_bytes_put(int_of(a(c)?))
-            Ok(VVoid)
+        // The bytes `file_read_bytes` held, the new array's storage.
+        if name == "file_bytes_taken" then return (c) ->
+            _ = a(c)?
+            Ok(vector_data(DU8(file_bytes_taken())))
+
+        if name == "file_write_buffer"
+            val b = codes[1]
+
+            return (c) ->
+                val path = str_of(a(c)?)
+                val data = arr_of(b(c)?)
+
+                if m.sandbox then file_denied(path) else written_bytes(path, data)
+
+                Ok(VVoid)
 
         // On a `File`.
         if name == "file_read_line" then return (c) -> Ok(VStr(file_read_line(file_of(a(c)?), "read_line")))
@@ -140,7 +175,7 @@ impl Interp
                     Some(f) -> Ok(VFile(FileBox(f, m.write)))
                     None -> Ok(VVoid)
 
-        if name == "file_read_text" || name == "file_read_lines" || name == "file_read_bytes" || name == "file_remove" || name == "file_write_bytes"
+        if name == "file_read_text" || name == "file_read_lines" || name == "file_read_bytes" || name == "file_remove"
             return (c) ->
                 val path = str_of(a(c)?)
 
@@ -155,11 +190,8 @@ impl Interp
                 if name == "file_read_text" then Ok(VStr(file_read_text(path)))
                 elif name == "file_read_lines" then Ok(strings_answer(file_read_lines(path)))
                 elif name == "file_read_bytes" then Ok(VInt(file_read_bytes(path)))
-                elif name == "file_remove"
-                    file_remove(path)
-                    Ok(VVoid)
                 else
-                    file_write_bytes(path)
+                    file_remove(path)
                     Ok(VVoid)
 
         // `write_text`, `append_text` and `write_lines`: a path and what is written.
