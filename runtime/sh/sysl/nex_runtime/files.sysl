@@ -109,6 +109,13 @@ private reported(path: string, e: fs.IoError) = e match
 // §17.8).
 file_denied(path: string) = failed(FILE_DENIED, path, "")
 
+// The outcome `code` set by another part of the runtime (`tables.sysl`), with the line and column a
+// `FILE_MALFORMED` is at.
+file_set_outcome(code: int, path: string, line: long, column: long, message: string)
+    failed(code, path, message)
+    fail_line = line
+    fail_column = column
+
 // -- opening ------------------------------------------------------------------------------------------
 
 // `path` opened as `mode` (`MODE_READ`, `MODE_WRITE` or `MODE_APPEND`), or `None` with the outcome
@@ -525,6 +532,9 @@ private slot_of(p: *u8) -> usize
     usize(words[0])
 
 private file_at(p: *u8) -> &NexFile = table[slot_of(p)].unwrap()
+
+// The file a compiled `File` object holds, for another part of the runtime (`tables.sysl`).
+file_object(p: *u8) -> &NexFile = file_at(p)
 
 private standard_slots()
     if table.len() == 0

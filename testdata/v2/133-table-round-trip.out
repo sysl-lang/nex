@@ -1,0 +1,44 @@
+real16: 63487 values, 63487x1 read, 0 differ
+real32 by 1.37: 608x2, 0 differ
+real32 by 1.01: 18890x2, 0 differ
+real64 by 1.37: 4617x2, 0 differ
+real64 by 1.07: 21462x2, 0 differ
+-- special values
+-0.0 0.0 inf -inf nan
+1.0E-320 -4.9E-324 1.7976931348623157E308 0.1 2.0
+
+0
+-0.0 0.0 inf -inf nan
+0.0 -0.0 inf 0.1 2.0
+
+0
+-0.0 0.0 inf -inf nan
+0.0 -0.0 inf 0.1 2.0
+
+0
+-- integers
+8-bit: 512 of 512 read back, from -128 to 127 and 0 to 255
+9223372036854775807 -9223372036854775808
+-1 0
+
+true
+[[18446744073709551615], [0]] true
+-- separators and units
+1.0,2.5
+-3.0,0.125
+
+[[1.0, 2.5], [-3.0, 0.125]]
+1.0<tab>2.5
+-3.0<tab>0.125
+
+[[1.0, 2.5], [-3.0, 0.125]]
+0.1 0.25
+-0.30000000000000004 0.0125
+
+1.0 2.5
+-3.0 0.125
+
+-- nothing, and nowhere
+<>
+0x0
+NotFound(<dir>/no/such/dir/table.dat) | <dir>/no/such/dir/table.dat: no such file

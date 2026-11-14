@@ -1,0 +1,63 @@
+module sh.sysl.nex
+@tests
+
+// Tables in an embedded script (DESIGN §16, §17.7, §17.8): a script that is not sandboxed reads and
+// writes tables as a program does; a sandboxed one is answered `Denied` by `read_table` and
+// `write_table` of a path, the files on the disk untouched, and reads a table from its empty
+// standard input as `0 x 0`.
+
+import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
+import sysl.text.{StrBuilder, str_builder}
+
+private struct Gathered
+    text: StrBuilder
+
+// `text` run as a script, sandboxed or not, what it wrote to the host, and its status.
+private ran_script(text: string, sandbox: bool) -> string
+    val o: &Gathered = Gathered(str_builder())
+    val opts = ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None)
+
+    val s = load_script(text, "t.nex", new_host(), opts) match
+        Ok(s) -> s
+        Err(ds) -> panic(ds[0].text)
+
+    val status = s.run().unwrap()
+
+    o.text.finish() + s"status $status\n"
+
+@test("a script that is not sandboxed reads and writes tables as a program does")
+emb_tables_unsandboxed()
+    val dir = make_temp_dir("nex-embed-tables").unwrap()
+
+    write_text(s"$dir/in.dat", "# t x\n1 2.5\n3 4\n").unwrap()
+
+    val text = s"def main() =\n  val a: [int32; :, :] = read_table(\"$dir/in.dat\", skip = 2)!\n  print(a)\n  write_table(\"$dir/out.dat\", read_table(\"$dir/in.dat\")!, sep = \",\")!\n"
+    val out = ran_script(text, false)
+    val written = read_text(s"$dir/out.dat").unwrap()
+
+    remove_dir_all(dir).unwrap()
+    assert_eq(out, "[[3, 4]]\nstatus 0\n")
+    assert_eq(written, "1.0,2.5\n3.0,4.0\n")
+
+@test("a sandboxed script is answered Denied by read_table and write_table, and reads stdin as an empty table")
+emb_tables_sandboxed()
+    val dir = make_temp_dir("nex-embed-tables-sandbox").unwrap()
+    val p = s"$dir/in.dat"
+    val q = s"$dir/out.dat"
+
+    write_text(p, "1 2\n").unwrap()
+
+    var lines = s"def shown[T](r: Result[T, IoError]) = r match\n  Ok(_) -> print(\"reached\")\n  Err(e) -> print(replace(message(e), \"$dir\", \"<dir>\"))\n"
+
+    lines += "def main() =\n"
+    lines += s"  shown(read_table(\"$p\"))\n  shown(read_table(\"$p\", skip = 1))\n  shown(write_table(\"$q\", [1.0]))\n"
+    lines += "  val a = read_table(stdin)!\n  print(s\"${extent(a, 1)}x${extent(a, 2)}\")\n"
+
+    val out = ran_script(lines, true)
+    val untouched = read_text(p).unwrap()
+    val made = exists(q)
+
+    remove_dir_all(dir).unwrap()
+    assert_eq(out, "<dir>/in.dat: permission denied\n<dir>/in.dat: permission denied\n<dir>/out.dat: permission denied\n0x0\nstatus 0\n")
+    assert_eq(untouched, "1 2\n")
+    assert(!made, "the sandboxed script made a file")

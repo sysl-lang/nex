@@ -1,0 +1,63 @@
+module sh.sysl.nex
+@tests
+
+// Tables (DESIGN §17.7) as the elaborator checks them: the type a table is expected to be read as,
+// which must be a rank-2 array of integers or reals, complex tables left out (§15); the arguments
+// of `read_table` and `write_table`; a `Result` that may not be dropped; table I/O refused in a
+// parallel body; and a program's own `read_table` hiding the prelude's. What the programs print is
+// `testdata/v2/130` to `134`'s, on both engines.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.join
+
+@test("a table is read into the rank-2 array of integers or reals expected of it, and never complex")
+elab_table_expected()
+    var got: Buf[string] = buf()
+    got.push(refused("def main() =\n  val a: [real] = read_table(\"a\")!\n  print(a)\n"))
+    got.push(refused("def main() =\n  val x: real = read_table(\"a\")!\n  print(x)\n"))
+    got.push(refused("def main() =\n  val a: [real; :, :, :] = read_table(\"a\")!\n  print(a)\n"))
+    got.push(refused("def main() =\n  val a: [complex; :, :] = read_table(\"a\")!\n  print(a)\n"))
+    got.push(refused("def main() =\n  val r: Result[[complex[real32]; :, :], IoError] = read_table(\"a\")\n  print(r)\n"))
+    got.push(refused("def t(): Result[[bool; :, :], IoError] =\n  val a: [bool; :, :] = read_table(\"a\")?\n  Ok(a)\ndef main() = print(t())\n"))
+    got.push(refused("def main() =\n  val a: [string; :, :] = read_table(\"a\")!\n  print(a)\n"))
+    got.push(refused("def main() =\n  val a: [uint16; :, :] = read_table(\"a\")!\n  val b: [real16<mm>; :, :] = read_table(\"a\")!\n  print(read_table(\"a\")!)\n  print(a)\n  print(b)\n"))
+
+    assert_eq(join(got.view(), "\n---\n"), "error: `read_table` reads a table into a rank-2 array, `[T; :, :]`, and the type expected here is [real64] @2:19\n---\nerror: `read_table` reads a table into a rank-2 array, `[T; :, :]`, and the type expected here is real64 @2:17\n---\nerror: `read_table` reads a table into a rank-2 array, `[T; :, :]`, and the type expected here is [real64; :, :, :] @2:28\n---\nerror: a table of complex numbers is not read: the comma in `(1.0, 2.0)` is also a separator (DESIGN §15) @2:28\n---\nerror: a table of complex numbers is not read: the comma in `(1.0, 2.0)` is also a separator (DESIGN §15) @2:53\n---\nerror: `read_table` reads integers or reals, and the element type expected here is bool @2:25\n---\nerror: `read_table` reads integers or reals, and the element type expected here is string @2:27\n---\nok")
+
+@test("read_table and write_table take their own arguments, and name the one that is wrong")
+elab_table_arguments()
+    var got: Buf[string] = buf()
+    got.push(refused("def main() = print(read_table())\n"))
+    got.push(refused("def main() = print(read_table(1))\n"))
+    got.push(refused("def main() = print(read_table(\"a\", \"b\"))\n"))
+    got.push(refused("def main() = print(read_table(\"a\", 1, 2))\n"))
+    got.push(refused("def main() = print(read_table(\"a\", 1, skip = 2))\n"))
+    got.push(refused("def main() = print(read_table(\"a\", lines = 1))\n"))
+    got.push(refused("def main() = print(read_table(\"a\", skip = 1, skip = 2))\n"))
+    got.push(refused("def main() =\n  val f = open(\"a\", Read)!\n  print(read_table(f, skip = 1))\n"))
+    got.push(refused("def main() = print(write_table(\"a\"))\n"))
+    got.push(refused("def main() = print(write_table(1, [1.0]))\n"))
+    got.push(refused("def main() = print(write_table(\"a\", 1.0))\n"))
+    got.push(refused("def main() =\n  val a: [real; :, :, :] = zeros((1, 1, 1))\n  print(write_table(\"a\", a))\n"))
+    got.push(refused("def main() = print(write_table(\"a\", [1.0 + 2.0i]))\n"))
+    got.push(refused("def main() = print(write_table(\"a\", [\"x\"]))\n"))
+    got.push(refused("def main() = print(write_table(\"a\", [true]))\n"))
+    got.push(refused("def main() = print(write_table(\"a\", [1.0], sep = 1))\n"))
+    got.push(refused("def main() = print(write_table(\"a\", [1.0], delimiter = \",\"))\n"))
+    got.push(refused("def main() = print(write_table(\"a\", [1.0], \",\", \" \"))\n"))
+
+    assert_eq(join(got.view(), "\n---\n"), "error: `read_table` takes a path and the lines to skip, `skip = n`, or a `File` @1:20\n---\nerror: `read_table` takes a path or a `File`, and this is int64 @1:31\n---\nerror: the lines skipped must be int64, but this is string @1:36\n---\nerror: `read_table` takes a path and the lines to skip, `skip = n`, or a `File` @1:20\n---\nerror: `read_table` takes a path and the lines to skip, `skip = n`, or a `File` @1:20\n---\nerror: `read_table` takes no argument named `lines`; its one named argument is `skip` @1:36\n---\nerror: `skip` is given twice @1:46\n---\nerror: `read_table` of a `File` reads the rest of it and takes no `skip`; read the lines to skip with `read_line` @3:9\n---\nerror: `write_table` takes a path, an array of one or two axes, and the separator, `sep = \",\"` @1:20\n---\nerror: the path must be string, but this is int64 @1:32\n---\nerror: `write_table` writes an array of one or two axes, and this is real64 @1:37\n---\nerror: `write_table` writes an array of one or two axes, and this is [real64; :, :, :] @3:26\n---\nerror: a table of complex numbers is not written: the comma in `(1.0, 2.0)` is also a separator (DESIGN §15) @1:37\n---\nerror: `write_table` writes integers or reals, and this is [string] @1:37\n---\nerror: `write_table` writes integers or reals, and this is [bool] @1:37\n---\nerror: the separator must be string, but this is int64 @1:50\n---\nerror: `write_table` takes no argument named `delimiter`; its one named argument is `sep` @1:44\n---\nerror: `write_table` takes a path, an array of one or two axes, and the separator, `sep = \",\"` @1:20")
+
+@test("a table's Result is not dropped, its I/O is refused in a parallel body, and a program's own read_table hides the prelude's")
+elab_table_uses()
+    var got: Buf[string] = buf()
+    got.push(refused("def main() =\n  write_table(\"a\", [1.0])\n"))
+    got.push(refused("def main() =\n  read_table(\"a\")\n"))
+    got.push(refused("def main() =\n  val _ = write_table(\"a\", [1.0])\n  print(\"ok\")\n"))
+    got.push(refused("def main() =\n  var y: [real] = zeros(4)\n  parallel for i in 1..4\n    y[i] = sum(read_table(\"a\")!)\n"))
+    got.push(refused("def save(t: [real]) =\n  write_table(\"f\", t)!\ndef main() =\n  parallel for i in 1..4\n    save([real(i)])\n"))
+    got.push(refused("@elemental def e(x: real) =\n  write_table(\"f\", [x])!\n  x\ndef main() = print(e(1.0))\n"))
+    got.push(refused("def read_table(n: integer): integer = n + 1\ndef main() = print(read_table(2))\n"))
+    got.push(refused("def main() =\n  val f = write_table\n  print(1)\n"))
+
+    assert_eq(join(got.view(), "\n---\n"), "error: the `Result` of `write_table` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …` @2:3\n---\nerror: the `Result` of `read_table` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …` @2:3\n---\nok\n---\nerror: a parallel body does no I/O but `print` and `eprint`, and `read_table` is I/O @4:16\n---\nerror: `save` does I/O with `write_table`, and a parallel body does no I/O but `print` and `eprint` @5:5\n---\nerror: an `@elemental` function may be run in any order, so it cannot do I/O with `write_table` @1:1\n---\nok\n---\nerror: the prelude function `write_table` as a value is not elaborated yet @2:11")

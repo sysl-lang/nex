@@ -1,0 +1,25 @@
+-- ragged rows
+short: <dir>/short.dat:2:4: expected 3 fields, found 2
+long: <dir>/long.dat:2:5: expected 2 fields, found 3
+one-field: <dir>/one-field.dat:2:3: expected 1 field, found 2
+short-commas: <dir>/short-commas.dat:3:5: expected 3 fields, found 2
+late: <dir>/late.dat:4:5: expected 2 fields, found 3
+-- fields that do not read
+word: <dir>/word.dat:2:6: expected a real64, found "1.2.3"
+comment-after: <dir>/comment-after.dat:1:5: expected a real64, found "#"
+comment-later: <dir>/comment-later.dat:2:5: expected 2 fields, found 5
+trailing-comma: <dir>/trailing-comma.dat:1:5: expected a real64, found ""
+leading-comma: <dir>/leading-comma.dat:1:1: expected a real64, found ""
+empty-field: <dir>/empty-field.dat:1:3: expected a real64, found ""
+comma-later: <dir>/comma-later.dat:2:2: expected a real64, found "3,4"
+blanks-later: <dir>/blanks-later.dat:2:3: expected a real64, found "3 4"
+point-first: <dir>/point-first.dat:1:3: expected a real64, found ".5"
+real-in-ints: Malformed(<dir>/real-in-ints.dat, 1, 4, expected an int8, found "2.5")
+out-of-range: Malformed(<dir>/out-of-range.dat, 2, 5, out of range for int8, found "300")
+ints: [[1, -128], [127, 0]]
+-- the file
+<dir>/bad.dat:2:3: not UTF-8
+NotFound(<dir>/missing.dat) | <dir>/missing.dat: no such file
+Failed(<dir>, is a directory)
+-- misuses
+done

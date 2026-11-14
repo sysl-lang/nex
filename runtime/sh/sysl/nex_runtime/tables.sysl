@@ -1,0 +1,308 @@
+module sh.sysl.nex_runtime
+
+// Tables (DESIGN §17.7), for both engines. `read_table` reads a file, or the rest of an open one,
+// into numbers held here row by row, which the typed IR then copies into its array one at a time;
+// `write_table`'s typed IR hands each value here as `print` writes it, a row at a time, and the
+// table is written to its file at once. The interpreter calls these functions directly, and a
+// compiled program through the `nex_table_*` entries at the end.
+//
+// **The format**: a line is a row. Its fields are separated by commas where the first row has one,
+// blanks around a comma ignored, and otherwise by runs of blanks. A blank line, and one whose first
+// non-blank is `#`, holds no row. Every row has the first row's number of fields, and each field
+// reads as a number of the element type does from text (`numbers.sysl`).
+//
+// **Every read answers through the files' outcome** (`files.sysl`): `NotFound`, `Denied` and
+// `Failed` as reading the file reports them, and `FILE_MALFORMED` at the line and the column, from 1
+// and in bytes, of the field that does not read, of the first field of a row that has too many, or
+// just past the last field of a row that has too few.
+
+import sysl.buf.{Buf, buf}
+
+// The state of this thread's table: the read held for the typed IR and the write being gathered.
+//
+// Reading: the source's name for a failure, the element type's name, whether a row has been read
+// and whether its fields are separated by commas, the rows and fields per row so far, and the
+// values row by row, in the one of `ints`, `uints` and `reals` the element type reads into. `starts`
+// and `ends` bound the fields of the line being read.
+//
+// Writing: the bytes so far, the separator, and whether the row being written has a field yet.
+struct Cells
+    path: string
+    kind: string
+    started: bool
+    commas: bool
+    rows: long
+    columns: long
+    ints: Buf[long]
+    uints: Buf[ulong]
+    reals: Buf[real]
+    starts: Buf[usize]
+    ends: Buf[usize]
+    out: Buf[u8]
+    sep: string
+    fresh: bool
+
+@thread_local private var cells_held: Option[&Cells] = None
+
+// This thread's table, made the first time it needs one.
+private cells() -> &Cells
+    cells_held match
+        Some(c) -> return c
+        None -> ()
+
+    val c = new_cells()
+
+    cells_held = Some(c)
+    c
+
+// A table with nothing read or written, made once for its thread and shared by every call after.
+private new_cells() -> &Cells = Cells("", "", false, false, 0, 0, buf(), buf(), buf(), buf(), buf(), buf(), " ", true)
+
+private blank(c: u8) -> bool = c == u8(' ') || c == u8('\t') || c == u8('\r')
+
+// -- reading --------------------------------------------------------------------------------------
+
+// A read of `path` as numbers of the type `kind` names begun, nothing held.
+private begun(path: string, kind: string) -> &Cells
+    val c = cells()
+
+    c.path = path.copy()
+    c.kind = kind.copy()
+    c.started = false
+    c.commas = false
+    c.rows = 0
+    c.columns = 0
+    c.ints.clear()
+    c.uints.clear()
+    c.reals.clear()
+    c
+
+// Whether the line `b` holds no row: nothing but blanks, or a `#` as its first non-blank.
+private no_row(b: []const u8) -> bool
+    for x in b
+        if x == u8('#') then return true
+        if !blank(x) then return false
+
+    true
+
+// Whether the line `b` has a comma.
+private has_comma(b: []const u8) -> bool
+    for x in b
+        if x == u8(',') then return true
+
+    false
+
+// The fields of the line `b`, bounded by `c.starts` and `c.ends`: the pieces between commas with
+// their blanks trimmed, an empty piece a field, or the runs of non-blanks.
+private split_fields(c: &Cells, b: []const u8)
+    c.starts.clear()
+    c.ends.clear()
+
+    var k: usize = 0
+
+    if c.commas
+        loop
+            var to = k
+
+            while to < b.len && b[to] != u8(',')
+                to += 1
+
+            var s = k
+            var e = to
+
+            while s < e && blank(b[s])
+                s += 1
+
+            while e > s && blank(b[e - 1])
+                e -= 1
+
+            c.starts.push(s)
+            c.ends.push(e)
+
+            if to == b.len then return
+
+            k = to + 1
+
+    loop
+        while k < b.len && blank(b[k])
+            k += 1
+
+        if k == b.len then return
+
+        c.starts.push(k)
+
+        while k < b.len && !blank(b[k])
+            k += 1
+
+        c.ends.push(k)
+end split_fields
+
+// One field's value held, read as `c.kind`; where it does not read, the outcome says so at
+// `number`, the line's, and false.
+private held_field(c: &Cells, line: string, number: long, s: usize, e: usize) -> bool
+    val r = read_number(line[s..<e], c.kind)
+
+    if r.column != 0
+        file_set_outcome(FILE_MALFORMED, c.path, number, long(s) + r.column, r.message)
+        return false
+
+    if c.kind.starts_with("int") then c.ints.push(r.int)
+    elif c.kind.starts_with("uint") then c.uints.push(r.uint)
+    else c.reals.push(r.re)
+
+    true
+
+private fields_word(n: long) -> string = if n == 1 then "1 field" else s"$n fields"
+
+// The row the line `line`, numbered `number`, holds, if any; false where it is malformed, the
+// outcome saying where.
+private held_row(c: &Cells, line: string, number: long) -> bool
+    val b = line.bytes
+
+    if no_row(b) then return true
+
+    if !c.started then c.commas = has_comma(b)
+
+    split_fields(c, b)
+
+    val found = long(c.starts.len())
+
+    if !c.started
+        c.started = true
+        c.columns = found
+
+    val fields = if found < c.columns then found else c.columns
+
+    for j in 0..<usize(fields)
+        if !held_field(c, line, number, c.starts[j], c.ends[j]) then return false
+
+    if found != c.columns
+        val column = if found > c.columns then c.starts[usize(c.columns)] + 1 else c.ends[c.ends.len() - 1] + 1
+        val message = s"expected ${fields_word(c.columns)}, found ${long(found)}"
+
+        file_set_outcome(FILE_MALFORMED, c.path, number, long(column), message)
+        return false
+
+    c.rows += 1
+    true
+
+// The read ended well: the outcome `FILE_OK`, and how many rows it held.
+private finished(c: &Cells) -> long
+    file_set_outcome(FILE_OK, "", 0, 0, "")
+    c.rows
+
+// The lines of `path` after the first `skip` read as a table of the type `kind` names: how many
+// rows, the outcome saying whether it read. A `skip` below zero is a misuse.
+table_read(path: string, skip: long, kind: string) -> long
+    val c = begun(path, kind)
+
+    if skip < 0
+        file_set_outcome(FILE_MISUSE, "", 0, 0, s"read_table skips ${skip} lines; it skips none or more")
+        return 0
+
+    val lines = file_read_lines(path)
+
+    if file_status() != long(FILE_OK) then return 0
+
+    for k in 0..<lines.len()
+        if long(k) >= skip && !held_row(c, lines[k], long(k) + 1) then return 0
+
+    finished(c)
+
+// The rest of the open file `f` read as a table, its lines numbered on from those already read.
+table_read_file(f: &NexFile, kind: string) -> long
+    val c = begun(file_name(f), kind)
+
+    loop
+        val line = file_read_line(f, "read_table")
+        val state = file_status()
+
+        if state == long(FILE_END) then return finished(c)
+        if state != long(FILE_OK) then return 0
+        if !held_row(c, line, f.lines) then return 0
+
+// The fields per row of the table just read: 0 where it has no rows.
+table_columns() -> long = cells().columns
+
+// Value `k`, from 1 and row by row, of the table just read, as the integer or real it was read as.
+table_int(k: long) -> long = cells().ints[usize(k - 1)]
+
+table_uint(k: long) -> ulong = cells().uints[usize(k - 1)]
+
+table_real(k: long) -> real = cells().reals[usize(k - 1)]
+
+// The values copied out, given back.
+table_clear()
+    val c = cells()
+
+    c.ints.clear()
+    c.uints.clear()
+    c.reals.clear()
+
+// -- writing --------------------------------------------------------------------------------------
+
+// A table begun whose fields are separated by `sep`.
+table_begin(sep: string)
+    val c = cells()
+
+    c.out.clear()
+    c.sep = sep.copy()
+    c.fresh = true
+
+// The next field of the row, `text` as `print` writes its value.
+table_field(text: string)
+    val c = cells()
+
+    if !c.fresh then c.out.extend(c.sep.bytes)
+
+    c.out.extend(text.bytes)
+    c.fresh = false
+
+// The row ended.
+table_row()
+    val c = cells()
+
+    c.out.push(u8('\n'))
+    c.fresh = true
+
+// The table made the whole of `path`, the outcome saying whether it was written.
+table_write(path: string)
+    val c = cells()
+
+    file_write_all(path, c.out.view(), false)
+    c.out.clear()
+
+// -- the compiled program's entries ----------------------------------------------------------------
+
+@export("nex_table_read")
+table_read_c(path: *u8, skip: long, kind: *u8) -> long = table_read(c_text(path), skip, c_text(kind))
+
+@export("nex_table_read_file")
+table_read_file_c(f: *u8, kind: *u8) -> long = table_read_file(file_object(f), c_text(kind))
+
+@export("nex_table_columns")
+table_columns_c() -> long = table_columns()
+
+@export("nex_table_int")
+table_int_c(k: long) -> long = table_int(k)
+
+@export("nex_table_uint")
+table_uint_c(k: long) -> ulong = table_uint(k)
+
+@export("nex_table_real")
+table_real_c(k: long) -> real = table_real(k)
+
+@export("nex_table_clear")
+table_clear_c() = table_clear()
+
+@export("nex_table_begin")
+table_begin_c(sep: *u8) = table_begin(c_text(sep))
+
+@export("nex_table_field")
+table_field_c(text: *u8) = table_field(c_text(text))
+
+@export("nex_table_row")
+table_row_c() = table_row()
+
+@export("nex_table_write")
+table_write_c(path: *u8) = table_write(c_text(path))

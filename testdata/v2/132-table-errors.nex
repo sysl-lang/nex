@@ -1,0 +1,75 @@
+// args: a scratch directory
+// What `read_table` fails with (DESIGN §17.7, §17.3): a row shorter or longer than the first is
+// `Malformed` just past its last field or at its first field too many; a field that does not read as
+// the element type is `Malformed` at its line and column, with the conversion's words — a `#` after
+// the fields, an empty field between commas or after a trailing one, a comma in a table whose
+// first row has none, a blank-separated row in one whose first row has commas, a real in an integer
+// table, an integer out of its type's range; text that is not UTF-8; a missing file and a directory.
+// A negative `skip`, and a `File` opened for writing, are misuses that trap.
+
+def show(dir: string, name: string, text: string) =
+  val path = s"$dir/$name.dat"
+  write_text(path, text)!
+  read_table(path) match
+    Ok(a) -> print(s"$name: $a")
+    Err(e) -> print(s"$name: ${replace(message(e), dir, "<dir>")}")
+  remove(path)!
+
+def counted(dir: string, name: string, text: string) =
+  val path = s"$dir/$name.dat"
+  write_text(path, text)!
+  val r: Result[[int8; :, :], IoError] = read_table(path)
+  r match
+    Ok(a) -> print(s"$name: $a")
+    Err(e) -> print(s"$name: ${replace(s"$e", dir, "<dir>")}")
+  remove(path)!
+
+def main(args: [string]) =
+  val dir = args[1]
+
+  print("-- ragged rows")
+  show(dir, "short", "1 2 3\n4 5\n")
+  show(dir, "long", "1 2\n3 4 5\n")
+  show(dir, "one-field", "1\n2 3\n")
+  show(dir, "short-commas", "1, 2, 3\n# a comment\n4, 5\n")
+  show(dir, "late", "1 2\n3 4\n5 6\n7 8 9\n")
+
+  print("-- fields that do not read")
+  show(dir, "word", "1 2\n3 1.2.3\n")
+  show(dir, "comment-after", "1 2 # the first row\n")
+  show(dir, "comment-later", "1 2\n3 4 # the second\n")
+  show(dir, "trailing-comma", "1,2,\n")
+  show(dir, "leading-comma", ",1,2\n")
+  show(dir, "empty-field", "1,,2\n")
+  show(dir, "comma-later", "1 2\n3,4\n")
+  show(dir, "blanks-later", "1,2\n3 4\n")
+  show(dir, "point-first", "1 .5\n")
+  counted(dir, "real-in-ints", "1 2.5\n")
+  counted(dir, "out-of-range", "1 -128\n127 300\n")
+  counted(dir, "ints", "1 -128\n127 0\n")
+
+  print("-- the file")
+  val bad = s"$dir/bad.dat"
+  write_bytes(bad, [49, 32, 50, 10, 51, 32, 255, 10])!
+  read_table(bad) match
+    Ok(a) -> print(a)
+    Err(e) -> print(replace(message(e), dir, "<dir>"))
+  remove(bad)!
+  read_table(s"$dir/missing.dat") match
+    Ok(a) -> print(a)
+    Err(e) -> print(replace(s"$e | ${message(e)}", dir, "<dir>"))
+  read_table(dir) match
+    Ok(a) -> print(a)
+    Err(e) -> print(replace(s"$e", dir, "<dir>"))
+
+  print("-- misuses")
+  val good = s"$dir/good.dat"
+  write_text(good, "1 2\n")!
+  assert_traps(() -> print(read_table(good, skip = -1)!), "read_table skips -1 lines; it skips none or more")
+  val w = open(s"$dir/written.dat", Write)!
+  assert_traps(() -> print(read_table(w)!), "read_table on a file opened for Write")
+  close(w)!
+  assert_traps(() -> print(read_table(w)!), "read_table on a closed file")
+  remove(s"$dir/written.dat")!
+  remove(good)!
+  print("done")

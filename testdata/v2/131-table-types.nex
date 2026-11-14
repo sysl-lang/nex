@@ -1,0 +1,74 @@
+// args: a scratch directory
+// The element type of `read_table` comes from the type expected (DESIGN §17.7, §2.6): `int32`,
+// `uint8`, `int64`, `real32` and `real16` arrays; a `real<mm>` array, whose unit is the expected
+// one; the `Result` bound directly; `real64` where nothing expects a type. `?` carries a table, or
+// its `IoError`, through a `def`. `read_table(f)` reads the rest of an open `File` after a header
+// line read with `read_line`, its lines numbered on from it, and leaves nothing to read.
+
+def total(path: string): Result[int32, IoError] =
+  val a: [int32; :, :] = read_table(path, skip = 1)?
+  Ok(sum(a[1, :]))
+
+def widest(path: string): Result[real32, IoError] =
+  val a: [real32; :, :] = read_table(path)?
+  Ok(maxval(a))
+
+def main(args: [string]) =
+  val dir = args[1]
+  val counts = s"$dir/counts.dat"
+  write_text(counts, "n k\n1 2 3\n-4 5 2147483647\n")!
+
+  val i32: [int32; :, :] = read_table(counts, skip = 1)!
+  print(i32)
+  print(i32[2, 3] + int32(0))
+  val i64: [int64; :, :] = read_table(counts, skip = 1)!
+  print(i64[2, 3] + 1)
+  val r32: [real32; :, :] = read_table(counts, skip = 1)!
+  print(r32)
+  val r16: [real16; :, :] = read_table(counts, skip = 1)!
+  print(r16)
+  val r: Result[[int32; :, :], IoError] = read_table(counts, skip = 1)
+  print(r)
+  val plain = read_table(counts, skip = 1)!
+  print(plain)
+  print(total(counts)!)
+  total(s"$dir/missing.dat") match
+    Ok(t) -> print(t)
+    Err(e) -> print(replace(s"$e", dir, "<dir>"))
+
+  val bytes = s"$dir/bytes.dat"
+  write_text(bytes, "0, 255\n128, 7\n")!
+  val u8: [uint8; :, :] = read_table(bytes)!
+  print(u8)
+  remove(bytes)!
+
+  val thin = s"$dir/thin.dat"
+  write_text(thin, "0.1 0.2\n0.3 1e-8\n")!
+  val t32: [real32; :, :] = read_table(thin)!
+  print(s"$t32 ${t32[1, 1] == real32(0.1)}")
+  print(widest(thin)!)
+  val t16: [real16; :, :] = read_table(thin)!
+  print(s"$t16 ${t16[1, 1] == real16(0.1)}")
+  val mm: [real<mm>; :, :] = read_table(thin)!
+  print(mm)
+  print(to<m>(mm[2, 1]))
+  remove(thin)!
+
+  print("-- the rest of a File")
+  val f = open(counts, Read)!
+  print(read_line(f)!)
+  val rest: [int32; :, :] = read_table(f)!
+  print(rest)
+  print(read_line(f)!)
+  close(f)!
+
+  val ragged = s"$dir/ragged.dat"
+  write_text(ragged, "a b\n1 2\n3\n")!
+  val g = open(ragged, Read)!
+  print(read_line(g)!)
+  read_table(g) match
+    Ok(a) -> print(a)
+    Err(e) -> print(replace(message(e), dir, "<dir>"))
+  close(g)!
+  remove(ragged)!
+  remove(counts)!

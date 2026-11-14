@@ -1,0 +1,36 @@
+// args: a scratch directory
+// The ownership of tables (DESIGN §17.7): tables read in a loop at each element type, from a path
+// and from an open `File`, the arrays dropped, held in a `Result`, returned from a `def` through
+// `?`, viewed by a column; a read that fails, its `Err` dropped; `write_table` of a table, of a
+// column and of a value with a unit, each released.
+
+def doubled(path: string): Result[[real; :, :], IoError] =
+  val a = read_table(path)?
+  Ok(a * 2.0)
+
+def main(args: [string]) =
+  val dir = args[1]
+  val path = s"$dir/table.dat"
+  val bad = s"$dir/bad.dat"
+  write_text(path, "# x y\n1 2.5\n3 4.5\n")!
+  write_text(bad, "1 2\n3\n")!
+  for round in 1..30
+    val a = read_table(path)!
+    val counted: Result[[int32; :, :], IoError] = read_table(s"$dir/table.dat", skip = 1)
+    val n: [int32; :, :] = counted match
+      Ok(t) -> t
+      Err(_) -> zeros((1, 1))
+    val h: [real16; :, :] = read_table(path)!
+    val mm: [real<mm>; :, :] = read_table(path)!
+    val kept = doubled(path)
+    val failed = read_table(bad)
+    val f = open(path, Read)!
+    val header = read_line(f)!
+    val rest: [real32; :, :] = read_table(f)!
+    write_table(path, a[:, 1])!
+    write_table(path, mm, sep = ",")!
+    write_table(path, a)!
+    write_text(path, "# x y\n1 2.5\n3 4.5\n")!
+    print(s"${sum(a)} ${sum(n)} ${h[2, 2]} ${is_ok(kept)} ${is_err(failed)} ${header} ${rest[2, 1]} ${mm[1, 2]}")
+  remove(path)!
+  remove(bad)!

@@ -184,14 +184,14 @@ impl Elab
     end file_typed
 
     // The outcome of the call just made, bound to a local by a statement added to `items`.
-    private status_of(*self, span: Span, items: *Buf[TExpr]) -> usize
+    status_of(*self, span: Span, items: *Buf[TExpr]) -> usize
         val status = self.new_local("status", INTEGER, LVal)
 
         items.push(texpr(span, Void, TLet(status, call(span, INTEGER, "file_status", no_args()))))
         status
 
     // What an outcome other than success is: the trap of a misuse, or the `Err` of its `IoError`.
-    private failure(*self, span: Span, result: Ty, status: usize) -> TExpr
+    failure(*self, span: Span, result: Ty, status: usize) -> TExpr
         val err = io_error_ty()
         val path = call(span, Ty.Str, "file_fail_path", no_args())
         val message = call(span, Ty.Str, "file_fail_message", no_args())

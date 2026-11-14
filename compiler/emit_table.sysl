@@ -1,0 +1,27 @@
+// Emission of the tables of DESIGN §17.7: each `table_*` call of the typed IR (`elab_table.sysl`) is
+// one call of the runtime's `nex_table_*` entry (`runtime/tables.sysl`), the function the interpreter
+// calls too. A path, a `File`, a separator and a field's text cross as pointers; a count, an index and
+// an integer read as an `i64`, and a real read as an `f64`. Nothing the runtime answers is an object.
+
+import nex.sh.sysl.nex.*
+import sysl.buf.{Buf, buf}
+
+impl Emitter
+    table_builtin(*self, name: string, args: Buf[TExpr], t: Ty) -> string
+        var vals = ""
+        var tys = ""
+
+        for k in 0..<args.len()
+            val a = args[k]
+            val sep = if k > 0 then ", " else ""
+
+            vals += sep + self.ex(a)
+            tys += sep + (if is_str(a.ty) || is_file(a.ty) then "!llvm.ptr" else "i64")
+
+        val ret = t match
+            Real(_) -> "f64"
+            Void -> ""
+            _ -> "i64"
+
+        self.call(s"nex_${name}", vals, tys, ret)
+end Emitter

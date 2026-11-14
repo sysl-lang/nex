@@ -1,0 +1,363 @@
+module sh.sysl.nex
+
+// Tables (DESIGN §17.7): `read_table(path, skip = 0)`, `read_table(f)` and
+// `write_table(path, a, sep = " ")`.
+//
+// **A read is one call of the runtime** (`runtime/tables.sysl`), which both engines answer with the
+// same sysl, inside the typed IR that builds the `Result`, as a file function's is
+// (`elab_file.sysl`). The runtime holds the numbers it read row by row, and the IR copies them into
+// the array. So `val a: [int32; :, :] = read_table(p)!` reads
+//
+//     val path = p
+//     val skip = 0
+//     val rows = table_read(path, skip, "int32")
+//     val status = file_status()
+//     if status == FILE_OK then
+//       val columns = table_columns()
+//       var cells: [int32; :, :] = zeros(rows, columns)
+//       var k = 0
+//       for i in 1..rows
+//         for j in 1..columns
+//           k = k + 1
+//           cells[i, j] = int32(table_int(k))
+//       table_clear()
+//       Ok(cells)
+//     else …                                  // the `Err` of its `IoError`, as a file function's
+//
+// **The element type is the one expected** (§2.6): of the value a `!` or `?` takes out of the call,
+// or of the `Ok` where the `Result` itself is bound; `real64` where nothing expects one. A unit
+// expected of the elements is given to the array the `Ok` holds, the text carrying none.
+//
+// **A write hands each value to the runtime as `print` writes it**, so it reads back exactly
+// (§17.5): `table_begin(sep)`, then `table_field(s"${a[i, j]}")` for each field and `table_row()`
+// after each row, then `table_write(path)`. A value with a unit is written as its number.
+
+import nex_runtime.sh.sysl.nex_runtime.FILE_OK
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+is_table_function(name: string) -> bool = name == "read_table" || name == "write_table"
+
+// The runtime calls the elaborator makes for tables.
+is_table_builtin(name: string) -> bool = name.starts_with("table_")
+
+// The prelude function a runtime call is the I/O of, a file's or a table's; `""` for a call that
+// reads or writes no file.
+io_name(builtin: string) -> string
+    if builtin == "table_read" || builtin == "table_read_file" then return "read_table"
+    if builtin == "table_write" then return "write_table"
+
+    file_io_name(builtin)
+
+private val RESULT_TYPE = "prelude.Result"
+
+private one_arg(e: TExpr) -> Buf[TExpr]
+    var out: Buf[TExpr] = buf()
+
+    out.push(e)
+    out
+
+private two_args(a: TExpr, b: TExpr) -> Buf[TExpr]
+    var out = one_arg(a)
+
+    out.push(b)
+    out
+
+private two_tys(a: Ty, b: Ty) -> Buf[Ty]
+    var out: Buf[Ty] = buf()
+
+    out.push(a)
+    out.push(b)
+    out
+
+private number(span: Span, v: i128) -> TExpr = texpr(span, INTEGER, TLiteral(IntVal(v), false))
+
+private the(span: Span, ty: Ty, id: usize) -> TExpr = texpr(span, ty, TLocal(id))
+
+private runtime(span: Span, ty: Ty, name: string, args: Buf[TExpr]) -> TExpr = texpr(span, ty, TBuiltin(name, args))
+
+private bind(id: usize, v: TExpr) -> TExpr = texpr(v.span, Void, TLet(id, v))
+
+// `a[i, j]`, or `a[i]` where there is no `j`.
+private cell(span: Span, elem: Ty, a: TExpr, i: TExpr, j: Option[TExpr]) -> TExpr
+    var subs: Buf[TSub] = buf()
+
+    subs.push(TSubAt(i))
+
+    j match
+        Some(x) -> subs.push(TSubAt(x))
+        None -> ()
+
+    texpr(span, elem, TArray(TIndex(a, subs)))
+
+// The arguments of a call, the positional ones in order and the one named `name`, if given.
+struct TableArgs
+    pos: Buf[Expr]
+    named: Option[Expr]
+
+impl Elab
+    // A call of `read_table` or `write_table`; its `Result` may not be dropped where it is a
+    // statement.
+    table_call(*self, span: Span, name: string, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        val v = if name == "read_table" then self.table_read(span, args, want) else self.table_write(span, args)
+
+        val statement = want match
+            Some(Void) -> true
+            _ -> false
+
+        if statement && !is_error(v.ty) then self.fail(span, s"the `Result` of `${name}` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …`")
+
+        v
+
+    // The positional arguments of a call of `name` and the one named `option`; `None` after a
+    // diagnostic for any other name, or for `option` given twice or before a positional one.
+    private table_args(*self, name: string, args: Buf[Expr], option: string) -> Option[TableArgs]
+        var pos: Buf[Expr] = buf()
+        var named: Option[Expr] = None
+
+        for a in args
+            *a.kind match
+                NamedArg(n, value) ->
+                    if n != option
+                        self.fail(a.span, s"`${name}` takes no argument named `${n}`; its one named argument is `${option}`")
+                        return None
+
+                    if named.is_some()
+                        self.fail(a.span, s"`${option}` is given twice")
+                        return None
+
+                    named = Some(value)
+                _ ->
+                    if named.is_some()
+                        self.fail(a.span, s"a positional argument of `${name}` comes before `${option} = …`")
+                        return None
+
+                    pos.push(a)
+
+        Some(TableArgs(pos, named))
+
+    // The array type `read_table` at `span` is expected to answer, as the value a `!` or `?` takes
+    // out of it or as the `Ok` of the `Result` it is bound as; `None` where nothing expects one.
+    private table_expected(self, span: Span, want: Option[Ty]) -> Option[Ty]
+        self.unwrapping match
+            Some(u) -> if u.at.start == span.start && u.at.end == span.end then return Some(u.want)
+            None -> ()
+
+        val w = want match
+            Some(w) -> w
+            None -> return None
+
+        self.family(w) match
+            Some(f) -> if f.result then Some(f.value) else None
+            None -> None
+
+    // The element type a table is read as: the expected array's, `real64` where none is expected,
+    // and `Error` after a diagnostic for an expected type that is not a table of numbers.
+    private table_element(*self, span: Span, want: Option[Ty]) -> Ty
+        val t = self.table_expected(span, want) match
+            Some(t) -> t
+            None -> return REAL
+
+        if is_wild(t) || is_void(t) then return REAL
+
+        if !is_array(t) || rank_of(t) != 2
+            self.fail(span, s"`read_table` reads a table into a rank-2 array, `[T; :, :]`, and the type expected here is ${show_ty(t)}")
+            return Error
+
+        val elem = elem_of(t)
+        val base = base_of(elem)
+
+        if is_wild(base) then return Error
+
+        if is_complex(base)
+            self.fail(span, "a table of complex numbers is not read: the comma in `(1.0, 2.0)` is also a separator (DESIGN §15)")
+            return Error
+
+        if !is_int(base) && !is_real(base)
+            self.fail(span, s"`read_table` reads integers or reals, and the element type expected here is ${show_ty(elem)}")
+            return Error
+
+        elem
+
+    // `read_table(path, skip = 0)` or `read_table(f)`.
+    private table_read(*self, span: Span, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        val wants = "a path and the lines to skip, `skip = n`, or a `File`"
+
+        val given = self.table_args("read_table", args, "skip") match
+            Some(g) -> g
+            None -> return self.invalid(span)
+
+        if given.pos.len() == 0 || given.pos.len() > 2 || given.pos.len() == 2 && given.named.is_some() then return self.arity(span, "read_table", wants)
+
+        val source = self.infer(given.pos[0])
+
+        if is_wild(source.ty) then return self.invalid(span)
+
+        val on_file = is_file(source.ty)
+
+        if !on_file && !is_str(source.ty)
+            self.fail(given.pos[0].span, s"`read_table` takes a path or a `File`, and this is ${show_ty(source.ty)}")
+            return self.invalid(span)
+
+        val skip_arg = if given.pos.len() == 2 then Some(given.pos[1]) else given.named
+
+        if on_file && skip_arg.is_some()
+            self.fail(span, "`read_table` of a `File` reads the rest of it and takes no `skip`; read the lines to skip with `read_line`")
+            return self.invalid(span)
+
+        val elem = self.table_element(span, want)
+
+        if is_error(elem) then return self.invalid(span)
+
+        val target = base_of(elem)
+        var items: Buf[TExpr] = buf()
+        val subject = self.new_local(if on_file then "file" else "path", source.ty, LVal)
+
+        items.push(bind(subject, source))
+
+        val kind = texpr(span, Ty.Str, TLiteral(StrVal(show_ty(target)), false))
+        val rows = self.new_local("rows", INTEGER, LVal)
+
+        if on_file
+            items.push(bind(rows, runtime(span, INTEGER, "table_read_file", two_args(the(span, source.ty, subject), kind))))
+        else
+            val skip = skip_arg match
+                Some(s) -> self.check(s, INTEGER, "the lines skipped")
+                None -> number(span, 0)
+            val skipped = self.new_local("skip", INTEGER, LVal)
+
+            items.push(bind(skipped, skip))
+
+            var operands = two_args(the(span, source.ty, subject), the(span, INTEGER, skipped))
+
+            operands.push(kind)
+            items.push(bind(rows, runtime(span, INTEGER, "table_read", operands)))
+
+        val numbers = Ty.Array(target, dynamic_axes(2))
+        val measured_numbers = Ty.Array(elem, dynamic_axes(2))
+        val result = self.prelude_instance(span, RESULT_TYPE, two_tys(measured_numbers, io_error_ty()))
+        val status = self.status_of(span, &items)
+
+        // The numbers copied out of the runtime, row by row.
+        val columns = self.new_local("columns", INTEGER, LVal)
+        val out = self.new_local("cells", numbers, LVar)
+        val k = self.new_local("k", INTEGER, LVar)
+        val i = self.new_local("i", INTEGER, LLoop)
+        val j = self.new_local("j", INTEGER, LLoop)
+        var body: Buf[TExpr] = buf()
+
+        body.push(bind(columns, runtime(span, INTEGER, "table_columns", buf())))
+        body.push(bind(out, runtime(span, numbers, "zeros", two_args(the(span, INTEGER, rows), the(span, INTEGER, columns)))))
+        body.push(bind(k, number(span, 0)))
+
+        var step: Buf[TExpr] = buf()
+
+        step.push(texpr(span, Void, TAssign("=", the(span, INTEGER, k), texpr(span, INTEGER, TBinary("+", the(span, INTEGER, k), number(span, 1))))))
+
+        val place = cell(span, target, the(span, numbers, out), the(span, INTEGER, i), Some(the(span, INTEGER, j)))
+        val store = texpr(span, Void, TAssign("=", place, table_value(span, target, the(span, INTEGER, k))))
+        val each = texpr(span, Void, TBlock(step, store))
+        val inner = texpr(span, Void, TFor(self.new_loop(None), j, number(span, 1), the(span, INTEGER, columns), true, None, each))
+
+        body.push(texpr(span, Void, TFor(self.new_loop(None), i, number(span, 1), the(span, INTEGER, rows), true, None, inner)))
+        body.push(runtime(span, Void, "table_clear", buf()))
+
+        val value = if ty_eq(measured_numbers, numbers) then the(span, numbers, out) else texpr(span, measured_numbers, TUnitAs(the(span, numbers, out)))
+        val filled = texpr(span, result, TBlock(body, texpr(span, result, TVariant("prelude.Ok", 0, one_arg(value)))))
+        val answer = texpr(span, result, TIf(texpr(span, Bool, TBinary("==", the(span, INTEGER, status), number(span, i128(FILE_OK)))), filled, Some(self.failure(span, result, status))))
+
+        texpr(span, result, TBlock(items, answer))
+    end table_read
+
+    // `write_table(path, a, sep = " ")`.
+    private table_write(*self, span: Span, args: Buf[Expr]) -> TExpr
+        val wants = "a path, an array of one or two axes, and the separator, `sep = \",\"`"
+
+        val given = self.table_args("write_table", args, "sep") match
+            Some(g) -> g
+            None -> return self.invalid(span)
+
+        if given.pos.len() < 2 || given.pos.len() > 3 || given.pos.len() == 3 && given.named.is_some() then return self.arity(span, "write_table", wants)
+
+        val path = self.check(given.pos[0], Ty.Str, "the path")
+        val data = self.infer(given.pos[1])
+
+        if is_wild(path.ty) || is_wild(data.ty) then return self.invalid(span)
+
+        val base = base_of(elem_of(data.ty))
+
+        if !is_array(data.ty) || rank_of(data.ty) > 2
+            self.fail(given.pos[1].span, s"`write_table` writes an array of one or two axes, and this is ${show_ty(data.ty)}")
+            return self.invalid(span)
+
+        if is_complex(base)
+            self.fail(given.pos[1].span, "a table of complex numbers is not written: the comma in `(1.0, 2.0)` is also a separator (DESIGN §15)")
+            return self.invalid(span)
+
+        if !is_int(base) && !is_real(base)
+            self.fail(given.pos[1].span, s"`write_table` writes integers or reals, and this is ${show_ty(data.ty)}")
+            return self.invalid(span)
+
+        val sep_arg = if given.pos.len() == 3 then Some(given.pos[2]) else given.named
+
+        val sep = sep_arg match
+            Some(s) -> self.check(s, Ty.Str, "the separator")
+            None -> texpr(span, Ty.Str, TLiteral(StrVal(" "), false))
+
+        val plain = if carries_unit(data.ty) then texpr(data.span, stripped(data.ty), TUnitAs(data)) else data
+        var items: Buf[TExpr] = buf()
+        val path_id = self.new_local("path", Ty.Str, LVal)
+        val data_id = self.new_local("table", plain.ty, LVal)
+        val sep_id = self.new_local("sep", Ty.Str, LVal)
+
+        items.push(bind(path_id, path))
+        items.push(bind(data_id, self.stored(the(span, plain.ty, data_id), plain)))
+        items.push(bind(sep_id, sep))
+        items.push(runtime(span, Void, "table_begin", one_arg(the(span, Ty.Str, sep_id))))
+
+        val table = the(span, plain.ty, data_id)
+        val i = self.new_local("i", INTEGER, LLoop)
+        val rows = runtime(span, INTEGER, "extent", two_args(table, number(span, 1)))
+        var row: Buf[TExpr] = buf()
+
+        if rank_of(plain.ty) == 1
+            row.push(field(span, cell(span, base, table, the(span, INTEGER, i), None)))
+        else
+            val j = self.new_local("j", INTEGER, LLoop)
+            val columns = runtime(span, INTEGER, "extent", two_args(table, number(span, 2)))
+            val each = field(span, cell(span, base, table, the(span, INTEGER, i), Some(the(span, INTEGER, j))))
+
+            row.push(texpr(span, Void, TFor(self.new_loop(None), j, number(span, 1), columns, true, None, each)))
+
+        val ended = texpr(span, Void, TBlock(row, runtime(span, Void, "table_row", buf())))
+
+        items.push(texpr(span, Void, TFor(self.new_loop(None), i, number(span, 1), rows, true, None, ended)))
+        items.push(runtime(span, Void, "table_write", one_arg(the(span, Ty.Str, path_id))))
+
+        val result = self.prelude_instance(span, RESULT_TYPE, two_tys(Void, io_error_ty()))
+        val status = self.status_of(span, &items)
+        val done = texpr(span, result, TVariant("prelude.Ok", 0, one_arg(texpr(span, Void, TLiteral(VoidVal, false)))))
+        val answer = texpr(span, result, TIf(texpr(span, Bool, TBinary("==", the(span, INTEGER, status), number(span, i128(FILE_OK)))), done, Some(self.failure(span, result, status))))
+
+        texpr(span, result, TBlock(items, answer))
+    end table_write
+end Elab
+
+// The value `k` of the table the runtime holds, read as `target`, at 64 bits and narrowed exactly.
+private table_value(span: Span, target: Ty, k: TExpr) -> TExpr = target match
+    Int(bits, signed) ->
+        val v = runtime(span, Int(64, signed), if signed then "table_int" else "table_uint", one_arg(k))
+
+        if bits == 64 then v else texpr(span, target, TConvert(v, true))
+    Real(bits) ->
+        val v = runtime(span, REAL, "table_real", one_arg(k))
+
+        if bits == 64 then v else texpr(span, target, TConvert(v, false))
+    _ -> texpr(span, Error, TInvalid)
+
+// `table_field` of the value `v` as `print` writes it.
+private field(span: Span, v: TExpr) -> TExpr
+    var parts: Buf[TPart] = buf()
+
+    parts.push(TValue(v, ""))
+    runtime(span, Void, "table_field", one_arg(texpr(span, Ty.Str, TInterp(parts, false))))

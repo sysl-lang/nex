@@ -335,7 +335,7 @@ impl Elab
 
         if self.is_intrinsic(g)
             self.fail(span, s"`${n}` is a collective of `mpi`, typed at each call from its operand, so it is only called: `${n}(x, …)`")
-        elif is_builtin(n) || is_array_builtin(n) || is_file_function(n)
+        elif is_builtin(n) || is_array_builtin(n) || is_file_function(n) || is_table_function(n)
             self.later(span, s"the prelude function `${n}` as a value")
         elif scalar_named(n).is_some()
             self.fail(span, s"`${n}` is a type; call it to convert a value: `${n}(x)`")

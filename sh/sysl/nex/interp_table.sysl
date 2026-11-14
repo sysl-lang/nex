@@ -1,0 +1,72 @@
+module sh.sysl.nex
+
+// Tables (DESIGN §17.7) as the interpreter runs them: each `table_*` call of the typed IR
+// (`elab_table.sysl`) is the runtime's own function (`runtime/tables.sysl`), which a compiled program
+// calls through its `nex_table_*` entries, so both engines read, write and fail alike. A script the
+// host sandboxes (§17.8) reaches no path: reading or writing a table by one answers `Denied`.
+
+import nex_runtime.sh.sysl.nex_runtime.{file_denied, table_begin, table_clear, table_columns, table_field, table_int, table_read, table_read_file,
+                                        table_real, table_row, table_uint, table_write}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+impl Interp
+    table_builtin(*self, span: Span, name: string, args: Buf[TExpr]) -> Code
+        val m = self.m
+        var codes: Buf[Code] = buf()
+
+        for a in args
+            codes.push(self.ex(a))
+
+        if name == "table_columns" then return (c) -> Ok(VInt(table_columns()))
+        if name == "table_clear" then return (c) ->
+            table_clear()
+            Ok(VVoid)
+        if name == "table_row" then return (c) ->
+            table_row()
+            Ok(VVoid)
+
+        val a = codes[0]
+
+        if name == "table_int" then return (c) -> Ok(VInt(table_int(int_of(a(c)?))))
+        if name == "table_uint" then return (c) -> Ok(VInt(long.wrap(table_uint(int_of(a(c)?)))))
+        if name == "table_real" then return (c) -> Ok(VReal(table_real(int_of(a(c)?))))
+        if name == "table_begin" then return (c) ->
+            table_begin(str_of(a(c)?))
+            Ok(VVoid)
+        if name == "table_field" then return (c) ->
+            table_field(str_of(a(c)?))
+            Ok(VVoid)
+
+        if name == "table_read_file"
+            val kind = codes[1]
+
+            return (c) ->
+                val f = file_of(a(c)?)
+
+                Ok(VInt(table_read_file(f, str_of(kind(c)?))))
+
+        if name == "table_read"
+            val skip = codes[1]
+            val kind = codes[2]
+
+            return (c) ->
+                val path = str_of(a(c)?)
+                val lines = int_of(skip(c)?)
+                val k = str_of(kind(c)?)
+
+                if m.sandbox
+                    file_denied(path)
+                    return Ok(VInt(0))
+
+                Ok(VInt(table_read(path, lines, k)))
+
+        // `table_write`.
+        (c) ->
+            val path = str_of(a(c)?)
+
+            if m.sandbox then file_denied(path) else table_write(path)
+
+            Ok(VVoid)
+    end table_builtin
+end Interp

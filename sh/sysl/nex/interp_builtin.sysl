@@ -46,6 +46,7 @@ impl Interp
 
         if is_text_builtin(name) then return self.text_builtin(span, name, args)
         if is_file_builtin(name) then return self.file_builtin(span, name, args)
+        if is_table_builtin(name) then return self.table_builtin(span, name, args)
         if name == "assert_approx" && is_array(args[0].ty) then return self.approx_arrays(args)
 
         if !name.starts_with("assert") && (is_array(t) || (args.len() > 0 && is_array(args[0].ty) && !self.is_args(args[0])))

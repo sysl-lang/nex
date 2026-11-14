@@ -328,7 +328,7 @@ impl Elab
 
                 return
             TBuiltin(name, args) ->
-                val io = file_io_name(name)
+                val io = io_name(name)
 
                 if io.len > 0 then self.fail(e.span, s"a parallel body does no I/O but `print` and `eprint`, and `${io}` is I/O")
 

@@ -1,0 +1,204 @@
+// args: a scratch directory
+// `write_table` then `read_table` gives the array back bit for bit (DESIGN §17.7, §17.5): every
+// finite `real16`, written as a rank-1 array (one value per line) and read as a column; geometric
+// walks across the whole range of `real32` and `real64`, down through the subnormals, as two-column
+// tables of each value and its negation; `-0.0`, the infinities and NaN at each width; every `int8`
+// and `uint8` as 16 x 16 tables, and the extremes of `int64` and `uint64`. The separator, by name
+// and by position, written as given; a value with a unit written as its number in the array's unit;
+// a `0 x 0` array written as an empty file; and a write into a directory that does not exist.
+
+def same64(x: real64, y: real64): bool = if is_nan(x) then is_nan(y) else x == y and (x != 0.0 or 1.0 / x == 1.0 / y)
+
+def same32(x: real32, y: real32): bool = if is_nan(x) then is_nan(y) else x == y and (x != 0.0 or 1.0 / x == 1.0 / y)
+
+def same16(x: real16, y: real16): bool = if is_nan(x) then is_nan(y) else x == y and (x != 0.0 or 1.0 / x == 1.0 / y)
+
+def steps64(ratio: real64): integer =
+  var n = 0
+  var x = 1.0
+  while is_finite(x)
+    n += 1
+    x = x * ratio
+  x = 1.0 / ratio
+  while x > 0.0 and x / ratio != x
+    n += 1
+    x = x / ratio
+  n
+
+// The walk from 1 by `ratio` up to the largest value and down past the smallest subnormal, each
+// value beside its negation.
+def walk64(ratio: real64): [real64; :, :] =
+  var out: [real64; :, :] = zeros((steps64(ratio), 2))
+  var k = 0
+  var x = 1.0
+  while is_finite(x)
+    k += 1
+    out[k, 1] = x
+    out[k, 2] = -x
+    x = x * ratio
+  x = 1.0 / ratio
+  while x > 0.0 and x / ratio != x
+    k += 1
+    out[k, 1] = x
+    out[k, 2] = -x
+    x = x / ratio
+  out
+
+def steps32(ratio: real32): integer =
+  var n = 0
+  var x: real32 = 1.0
+  while is_finite(x)
+    n += 1
+    x = x * ratio
+  x = 1.0 / ratio
+  while x > 0.0 and x / ratio != x
+    n += 1
+    x = x / ratio
+  n
+
+def walk32(ratio: real32): [real32; :, :] =
+  var out: [real32; :, :] = zeros((steps32(ratio), 2))
+  var k = 0
+  var x: real32 = 1.0
+  while is_finite(x)
+    k += 1
+    out[k, 1] = x
+    out[k, 2] = -x
+    x = x * ratio
+  x = 1.0 / ratio
+  while x > 0.0 and x / ratio != x
+    k += 1
+    out[k, 1] = x
+    out[k, 2] = -x
+    x = x / ratio
+  out
+
+def differ64(a: [real64; :, :], b: [real64; :, :]): integer =
+  var bad = 0
+  for i in 1..extent(a, 1)
+    for j in 1..extent(a, 2)
+      if not same64(a[i, j], b[i, j]) then bad += 1
+  bad
+
+def differ32(a: [real32; :, :], b: [real32; :, :]): integer =
+  var bad = 0
+  for i in 1..extent(a, 1)
+    for j in 1..extent(a, 2)
+      if not same32(a[i, j], b[i, j]) then bad += 1
+  bad
+
+def differ16(a: [real16; :, :], b: [real16; :, :]): integer =
+  var bad = 0
+  for i in 1..extent(a, 1)
+    for j in 1..extent(a, 2)
+      if not same16(a[i, j], b[i, j]) then bad += 1
+  bad
+
+def main(args: [string]) =
+  val dir = args[1]
+  val path = s"$dir/table.dat"
+
+  // Every finite real16, from the most negative up.
+  var n = 0
+  var h: real16 = -huge(real16(0))
+  while is_finite(h)
+    n += 1
+    h = nearest(h, 1.0)
+  var all16: [real16] = zeros(n)
+  h = -huge(real16(0))
+  for k in 1..n
+    all16[k] = h
+    h = nearest(h, 1.0)
+  write_table(path, all16)!
+  val back16: [real16; :, :] = read_table(path)!
+  var bad16 = 0
+  for k in 1..n
+    if not same16(all16[k], back16[k, 1]) then bad16 += 1
+  print(s"real16: $n values, ${extent(back16, 1)}x${extent(back16, 2)} read, $bad16 differ")
+
+  for ratio in [real32(1.37), real32(1.01)]
+    val a = walk32(ratio)
+    write_table(path, a)!
+    val b: [real32; :, :] = read_table(path)!
+    print(s"real32 by $ratio: ${extent(b, 1)}x${extent(b, 2)}, ${differ32(a, b)} differ")
+  for ratio in [1.37, 1.07]
+    val a = walk64(ratio)
+    write_table(path, a, sep = ",")!
+    val b = read_table(path)!
+    print(s"real64 by $ratio: ${extent(b, 1)}x${extent(b, 2)}, ${differ64(a, b)} differ")
+
+  print("-- special values")
+  write_text(path, "-0.0 0.0 inf -inf nan\n1e-320 -4.9e-324 1.7976931348623157e308 0.1 2.0\n")!
+  val s64 = read_table(path)!
+  write_table(path, s64)!
+  print(read_text(path)!)
+  print(differ64(s64, read_table(path)!))
+  val s32: [real32; :, :] = read_table(path)!
+  write_table(path, s32)!
+  print(read_text(path)!)
+  val t32: [real32; :, :] = read_table(path)!
+  print(differ32(s32, t32))
+  val s16: [real16; :, :] = read_table(path)!
+  write_table(path, s16)!
+  print(read_text(path)!)
+  val t16: [real16; :, :] = read_table(path)!
+  print(differ16(s16, t16))
+
+  print("-- integers")
+  var i8: [int8; :, :] = zeros((16, 16))
+  var u8: [uint8; :, :] = zeros((16, 16))
+  for i in 1..16
+    for j in 1..16
+      i8[i, j] = int8((i - 1) * 16 + j - 129)
+      u8[i, j] = uint8((i - 1) * 16 + j - 1)
+  write_table(path, i8)!
+  val j8: [int8; :, :] = read_table(path)!
+  var same8 = 0
+  for i in 1..16
+    for j in 1..16
+      if i8[i, j] == j8[i, j] then same8 += 1
+  write_table(path, u8)!
+  val v8: [uint8; :, :] = read_table(path)!
+  for i in 1..16
+    for j in 1..16
+      if u8[i, j] == v8[i, j] then same8 += 1
+  print(s"8-bit: $same8 of 512 read back, from ${j8[1, 1]} to ${j8[16, 16]} and ${v8[1, 1]} to ${v8[16, 16]}")
+  var wide: [int64; :, :] = zeros((2, 2))
+  wide[1, 1] = huge(0)
+  wide[1, 2] = -huge(0) - 1
+  wide[2, 1] = -1
+  write_table(path, wide)!
+  print(read_text(path)!)
+  val wide_back: [int64; :, :] = read_table(path)!
+  print(wide_back[1, 1] == huge(0) and wide_back[1, 2] == -huge(0) - 1 and wide_back[2, 1] == -1 and wide_back[2, 2] == 0)
+  var top: [uint64] = zeros(2)
+  top[1] = huge(uint64(0))
+  write_table(path, top)!
+  val top_back: [uint64; :, :] = read_table(path)!
+  print(s"$top_back ${top_back[1, 1] == huge(uint64(0))}")
+
+  print("-- separators and units")
+  write_text(path, "1 2.5\n-3 0.125\n")!
+  val m = read_table(path)!
+  write_table(path, m, sep = ",")!
+  print(read_text(path)!)
+  print(read_table(path)!)
+  write_table(path, m, "\t")!
+  print(replace(read_text(path)!, "\t", "<tab>"))
+  print(read_table(path)!)
+  val mm: [real<mm>; :, :] = read_table(path)!
+  write_table(path, to<cm>(mm))!
+  print(read_text(path)!)
+  write_table(path, mm)!
+  print(read_text(path)!)
+
+  print("-- nothing, and nowhere")
+  val none: [real; :, :] = zeros((0, 0))
+  write_table(path, none)!
+  print(s"<${read_text(path)!}>")
+  val e = read_table(path)!
+  print(s"${extent(e, 1)}x${extent(e, 2)}")
+  remove(path)!
+  write_table(s"$dir/no/such/dir/table.dat", m) match
+    Ok(_) -> print("ok")
+    Err(err) -> print(replace(s"$err | ${message(err)}", dir, "<dir>"))

@@ -1,6 +1,6 @@
 ---
 title: The Prelude
-summary: Every name available without an import — constants, elementary and complex math, array construction, shape queries, reductions, linear algebra, higher-order functions, views, conversions, I/O, testing, `Option` and `Result`, strings and numbers from text — with its Fortran equivalent.
+summary: Every name available without an import — constants, elementary and complex math, array construction, shape queries, reductions, linear algebra, higher-order functions, views, conversions, I/O, testing, `Option` and `Result`, strings, numbers from text, files and tables — with its Fortran equivalent.
 weight: 120
 ---
 
@@ -872,3 +872,76 @@ def main(): Result[void, IoError] =
 An embedded script writes `stdout` and `stderr` where its `print` and
 `eprint` go, the host's `write`. A script its host sandboxes reaches no file: every function on a
 path answers `Denied`, `exists` answers `false`, and `stdin` reads as empty.
+
+## 12.17 Tables
+
+`read_table` reads a file of numbers into a rank-2 array, as `numpy.loadtxt` does and as Fortran's
+list-directed `READ` into an array is used for, and `write_table` writes one that reads back exactly.
+
+| Signature | Meaning | Fortran |
+|---|---|---|
+| `read_table(path, skip = 0): Result[[T; :, :], IoError]` | the file's rows, its first `skip` lines ignored (a header) | `READ(u, *) ((a(i, j), j = 1, m), i = 1, n)` |
+| `read_table(f: File): Result[[T; :, :], IoError]` | the rest of an open `File` | the same, after reading the header |
+| `write_table(path, a, sep = " "): Result[void, IoError]` | `a`'s rows, one per line, the fields separated by `sep`; a rank-1 `a` one value per line | `WRITE(u, *)` row by row |
+
+**The element type is the one expected**, and `real64` where nothing expects one; no type argument
+is written. Any integer or real type may be read, and a unit expected of the elements is the
+table's unit, the text carrying none:
+
+```nex
+val a = read_table("data.dat")!                          // [real64; :, :]
+val n: [int32; :, :] = read_table("counts.dat", skip = 1)!
+val d: [real<mm>; :, :] = read_table("lengths.dat")!
+val r: Result[[real32; :, :], IoError] = read_table("x.dat")
+```
+
+The expectation comes from the value a `!` or `?` takes out, or from the `Result` where it is bound
+itself; a `match` on the call expects nothing, so it reads `real64`. A table of complex numbers is
+not read or written: the comma in `(1.0, 2.0)` would also be a separator.
+
+**The format.** A line is a row. Its fields are separated by **commas** where the first row has one,
+blanks around a comma ignored, and otherwise by **runs of blanks** (spaces and tabs), blanks before
+the first field and after the last ignored too. A blank line, and a line whose first non-blank is
+`#`, is skipped; a `#` after a row's fields is not a comment, but a field that does not read. `\r\n`
+ends a line as `\n` does, and `skip` counts every line, a blank or a comment too. Each field reads as
+a number from text does ([Numbers from text](#1215-numbers-from-text)): `1.5d0`, `-2_500`, `inf`,
+`nan` and `-0.0` all read. **`a[i, j]` is row `i`, field `j`**, so `extent(a, 1)` is the number of
+rows, a one-column file is `n x 1` and `a[:, 1]` is its column, and a file with no rows is `0 x 0`.
+
+**What fails is `Malformed`** at the line and the column, in bytes from 1, so an editor finds it:
+
+| The text | `message(e)` |
+|---|---|
+| a field that does not read | `in.dat:4:13: expected a real64, found "1.2.3"` |
+| an empty field, between two commas or after a trailing one | `in.dat:2:5: expected a real64, found ""` |
+| an integer out of its type's range | `in.dat:2:5: out of range for int8, found "300"` |
+| a row shorter than the first, at just past its last field | `in.dat:7:4: expected 3 fields, found 2` |
+| a row longer than the first, at its first field too many | `in.dat:7:5: expected 2 fields, found 3` |
+
+The file's own failures are those of `read_lines` (§12.16). A negative `skip`, and a `File` opened
+for writing or closed, are misuses that trap. `read_table(f)` numbers its lines on from those
+already read, and leaves nothing to read after it.
+
+**`write_table` writes each value as `print` does**, which reads back to the same value, so
+`read_table(p)` after `write_table(p, a)` gives `a` exactly, bit for bit, at every real width, NaN
+as a NaN and `-0.0` as `-0.0`, and every integer. A value with a unit is written as its number in
+the array's unit, and a `0 x 0` array as an empty file. A separator other than blanks or a comma
+does not read back.
+
+```nex
+def main(): Result[void, IoError] =
+  write_text("in.dat", "# t  x\n0.0  1.5\n1.0  2.5\n")?
+  val a = read_table("in.dat")?
+  print(a)                                  // [[0.0, 1.5], [1.0, 2.5]]
+  write_table("out.csv", a * 2.0, sep = ",")?
+  print(read_text("out.csv")?)              // 0.0,3.0 / 2.0,5.0
+  val f = open("in.dat", Read)?
+  val header = read_line(f)?
+  val rest = read_table(f)?
+  print(s"$header: ${extent(rest, 1)} rows")
+  remove("in.dat")?
+  remove("out.csv")
+```
+
+Like every function on files, these are a compile error in a `parallel` body and in an
+`@elemental` function.
