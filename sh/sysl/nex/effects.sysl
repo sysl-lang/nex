@@ -281,7 +281,9 @@ private scan(p: TProgram, fx: Effects, vars: Buf[string], e: TExpr, sc: *Scan)
                 TLocal(id) -> called_local(p, fx, id, sc)
                 _ -> if sc.s.opaque.len == 0 then sc.s.opaque = "a function value"
         TBuiltin(name, args) ->
-            if (name == "read_bytes" || name == "write_bytes") && sc.s.io.len == 0 then sc.s.io = name
+            val io = file_io_name(name)
+
+            if io.len > 0 && sc.s.io.len == 0 then sc.s.io = io
 
             for a in args
                 *a.kind match

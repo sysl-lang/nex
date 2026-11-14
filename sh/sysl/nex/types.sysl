@@ -60,6 +60,8 @@ enum Ty
     Complex(bits: int)
     Bool
     Str
+    // An open file (DESIGN §17.6): counted like a string, every copy sharing the one file.
+    File
     Void
     // The type of an expression that never yields: `return`, `exit`, `cycle`, `stop`. It stands
     // wherever any type is expected.
@@ -185,6 +187,10 @@ is_str(t: Ty) -> bool = t match
     Str -> true
     _ -> false
 
+is_file(t: Ty) -> bool = t match
+    File -> true
+    _ -> false
+
 // Whether `Error` stands anywhere inside a type, as a function's result whose body was refused.
 has_error(t: Ty) -> bool = t match
     Error -> true
@@ -230,6 +236,9 @@ ty_eq(a: Ty, b: Ty) -> bool = a match
         _ -> false
     Str -> b match
         Str -> true
+        _ -> false
+    File -> b match
+        File -> true
         _ -> false
     Void -> b match
         Void -> true
@@ -395,6 +404,7 @@ show_ty(t: Ty) -> string = t match
     Complex(b) -> s"complex[real${b}]"
     Bool -> "bool"
     Str -> "string"
+    File -> "File"
     Void -> "void"
     Never -> "never"
     Fn(sig) -> show_sig(*sig)

@@ -186,7 +186,7 @@ array_elemental_rules()
     assert_eq(refused("@elemental def p(x: real) = print(x)\n" + MAIN), "error: an `@elemental` function gives a value for each element, and `p` returns nothing @1:1")
     assert_eq(refused("@elemental def q(v: [real]) = 1.0\n" + MAIN), "error: an `@elemental` function takes scalars, and `v` is [real64] @1:1")
     assert_eq(refused("@elemental def e(x: real) =\n  eprint(x)\n  x\n" + MAIN), "ok")
-    assert_eq(refused("@elemental def e(x: real) =\n  write_bytes(\"f\", to_bytes([1]))\n  x\n" + MAIN), "error: an `@elemental` function may be run in any order, so it cannot do I/O with `write_bytes` @1:1")
+    assert_eq(refused("@elemental def e(x: real) =\n  write_bytes(\"f\", to_bytes([1]))!\n  x\n" + MAIN), "error: an `@elemental` function may be run in any order, so it cannot do I/O with `write_bytes` @1:1")
 
 @test("merge meets its two values as + does, broadcasts a scalar and takes a bool or [bool] mask")
 array_merge()

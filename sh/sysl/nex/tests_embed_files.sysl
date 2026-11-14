@@ -1,0 +1,96 @@
+module sh.sysl.nex
+@tests
+
+// Files in an embedded script (DESIGN §16, §17.6, §17.8): standard output and error written as files
+// go to the host's `write`, in order with `print` and `eprint`; a script that is not sandboxed reads
+// and writes files as a program does; a sandboxed one, which no grant reaches, is answered `Denied`
+// by every operation on a path, `false` by `exists`, and reads its standard input as empty — and the
+// files on the disk are untouched. A `File` does not cross to the host.
+
+import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
+import sysl.text.{StrBuilder, str_builder}
+
+private struct Gathered
+    text: StrBuilder
+
+private gathering(o: &Gathered, sandbox: bool) -> ScriptOptions =
+    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None)
+
+// `text` run as a script, what it wrote to the host, and its status.
+private ran_script(text: string, sandbox: bool) -> string
+    val o: &Gathered = Gathered(str_builder())
+
+    val s = load_script(text, "t.nex", new_host(), gathering(o, sandbox)) match
+        Ok(s) -> s
+        Err(ds) -> panic(ds[0].text)
+
+    val status = s.run().unwrap()
+
+    o.text.finish() + s"status $status\n"
+
+@test("an embedded script's stdout and stderr, written as files, go to the host's write in order with print")
+emb_files_standard_output()
+    val text = "def main() =\n  print(\"a\")\n  write_line(stdout, \"b\")!\n  write(stdout, \"c\")!\n  write(stdout, \"d\\n\")!\n  write_line(stderr, \"e\")!\n  eprint(\"f\")\n  flush(stdout)!\n  close(stdout)!\n  print(stdout)\n"
+
+    assert_eq(ran_script(text, false), "a\nb\ncd\nerr: e\nerr: f\nFile(stdout)\nstatus 0\n")
+    assert_eq(ran_script(text, true), "a\nb\ncd\nerr: e\nerr: f\nFile(stdout)\nstatus 0\n")
+
+@test("a script that is not sandboxed reads and writes files as a program does")
+emb_files_unsandboxed()
+    val dir = make_temp_dir("nex-embed-files").unwrap()
+    val text = s"def main() =\n  write_text(\"$dir/a.txt\", \"one\\ntwo\\n\")!\n  print(read_lines(\"$dir/a.txt\")!)\n  print(exists(\"$dir/a.txt\"))\n  val f = open(\"$dir/b.txt\", Write)!\n  write_line(f, \"from the script\")!\n"
+    val out = ran_script(text, false)
+    val written = read_text(s"$dir/b.txt").unwrap()
+
+    remove_dir_all(dir).unwrap()
+    assert_eq(out, "[one, two]\ntrue\nstatus 0\n")
+    assert_eq(written, "from the script\n")
+
+@test("a sandboxed script is answered Denied by every file operation, false by exists, and reads stdin as empty")
+emb_files_sandboxed()
+    val dir = make_temp_dir("nex-embed-sandbox").unwrap()
+
+    write_text(s"$dir/here.txt", "secret\n").unwrap()
+
+    val p = s"$dir/here.txt"
+    val q = s"$dir/new.txt"
+    var lines = s"def shown[T](r: Result[T, IoError]) = r match\n  Ok(_) -> print(\"reached\")\n  Err(e) -> print(replace(message(e), \"$dir\", \"<dir>\"))\n"
+
+    lines += "def main() =\n"
+    lines += s"  shown(open(\"$p\", Read))\n  shown(open(\"$q\", Write))\n  shown(open(\"$q\", Append))\n"
+    lines += s"  shown(read_text(\"$p\"))\n  shown(read_lines(\"$p\"))\n  shown(read_bytes(\"$p\"))\n"
+    lines += s"  shown(write_text(\"$q\", \"x\"))\n  shown(append_text(\"$q\", \"x\"))\n  shown(write_lines(\"$q\", [\"x\"]))\n"
+    lines += s"  shown(write_bytes(\"$q\", to_bytes([1])))\n  shown(remove(\"$p\"))\n  shown(open(\"relative.txt\", Read))\n"
+    lines += s"  print(exists(\"$p\"))\n  print(exists(\"$dir\"))\n"
+    lines += "  print(read_line(stdin)!)\n  print(read_line(stdin)!)\n  write_line(stdout, \"still written\")!\n"
+
+    val out = ran_script(lines, true)
+    val untouched = read_text(p).unwrap()
+    val made = exists(q)
+
+    remove_dir_all(dir).unwrap()
+
+    var denied = ""
+
+    for path in ["<dir>/here.txt", "<dir>/new.txt", "<dir>/new.txt", "<dir>/here.txt", "<dir>/here.txt", "<dir>/here.txt", "<dir>/new.txt", "<dir>/new.txt", "<dir>/new.txt",
+                 "<dir>/new.txt", "<dir>/here.txt", "relative.txt"]
+        denied += s"$path: permission denied\n"
+
+    assert_eq(out, denied + "false\nfalse\nNone\nNone\nstill written\nstatus 0\n")
+    assert_eq(untouched, "secret\n")
+    assert(!made, "the sandboxed script made a file")
+
+@test("a File does not cross to the host, as a host function's parameter or its result")
+emb_files_not_to_host()
+    val o: &Gathered = Gathered(str_builder())
+    val opts = gathering(o, false)
+
+    val took = load_script("@host extern def keep(f: File)\ndef main() = print(1)\n", "t.nex", new_host(), opts) match
+        Ok(_) -> "loaded"
+        Err(ds) -> s"${ds[0].message} @${ds[0].line}:${ds[0].col}"
+    val gave = load_script("@host extern def handed(): File\ndef main() = print(1)\n", "t.nex", new_host(), opts) match
+        Ok(_) -> "loaded"
+        Err(ds) -> s"${ds[0].message} @${ds[0].line}:${ds[0].col}"
+
+    assert_eq(took, "a `File` does not cross to the host (DESIGN §17.6), so `f` cannot be one @1:26")
+    assert_eq(gave, "a `File` does not cross to the host (DESIGN §17.6), so a `@host` function does not answer one @1:28")

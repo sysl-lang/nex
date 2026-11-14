@@ -1,0 +1,662 @@
+module sh.sysl.nex_runtime
+
+// Files (DESIGN §17.6): a `File`'s state, the line reader and the write buffer in front of the
+// system's file, and the whole-file functions. Both engines run these: the interpreter holds a
+// `&NexFile` in its value and calls the functions here directly, and a compiled program reaches them
+// through the `nex_file_*` entries at the end, its `File` an object of the counted heap.
+//
+// **Every operation answers through this thread's outcome**: it sets `FILE_OK`, the end of the input,
+// or what went wrong — its status, the path, the system's words and, for text that is not UTF-8, the
+// line and column — and the caller's typed IR reads them back (`file_status`, `file_fail_*`) to build
+// the `Result` and its `IoError`. A misuse, reading a file opened for writing or using one after
+// `close`, is the status `FILE_MISUSE` with the trap's message, which the typed IR traps with.
+//
+// The system's side is `sysl.fs`: its `File` for the descriptor and the reads, its whole-file
+// functions, `exists` and `remove_file`. Writes collect in a buffer here, shared by `print` and
+// `write(stdout, …)` for standard output (`text.sysl`'s sinks), and are handed to the system in
+// pieces smaller than `sysl.fs`'s own buffer, each followed by its `flush`, so every failure comes
+// back as the `IoError` that `flush` answers.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs as fs
+import sysl.io as sio
+import sysl.raw.ptr_cast
+import sysl.text.{from_utf8, from_utf8_unchecked}
+
+// What the last file operation of a thread came to.
+val FILE_OK = 0
+// `read_line` at the end of the input.
+val FILE_END = 1
+val FILE_NOT_FOUND = 2
+val FILE_DENIED = 3
+// Text that is not UTF-8, at `file_fail_line` and `file_fail_column`.
+val FILE_MALFORMED = 4
+// Anything else the system reports, in its words (`file_fail_message`).
+val FILE_FAILED = 5
+// A bug, not an `IoError`: the trap's message is `file_fail_message`.
+val FILE_MISUSE = 6
+
+// How a file is open: the prelude's `Mode` by its tag, then the three standard files.
+val MODE_READ = 0
+val MODE_WRITE = 1
+val MODE_APPEND = 2
+val MODE_STDIN = 3
+val MODE_STDOUT = 4
+val MODE_STDERR = 5
+
+// What is read from the system at once, and the most handed to it at once: less than `sysl.fs`'s
+// own buffer, so a write is never handed on by `sysl.fs` before the `flush` that reports it.
+private const CHUNK: usize = 4096
+// What is written before it is handed to the system.
+private const HOLD: usize = 8192
+
+// An open file, or one that was: what it was opened as, the system's file (none for standard input
+// and the two standard outputs, and for an input read from a string), what was written and not yet
+// handed over, what was read and not yet handed out as a line (`held[at..]`), whether the system's
+// input has ended, and how many lines have been handed out, which numbers a malformed one.
+struct NexFile
+    path: string
+    mode: int
+    os: Option[fs.File]
+    shut: bool
+    out: Buf[u8]
+    held: Buf[u8]
+    at: usize
+    ended: bool
+    lines: long
+
+private new_file(path: string, mode: int, os: Option[fs.File]) -> &NexFile = NexFile(path, mode, os, false, buf(), buf(), 0, false, 0)
+
+// -- the outcome --------------------------------------------------------------------------------------
+
+@thread_local private var status: long = 0
+@thread_local private var fail_path = ""
+@thread_local private var fail_message = ""
+@thread_local private var fail_line: long = 0
+@thread_local private var fail_column: long = 0
+
+file_status() -> long = status
+file_fail_path() -> string = fail_path
+file_fail_message() -> string = fail_message
+file_fail_line() -> long = fail_line
+file_fail_column() -> long = fail_column
+
+private succeeded()
+    status = FILE_OK
+
+private failed(code: int, path: string, message: string)
+    status = long(code)
+    fail_path = path
+    fail_message = message
+
+private malformed(path: string, line: long, column: long)
+    failed(FILE_MALFORMED, path, "not UTF-8")
+    fail_line = line
+    fail_column = column
+
+private misused(message: string)
+    failed(FILE_MISUSE, "", message)
+
+// What `sysl.fs` reported about `path`, as nex's outcome: `NotFound`, `Denied`, or `Failed` in the
+// system's words.
+private reported(path: string, e: fs.IoError) = e match
+    NotFound -> failed(FILE_NOT_FOUND, path, "")
+    PermissionDenied -> failed(FILE_DENIED, path, "")
+    NotPermitted -> failed(FILE_DENIED, path, "")
+    _ -> failed(FILE_FAILED, path, e.message())
+
+// The operation on `path` refused: a sandboxed script, which no grant lets reach a file (DESIGN
+// §17.8).
+file_denied(path: string) = failed(FILE_DENIED, path, "")
+
+// -- opening ------------------------------------------------------------------------------------------
+
+// `path` opened as `mode` (`MODE_READ`, `MODE_WRITE` or `MODE_APPEND`), or `None` with the outcome
+// saying why. A directory is not a file to read, though the system opens one.
+file_open(path: string, mode: int) -> Option[&NexFile]
+    if mode == MODE_READ && fs.is_dir(path)
+        failed(FILE_FAILED, path, fs.IoError.IsADirectory.message())
+        return None
+
+    val opened = if mode == MODE_READ then fs.open(path) elif mode == MODE_WRITE then fs.create(path) else fs.append(path)
+
+    opened match
+        Ok(f) ->
+            succeeded()
+            Some(new_file(path, mode, Some(f)))
+        Err(e) ->
+            reported(path, e)
+            None
+
+private var standard: Buf[&NexFile] = buf()
+
+// Standard input (0), output (1) or error (2): one file each, every `stdin` sharing what was read
+// ahead.
+std_file(k: long) -> &NexFile
+    if standard.len() == 0
+        standard.push(new_file("stdin", MODE_STDIN, None))
+        standard.push(new_file("stdout", MODE_STDOUT, None))
+        standard.push(new_file("stderr", MODE_STDERR, None))
+
+    standard[usize(k)]
+
+// A standard input that reads `text` and then ends: a sandboxed script's, which is empty, or a
+// host's or a test's own.
+text_input(text: string) -> &NexFile
+    val f = new_file("stdin", MODE_STDIN, None)
+
+    f.held.extend(text.bytes)
+    f.ended = true
+    f
+
+// What a `File` prints as inside `File(…)`: its path, or the standard file's name.
+file_name(f: &NexFile) -> string = f.path
+
+is_standard_output(f: &NexFile) -> bool = f.mode == MODE_STDOUT || f.mode == MODE_STDERR
+
+private reads(f: &NexFile) -> bool = f.mode == MODE_READ || f.mode == MODE_STDIN
+
+private mode_name(mode: int) -> string = if mode == MODE_READ then "Read" elif mode == MODE_WRITE then "Write" else "Append"
+
+// Whether `what` may use `f`, reading where `reading`; where not, the outcome is the misuse.
+private usable(f: &NexFile, what: string, reading: bool) -> bool
+    if f.shut
+        misused(s"$what on a closed file")
+        return false
+
+    if reading == reads(f) then return true
+
+    if f.mode >= MODE_STDIN then misused(s"$what on ${f.path}, which is ${if reading then "written" else "read"}")
+    else misused(s"$what on a file opened for ${mode_name(f.mode)}")
+
+    false
+
+// Whether `what` may use `f`, reading where `reading`: the outcome `FILE_OK`, or the misuse. An
+// interpreter writing standard output to its host asks this before it writes.
+file_usable(f: &NexFile, what: string, reading: bool) -> bool
+    if !usable(f, what, reading) then return false
+
+    succeeded()
+    true
+
+// -- reading lines --------------------------------------------------------------------------------
+
+// The next line of `f` without its `\n` or `\r\n`, the outcome `FILE_OK`; or `""` with the outcome
+// `FILE_END` at the end of the input, or what went wrong. A last line without a newline is still a
+// line, and a file ending in a newline has no empty line after it.
+file_read_line(f: &NexFile, what: string) -> string
+    if !usable(f, what, true) then return ""
+
+    var from = f.at
+
+    loop
+        for k in from..<f.held.len()
+            if f.held[k] == u8('\n') then return taken_line(f, k, k + 1)
+
+        if f.ended
+            if f.at == f.held.len()
+                status = FILE_END
+                return ""
+
+            return taken_line(f, f.held.len(), f.held.len())
+
+        // What is searched already is not searched again.
+        val searched = f.held.len() - f.at
+
+        compact(f)
+        from = f.at + searched
+
+        if !filled(f) then return ""
+end file_read_line
+
+// The line `held[at..<end]`, a `\r` before its `\n` dropped, handed out with `at` moved to `next`.
+private taken_line(f: &NexFile, end: usize, next: usize) -> string
+    var stop = end
+
+    if next > end && stop > f.at && f.held[stop - 1] == u8('\r') then stop -= 1
+
+    val bytes = f.held.view()[f.at..<stop]
+
+    f.at = next
+    f.lines += 1
+
+    from_utf8(bytes) match
+        Ok(_) ->
+            succeeded()
+            from_utf8_unchecked(bytes).copy()
+        Err(e) ->
+            malformed(f.path, f.lines, long(e.offset) + 1)
+            ""
+
+// What was handed out dropped from the front of the buffer, once it is all of it or a good part.
+private compact(f: &NexFile)
+    if f.at == 0 then return
+
+    if f.at < f.held.len() && f.at < 65536 then return
+
+    var rest: Buf[u8] = buf()
+
+    rest.extend(f.held.view()[f.at..])
+    f.held = rest
+    f.at = 0
+
+// More of the input read onto the end of `f.held`, or its end noted; false with the outcome where
+// the read failed.
+private filled(f: &NexFile) -> bool
+    var chunk: [CHUNK]u8 = [0; CHUNK]
+
+    f.os match
+        Some(os) ->
+            var file = os
+            val got = file.read(chunk[..])
+
+            if got.len == 0
+                // `sysl.fs.File` latches a failed read without saying which failure it was.
+                if file.failed()
+                    failed(FILE_FAILED, f.path, "the file could not be read")
+                    return false
+
+                f.ended = true
+            else
+                f.held.extend(got)
+        None ->
+            var input = sio.stdin()
+            val got = input.read(chunk[..])
+
+            if got.len == 0
+                if input.failed()
+                    failed(FILE_FAILED, f.path, "standard input could not be read")
+                    return false
+
+                f.ended = true
+            else
+                f.held.extend(got)
+
+    true
+end filled
+
+// -- writing --------------------------------------------------------------------------------------
+
+// `s`, followed by a newline where `line`, written to `f`: collected, and handed to the system once
+// enough has. Standard output and error go to the sinks `print` and `eprint` write to.
+file_write(f: &NexFile, s: string, line: bool, what: string)
+    if !usable(f, what, false) then return
+
+    succeeded()
+
+    if is_standard_output(f)
+        val sink: long = if f.mode == MODE_STDOUT then 1 else 2
+
+        put(sink, if line then s + "\n" else s)
+        return
+
+    f.out.extend(s.bytes)
+
+    if line then f.out.push(u8('\n'))
+
+    if f.out.len() >= HOLD then _ = handed_over(f)
+
+// What `f` collected handed to the system, in pieces each followed by `sysl.fs`'s `flush`; false
+// with the outcome where the system refused one. What could not be handed over is dropped: keeping
+// it would only have it fail again.
+private handed_over(f: &NexFile) -> bool
+    if f.out.len() == 0 then return true
+
+    var file = f.os.unwrap()
+    var k: usize = 0
+    val n = f.out.len()
+
+    while k < n
+        val end = if n - k > CHUNK then k + CHUNK else n
+
+        file.write(f.out.view()[k..<end])
+
+        file.flush() match
+            Ok(_) -> ()
+            Err(e) ->
+                f.out.clear()
+                reported(f.path, e)
+                return false
+
+        if file.failed()
+            f.out.clear()
+            failed(FILE_FAILED, f.path, "the file could not be written")
+            return false
+
+        k = end
+
+    f.out.clear()
+    true
+end handed_over
+
+// What `f` collected handed to the system now.
+file_flush(f: &NexFile)
+    if f.shut
+        misused("flush on a closed file")
+        return
+
+    succeeded()
+
+    if is_standard_output(f) then flush_output()
+    elif !reads(f) then _ = handed_over(f)
+
+// `f` flushed and closed, for every reference to it; closing it again does nothing. A standard file
+// is flushed and stays open.
+file_close(f: &NexFile)
+    succeeded()
+
+    if f.shut then return
+
+    if f.mode >= MODE_STDIN
+        if is_standard_output(f) then flush_output()
+        return
+
+    val written = reads(f) || handed_over(f)
+
+    f.shut = true
+    f.held = buf()
+
+    var file = f.os.unwrap()
+    val closed = file.close()
+
+    if written
+        closed match
+            Ok(_) -> ()
+            Err(e) -> reported(f.path, e)
+
+// `f` closed as its last reference goes: `""`, or the sentence of the failure, which the caller
+// traps with, since nobody is left to hand it to.
+file_dropped(f: &NexFile) -> string
+    if f.shut || f.mode >= MODE_STDIN then return ""
+
+    file_close(f)
+
+    if status == FILE_OK then return ""
+
+    if status == FILE_NOT_FOUND then s"$fail_path: no such file"
+    elif status == FILE_DENIED then s"$fail_path: permission denied"
+    else s"$fail_path: $fail_message"
+
+// -- whole files ----------------------------------------------------------------------------------
+
+// The bytes of `path`, or `None` with the outcome.
+private whole(path: string) -> Option[[]u8]
+    if fs.is_dir(path)
+        failed(FILE_FAILED, path, fs.IoError.IsADirectory.message())
+        return None
+
+    fs.read_bytes(path) match
+        Ok(b) ->
+            succeeded()
+            Some(b)
+        Err(e) ->
+            reported(path, e)
+            None
+
+// Where `b` is not UTF-8, the outcome says so at the line and column of the first byte that is not;
+// false then.
+private checked_text(path: string, b: []const u8) -> bool
+    from_utf8(b) match
+        Ok(_) -> true
+        Err(e) ->
+            var line: long = 1
+            var start: usize = 0
+
+            for k in 0..<e.offset
+                if b[k] == u8('\n')
+                    line += 1
+                    start = k + 1
+
+            malformed(path, line, long(e.offset - start) + 1)
+            false
+
+// The whole of `path` as text.
+file_read_text(path: string) -> string
+    whole(path) match
+        Some(b) -> if checked_text(path, b) then from_utf8_unchecked(b).copy() else ""
+        None -> ""
+
+// The lines of `path`, as `read_line` reads them.
+file_read_lines(path: string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    val b = whole(path) match
+        Some(b) -> b
+        None -> return out
+
+    if !checked_text(path, b) then return out
+
+    var start: usize = 0
+
+    for k in 0..<b.len
+        if b[k] == u8('\n')
+            val stop = if k > start && b[k - 1] == u8('\r') then k - 1 else k
+
+            out.push(from_utf8_unchecked(b[start..<stop]).copy())
+            start = k + 1
+
+    if start < b.len then out.push(from_utf8_unchecked(b[start..]).copy())
+
+    out
+end file_read_lines
+
+// `bytes` made the whole of `path`, or added at its end where `append`.
+file_write_all(path: string, bytes: []const u8, append: bool)
+    val r = if append then fs.append_bytes(path, bytes) else fs.write_bytes(path, bytes)
+
+    r match
+        Ok(_) -> succeeded()
+        Err(e) -> reported(path, e)
+
+// Each of `lines` followed by a newline, made the whole of `path`.
+file_write_lines(path: string, lines: []const string)
+    var bytes: Buf[u8] = buf()
+
+    for s in lines
+        bytes.extend(s.bytes)
+        bytes.push(u8('\n'))
+
+    file_write_all(path, bytes.view(), false)
+
+// Whether anything is at `path`.
+file_exists(path: string) -> bool = fs.exists(path)
+
+// The file at `path` deleted.
+file_remove(path: string)
+    fs.remove_file(path) match
+        Ok(_) -> succeeded()
+        Err(e) -> reported(path, e)
+
+// The bytes `read_bytes` read, which the typed IR copies out one at a time; and the bytes
+// `write_bytes` writes, which it puts in one at a time.
+@thread_local private var bytes_held: Option[&Buf[u8]] = None
+
+// This thread's held bytes, made the first time it needs them.
+private held_bytes() -> &Buf[u8]
+    bytes_held match
+        Some(b) -> return b
+        None -> ()
+
+    val b: &Buf[u8] = buf()
+
+    bytes_held = Some(b)
+    b
+
+// The bytes of `path` held for `file_byte`, and how many there are.
+file_read_bytes(path: string) -> long
+    val held = held_bytes()
+
+    held.clear()
+
+    whole(path) match
+        Some(b) ->
+            held.extend(b)
+            long(b.len)
+        None -> 0
+
+// Byte `k` of those `file_read_bytes` holds, from 1.
+file_byte(k: long) -> long = long(held_bytes()[usize(k - 1)])
+
+// The bytes `write_bytes` writes begun, put in one at a time and written by `file_write_bytes`.
+file_bytes_begin() = held_bytes().clear()
+
+file_bytes_put(b: long) = held_bytes().push(u8.wrap(b))
+
+file_write_bytes(path: string)
+    val held = held_bytes()
+
+    file_write_all(path, held.view(), false)
+    held.clear()
+
+// -- the compiled program's entries ----------------------------------------------------------------
+//
+// A compiled `File` is an object of the counted heap whose payload is a slot of `table`, and whose
+// release closes the file once the last reference goes. Where that close fails the program ends as
+// a trap nothing catches would end it (DESIGN §17.6) — a release is a call no frame can be abandoned
+// across, so the trap cannot return to a catch — unless a trap is already giving back what its
+// frames held, which drops the failure. The three standard files are slots 0 to 2, never closed.
+
+private var table: Buf[Option[&NexFile]] = buf()
+private var free_slots: Buf[usize] = buf()
+
+private slot_of(p: *u8) -> usize
+    val words: *long = ptr_cast(p)
+
+    usize(words[0])
+
+private file_at(p: *u8) -> &NexFile = table[slot_of(p)].unwrap()
+
+private standard_slots()
+    if table.len() == 0
+        for k in 0..<3
+            table.push(Some(std_file(long(k))))
+
+// The file in `slot` as a new counted object, which the caller owns.
+private object_of(slot: usize) -> *u8
+    val p = new_object(8, &file_release)
+    val words: *long = ptr_cast(p)
+
+    words[0] = long(slot)
+    p
+
+private new_slot(f: &NexFile) -> usize
+    standard_slots()
+
+    if free_slots.len() > 0
+        val k = free_slots.pop().unwrap()
+
+        table[k] = Some(f)
+        return k
+
+    table.push(Some(f))
+    table.len() - 1
+
+@export("nex_file_release")
+file_release(p: *u8)
+    val k = slot_of(p)
+
+    if k < 3 then return
+
+    val f = table[k].unwrap()
+
+    table[k] = None
+    free_slots.push(k)
+
+    val message = file_dropped(f)
+
+    if message != "" && !unwinding() then ended_by_failure(message)
+
+// Every file still open as the program ends, closed as its last reference going would close it.
+files_at_exit()
+    for k in 3..<table.len()
+        table[k] match
+            Some(f) ->
+                val message = file_dropped(f)
+
+                if message != "" then ended_by_failure(message)
+            None -> ()
+
+@export("nex_file_std")
+file_std(k: long) -> *u8
+    standard_slots()
+    object_of(usize(k))
+
+@export("nex_file_open")
+file_open_c(path: *u8, mode: long) -> *u8
+    val slot = opened_slot(c_text(path), int(mode))
+
+    if slot < 0 then null else object_of(usize(slot))
+
+// The slot of `path` opened as `mode`, or -1 with the outcome.
+private opened_slot(path: string, mode: int) -> long = file_open(path, mode) match
+    Some(f) -> long(new_slot(f))
+    None -> -1
+
+@export("nex_file_read_line")
+file_read_line_c(f: *u8) -> *u8 = c_string(file_read_line(file_at(f), "read_line"))
+
+@export("nex_file_write")
+file_write_c(f: *u8, s: *u8) = file_write(file_at(f), c_text(s), false, "write")
+
+@export("nex_file_write_line")
+file_write_line_c(f: *u8, s: *u8) = file_write(file_at(f), c_text(s), true, "write_line")
+
+@export("nex_file_flush")
+file_flush_c(f: *u8) = file_flush(file_at(f))
+
+@export("nex_file_close")
+file_close_c(f: *u8) = file_close(file_at(f))
+
+@export("nex_file_name")
+file_name_c(f: *u8) -> *u8 = c_string(file_name(file_at(f)))
+
+@export("nex_file_read_text")
+file_read_text_c(path: *u8) -> *u8 = c_string(file_read_text(c_text(path)))
+
+@export("nex_file_read_lines")
+file_read_lines_c(path: *u8) -> *u8 = string_items(file_read_lines(c_text(path)))
+
+@export("nex_file_write_text")
+file_write_text_c(path: *u8, s: *u8) = file_write_all(c_text(path), c_text(s).bytes, false)
+
+@export("nex_file_append_text")
+file_append_text_c(path: *u8, s: *u8) = file_write_all(c_text(path), c_text(s).bytes, true)
+
+@export("nex_file_write_lines")
+file_write_lines_c(path: *u8, lines: *u8) = file_write_lines(c_text(path), item_strings(lines).view())
+
+@export("nex_file_exists")
+file_exists_c(path: *u8) -> bool = file_exists(c_text(path))
+
+@export("nex_file_remove")
+file_remove_c(path: *u8) = file_remove(c_text(path))
+
+@export("nex_file_read_bytes")
+file_read_bytes_c(path: *u8) -> long = file_read_bytes(c_text(path))
+
+@export("nex_file_byte")
+file_byte_c(k: long) -> long = file_byte(k)
+
+@export("nex_file_bytes_begin")
+file_bytes_begin_c() = file_bytes_begin()
+
+@export("nex_file_bytes_put")
+file_bytes_put_c(b: long) = file_bytes_put(b)
+
+@export("nex_file_write_bytes")
+file_write_bytes_c(path: *u8) = file_write_bytes(c_text(path))
+
+@export("nex_file_status")
+file_status_c() -> long = file_status()
+
+@export("nex_file_fail_path")
+file_fail_path_c() -> *u8 = c_string(fail_path)
+
+@export("nex_file_fail_message")
+file_fail_message_c() -> *u8 = c_string(fail_message)
+
+@export("nex_file_fail_line")
+file_fail_line_c() -> long = fail_line
+
+@export("nex_file_fail_column")
+file_fail_column_c() -> long = fail_column

@@ -151,6 +151,7 @@ impl Elab
             val ty = self.resolve_type(p.typ)
 
             if is_callback(ty) then self.fail(p.typ.span, s"a `@host` function's parameter is a value the host holds, and `${p.name}` is a function")
+            if is_file(ty) then self.fail(p.typ.span, s"a `File` does not cross to the host (DESIGN §17.6), so `${p.name}` cannot be one")
 
             names.push(p.name)
             tys.push(ty)
@@ -163,6 +164,7 @@ impl Elab
                 val r = self.resolve_type(t)
 
                 if is_callback(r) then self.fail(t.span, "a `@host` function's result is a value the host holds, and a function is not one")
+                if is_file(r) then self.fail(t.span, "a `File` does not cross to the host (DESIGN §17.6), so a `@host` function does not answer one")
                 r
             None -> Void
 

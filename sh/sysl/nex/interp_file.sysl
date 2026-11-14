@@ -1,0 +1,173 @@
+module sh.sysl.nex
+
+// Files (DESIGN §17.6) as the interpreter runs them: each `file_*` call of the typed IR
+// (`elab_file.sysl`) is the runtime's own function (`runtime/files.sysl`), which a compiled program
+// calls through its `nex_file_*` entries, so both engines read, write, fail and trap alike.
+//
+// What is the interpreter's own: a `File` is a `VFile` holding the runtime's file in a box whose
+// last holder letting go closes it; standard output and error are written where `print` and
+// `eprint` write, the machine's `write`, which is the host's for an embedded script (DESIGN §16);
+// and a script the host sandboxes (§16.6, §17.8) reaches no file — every operation on a path
+// answers `Denied`, `exists` answers false, and standard input reads as empty.
+
+import nex_runtime.sh.sysl.nex_runtime.{NexFile, ended_by_failure, file_byte, file_bytes_begin, file_bytes_put, file_close, file_denied,
+                                        file_dropped, file_exists, file_fail_column, file_fail_line, file_fail_message, file_fail_path, file_flush, file_name,
+                                        file_open, file_read_bytes, file_read_line, file_read_lines, file_read_text, file_remove, file_status, file_usable,
+                                        file_write, file_write_all, file_write_bytes, file_write_lines, is_standard_output, std_file, text_input}
+import sysl.buf.{Buf, buf}
+import sh.sysl.parsing.Span
+
+// The runtime's file a `VFile` holds. When the last value holding it goes, the file is closed, and a
+// close that fails then ends the run as a trap nothing catches, there being nobody to hand the
+// failure to.
+struct FileBox
+    f: &NexFile
+
+impl Drop for FileBox
+    drop(self)
+        val message = file_dropped(self.f)
+
+        if message != "" then ended_by_failure(message)
+
+private[nex] file_of(v: Value) -> &NexFile = v match
+    VFile(b) -> b.f
+    _ -> std_file(0)
+
+// A `File` as `print` writes it: `File(run.log)`, `File(stdout)`.
+private[nex] file_text(v: Value) -> string = s"File(${file_name(file_of(v))})"
+
+private strings_of_value(v: Value) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    for e in elements(arr_of(v))
+        out.push(str_of(e))
+
+    out
+
+private strings_answer(strings: Buf[string]) -> Value
+    var vs: Buf[Value] = buf()
+
+    for s in strings
+        vs.push(VStr(s))
+
+    vector(Ty.Str, vs)
+
+impl Interp
+    file_builtin(*self, span: Span, name: string, args: Buf[TExpr]) -> Code
+        val m = self.m
+        var codes: Buf[Code] = buf()
+
+        for a in args
+            codes.push(self.ex(a))
+
+        // The outcome of the call just made, read back.
+        if name == "file_status" then return (c) -> Ok(VInt(file_status()))
+        if name == "file_fail_path" then return (c) -> Ok(VStr(file_fail_path()))
+        if name == "file_fail_message" then return (c) -> Ok(VStr(file_fail_message()))
+        if name == "file_fail_line" then return (c) -> Ok(VInt(file_fail_line()))
+        if name == "file_fail_column" then return (c) -> Ok(VInt(file_fail_column()))
+        if name == "file_bytes_begin" then return (c) ->
+            file_bytes_begin()
+            Ok(VVoid)
+
+        val a = codes[0]
+
+        if name == "file_std"
+            return (c) ->
+                val k = int_of(a(c)?)
+
+                if k == 0
+                    m.stdin match
+                        Some(input) -> return Ok(VFile(FileBox(input)))
+                        None -> ()
+
+                Ok(VFile(FileBox(std_file(k))))
+
+        if name == "file_byte" then return (c) -> Ok(VInt(file_byte(int_of(a(c)?))))
+        if name == "file_bytes_put" then return (c) ->
+            file_bytes_put(int_of(a(c)?))
+            Ok(VVoid)
+
+        // On a `File`.
+        if name == "file_read_line" then return (c) -> Ok(VStr(file_read_line(file_of(a(c)?), "read_line")))
+        if name == "file_flush" then return (c) ->
+            file_flush(file_of(a(c)?))
+            Ok(VVoid)
+        if name == "file_close" then return (c) ->
+            file_close(file_of(a(c)?))
+            Ok(VVoid)
+
+        if name == "file_write" || name == "file_write_line"
+            val b = codes[1]
+            val line = name == "file_write_line"
+            val what = name[5..]
+
+            return (c) ->
+                val f = file_of(a(c)?)
+                val s = str_of(b(c)?)
+
+                if is_standard_output(f)
+                    if file_usable(f, what, false) then emit(m, if file_name(f) == "stdout" then StdOut else StdErr, if line then s + "\n" else s)
+                else
+                    file_write(f, s, line, what)
+
+                Ok(VVoid)
+
+        // On a path: none reached in a sandbox.
+        if name == "file_exists" then return (c) ->
+            val path = str_of(a(c)?)
+
+            Ok(VBool(!m.sandbox && file_exists(path)))
+
+        if name == "file_open"
+            val b = codes[1]
+
+            return (c) ->
+                val path = str_of(a(c)?)
+                val mode = int(int_of(b(c)?))
+
+                if m.sandbox
+                    file_denied(path)
+                    return Ok(VVoid)
+
+                file_open(path, mode) match
+                    Some(f) -> Ok(VFile(FileBox(f)))
+                    None -> Ok(VVoid)
+
+        if name == "file_read_text" || name == "file_read_lines" || name == "file_read_bytes" || name == "file_remove" || name == "file_write_bytes"
+            return (c) ->
+                val path = str_of(a(c)?)
+
+                if m.sandbox
+                    file_denied(path)
+
+                    return if name == "file_read_text" then Ok(VStr(""))
+                           elif name == "file_read_lines" then Ok(strings_answer(buf()))
+                           elif name == "file_read_bytes" then Ok(VInt(0))
+                           else Ok(VVoid)
+
+                if name == "file_read_text" then Ok(VStr(file_read_text(path)))
+                elif name == "file_read_lines" then Ok(strings_answer(file_read_lines(path)))
+                elif name == "file_read_bytes" then Ok(VInt(file_read_bytes(path)))
+                elif name == "file_remove"
+                    file_remove(path)
+                    Ok(VVoid)
+                else
+                    file_write_bytes(path)
+                    Ok(VVoid)
+
+        // `write_text`, `append_text` and `write_lines`: a path and what is written.
+        val b = codes[1]
+
+        (c) ->
+            val path = str_of(a(c)?)
+            val v = b(c)?
+
+            if m.sandbox then file_denied(path)
+            elif name == "file_write_lines" then file_write_lines(path, strings_of_value(v).view())
+            elif name == "file_append_text" then file_write_all(path, str_of(v).bytes, true)
+            else file_write_all(path, str_of(v).bytes, false)
+
+            Ok(VVoid)
+    end file_builtin
+end Interp

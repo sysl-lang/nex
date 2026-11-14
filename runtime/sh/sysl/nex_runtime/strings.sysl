@@ -150,7 +150,7 @@ hold_cell(slot: *u8)
     retain(p[0])
 
 // `strings` as a new rank-1 array of nex strings, which the caller owns.
-private string_items(strings: Buf[string]) -> *u8
+string_items(strings: Buf[string]) -> *u8
     val p = items_new(long(strings.len()), 8, &hold_cell, &release_slot, 1)
 
     for k in 0..<strings.len()
@@ -161,7 +161,7 @@ private string_items(strings: Buf[string]) -> *u8
     p
 
 // The strings of the array `p` holds, in storage order.
-private item_strings(p: *u8) -> Buf[string]
+item_strings(p: *u8) -> Buf[string]
     var out: Buf[string] = buf()
 
     for k in 1..items_count(p)

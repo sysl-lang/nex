@@ -24,10 +24,10 @@ import nex.sh.sysl.nex.{Ending, LoadOptions, Stream, TProgram, interpret, interp
 import nex_runtime.sh.sysl.nex_runtime.uncaught_text
 import sh.sysl.parsing.{Diagnostic, source_of}
 import sysl.buf.{Buf, buf}
-import sysl.fs.{entries, exists, read_text}
+import sysl.fs.{entries, exists, make_dir, read_text, remove_dir_all}
 import sysl.path.{join_all, normalize, parent}
-import sysl.process.{Output, Status, Var, capture}
-import sysl.text.{StrBuilder, from_utf8, split, str_builder}
+import sysl.process.{Output, Status, Stdio, Var, capture}
+import sysl.text.{StrBuilder, from_utf8, join, split, str_builder}
 
 // Where a program runs: compiled through MLIR to a native program, or interpreted from its typed IR.
 enum Engine
@@ -102,20 +102,21 @@ struct Run
 // `text` run on every engine of `ENGINES` — or, where `entry` is given, the project whose root module
 // it is, `text` then being every file of it. The compiled engine builds `<work>/<case>` once and runs it
 // at each of `threads` (`""` leaving `OMP_NUM_THREADS` alone); an engine running in one thread runs it
-// once. A program that does not build is a run whose output is the diagnostics.
+// once. A program that does not build is a run whose output is the diagnostics. `input`, where it is
+// not `""`, is the path of a file every run reads as its standard input.
 runs(b: Bench, case: string, text: string, entry: string = "", args: []const string = [], fpe_trap: bool = false, links: []const string = [],
-     prelude: Option[string] = None, threads: []const string = [""]) -> Buf[Run]
+     prelude: Option[string] = None, threads: []const string = [""], input: string = "") -> Buf[Run]
     val only = compiled_only(case, text)
     var out: Buf[Run] = buf()
 
     for e in ENGINES
         e match
             Compiled ->
-                for r in compiled_runs(b, case, text, entry, args, fpe_trap, links, prelude, threads)
+                for r in compiled_runs(b, case, text, entry, args, fpe_trap, links, prelude, threads, input)
                     out.push(r)
             Interpreted ->
                 if !only
-                    interpreted_run(b, case, text, entry, args, fpe_trap, prelude) match
+                    interpreted_run(b, case, text, entry, args, fpe_trap, prelude, input) match
                         Some(r) -> out.push(r)
                         None -> ()
 
@@ -124,16 +125,18 @@ runs(b: Bench, case: string, text: string, entry: string = "", args: []const str
 // `text`, or the project whose root module is `entry`, interpreted: what it wrote and how it ended as
 // a compiled program's would read — a trap nothing caught written to standard error and the status
 // an abort gives. `None` where the interpreter refuses a program `NOT_INTERPRETED` lists.
-private interpreted_run(b: Bench, case: string, text: string, entry: string, args: []const string, fpe_trap: bool, prelude: Option[string]) -> Option[Run]
+private interpreted_run(b: Bench, case: string, text: string, entry: string, args: []const string, fpe_trap: bool, prelude: Option[string], input: string) -> Option[Run]
+    val stdin = if input == "" then None else Some(read_text(input).unwrap())
+
     if entry == ""
         val src = source_of("t.nex", text)
 
         return load_source(src) match
-            Ok(p) -> interpreted_outcome(b, case, p, args, fpe_trap, (ds) -> lines(ds, src))
+            Ok(p) -> interpreted_outcome(b, case, p, args, fpe_trap, (ds) -> lines(ds, src), stdin)
             Err(ds) -> Some(Run("interpreted", Err(lines(ds, src))))
 
     load(entry, LoadOptions(prelude, false)) match
-        Ok(l) -> interpreted_outcome(b, case, l.program, args, fpe_trap, (ds) -> l.project.render(ds))
+        Ok(l) -> interpreted_outcome(b, case, l.program, args, fpe_trap, (ds) -> l.project.render(ds), stdin)
         Err(m) -> Some(Run("interpreted", Err(m)))
 
 // What the interpreter's run wrote, as it wrote it.
@@ -141,10 +144,11 @@ private struct Gathered
     text: StrBuilder
     err: StrBuilder
 
-private interpreted_outcome(b: Bench, case: string, p: TProgram, args: []const string, fpe_trap: bool, render: &Fn(Buf[Diagnostic]) -> string) -> Option[Run]
+private interpreted_outcome(b: Bench, case: string, p: TProgram, args: []const string, fpe_trap: bool, render: &Fn(Buf[Diagnostic]) -> string,
+                             stdin: Option[string]) -> Option[Run]
     val g: &Gathered = Gathered(str_builder(), str_builder())
 
-    interpret(p, args, (s, t) -> if s == Stream.StdOut then g.text.push(t) else g.err.push(t), fpe_trap) match
+    interpret(p, args, (s, t) -> if s == Stream.StdOut then g.text.push(t) else g.err.push(t), fpe_trap, stdin = stdin) match
         Ok(ending) ->
             b.seen.note(case, false)
 
@@ -191,7 +195,7 @@ still_refused(b: Bench)
         if not_interpreted(c) && !b.seen.refused[k] then fail_with(s"`$c` is in NOT_INTERPRETED, but the interpreter runs every program of it: take it out")
 
 private compiled_runs(b: Bench, case: string, text: string, entry: string, args: []const string, fpe_trap: bool, links: []const string,
-                      prelude: Option[string], threads: []const string) -> Buf[Run]
+                      prelude: Option[string], threads: []const string, input: string) -> Buf[Run]
     var out: Buf[Run] = buf()
     val built = if entry == "" then emitted(text, fpe_trap) else mlir_of(entry, fpe_trap, LoadOptions(prelude, false))
 
@@ -213,7 +217,9 @@ private compiled_runs(b: Bench, case: string, text: string, entry: string, args:
         var env: Buf[Var] = buf()
 
         if t != "" then env.push(Var("OMP_NUM_THREADS", t))
-        out.push(Run(if t == "" then "compiled" else s"compiled, $t threads", Ok(capture(exe, args, env = env.view(), stderr = true).unwrap())))
+        val stdin = if input == "" then Stdio.Inherit else Stdio.FromPath(input)
+
+        out.push(Run(if t == "" then "compiled" else s"compiled, $t threads", Ok(capture(exe, args, env = env.view(), stderr = true, stdin = stdin).unwrap())))
 
     out
 
@@ -248,17 +254,55 @@ struct Checked
     failed: Buf[string]
     waiting: Buf[string]
 
+// What a program that writes files is told on its first line: it is given one argument, a directory
+// of its own that starts empty, and must leave it empty.
+val SCRATCH_MARKER = "// args: a scratch directory"
+
+// The arguments `name`, of program text `text`, runs with: its scratch directory, made empty, where
+// its text asks for one.
+scratch_args(b: Bench, name: string, text: string) -> Buf[string]
+    var out: Buf[string] = buf()
+
+    if !text.starts_with(SCRATCH_MARKER) then return out
+
+    val dir = s"${b.work}/$name.scratch"
+
+    if exists(dir) then remove_dir_all(dir).unwrap()
+
+    make_dir(dir).unwrap()
+    out.push(dir)
+    out
+
+// What a program left in its scratch directory, which is then removed: `""` where it left nothing.
+scratch_left(args: Buf[string]) -> string
+    if args.len() == 0 then return ""
+
+    val left = entries(args[0]).unwrap()
+
+    remove_dir_all(args[0]).unwrap()
+
+    if left.len() == 0 then "" else s"left in its scratch directory: ${join(left.view(), ", ")}"
+
+// The standard input of the program `testdata/<dir>/<name>.nex`: the `.in` file beside it, or `""`
+// where there is none.
+input_of(dir: string, name: string) -> string
+    val file = repo(s"testdata/$dir/$name.in")
+
+    if exists(file) then file else ""
+
 // Every program of `names` in `testdata/<dir>/` run on every engine, at each of `threads`, and
-// compared with its `.out`.
+// compared with its `.out`. A program reads the `.in` beside it as its standard input, and one that
+// asks for a scratch directory (`SCRATCH_MARKER`) is given one, which it must leave empty.
 check_programs(b: Bench, dir: string, names: []const string, links: []const string = [], threads: []const string = [""]) -> Checked
     var r = Checked(0, buf(), buf())
 
     for name in names
         val text = read_text(repo(s"testdata/$dir/$name.nex")).unwrap()
         val expected = read_text(repo(s"testdata/$dir/$name.out")).unwrap()
+        val args = scratch_args(b, name, text)
         var ok = true
 
-        for run in runs(b, name, text, links = links, threads = threads)
+        for run in runs(b, name, text, args = args.view(), links = links, threads = threads, input = input_of(dir, name))
             run.out match
                 Ok(out) ->
                     if !out.status.ok() || out.text != expected
@@ -267,6 +311,12 @@ check_programs(b: Bench, dir: string, names: []const string, links: []const stri
                 Err(e) ->
                     if only_later(e) then r.waiting.push(name) else r.failed.push(s"$name (${run.on}): $e")
                     ok = false
+
+        val left = scratch_left(args)
+
+        if left != ""
+            r.failed.push(s"$name: $left")
+            ok = false
 
         if ok then r.passed += 1
 

@@ -1,0 +1,50 @@
+@tests
+
+// Files (DESIGN §17.6) where a program's ending is the subject, on both engines: `main` answering the
+// `Err` of a missing file, `!` trapping with its sentence, and the files still open as a program
+// ends — by returning or by `stop` — closed, what they held written. The programs of
+// `testdata/v2/120` to `125` and `testdata/leaks/files` cover the rest.
+
+import sysl.fs.{make_dir, read_text, remove_dir_all}
+import sysl.process.Status
+
+@test("main returning Result[void, IoError] on a missing file exits 1 with the sentence; ! traps with it")
+run_files_main_err()
+    val b = bench()
+    val missing = s"${b.work}/no-such-dir/in.dat"
+    val err = ran(b, s"def load(p: string): Result[string, IoError] =\n  val f = open(p, Read)?\n  read_text(p)\ndef main(): Result[void, IoError] =\n  print(\"before\")\n  print(load(\"$missing\")?)\n  print(\"after\")\n  Ok(())\n", case = "run_files_main_err")
+    val trap = ran(b, s"def main() =\n  print(\"before\")\n  print(read_text(\"$missing\")!)\n", case = "run_files_trap")
+    val ok = ran(b, s"def main(): Result[void, IoError] =\n  if not exists(\"$missing\") then return Ok(())\n  print(read_text(\"$missing\")?)\n  Ok(())\n", case = "run_files_main_ok")
+
+    finish(b)
+    assert_eq(err.text, "before\n")
+    assert_eq(err.err.unwrap_or(""), s"error: $missing: no such file\n")
+    assert(err.status == Status.Exited(1), s"${err.status}")
+    assert_eq(trap.text, "before\n")
+    assert_eq(trap.err.unwrap_or(""), s"trap: $missing: no such file\n")
+    assert(trap.status == Status.Signalled(6), s"${trap.status}")
+    assert_eq(ok.text, "")
+    assert(ok.status == Status.Exited(0), s"${ok.status}")
+
+@test("a file still open as the program ends — a module-level binding, by returning or by stop — is closed, what it held written")
+run_files_closed_at_exit()
+    val b = bench()
+    val dir = s"${b.work}/at-exit"
+
+    make_dir(dir).unwrap()
+
+    val returned = ran(b, s"val log = open(\"$dir/returned.txt\", Write)!\ndef main() =\n  write_line(log, \"kept\")!\n  write(log, \"to the end\")!\n  print(\"done\")\n", case = "run_files_exit_return")
+    val returned_text = read_text(s"$dir/returned.txt").unwrap()
+    val stopped = ran(b, s"val log = open(\"$dir/stopped.txt\", Write)!\ndef main() =\n  write_line(log, \"before stop\")!\n  stop 3\n", case = "run_files_exit_stop")
+    val stopped_text = read_text(s"$dir/stopped.txt").unwrap()
+    val local = ran(b, s"def main() =\n  val f = open(\"$dir/local.txt\", Write)!\n  write(f, \"local\")!\n  stop 0\n", case = "run_files_exit_local")
+    val local_text = read_text(s"$dir/local.txt").unwrap()
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+    assert_eq(returned.text, "done\n")
+    assert_eq(returned_text, "kept\nto the end")
+    assert(stopped.status == Status.Exited(3), s"${stopped.status}")
+    assert_eq(stopped_text, "before stop\n")
+    assert(local.status == Status.Exited(0), s"${local.status}")
+    assert_eq(local_text, "local")

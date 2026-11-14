@@ -580,8 +580,8 @@ in [Units of measure](/spec/13-units/).
 | `print(x, …)` | prints its arguments on one line to standard output, then a newline | `PRINT *, x, …` |
 | `print()` | prints an empty line | `PRINT *` |
 | `eprint(x, …)` | as `print`, to standard error | `WRITE(ERROR_UNIT, *) x, …` |
-| `read_bytes(path: string): [uint8]` | the whole file's contents | `OPEN(…, ACCESS='stream')` + `READ` |
-| `write_bytes(path: string, data: [uint8])` | writes `data` as the file's contents | `OPEN(…, ACCESS='stream')` + `WRITE` |
+| `read_bytes(path: string): Result[[uint8], IoError]` | the whole file's contents | `OPEN(…, ACCESS='stream')` + `READ` |
+| `write_bytes(path: string, data: [uint8]): Result[void, IoError]` | writes `data` as the file's contents | `OPEN(…, ACCESS='stream')` + `WRITE` |
 
 A real prints as the shortest decimal that reads back to the same value at its own width, so the
 `real32` nearest 0.3 prints as `0.3`. A complex prints as its two parts do. Text is formatted with
@@ -593,12 +593,13 @@ val n = 42
 print(s"n = $n")              // n = 42
 print(f"pi = $pi%.3f")        // pi = 3.142
 
-val data = read_bytes("input.bin")
-write_bytes("copy.bin", data)
+val data = read_bytes("input.bin")!
+write_bytes("copy.bin", data)!
 ```
 
 Raw bytes are `[uint8]`, an ordinary array with every array operation; there is no separate byte
-type.
+type. `read_bytes` and `write_bytes` answer a `Result` like every function on files
+(§12.16): `!` takes the value or traps with the failure's sentence.
 
 {{< note >}}
 Width-exact printing of `real32` and `real16` values is proposed and may change in detail.
@@ -795,3 +796,76 @@ def main() =
     Err(e) -> print(message(e))     // 1:2: expected a real64, found "two"
   print(int64(" 42 ")! + 1)         // 43
 ```
+
+## 12.16 Files
+
+A `File` is an open file. It is counted like a string: every copy shares the one file, and **the file
+closes when the last reference goes**, flushing what was written first. Where that flush fails
+there is nobody to hand the failure to, so the program ends as a trap nothing catches would end it;
+a program that must handle the failure calls `close` and matches its `Result`. A file still open
+when the program ends, by returning or by `stop`, is closed the same way.
+
+| Signature | Meaning | Fortran |
+|---|---|---|
+| `open(path: string, mode: Mode): Result[File, IoError]` | `Read`, `Write` (create, or empty) or `Append` (create, or write at the end) | `OPEN(newunit=u, file=…, action=…)` |
+| `read_line(f: File): Result[Option[string], IoError]` | the next line without its `\n` or `\r\n`; `None` at the end | `READ(u, '(A)', iostat=ios)` |
+| `write(f: File, s: string): Result[void, IoError]` | `s` as it is | `WRITE(u, '(A)', advance='no')` |
+| `write_line(f: File, s: string): Result[void, IoError]` | `s` and a newline | `WRITE(u, '(A)')` |
+| `flush(f: File): Result[void, IoError]` | what was written handed to the system | `FLUSH(u)` |
+| `close(f: File): Result[void, IoError]` | flushed and closed, for every copy; a second `close` does nothing | `CLOSE(u)` |
+| `stdin`, `stdout`, `stderr` | the standard files | `INPUT_UNIT`, `OUTPUT_UNIT`, `ERROR_UNIT` |
+
+`Mode` is a prelude enum of `Read`, `Write` and `Append`. **A line is text**: a last line without a
+newline is still a line, a file ending in a newline has no empty line after it, a `\r` is dropped
+only before a `\n`, and a line that is not UTF-8 is `Malformed` at its line and the column of its
+first bad byte. `print` and `write_line(stdout, …)` share one buffer, so their lines stay in order.
+Closing a standard file flushes it and leaves it open. A `File` prints as `File(run.log)` and has
+no `==`.
+
+**Misusing a file is a bug, not an `IoError`**, and traps: `read_line on a file opened for Write`,
+`write_line on a file opened for Read`, `write_line on a closed file`, `read_line on stdout, which
+is written`.
+
+The whole-file functions need no `File`:
+
+| Signature | Meaning |
+|---|---|
+| `read_text(path): Result[string, IoError]` | the whole file, which must be UTF-8 |
+| `read_lines(path): Result[[string], IoError]` | its lines, as `read_line` reads them |
+| `write_text(path, s): Result[void, IoError]` | the file made `s` |
+| `append_text(path, s): Result[void, IoError]` | `s` added at the file's end, the file made where it is not there |
+| `write_lines(path, lines: [string]): Result[void, IoError]` | each line followed by a newline |
+| `read_bytes(path)`, `write_bytes(path, data)` | binary (§12.11) |
+| `exists(path): bool` | whether anything is there |
+| `remove(path): Result[void, IoError]` | the file deleted |
+
+A missing file, and a file in a directory that does not exist, is `NotFound`; a file the system
+does not let the program reach is `Denied`; a directory where a file is wanted, and anything else
+the system reports, is `Failed` with the system's words. A relative path is relative to the working
+directory. In a `parallel` body or an `@elemental` function every function here is a compile error;
+`print` and `eprint` stay allowed.
+
+```nex
+def count(path: string): Result[integer, IoError] =
+  val f = open(path, Read)?
+  var n = 0
+  while true
+    read_line(f)? match
+      Some(_) -> n += 1
+      None -> return Ok(n)
+  Ok(n)
+
+def main(): Result[void, IoError] =
+  write_lines("run.log", ["start", "step 1"])?
+  append_text("run.log", "done\n")?
+  print(count("run.log")?)          // 3
+  val log = open("run.log", Append)?
+  write_line(log, "again")?
+  close(log)?
+  print(read_lines("run.log")?)     // [start, step 1, done, again]
+  remove("run.log")
+```
+
+An embedded script writes `stdout` and `stderr` where its `print` and
+`eprint` go, the host's `write`. A script its host sandboxes reaches no file: every function on a
+path answers `Denied`, `exists` answers `false`, and `stdin` reads as empty.

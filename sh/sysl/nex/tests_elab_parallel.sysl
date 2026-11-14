@@ -148,9 +148,9 @@ par_owned_slice_reads()
 // -- rule 3: calls and I/O --------------------------------------------------------------------
 @test("a body does no I/O but print and eprint, and calls only what the checker sees")
 par_io_and_opaque_calls()
-    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    print(length(read_bytes(\"data\")))\n"),
+    assert_eq(refused("def main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    print(length(read_bytes(\"data\")!))\n"),
         "error: a parallel body does no I/O but `print` and `eprint`, and `read_bytes` is I/O @6:18")
-    assert_eq(refused("def save(t: real) =\n  write_bytes(\"f\", to_bytes([1]))\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    save(x[i])\n"),
+    assert_eq(refused("def save(t: real) =\n  write_bytes(\"f\", to_bytes([1]))!\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    save(x[i])\n"),
         "error: `save` does I/O with `write_bytes`, and a parallel body does no I/O but `print` and `eprint` @8:5")
     assert_eq(refused("def apply(f: (real) -> real, v: real) = f(v)\ndef main() =\n  val n = 4\n  val x: [real] = linspace(0.0, 1.0, n)\n  var y: [real] = zeros(n)\n  parallel for i in 1..n\n    y[i] = apply(t -> t, x[i])\n"),
         "error: `apply` calls `f`, which the checker cannot see into, so a parallel body cannot call it @7:12")
@@ -192,7 +192,7 @@ par_expressions()
         "error: `parallel` computes a `map`, a reduction (`sum`, `product`, `minval`, `maxval`, `dot`) or a whole-array element-wise expression, and this is none of them @1:29")
     assert_eq(refused("def main() = print(parallel norm2([3.0, 4.0]))\n"),
         "error: `norm2` has no parallel form; `parallel` computes `sum`, `product`, `minval`, `maxval` and `dot` @1:29")
-    assert_eq(refused("def put(t: real): real =\n  write_bytes(\"f\", to_bytes([1]))\n  t\ndef main() = print(parallel map([1.0], put))\n"),
+    assert_eq(refused("def put(t: real): real =\n  write_bytes(\"f\", to_bytes([1]))!\n  t\ndef main() = print(parallel map([1.0], put))\n"),
         "error: `put` does I/O with `write_bytes`, and a parallel body does no I/O but `print` and `eprint` @4:40")
 
 // -- elemental functions ----------------------------------------------------------------------

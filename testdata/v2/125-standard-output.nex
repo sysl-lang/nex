@@ -1,0 +1,28 @@
+// Standard output and error as files (DESIGN §17.6): `write` and `write_line` to `stdout` in order
+// with `print`, a line built in pieces, `flush`; `stderr` written beside them; a standard file kept
+// in a binding and passed to a `def`; `close` of a standard file flushing it and leaving it open;
+// reading one a misuse.
+
+def report(out: File, n: integer): Result[void, IoError] =
+  write(out, s"n = ")?
+  write_line(out, string(n))?
+  Ok(())
+
+def main() =
+  print("first")
+  write_line(stdout, "second")!
+  write(stdout, "thi")!
+  write(stdout, "rd")!
+  print("")
+  write_line(stderr, "to standard error")!
+  write(stderr, "")!
+  flush(stdout)!
+  val out = stdout
+  report(out, 42)!
+  report(stdout, 7)!
+  close(stdout)!
+  print("after close")
+  write_line(stdout, "still open")!
+  assert_traps(() -> print(read_line(stdout)!), "read_line on stdout, which is written")
+  assert_traps(() -> print(read_line(stderr)!), "read_line on stderr, which is written")
+  print(out)

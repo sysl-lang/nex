@@ -27,6 +27,7 @@ module sh.sysl.nex
 // parameter, a host function's result, a module-level binding. An array crosses as its extents and
 // its elements in one typed buffer, column-major, rather than a value per element.
 
+import nex_runtime.sh.sysl.nex_runtime.text_input
 import sysl.buf.{Buf, buf}
 import sysl.sync.{Atomic, Relaxed}
 import sh.sysl.parsing.{Diagnostic, Source, Span, source, source_of}
@@ -233,6 +234,9 @@ private compiled(p: TProgram, texts: Texts, host: Host, opts: ScriptOptions) -> 
     m.hosts = host.functions
     m.host_types = host.types
     m.sandbox = opts.sandbox
+
+    // A sandboxed script's standard input is empty (DESIGN §17.8).
+    if opts.sandbox then m.stdin = Some(text_input(""))
 
     var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf(), buf())
     var init = it.program(None)
