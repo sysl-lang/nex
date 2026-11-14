@@ -48,13 +48,13 @@ run_rounding_complex_edges()
     val out = ran(b, COMPLEX_EDGES)
 
     finish(b)
-    assert_eq(out.text, "0.0+0.0i\ninf\ninf\ninf\ninf\n0.0+0.0i\ninf\ninf\ninf\ninf\n0.0+0.0i\n-inf\ninf\n-inf\ninf\n0.0+0.0i\ninf\n-inf\ninf\n-inf\n" +
+    assert_eq(out.text, "0.0+0.0i\ninf\ninf\ninf\ninf\n0.0+0.0i\ninf\ninf\ninf\ninf\n-0.0+0.0i\n-inf\ninf\n-inf\ninf\n0.0-0.0i\ninf\n-inf\ninf\n-inf\n" +
                         "inf-nani\n0.0\nnan\n0.0\nnan\nnan+infi\nnan\n0.0\nnan\n0.0\ninf-nani\n0.0\nnan\n0.0\nnan\nnan-nani\nnan\nnan\nnan\nnan\n" +
                         "1.0E-320+1.0E-160i\ninf\n1.0E160\ninf\n1.0E160\n-0.10999999999999999+0.13i\n-9.090909090909092\n7.692307692307692\n-9.090909090909092\n7.692307692307692\n" +
-                        "[0.0+0.0i, 0.0+0.0i, 0.0+0.0i, 0.0+0.0i, inf-nani, nan+infi, inf-nani, nan-nani, 1.0E-320+1.0E-160i, -0.10999999999999999+0.13i]\n" +
-                        "[0.0+0.0i, 0.0+0.0i, 0.0+0.0i, 0.0+0.0i, nan+infi, nan+infi, -1.0E300+1.0E300i, nan-nani, -1.0+1.0E-160i, -0.2+0.1i]\n" +
-                        "[0.0+0.0i, 0.0+0.0i, 0.0+0.0i, 0.0+0.0i, inf-nani, inf-nani, 1.0E300+1.0E300i, nan-nani, 1.0E-160+1.0i, 0.1+0.2i]\n" +
-                        "[0.0+0.0i, inf-nani, -0.11+0.13i]\n-0.11+0.13i\n-inf\n")
+                        "[0.0+0.0i, 0.0+0.0i, -0.0+0.0i, 0.0-0.0i, inf-nani, nan+infi, inf-nani, nan-nani, 1.0E-320+1.0E-160i, -0.10999999999999999+0.13i]\n" +
+                        "[0.0-0.0i, 0.0+0.0i, 0.0-0.0i, 0.0+0.0i, nan+infi, nan+infi, -1.0E300+1.0E300i, nan-nani, -1.0+1.0E-160i, -0.2+0.1i]\n" +
+                        "[0.0+0.0i, -0.0+0.0i, 0.0+0.0i, -0.0+0.0i, inf-nani, inf-nani, 1.0E300+1.0E300i, nan-nani, 1.0E-160+1.0i, 0.1+0.2i]\n" +
+                        "[-0.0+0.0i, inf-nani, -0.11+0.13i]\n-0.11+0.13i\n-inf\n")
 
 @test("a product summed by @, dot, sum or an element-wise expression is rounded first, serial and parallel, on both engines")
 run_rounding_products()

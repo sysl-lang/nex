@@ -8,6 +8,7 @@ real64: 0 0 0 differ
 -4.9E-324 true
 0.1 true
 0.3333333333333333 true
+-0.0 true
 0.0 true
 inf true
 -inf true
@@ -18,15 +19,20 @@ nan true
 1.1754944E-38 true
 1.0E-45 true
 0.1 true
+-0.0 true
 inf true
 nan true
 65500.0 true
 6.104E-5 true
 6.0E-8 true
 0.1 true
+-0.0 true
 -inf true
 nan true
+-inf
 1.5-2.0i true
+-0.0+0.0i true
+1.0-0.0i true
 inf-nani true
 2.2250738585072014E-308-1.7976931348623157E308i true
 0.1-1.0E-40i true

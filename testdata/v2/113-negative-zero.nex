@@ -1,0 +1,21 @@
+// A negative zero prints as `-0.0` on every printing path (DESIGN §2.5): `print`, `s"…"`,
+// `string(x)`, `real32` and `real16`, a complex's parts, arrays of each rank, and an `f"…"` spec,
+// which writes what C's `printf` does. A positive zero beside it keeps `0.0`.
+
+def main() =
+  val z = -0.0
+  print(z)
+  print(s"$z ${string(z)} ${real32(z)} ${real16(z)}")
+  print(real32(z))
+  print(real16(z))
+  print(-1.0 * 0.0)
+  print(0.0)
+  print(complex(1.0, -0.0))
+  print(complex(-0.0, -0.0))
+  print(complex[real32](-0.0, 0.0))
+  print([z, 1.0, -0.0])
+  print([[z, 1.0], [2.0, z]])
+  print([complex(z, z)])
+  print(f"$z%f|$z%.2f|$z%e|$z%g|$z%8.3f|$z%-8.1f|")
+  print(f"${real32(z)}%f")
+  print(1.0 / real64(string(-0.0))!)

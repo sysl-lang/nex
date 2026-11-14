@@ -64,7 +64,7 @@ itp_typed_complex()
 
         assert_eq(interpreted(text),
                   "[4.0+1.0i, 3.0+1.0i, 0.5-1.0i]\n[-2.0+1.0i, 1.0-3.0i, 0.5+1.0i]\n[3.0+3.0i, 4.0+3.0i, 0.0-0.5i]\n" +
-                  s"[$third+${third}i, 0.0-1.0i, 0.0+0.5i]\n[-1.0-1.0i, -2.0+1.0i, -0.5+0.0i]\n[false, false, false]\n[false, false, false]\n3.5+0.0i\n" +
+                  s"[$third+${third}i, 0.0-1.0i, 0.0+0.5i]\n[-1.0-1.0i, -2.0+1.0i, -0.5-0.0i]\n[false, false, false]\n[false, false, false]\n3.5+0.0i\n" +
                   "[0.5+0.0i, 2.0-1.0i, 1.0+1.0i]\n[1.0+1.0i, 2.0-1.0i, 0.5+0.0i]\n[0.0+0.0i, 5.0-1.0i, 1.5+2.0i]\n3.0+1.5i\ntrap: complex division by zero")
 
 @test("bool arrays combine, negate, compare, count along an axis and write windows over their storage")

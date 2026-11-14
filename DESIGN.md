@@ -233,6 +233,9 @@ be an array, the other then an array of the same shape or a scalar that broadcas
   `0.30000001192092896`) (**PROPOSED**). The spelling is the one the `real64` nearest that decimal
   gets, so a whole number is shortened too: the `real16` 65504 prints `65500.0` and the `real32`
   nearest 1e15 prints `1.0E15`. A complex prints as its two parts do.
+- **A negative zero prints as `-0.0`**, at every width, in a complex's parts (`1.0-0.0i`), in
+  `s"…"` and `string(x)`, so that it reads back as itself (§17.5). This departs from the reference,
+  which prints `0.0`. An `f"…"` spec writes what C's `printf` does: `f"${-0.0}%f"` is `-0.000000`.
 - `round` rounds half away from zero, as Fortran's `ANINT` does: `round(2.5)` is `3.0` and
   `round(-2.5)` is `-3.0`.
 - **The prelude's real functions** (`sqrt`, `exp`, `sin`, `floor`, …, ref §10.2) compute at the
