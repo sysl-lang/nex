@@ -401,6 +401,8 @@ impl Interp
                 val unit = " " + spell(*u)
 
                 return (v) -> number(v) + unit
+            // A `void` field's one value.
+            Void -> return (v) -> "()"
             _ -> ()
 
         (v) -> scalar_text(v, t)

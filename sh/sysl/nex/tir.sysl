@@ -302,5 +302,8 @@ struct TProgram
     // Where the program first imports the `mpi` module nex ships, which makes it an MPI program
     // (DESIGN §9.6): one the compiled engine starts and ends with MPI, and the interpreter refuses.
     mpi: Option[Span]
+    // The function the program starts at: `main`, or, where `main` returns a `Result[void, E]`, the
+    // entry that calls it and reports its `Err`.
+    entry: string
 
 texpr(span: Span, ty: Ty, kind: TKind) -> TExpr = TExpr(span, ty, kind)

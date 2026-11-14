@@ -49,7 +49,7 @@ elaborate_modules(p: Program, mods: Modules) -> Result[TProgram, Buf[Diagnostic]
     Ok(e.program())
 
 private elab(p: Program, mods: Modules) -> Elab =
-    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf(), buf(), buf())
+    Elab(p, buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), buf(), empty_fx(), empty_aggregates(), buf(), empty_views(), empty_generics(), buf(), buf(), empty_units(), false, mods, buf(), buf(), buf(), None)
 
 // How far a declaration has got.
 enum Progress
@@ -211,6 +211,9 @@ struct Elab
     // The `@intrinsic` functions of the `mpi` module, by internal name: declared there, typed at each
     // call by the compiler (`elab_mpi.sysl`).
     intrinsics: Buf[string]
+    // The function the program starts at where it is not `main` itself: one calling a `main` that
+    // returns a `Result[void, E]` and reporting its `Err` (`elab_result.sysl`).
+    entry: Option[TFun]
 
     // -- diagnostics ------------------------------------------------------------------------------
 
@@ -397,8 +400,11 @@ struct Elab
 
         if !shaped
             self.fail(span, "`main` takes no parameters or `args: [string]`: `def main()` or `def main(args: [string])`")
+        elif self.fret_known[k] && self.main_result(self.fret[k])
+            // The program starts at an entry reporting `main`'s `Err`; a test build starts at its tests.
+            if !self.mods.test_build then self.entry = Some(self.main_entry(span, self.fret[k]))
         elif self.fret_known[k] && !is_void(self.fret[k]) && !is_wild(self.fret[k])
-            self.fail(span, s"`main` returns nothing, but this one returns ${show_ty(self.fret[k])}")
+            self.fail(span, s"`main` returns nothing or a `Result[void, E]`, but this one returns ${self.main_result_text(self.fret[k])}")
     end check_main
 
     // -- module-level bindings --------------------------------------------------------------------
@@ -918,6 +924,12 @@ struct Elab
 
         decls.extend(self.instance_fun_decls().view())
 
+        val entry = self.entry match
+            Some(f) ->
+                decls.push(FunDecl(f))
+                f.name
+            None -> "main"
+
         var lambdas: Buf[TLambda] = buf()
 
         for l in 0..<self.lambdas.len()
@@ -934,7 +946,7 @@ struct Elab
 
             lambdas.push(TLambda(x.name, x.params, x.ret, caps, x.body, x.escapes, copies))
 
-        TProgram(decls, self.locals, lambdas, self.loops, self.tests, self.mods.test_build, self.mods.mpi)
+        TProgram(decls, self.locals, lambdas, self.loops, self.tests, self.mods.test_build, self.mods.mpi, entry)
     end program
 end Elab
 

@@ -21,6 +21,10 @@ import sh.sysl.parsing.Span
 private val OPTION = "prelude.Option"
 private val RESULT = "prelude.Result"
 
+// The function a program starts at when its `main` returns a `Result[void, E]`: it calls `main` and
+// reports an `Err`. No source name can be spelled this way.
+val MAIN_ENTRY = "<main>"
+
 // The message `!` traps with on a `None`.
 val FOUND_NONE = "`!` found None"
 
@@ -154,9 +158,12 @@ impl Elab
         texpr(span, f.value, TMatch(v, arms))
     end try_expr
 
-    // The arm taking the value out of a `Some` or an `Ok`.
+    // The arm taking the value out of a `Some` or an `Ok`: a `void` one is `()`, with nothing to bind.
     private value_arm(*self, span: Span, f: Family) -> TArm
         val name = if f.result then "Ok" else "Some"
+
+        if is_void(f.value) then return TArm(PVariant(name, 0, one_bind(None)), texpr(span, Void, TLiteral(VoidVal, false)))
+
         val id = self.new_local("value", f.value, LVal)
 
         TArm(PVariant(name, 0, one_bind(Some(id))), texpr(span, f.value, TLocal(id)))
@@ -261,6 +268,45 @@ impl Elab
             _ -> "this `Result`"
 
         self.fail(v.span, s"${what} is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …`")
+
+    // -- `main` returning a `Result` --------------------------------------------------------------
+
+    // Whether `t` is a `Result[void, E]`, which `main` may return (DESIGN §11.2, §17.2).
+    main_result(self, t: Ty) -> bool = self.family(t) match
+        Some(f) -> f.result && is_void(f.value)
+        None -> false
+
+    // The entry calling `main`, which returns `ret`, a `Result[void, E]`: on an `Err` it writes
+    // `error: <message>` to standard error, the message as `!` would word it, and stops with status 1.
+    main_entry(*self, span: Span, ret: Ty) -> TFun
+        val f = self.family(ret).unwrap()
+        val err = self.new_local("error", f.error, LVal)
+        var parts: Buf[TPart] = buf()
+
+        parts.push(TText("error: "))
+        interp_value(&parts, texpr(span, f.error, TLocal(err)), "")
+
+        var report: Buf[TExpr] = buf()
+
+        report.push(texpr(span, Ty.Str, TInterp(parts, false)))
+
+        var items: Buf[TExpr] = buf()
+
+        items.push(texpr(span, Void, TBuiltin("eprint", report)))
+
+        val stop = texpr(span, Never, TStop(Some(texpr(span, INTEGER, TLiteral(IntVal(1), false)))))
+        var arms: Buf[TArm] = buf()
+
+        arms.push(TArm(PVariant("Ok", 0, one_bind(None)), texpr(span, Void, TLiteral(VoidVal, false))))
+        arms.push(TArm(PVariant("Err", 1, one_bind(Some(err))), texpr(span, Never, TBlock(items, stop))))
+
+        // `main` is called with no arguments: its `args` are the program's, read where they are kept.
+        val call = texpr(span, ret, TCall(texpr(span, fn_type(buf(), buf(), ret), TFnRef("main")), buf()))
+
+        TFun(span, MAIN_ENTRY, buf(), buf(), Void, texpr(span, Void, TMatch(call, arms)))
+
+    // The shape `main` may return, for a diagnostic about one that returns something else.
+    main_result_text(self, t: Ty) -> string = family_text(t)
 end Elab
 
 private one_bind(id: Option[usize]) -> Buf[Option[usize]]

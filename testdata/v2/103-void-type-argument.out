@@ -1,0 +1,31 @@
+Box { value=() }
+()
+true
+()
+evaluated
+Box { value=() }
+Tagged { label=x, inner=Box { value=() }, count=7 }
+x
+7
+Just(())
+Nothing
+true
+false
+false
+just ()
+Some(())
+None
+true
+true
+true
+Ok(())
+()
+Ok(())
+Err(negative: -2)
+true
+3
+[Ok(()), Err(negative: -1), Ok(()), Err(x)]
+true
+false
+2
+Err(negative: -1) and ()

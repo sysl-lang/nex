@@ -5,6 +5,9 @@ module sh.sysl.nex
 // gives. A program is checked whole; the cases the reference's elaborator tests cover for scalars are
 // here in nex's own syntax.
 
+import sh.sysl.parsing.source_of
+import sysl.text.split
+
 private val MAIN = "def main() = ()\n"
 
 // -- the top level and the program ------------------------------------------------------------------
@@ -27,10 +30,25 @@ elab_main_signature()
     assert_eq(refused("def main(args: [string]) = print(1)\n"), "ok")
     assert_eq(refused("def main(n: integer) = print(n)\n"), "error: `main` takes no parameters or `args: [string]`: `def main()` or `def main(args: [string])` @1:1")
     assert_eq(refused("def main(args: [integer]) = ()\n"), "error: `main` takes no parameters or `args: [string]`: `def main()` or `def main(args: [string])` @1:1")
-    assert_eq(refused("def main(): integer = 1\n"), "error: `main` returns nothing, but this one returns int64 @1:1")
+    assert_eq(refused("def main(): integer = 1\n"), "error: `main` returns nothing or a `Result[void, E]`, but this one returns int64 @1:1")
     assert_eq(elaborated("def f(): integer = 1\ndef main() = f()\n"), "(def f () int64 1)\n(def main () void (block (call:int64 f) ()))")
     assert_eq(refused("val main = 1\n"), "error: `main` must be a function: `def main()` or `def main(args: [string])` @1:1")
     assert_eq(refused("def f() = ()\n"), "error: a program needs a `def main()` or a `def main(args: [string])` @1:1")
+
+@test("main may return a Result[void, E], and the program starts at an entry reporting its Err")
+elab_main_result()
+    assert_eq(refused("def main(): Result[void, string] = Ok(())\n"), "ok")
+    assert_eq(refused("def main(args: [string]): Result[void, integer] =\n  if length(args) > 0 then return Err(length(args))\n  Ok(())\n"), "ok")
+    assert_eq(entry_of("def main(): Result[void, string] = Ok(())\n"), "<main>")
+    assert_eq(entry_of("def main() = ()\n"), "main")
+    assert_eq(entry_shown("def main(): Result[void, string] = Err(\"no\")\n"),
+        "(def <main> () void (match (call:prelude.Result[void, string] main) ((Ok _) ()) ((Err error#0) (block (eprint (s \"error: \" error#0)) (stop 1)))))")
+
+@test("main returning a Result whose value is not void, or an Option, is refused")
+elab_main_result_refused()
+    assert_eq(refused("def main(): Result[integer, string] = Ok(1)\n"), "error: `main` returns nothing or a `Result[void, E]`, but this one returns Result[int64, string] @1:1")
+    assert_eq(refused("def main(): Option[void] = Some(())\n"), "error: `main` returns nothing or a `Result[void, E]`, but this one returns Option[void] @1:1")
+    assert_eq(refused("def main(): Result[[integer], string] = Ok([1])\n"), "error: `main` returns nothing or a `Result[void, E]`, but this one returns Result[[int64], string] @1:1")
 
 @test("the top level holds only declarations")
 elab_top_level_statement()
@@ -327,3 +345,19 @@ elab_type_names()
     assert_eq(refused("def f(x: foo) = ()\n" + MAIN), "error: unknown type `foo` @1:10")
     assert_eq(refused("def f(): unit = ()\n" + MAIN), "error: `unit` declares a physical unit; the empty type is `void` @1:10")
     assert_eq(refused("def f(x: byte) = ()\n" + MAIN), "error: there is no `byte` type; raw bytes are `uint8` @1:10")
+
+// The name of the function the elaborated program starts at.
+private entry_of(text: string) -> string
+    val p = parse_program(source_of("t.nex", text)) match
+        Ok(p) -> p
+        Err(d) -> return s"error: ${d.message}"
+
+    elaborate(p) match
+        Ok(t) -> t.entry
+        Err(ds) -> s"error: ${ds[0].message}"
+
+// The last declaration of the elaborated program, as `nex elaborate` prints it.
+private entry_shown(text: string) -> string
+    val lines = split(elaborated(text), "\n")
+
+    lines[lines.len - 1]

@@ -333,6 +333,8 @@ impl Emitter
             Measured(b, u) ->
                 self.put_value(span, sink, v, *b)
                 self.put_text(sink, " " + spell(*u))
+            // A `void` field's one value.
+            Void -> self.put_text(sink, "()")
             _ -> self.put_aggregate_value(span, sink, v, t)
 
     // A value under an `f"..."` specifier, which the elaborator has checked against its type.

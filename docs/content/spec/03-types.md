@@ -237,6 +237,12 @@ Shortest-form printing for `real32` and `real16` may change in detail.
 Strings compare by content. A function with no declared result whose body ends in a statement returns `void`; it plays the
 part of a Fortran `subroutine`.
 
+`void` may be the type argument of any generic struct, enum or function: `Box(())` is a `Box[void]`
+and `Ok(())` a `Result[void, E]`. A field or payload of type `void` holds nothing and takes no
+space; two of them are always equal, and `print` and an interpolation spell one `()`, as in
+`Box { value=() }` and `Ok(())`. `never`, the type of `stop` and `return`, has no value and is not a
+type argument. A struct's own field may not be declared `void`; only a type argument makes one.
+
 ## 3.11 Tuples
 
 A tuple type is a fixed list of two or more types, written with commas: `real, real` or

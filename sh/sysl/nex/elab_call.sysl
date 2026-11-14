@@ -737,7 +737,17 @@ impl Elab
             val v = self.infer(a)
 
             v.ty match
-                Void -> self.fail(a.span, "this has no value to print: it is void")
+                // `void`'s one value is spelled `()`: what holds it is evaluated, then that is printed.
+                Void ->
+                    var items: Buf[TExpr] = buf()
+
+                    items.push(v)
+
+                    var text: Buf[TExpr] = buf()
+
+                    text.push(texpr(a.span, Ty.Str, TLiteral(StrVal("()"), false)))
+
+                    return texpr(span, Void, TBlock(items, texpr(span, Void, TBuiltin(name, text))))
                 Fn(_) -> self.fail(a.span, s"a function cannot be printed")
                 _ -> ()
 

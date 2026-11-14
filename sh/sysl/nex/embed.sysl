@@ -388,7 +388,8 @@ struct Script
     private failed: Option[NexError]
 
     // `main` run with `args` as the program's arguments: the status `main` returning (0) or `stop`
-    // gives.
+    // gives. A `main` returning a `Result[void, E]` that gives an `Err` writes `error: <message>`
+    // through the host's standard-error `write` and gives 1 (DESIGN §17.2).
     run(*self, args: []const string = []) -> Result[int, NexError]
         var kept: Buf[string] = buf()
 
@@ -397,7 +398,7 @@ struct Script
 
         self.m.args = kept
 
-        val k = self.function("main")?
+        val k = self.function(self.program.entry)?
         var none: Buf[Code] = buf()
 
         self.start()?

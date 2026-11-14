@@ -175,7 +175,21 @@ elab_generic_struct_errors()
     assert_eq(refused("struct OrdBox[T: Ord]\n  value: T\ndef main() = print(OrdBox(\"x\").value)\n"), "error: `OrdBox` needs `T: Ord`, and string is not Ord: Ord admits the integer and real types @3:20")
     assert_eq(refused("struct OrdBox[T: Ord]\n  value: T\ndef f(b: OrdBox[bool]) = ()\n" + MAIN), "error: `OrdBox` needs `T: Ord`, and bool is not Ord: Ord admits the integer and real types @3:10")
     assert_eq(refused(BOX + "def main() =\n  val b: Box[integer] = Box(\"x\")\n"), "error: the field `value` must be int64, but this is string @4:29")
-    assert_eq(refused(BOX + "def main() =\n  val b = Box(print(1))\n"), "error: `T` of `Box` would be void, which holds no value @4:11")
+    assert_eq(refused(BOX + "def main() =\n  val b = Box(stop 1)\n"), "error: cannot infer `T` of `Box` here: write the type where it is bound, `val x: Box[...] = Box(...)` @4:11")
+    assert_eq(refused(BOX + "def f(b: Box[never]) = ()\n" + MAIN), "error: unknown type `never` @3:14")
+    assert_eq(refused("def call[R](f: () -> R): R = f()\ndef main() =\n  call(() -> stop 1)\n"), "error: cannot infer `R` of `call` here: no argument fixes it @3:3")
+
+@test("void is a type argument, its one value ()")
+elab_generic_void()
+    assert_eq(elaborated(BOX + "def main() =\n  val b = Box(print(1))\n  print(b.value)\n"),
+        "(struct Box[void] (value void))\n(def main () void (block (val b#0:Box[void] (new:Box[void] (print 1))) (block (.value b#0) (print \"()\"))))")
+    assert_eq(elaborated(BOX + "def main() =\n  val b: Box[void] = Box(())\n  print(b)\n"),
+        "(struct Box[void] (value void))\n(def main () void (block (val b#0:Box[void] (new:Box[void] ())) (print b#0)))")
+    assert_eq(elaborated(OPT + "def main() =\n  val o: Opt[void] = Some(())\n  print(o)\n"),
+        "(enum Opt[void] (Some (value void)) None)\n(def main () void (block (val o#0:Opt[void] (variant:Opt[void] Some ())) (print o#0)))")
+    assert_eq(elaborated(ID + "def main() = print(id(()))\n"), "(def main () void (block (call id[void] ()) (print \"()\")))\n(def id[void] ((x#0 void)) void x#0)")
+    assert_eq(elaborated(RESULT + "def main() =\n  val r: Result[void, string] = Ok(())\n  print(s\"${r} ${()}\")\n"),
+        "(enum Result[void, string] (Ok (value void)) (Err (error string)))\n(def main () void (block (val r#0:Result[void, string] (variant:Result[void, string] Ok ())) (print (s r#0 \" \" (block:string () \"()\")))))")
     assert_eq(refused("struct Node[T]\n  next: Node[T]\ndef f(n: Node[integer]) = ()\n" + MAIN), "error: `Node[int64]` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1")
     assert_eq(refused(BOX + "def main() =\n  val b = Box(1)\n  val c: Box[real] = b\n"), "error: `c` must be Box[real], but this is Box[int64] @5:22")
 

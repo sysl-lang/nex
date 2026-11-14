@@ -188,6 +188,23 @@ emb_run_and_state()
     assert_eq(called(s, "bump", none()), "i64:2")
     assert_eq(o.text.finish(), "init\nx\nx\ny\n")
 
+@test("run of a main returning Result[void, E] gives 1 for an Err, its error line through the host's standard-error write, and 0 for Ok(())")
+emb_run_main_result()
+    val o: &Out = Out(str_builder())
+    val s = loaded("def main(args: [string]): Result[void, string] =\n  print(\"start\")\n  if size(args) > 0 then return Err(s\"bad ${args[1]}\")\n  Ok(())\n", new_host(), kept(o))
+
+    assert_eq(s.run().unwrap(), 0)
+    assert_eq(s.run(["x"]).unwrap(), 1)
+    assert_eq(o.text.finish(), "start\nstart\nerr: error: bad x\n")
+
+    // A host calling `main` by name gets its `Result` as it is, and nothing is written.
+    val q: &Out = Out(str_builder())
+    val t = loaded("def main(): Result[void, string] = Err(\"no\")\n", new_host(), kept(q))
+
+    assert_eq(called(t, "main", none()), "Err(\"no\")")
+    assert_eq(q.text.finish(), "")
+    assert_eq(t.run().unwrap(), 1)
+
 @test("a call by name checks the argument count, refuses an inout parameter and a name the script lacks, and stop inside a call is an error")
 emb_call_refusals()
     val s = loaded("def f(a: integer, b: real): real = a * b\ndef g(x: inout real) =\n  x = 1.0\ndef h() =\n  stop 7\n")

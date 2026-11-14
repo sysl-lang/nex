@@ -1,0 +1,7 @@
+6.0
+Ok(())
+Err(negative: -2)
+Holder { name=h1, marker=Box { value=() }, data=[1.0, 2.0] }
+[Ok(()), Err(negative: -4), Err(x2)]
+negative: -9
+done

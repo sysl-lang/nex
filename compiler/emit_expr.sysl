@@ -861,6 +861,11 @@ impl Emitter
                     v = self.ex(a)
                     t = self.ty(a.span, a.ty)
 
+                    // A `void` argument, once evaluated, crosses as the empty struct its parameter is.
+                    if is_void(a.ty)
+                        t = VOID_PARAM
+                        v = self.def(s"llvm.mlir.undef : $VOID_PARAM")
+
                     // Through a function value an array crosses as a buffer.
                     if is_arr(a.ty) && !is_fn_ref(callee)
                         v = self.crossing(a.span, v, a.ty)

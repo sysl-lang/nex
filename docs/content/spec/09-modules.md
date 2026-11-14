@@ -110,7 +110,8 @@ def main() =
 ```
 
 `main` is declared in one of two forms, `def main()` or `def main(args: [string])`, and returns
-`void`; any other signature is a compile error. `args` holds the command-line arguments the user
+`void` or `Result[void, E]`, whose `Err` ends the program with `error: <message>` on standard error
+and status 1 ([§12.13](/spec/12-prelude/)); any other signature is a compile error. `args` holds the command-line arguments the user
 gave, without the program's name, and is 1-based like every array: `args[1]` is the first.
 
 ```nex

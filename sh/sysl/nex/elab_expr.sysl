@@ -1115,7 +1115,6 @@ impl Elab
                 Value(x, spec) ->
                     val v = self.infer(x)
 
-                    if is_void(v.ty) then self.fail(x.span, "this has no value to put in a string: it is void")
                     if format && spec.len > 0 then self.check_spec(x.span, spec, base_of(v.ty))
 
                     interp_value(&out, v, spec)

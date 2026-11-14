@@ -1,0 +1,34 @@
+// `void` type arguments beside counted values (DESIGN §2.6, §17.2): a `Result[void, string]` whose
+// `Err` string `?` passes out past a held array, a struct holding a `Box[void]` beside a string and
+// an array, and an array of `Result[void, string]`, each given back once.
+
+struct Box[T]
+  value: T
+
+struct Holder
+  name: string
+  marker: Box[void]
+  data: [real]
+
+def check(n: integer): Result[void, string] =
+  if n < 0 then Err(s"negative: $n") else Ok(())
+
+def all_ok(xs: [integer]): Result[void, string] =
+  val held = [1.0, 2.0, 3.0]
+  for x in xs
+    check(x)?
+  print(sum(held))
+  Ok(())
+
+def main() =
+  print(all_ok([1, 2]))
+  print(all_ok([1, -2, 3]))
+  val h = Holder(s"h${1}", Box(()), [1.0, 2.0])
+  print(h)
+  val rs: [Result[void, string]] = [check(1), check(-4), Err(s"x${2}")]
+  print(rs)
+  all_ok([-9]) match
+    Ok(_) -> print("ok")
+    Err(e) -> print(e)
+  assert_traps(() -> all_ok([-7])!, "negative: -7")
+  print("done")
