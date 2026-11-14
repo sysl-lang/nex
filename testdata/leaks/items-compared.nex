@@ -1,0 +1,22 @@
+// `==` and `!=` on arrays of non-numbers read each element of both operands as they compare it:
+// strings made at run time, enums and tuples holding them, operands that are calls, slices and
+// temporaries, and a comparison that traps on mismatched extents.
+
+enum Tag =
+  Named(s: string)
+  Blank
+
+def names(n: integer): [string] = map(1..n, k -> s"n$k")
+
+def main() =
+  var hits = 0
+  for k in 1..50
+    val a = names(4)
+    val b = map(1..4, j -> s"n${if j == 2 then k else j}")
+    val ts = map(a, s -> Named(s))
+    val ps = map(a, s -> (s, s + s))
+    hits += count(a == b) + count(names(4) != b) + count(ts == map(b, s -> Named(s)))
+    hits += count(ps != map(b, s -> (s, s + s))) + count(a[2..3] == b[2..3])
+    assert_traps(() -> print(a == names(5)), "shape mismatch")
+  print(hits)
+  print(map(names(2), s -> Named(s)) == [Named("n1"), Blank])

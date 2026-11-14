@@ -1,0 +1,86 @@
+// `==` and `!=` on arrays are element-wise for every element type (DESIGN §7.1, §11.4): an array of
+// strings, enums, `Option`s and `Result`s with payloads, tuples and structs gives a `[bool]` as an
+// array of numbers does, at rank 1 and 2, over a slice, an empty array and a call's result, broadcast
+// against a scalar, inside a `parallel for` and fed to `all`, `any` and `not`; arrays of different
+// extents trap.
+
+struct P
+  x: integer
+  tag: string
+
+enum Shape =
+  Circle(r: real)
+  Square(side: real, name: string)
+  Empty
+
+def words(): [string] = ["a", "x", "c"]
+
+def main() =
+  val a = ["a", "b"]
+  print(a == ["a", "c"])
+  print(a != ["a", "c"])
+  print(a == "b")
+  print("a" != a)
+
+  val rs: [Result[void, string]] = [Ok(()), Err("x")]
+  print(rs == rs)
+  print([Ok(()), Err("x")] == rs)
+  print(rs != [Ok(()), Err("y")])
+
+  val os: [Option[int32]] = [Some(1), None, Some(3)]
+  print(os == [Some(1), Some(2), Some(3)])
+  print(os != [None, None, Some(3)])
+
+  val shapes = [Circle(1.0), Square(2.0, "s"), Empty]
+  print(shapes == [Circle(1.0), Square(2.0, "t"), Empty])
+  print(shapes != [Circle(2.0), Square(2.0, "s"), Circle(0.0)])
+
+  val ts = [(1, "a"), (2, "b")]
+  print(ts == [(1, "a"), (2, "c")])
+  print(ts != [(1, "a"), (3, "b")])
+
+  val ps = [P(1, "a"), P(2, "b")]
+  print(ps == [P(1, "a"), P(2, "x")])
+  print(ps != [P(1, "a"), P(2, "x")])
+
+  val bs = [true, false, true]
+  print(bs == [true, true, true])
+  val zs = [1 + 2i, 3 - 1i]
+  print(zs == [1 + 2i, 3 + 1i])
+  print(zs != [1 + 2i, 3 + 1i])
+
+  // Rank 2.
+  val m = [["a", "b", "c"], ["d", "e", "f"]]
+  print(m == [["a", "x", "c"], ["d", "e", "y"]])
+  print(m != [["a", "x", "c"], ["d", "e", "y"]])
+
+  // A slice on one side, and on both.
+  val w = ["q", "a", "x", "c", "q"]
+  print(w[2..4] == words())
+  print(words() != w[2..4])
+  print(m[1, :] == m[2, :])
+  print(m[:, 2] == ["b", "e"])
+
+  // Empty arrays.
+  val none: [string] = []
+  print(none == none)
+  print(none != w[3..2])
+
+  // A call's result, and the result fed on.
+  print(words() == words())
+  print(all(words() == ["a", "x", "c"]))
+  print(any(a != a))
+  print(not (a == ["a", "c"]))
+
+  // Inside a `parallel for`: each iteration compares its own arrays.
+  var same: [bool] = fill(4, false)
+  parallel for i in 1..4
+    same[i] = all([s"${i % 2}", "k"] == ["1", "k"])
+  print(same)
+
+  // A `parallel` element-wise expression.
+  print(parallel (a != ["a", "c"]))
+
+  // Different extents trap.
+  assert_traps(() -> print(a == ["a", "b", "c"]), "shape mismatch")
+  assert_traps(() -> print(m != [["a"], ["d"]]), "shape mismatch")
