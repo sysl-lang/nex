@@ -3393,9 +3393,12 @@ are gone with it.
   stay in order. `print` and `eprint` keep their meaning (§11.2) and answer nothing; a failure to
   write standard output is not reported, as in Fortran.
 - **Closing when the last reference goes flushes**, and a failure then cannot be returned to
-  anyone, so it **traps** with its message rather than being lost; a program that must handle that
-  failure calls `close` and matches its `Result`. While a trap is already unwinding (§11.4) the
-  failure is dropped, since the program is failing anyway.
+  anyone, so it **warns and does not trap**: `warning: <path>: <reason>` goes to standard error
+  (for an embedded script, the host's `write` for it, §16) and the program carries on. This holds for
+  every implicit close: a scope's end, an overwritten binding, the program's end by returning or by
+  `stop`, a trap unwinding (§11.4), and a host dropping its script. An explicit `close(f)` or
+  `flush(f)` still answers the failure as its `Result`. **A program that must know calls
+  `close(f)?`.**
 - **A `File` is a value of its own kind**: it may be a local, a field, an element or a module-level
   binding, but it has no `==` (§2.6 `Eq` does not admit it), it prints as `File(run.log)`, it does
   not cross to a host (§16.3) or to C (§10.2), and it is not sent between MPI ranks.

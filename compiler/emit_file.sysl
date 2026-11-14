@@ -8,6 +8,9 @@ import sysl.buf.{Buf, buf}
 
 impl Emitter
     file_builtin(*self, name: string, args: Buf[TExpr], t: Ty) -> string
+        if name == "file_bytes_taken" then return self.bytes_taken(args[0], t)
+        if name == "file_write_buffer" then return self.buffer_written(args[0], args[1])
+
         var vals = ""
         var tys = ""
 
@@ -29,4 +32,27 @@ impl Emitter
         val r = self.call(s"nex_${name}", vals, tys, ret)
 
         if ret == "!llvm.ptr" then self.own(r, t) else r
+
+    // The `[uint8]` of `count` bytes that `read_bytes` read: a fresh buffer the runtime copies them
+    // into in one call.
+    private bytes_taken(*self, count: TExpr, t: Ty) -> string
+        val n = self.def(s"arith.index_cast ${self.ex(count)} : i64 to index")
+        val b = self.fresh_buffer(count.span, elem_of(t), n, "")
+
+        self.call("nex_file_bytes_taken", b.ptr, "!llvm.ptr", "")
+        self.buffer_tensor(count.span, b, t)
+
+    // `write_bytes(path, data)`: the array's storage handed to the runtime in one call, where it lies
+    // when it is dense, else a dense copy given back after.
+    private buffer_written(*self, path: TExpr, data: TExpr) -> string
+        val p = self.ex(path)
+        val vt = self.view_ty(data.ty)
+        val x = self.blas_arg(data.span, self.read_buffer(data.span, self.cast(data.span, self.ex(data), data.ty, vt), vt), vt, false)
+        val n = self.def(s"arith.index_cast ${x.rows} : index to i64")
+        var copies: Buf[CArray] = buf()
+
+        self.call("nex_file_write_buffer", s"$p, ${x.ptr}, $n", "!llvm.ptr, !llvm.ptr, i64", "")
+        copies.push(x.copy)
+        self.give_back(copies)
+        ""
 end Emitter

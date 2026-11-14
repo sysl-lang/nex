@@ -21,6 +21,7 @@ import sysl.buf.{Buf, buf}
 import sysl.fs as fs
 import sysl.io as sio
 import sysl.raw.ptr_cast
+import sysl.slices.copy
 import sysl.text.{from_utf8, from_utf8_unchecked}
 
 // What the last file operation of a thread came to.
@@ -309,6 +310,11 @@ file_write(f: &NexFile, s: string, line: bool, what: string)
 private handed_over(f: &NexFile) -> bool
     if f.out.len() == 0 then return true
 
+    if faulty(f.path)
+        f.out.clear()
+        reported(f.path, fs.IoError.NoSpaceLeft)
+        return false
+
     var file = f.os.unwrap()
     var k: usize = 0
     val n = f.out.len()
@@ -372,7 +378,7 @@ file_close(f: &NexFile)
             Err(e) -> reported(f.path, e)
 
 // `f` closed as its last reference goes: `""`, or the sentence of the failure, which the caller
-// traps with, since nobody is left to hand it to.
+// writes as a warning (`dropped_warning`), since nobody is left to hand it to.
 file_dropped(f: &NexFile) -> string
     if f.shut || f.mode >= MODE_STDIN then return ""
 
@@ -383,6 +389,30 @@ file_dropped(f: &NexFile) -> string
     if status == FILE_NOT_FOUND then s"$fail_path: no such file"
     elif status == FILE_DENIED then s"$fail_path: permission denied"
     else s"$fail_path: $fail_message"
+
+// The line standard error is given for a close that failed as the last reference went (DESIGN
+// §17.6); the program goes on.
+dropped_warning(message: string) -> string = s"warning: $message\n"
+
+// -- the fault the tests set ---------------------------------------------------------------------------
+//
+// A test cannot make the system refuse a write on demand — macOS has no `/dev/full` — so the suite
+// names a prefix, and every hand-over to the system of a file whose path starts with it fails as a
+// full disk would, `NoSpaceLeft`: from sysl with `fail_flushes_under`, from a compiled program by
+// linking a constructor that calls `nex_test_fail_flushes`. Nothing else sets it; an empty prefix is
+// no fault.
+@thread_local private var faulty_prefix = ""
+@thread_local private var faulty_c: *u8 = null
+
+fail_flushes_under(prefix: string)
+    faulty_prefix = prefix
+
+@export("nex_test_fail_flushes")
+fail_flushes_under_c(prefix: *u8)
+    faulty_c = prefix
+
+private faulty(path: string) -> bool =
+    (faulty_prefix != "" && path.starts_with(faulty_prefix)) || (faulty_c != null && path.starts_with(c_text(faulty_c)))
 
 // -- whole files ----------------------------------------------------------------------------------
 
@@ -474,8 +504,8 @@ file_remove(path: string)
         Ok(_) -> succeeded()
         Err(e) -> reported(path, e)
 
-// The bytes `read_bytes` read, which the typed IR copies out one at a time; and the bytes
-// `write_bytes` writes, which it puts in one at a time.
+// The bytes `read_bytes` read, held between the call that reads them and the one that hands them
+// to the new array, whole.
 @thread_local private var bytes_held: Option[&Buf[u8]] = None
 
 // This thread's held bytes, made the first time it needs them.
@@ -489,7 +519,7 @@ private held_bytes() -> &Buf[u8]
     bytes_held = Some(b)
     b
 
-// The bytes of `path` held for `file_byte`, and how many there are.
+// The bytes of `path` held for `file_bytes_taken`, and how many there are.
 file_read_bytes(path: string) -> long
     val held = held_bytes()
 
@@ -501,27 +531,30 @@ file_read_bytes(path: string) -> long
             long(b.len)
         None -> 0
 
-// Byte `k` of those `file_read_bytes` holds, from 1.
-file_byte(k: long) -> long = long(held_bytes()[usize(k - 1)])
+// The bytes `file_read_bytes` holds, handed over: the storage of the interpreter's new array. The
+// thread holds none after.
+file_bytes_taken() -> Buf[u8]
+    var out: Buf[u8] = buf()
 
-// The bytes `write_bytes` writes begun, put in one at a time and written by `file_write_bytes`.
-file_bytes_begin() = held_bytes().clear()
+    out.extend(held_bytes().view())
+    bytes_held = None
+    out
 
-file_bytes_put(b: long) = held_bytes().push(u8.wrap(b))
-
-file_write_bytes(path: string)
+// The bytes `file_read_bytes` holds copied to `dest`, which has room for them all: the storage of the
+// compiled program's new array. The thread holds none after.
+private bytes_taken_to(dest: *u8)
     val held = held_bytes()
 
-    file_write_all(path, held.view(), false)
-    held.clear()
+    _ = copy(dest[0..<held.len()], held.view())
+    bytes_held = None
 
 // -- the compiled program's entries ----------------------------------------------------------------
 //
 // A compiled `File` is an object of the counted heap whose payload is a slot of `table`, and whose
-// release closes the file once the last reference goes. Where that close fails the program ends as
-// a trap nothing catches would end it (DESIGN §17.6) — a release is a call no frame can be abandoned
-// across, so the trap cannot return to a catch — unless a trap is already giving back what its
-// frames held, which drops the failure. The three standard files are slots 0 to 2, never closed.
+// release closes the file once the last reference goes. Where that close fails, standard error is
+// given a warning and the program goes on (DESIGN §17.6): a release is a call no frame can be
+// abandoned across, so it could not trap even if the failure were one. The three standard files are
+// slots 0 to 2, never closed.
 
 private var table: Buf[Option[&NexFile]] = buf()
 private var free_slots: Buf[usize] = buf()
@@ -574,7 +607,7 @@ file_release(p: *u8)
 
     val message = file_dropped(f)
 
-    if message != "" && !unwinding() then ended_by_failure(message)
+    if message != "" then warned(message)
 
 // Every file still open as the program ends, closed as its last reference going would close it.
 files_at_exit()
@@ -583,7 +616,7 @@ files_at_exit()
             Some(f) ->
                 val message = file_dropped(f)
 
-                if message != "" then ended_by_failure(message)
+                if message != "" then warned(message)
             None -> ()
 
 @export("nex_file_std")
@@ -644,17 +677,12 @@ file_remove_c(path: *u8) = file_remove(c_text(path))
 @export("nex_file_read_bytes")
 file_read_bytes_c(path: *u8) -> long = file_read_bytes(c_text(path))
 
-@export("nex_file_byte")
-file_byte_c(k: long) -> long = file_byte(k)
+@export("nex_file_bytes_taken")
+file_bytes_taken_c(dest: *u8) = bytes_taken_to(dest)
 
-@export("nex_file_bytes_begin")
-file_bytes_begin_c() = file_bytes_begin()
-
-@export("nex_file_bytes_put")
-file_bytes_put_c(b: long) = file_bytes_put(b)
-
-@export("nex_file_write_bytes")
-file_write_bytes_c(path: *u8) = file_write_bytes(c_text(path))
+// `write_bytes(path, data)`: the `n` bytes from `data`, a dense buffer, made the whole of `path`.
+@export("nex_file_write_buffer")
+file_write_buffer_c(path: *u8, data: *u8, n: long) = file_write_all(c_text(path), data[0..<usize(n)], false)
 
 @export("nex_file_status")
 file_status_c() -> long = file_status()

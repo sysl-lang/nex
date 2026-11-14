@@ -18,8 +18,8 @@ module sh.sysl.nex
 //     else Err(Failed(file_fail_path(), file_fail_message()))
 //
 // `read_line` answers `Ok(None)` where the outcome is the end of the input. `read_bytes` and
-// `write_bytes` move their bytes one at a time between the array and the runtime, which holds them
-// for the one call that reads or writes the file.
+// `write_bytes` hand the array's storage across whole: the runtime holds what it read until a second
+// call fills the new array with it, and writes an array's storage in the one call.
 
 import nex_runtime.sh.sysl.nex_runtime.{FILE_DENIED, FILE_END, FILE_MALFORMED, FILE_MISUSE, FILE_NOT_FOUND, FILE_OK}
 import sysl.buf.{Buf, buf}
@@ -40,9 +40,10 @@ is_file_function(name: string) -> bool
 is_file_builtin(name: string) -> bool = name.starts_with("file_")
 
 // The file function a runtime call is the I/O of, by its nex name; `""` for a call that reads or
-// writes no file (an outcome read back, a byte moved, a standard file named).
+// writes no file (an outcome read back, read bytes handed to their array, a standard file named).
 file_io_name(builtin: string) -> string
     if !is_file_builtin(builtin) then return ""
+    if builtin == "file_write_buffer" then return "write_bytes"
 
     val n = builtin[5..]
 
@@ -156,12 +157,11 @@ impl Elab
             operands.push(if name == "open" then mode_tag(span, at(span, second.ty, held)) else at(span, second.ty, held))
 
         if name == "read_bytes" then return self.bytes_read(span, items, operands)
-        if name == "write_bytes" then self.bytes_written(span, &items, operands)
 
         // The value the call answers on success, and the call.
         val ty = if name == "open" then Ty.File elif name == "read_line" || name == "read_text" then Ty.Str elif name == "read_lines" then Ty.Array(Ty.Str, dynamic_axes(1)) else Void
-        val entry = if name == "write_bytes" then "file_write_bytes" else s"file_${name}"
-        val made = call(span, ty, entry, if name == "write_bytes" then just(operands[0]) else operands)
+        val entry = if name == "write_bytes" then "file_write_buffer" else s"file_${name}"
+        val made = call(span, ty, entry, operands)
         var value = unit(span)
 
         if is_void(ty)
@@ -211,16 +211,14 @@ impl Elab
 
         texpr(span, result, TIf(is(span, status, FILE_MISUSE), trap, Some(e1)))
 
-    // `read_bytes(path)`: the file's bytes held by the runtime, then copied into a new `[uint8]`.
+    // `read_bytes(path)`: the file's bytes held by the runtime, then handed whole to a new `[uint8]`.
     //
     //     val count = file_read_bytes(path)
     //     val status = file_status()
-    //     if status == FILE_OK then
-    //       var bytes: [uint8] = zeros(count)
-    //       for k in 1..count
-    //         bytes[k] = uint8(file_byte(k))
-    //       Ok(bytes)
-    //     else …
+    //     if status == FILE_OK then Ok(file_bytes_taken(count)) else …
+    //
+    // `write_bytes(path, data)` is one call, `file_write_buffer(path, data)`, which hands the array's
+    // storage to the runtime whole.
     private bytes_read(*self, span: Span, items: Buf[TExpr], operands: Buf[TExpr]) -> TExpr
         var out = items
         val bytes_ty = Ty.Array(UINT8, dynamic_axes(1))
@@ -230,31 +228,9 @@ impl Elab
         out.push(texpr(span, Void, TLet(count, call(span, INTEGER, "file_read_bytes", operands))))
 
         val status = self.status_of(span, &out)
-        val bytes = self.new_local("bytes", bytes_ty, LVar)
-        val k = self.new_local("k", INTEGER, LLoop)
-        var body: Buf[TExpr] = buf()
+        val taken = ok(span, result, call(span, bytes_ty, "file_bytes_taken", just(at(span, INTEGER, count))))
 
-        body.push(texpr(span, Void, TLet(bytes, call(span, bytes_ty, "zeros", just(at(span, INTEGER, count))))))
-
-        val byte = texpr(span, UINT8, TConvert(call(span, INTEGER, "file_byte", just(at(span, INTEGER, k))), false))
-        val store = texpr(span, Void, TAssign("=", element_of(span, UINT8, at(span, bytes_ty, bytes), at(span, INTEGER, k)), byte))
-
-        body.push(texpr(span, Void, TFor(self.new_loop(None), k, lit(span, 1), at(span, INTEGER, count), true, None, store)))
-
-        val filled = texpr(span, result, TBlock(body, ok(span, result, at(span, bytes_ty, bytes))))
-
-        texpr(span, result, TBlock(out, texpr(span, result, TIf(is(span, status, FILE_OK), filled, Some(self.failure(span, result, status))))))
-
-    // The bytes `write_bytes` writes put into the runtime one at a time, by statements added to
-    // `items`, before the call that writes them.
-    private bytes_written(*self, span: Span, items: *Buf[TExpr], operands: Buf[TExpr])
-        val data = operands[1]
-        val k = self.new_local("k", INTEGER, LLoop)
-        val byte = texpr(span, INTEGER, TConvert(element_of(span, UINT8, data, at(span, INTEGER, k)), false))
-        val put = call(span, Void, "file_bytes_put", just(byte))
-
-        items.push(call(span, Void, "file_bytes_begin", no_args()))
-        items.push(texpr(span, Void, TFor(self.new_loop(None), k, lit(span, 1), call(span, INTEGER, "length", just(data)), true, None, put)))
+        texpr(span, result, TBlock(out, texpr(span, result, TIf(is(span, status, FILE_OK), taken, Some(self.failure(span, result, status))))))
 end Elab
 
 private just_ty(t: Ty) -> Buf[Ty]
@@ -266,13 +242,6 @@ private just_ty(t: Ty) -> Buf[Ty]
 private ok(span: Span, result: Ty, v: TExpr) -> TExpr = texpr(span, result, TVariant("prelude.Ok", 0, just(v)))
 
 private error(span: Span, result: Ty, e: TExpr) -> TExpr = texpr(span, result, TVariant("prelude.Err", 1, just(e)))
-
-// Element `k` of the array `a`, of elements `elem`.
-private element_of(span: Span, elem: Ty, a: TExpr, k: TExpr) -> TExpr
-    var subs: Buf[TSub] = buf()
-
-    subs.push(TSubAt(k))
-    texpr(span, elem, TArray(TIndex(a, subs)))
 
 // The prelude `Mode` `m` as the runtime's number for it: its tag.
 private mode_tag(span: Span, m: TExpr) -> TExpr

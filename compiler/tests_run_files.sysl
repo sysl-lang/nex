@@ -5,8 +5,9 @@
 // ends — by returning or by `stop` — closed, what they held written. The programs of
 // `testdata/v2/120` to `125` and `testdata/leaks/files` cover the rest.
 
-import sysl.fs.{make_dir, read_text, remove_dir_all}
-import sysl.process.Status
+import nex_runtime.sh.sysl.nex_runtime.fail_flushes_under
+import sysl.fs.{make_dir, read_text, remove_dir_all, write_text}
+import sysl.process.{Output, Status}
 
 @test("main returning Result[void, IoError] on a missing file exits 1 with the sentence; ! traps with it")
 run_files_main_err()
@@ -48,3 +49,81 @@ run_files_closed_at_exit()
     assert_eq(stopped_text, "before stop\n")
     assert(local.status == Status.Exited(0), s"${local.status}")
     assert_eq(local_text, "local")
+
+// `text` run on both engines with every hand-over to the system of a file under `prefix` failing as a
+// full disk would: the interpreter's through the runtime's fault, set on this thread for the run; the
+// compiled program's through a constructor, linked in, that sets it as the program starts.
+private ran_failing(b: Bench, prefix: string, text: string, case: string) -> Output
+    val hook = s"${b.work}/$case-fault.c"
+
+    write_text(hook, s"void nex_test_fail_flushes(const char *prefix);\n__attribute__((constructor)) static void fault(void) { nex_test_fail_flushes(\"$prefix\"); }\n").unwrap()
+    fail_flushes_under(prefix)
+
+    val out = ran(b, text, links = [hook], case = case)
+
+    fail_flushes_under("")
+    out
+
+@test("a close that fails as the last reference goes warns on stderr and the program goes on: a scope's end, an overwritten binding, the program's end")
+run_files_dropped_close_warns()
+    val b = bench()
+    val dir = s"${b.work}/dropped"
+
+    make_dir(dir).unwrap()
+
+    val full = s"$dir/full-"
+    var text = s"val log = open(\"${full}module.txt\", Write)!\n"
+
+    text += s"def scoped() =\n  val f = open(\"${full}scope.txt\", Write)!\n  write(f, \"lost\")!\n"
+    text += "def main() =\n  write_line(log, \"lost\")!\n  scoped()\n  print(\"after the scope\")\n"
+    text += s"  var g = open(\"${full}first.txt\", Write)!\n  write(g, \"lost\")!\n  g = open(\"$dir/second.txt\", Write)!\n  write(g, \"kept\")!\n"
+    text += "  print(\"after the overwrite\")\n"
+
+    val out = ran_failing(b, full, text, "run_files_dropped_close_warns")
+    val second = read_text(s"$dir/second.txt").unwrap()
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+    assert_eq(out.text, "after the scope\nafter the overwrite\n")
+    assert_eq(out.err.unwrap_or(""), s"warning: ${full}scope.txt: no space left on the device\nwarning: ${full}first.txt: no space left on the device\nwarning: ${full}module.txt: no space left on the device\n")
+    assert(out.status == Status.Exited(0), s"${out.status}")
+    assert_eq(second, "kept")
+
+@test("a close that fails as stop ends the program warns, and stop's status stands")
+run_files_dropped_close_at_stop()
+    val b = bench()
+    val dir = s"${b.work}/dropped-stop"
+
+    make_dir(dir).unwrap()
+
+    val full = s"$dir/full-"
+    val text = s"val log = open(\"${full}log.txt\", Write)!\ndef main() =\n  write_line(log, \"lost\")!\n  print(\"stopping\")\n  stop 3\n"
+    val out = ran_failing(b, full, text, "run_files_dropped_close_at_stop")
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+    assert_eq(out.text, "stopping\n")
+    assert_eq(out.err.unwrap_or(""), s"warning: ${full}log.txt: no space left on the device\n")
+    assert(out.status == Status.Exited(3), s"${out.status}")
+
+@test("an explicit close or flush of a file whose flush fails answers Err(Failed(…)), and no warning follows")
+run_files_explicit_close_fails()
+    val b = bench()
+    val dir = s"${b.work}/explicit"
+
+    make_dir(dir).unwrap()
+
+    val full = s"$dir/full-"
+    var text = "def kind(e: IoError): string = e match\n  Failed(_, _) -> \"Failed\"\n  _ -> \"other\"\n"
+
+    text += "def shown(r: Result[void, IoError]) = r match\n  Ok(_) -> print(\"ok\")\n  Err(e) ->\n    print(kind(e))\n    print(message(e))\n"
+    text += s"def main() =\n  val f = open(\"${full}flushed.txt\", Write)!\n  write(f, \"x\")!\n  shown(flush(f))\n"
+    text += s"  val h = open(\"${full}closed.txt\", Write)!\n  write(h, \"x\")!\n  shown(close(h))\n  shown(close(h))\n  print(\"end\")\n"
+
+    val out = ran_failing(b, full, text, "run_files_explicit_close_fails")
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+    assert_eq(out.text, s"Failed\n${full}flushed.txt: no space left on the device\nFailed\n${full}closed.txt: no space left on the device\nok\nend\n")
+    assert_eq(out.err.unwrap_or(""), "")
+    assert(out.status == Status.Exited(0), s"${out.status}")

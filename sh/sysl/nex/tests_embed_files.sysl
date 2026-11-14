@@ -7,6 +7,7 @@ module sh.sysl.nex
 // by every operation on a path, `false` by `exists`, and reads its standard input as empty — and the
 // files on the disk are untouched. A `File` does not cross to the host.
 
+import nex_runtime.sh.sysl.nex_runtime.fail_flushes_under
 import sysl.fs.{exists, make_temp_dir, read_text, remove_dir_all, write_text}
 import sysl.text.{StrBuilder, str_builder}
 
@@ -94,3 +95,31 @@ emb_files_not_to_host()
 
     assert_eq(took, "a `File` does not cross to the host (DESIGN §17.6), so `f` cannot be one @1:26")
     assert_eq(gave, "a `File` does not cross to the host (DESIGN §17.6), so a `@host` function does not answer one @1:28")
+
+// `text` loaded and run, its status written to `o` after what it wrote, and the script dropped.
+private run_and_drop(text: string, o: &Gathered)
+    val s = load_script(text, "t.nex", new_host(), gathering(o, false)) match
+        Ok(s) -> s
+        Err(ds) -> panic(ds[0].text)
+
+    val status = s.run().unwrap()
+
+    o.text.push(s"status $status\n")
+
+@test("a file whose close fails as its last reference goes warns through the host's write, at the scope's end and as the script is dropped, and the host goes on")
+emb_files_dropped_close_warns()
+    val dir = make_temp_dir("nex-embed-dropped").unwrap()
+    val full = s"$dir/full-"
+    val text = s"val log = open(\"${full}module.txt\", Write)!\ndef main() =\n  write_line(log, \"lost\")!\n  val f = open(\"${full}local.txt\", Write)!\n  write(f, \"lost\")!\n  print(\"ran\")\n"
+    val o: &Gathered = Gathered(str_builder())
+
+    fail_flushes_under(full)
+    run_and_drop(text, o)
+    fail_flushes_under("")
+    o.text.push("host goes on\n")
+    remove_dir_all(dir).unwrap()
+
+    assert_eq(o.text.finish(), "ran\n" + warned(full, "local.txt") + "status 0\n" + warned(full, "module.txt") + "host goes on\n")
+
+// The warning the host is written for `name` under `full` whose close failed.
+private warned(full: string, name: string) -> string = s"err: warning: $full$name: no space left on the device\n"
