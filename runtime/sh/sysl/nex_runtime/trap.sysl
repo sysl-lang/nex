@@ -50,10 +50,13 @@ warned(message: string)
     put(2, job_prefix() + dropped_warning(message))
 
 // A trap's message, kept for the catch; with nothing catching, written out, and the program ends.
-// A message built from values is noted here, in a call that returns, so that no frame holds it across
-// the `longjmp` of `raise_trap`.
+// Ending so, every file still open is closed first, what it held written and a failing close
+// warned of, as a trap unwinding an interpreted program closes them (DESIGN §17.6). A message built
+// from values is noted here, in a call that returns, so that no frame holds it across the `longjmp`
+// of `raise_trap`.
 note_trap(message: string)
     if depth == 0 then
+        files_at_exit()
         flush_output()
         put(2, job_prefix() + uncaught_text(message))
         abort_job(TRAP_STATUS)

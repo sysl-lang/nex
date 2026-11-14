@@ -2,8 +2,8 @@
 
 // Files (DESIGN §17.6) where a program's ending is the subject, on both engines: `main` answering the
 // `Err` of a missing file, `!` trapping with its sentence, and the files still open as a program
-// ends — by returning or by `stop` — closed, what they held written. The programs of
-// `testdata/v2/120` to `125` and `testdata/leaks/files` cover the rest.
+// ends — by returning, by `stop` or by a trap nothing catches — closed, what they held written. The
+// programs of `testdata/v2/120` to `125` and `testdata/leaks/files` cover the rest.
 
 import nex_runtime.sh.sysl.nex_runtime.fail_flushes_under
 import sysl.fs.{make_dir, read_text, remove_dir_all, write_text}
@@ -49,6 +49,47 @@ run_files_closed_at_exit()
     assert_eq(stopped_text, "before stop\n")
     assert(local.status == Status.Exited(0), s"${local.status}")
     assert_eq(local_text, "local")
+
+@test("a file still open as a trap nothing catches ends the program — a module-level binding, a local — is closed, what it held written")
+run_files_closed_at_trap()
+    val b = bench()
+    val dir = s"${b.work}/at-trap"
+
+    make_dir(dir).unwrap()
+
+    var text = s"val log = open(\"$dir/module.txt\", Write)!\n"
+
+    text += s"def main() =\n  val f = open(\"$dir/local.txt\", Write)!\n  write_line(log, \"before the trap\")!\n  write(f, \"local\")!\n"
+    text += s"  print(\"trapping\")\n  print(read_text(\"$dir/missing.txt\")!)\n"
+
+    val out = ran(b, text, case = "run_files_exit_trap")
+    val module_text = read_text(s"$dir/module.txt").unwrap()
+    val local_text = read_text(s"$dir/local.txt").unwrap()
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+    assert_eq(out.text, "trapping\n")
+    assert_eq(out.err.unwrap_or(""), s"trap: $dir/missing.txt: no such file\n")
+    assert(out.status == Status.Signalled(6), s"${out.status}")
+    assert_eq(module_text, "before the trap\n")
+    assert_eq(local_text, "local")
+
+@test("a close that fails as a trap ends the program warns before the trap's message, and the trap's status stands")
+run_files_dropped_close_at_trap()
+    val b = bench()
+    val dir = s"${b.work}/dropped-trap"
+
+    make_dir(dir).unwrap()
+
+    val full = s"$dir/full-"
+    val text = s"val log = open(\"${full}log.txt\", Write)!\ndef main() =\n  write_line(log, \"lost\")!\n  print(\"trapping\")\n  print(read_text(\"$dir/missing.txt\")!)\n"
+    val out = ran_failing(b, full, text, "run_files_dropped_close_at_trap")
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+    assert_eq(out.text, "trapping\n")
+    assert_eq(out.err.unwrap_or(""), s"warning: ${full}log.txt: no space left on the device\ntrap: $dir/missing.txt: no such file\n")
+    assert(out.status == Status.Signalled(6), s"${out.status}")
 
 // `text` run on both engines with every hand-over to the system of a file under `prefix` failing as a
 // full disk would: the interpreter's through the runtime's fault, set on this thread for the run; the
