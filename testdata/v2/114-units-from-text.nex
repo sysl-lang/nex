@@ -1,0 +1,37 @@
+// A conversion from text takes its unit from the expected type (DESIGN §17.5): the text carries no
+// unit and none is parsed, so `val d: real<mm> = real64(s)!` is a number taken in millimetres. The
+// unit comes through `!`, through `?` in a `def`, into a `Result` bound as one, onto every element
+// of a `[string]`, and onto a complex at both widths; a value read where no unit is expected stays
+// a plain number.
+
+def width(s: string): Result[real<mm>, IoError] =
+  val w: real<mm> = real64(s)?
+  Ok(w + 1.0<mm>)
+
+def lengths(line: string): Result[[real<m>], IoError] = Ok(real64(split(line))?)
+
+def main() =
+  val d: real<mm> = real64("2.5")!
+  print(d)
+  print(d + 1.0<in>)
+  print(to<in>(d))
+  print(strip(d))
+  val f: real32<mm> = real32(" 0.1 ")!
+  print(f)
+  val r: Result[real<s>, IoError] = real64("3")
+  print(r)
+  val bad: Result[real<s>, IoError] = real64("x")
+  print(bad)
+  print(width("4"))
+  print(width("4x"))
+  val v: [real<mm>] = real64(split("1 2.5 -0.0"))!
+  print(v)
+  print(sum(v) + 1.0<m>)
+  print(lengths("1 2"))
+  print(lengths("1 q"))
+  val z: complex<V> = complex("1.5-2.0i")!
+  print(z)
+  val z32: complex[real32]<V> = complex[real32]("(1, 2)")!
+  print(z32)
+  val plain = real64("7")!
+  print(plain)

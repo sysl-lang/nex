@@ -30,7 +30,7 @@ elab_text_arity()
 @test("find answers an Option[integer], which may be dropped; the other functions answer strings, arrays and bools")
 elab_text_result_types()
     assert_eq(refused("def main() =\n  val p: Option[integer] = find(\"ab\", \"b\")\n  val w: [string] = split(\"a b\")\n  val b: bool = starts_with(\"ab\", \"a\")\n  val n: integer = length(\"ab\")\n  find(\"a\", \"a\")\n  print(s\"$p $w $b $n\")\n"), "ok")
-    assert_eq(refused("def main() =\n  val p: integer = find(\"ab\", \"b\")\n  print(p)\n"), "error: `p` must be integer, but this is prelude.Option[int64] @2:20")
+    assert_eq(refused("def main() =\n  val p: integer = find(\"ab\", \"b\")\n  print(p)\n"), "error: `p` must be integer, but this is Option[int64] @2:20")
 
 @test("a string takes one range: no s[i], no step, no second axis, and a slice is not assigned")
 elab_text_slices()
@@ -47,7 +47,7 @@ elab_text_slices()
 elab_text_conversions()
     assert_eq(refused("def main() =\n  val r: Result[real32, IoError] = real32(\"1\")\n  val a: Result[[int8], IoError] = int8(split(\"1 2\"))\n  val z: Result[complex[real32], IoError] = complex[real32](\"1+2i\")\n  print(s\"$r $a $z\")\n"), "ok")
     assert_eq(refused("def main() =\n  real64(\"1\")\n  print(1)\n"), "error: the `Result` of `real64` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …` @2:3")
-    assert_eq(refused("def main() =\n  val x: real64 = real64(\"1\")\n  print(x)\n"), "error: `x` must be real64, but this is prelude.Result[real64, prelude.IoError] @2:19")
+    assert_eq(refused("def main() =\n  val x: real64 = real64(\"1\")\n  print(x)\n"), "error: `x` must be real64, but this is Result[real64, IoError] @2:19")
     assert_eq(refused("def main() = print(int32([[\"1\"], [\"2\"]]))\n"), "error: a conversion from text reads a `[string]` of one axis; this is [string; :, :] @1:26")
     assert_eq(refused("def main() = print(int32(true))\n"), "error: `int32(...)` converts a number, and this is bool @1:26")
     assert_eq(refused("def main() = print(string(1, 2))\n"), "error: `string(...)` converts one value @1:20")
@@ -56,6 +56,25 @@ elab_text_conversions()
     assert_eq(refused("def f(s: string): Result[integer, IoError] = Ok(int64(s)? + 1)\ndef main() = print(f(\"1\"))\n"), "ok")
     assert_eq(refused("def f(s: string): Result[integer, string] = Ok(int64(s)? + 1)\ndef main() = print(f(\"1\"))\n"),
         "error: `?` would return `Err(IoError)` from this function, which returns Result[int64, string]; there is no conversion between error types @1:48")
+
+@test("a real or complex conversion from text takes its unit from the expected type, through !, ? and an Ok; an integer one has none to take")
+elab_text_units()
+    assert_eq(refused("def main() =\n  val d: real<mm> = real64(\"2.5\")!\n  val f: real32<mm> = real32(\"1\")!\n  val r: Result[real<s>, IoError] = real64(\"3\")\n  print(s\"$d $f $r\")\n"), "ok")
+    assert_eq(refused("def main() =\n  val v: [real<mm>] = real64(split(\"1 2\"))!\n  val z: complex<V> = complex(\"1+2i\")!\n  val w: complex[real32]<V> = complex[real32](\"(1, 2)\")!\n  print(s\"$v $z $w\")\n"), "ok")
+    assert_eq(refused("def f(s: string): Result[real<mm>, IoError] =\n  val w: real<mm> = real64(s)?\n  Ok(w + 1.0<mm>)\ndef main() = print(f(\"1\"))\n"), "ok")
+    assert_eq(refused("def f(s: string): Result[real<mm>, IoError] = Ok(real64(s)?)\ndef main() = print(f(\"1\"))\n"), "ok")
+    assert_eq(refused("def f(line: string): Result[[real<m>], IoError] = Ok(real64(split(line))?)\ndef main() = print(f(\"1 2\"))\n"), "ok")
+    // Without an expected unit the value is a plain number, which a unit beside it then refuses.
+    assert_eq(refused("def main() =\n  val x = real64(\"1\")!\n  val d: real<mm> = x\n  print(d)\n"),
+        "error: `d` must be real<mm>, but this is real64: a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<mm>` @3:21")
+    // Integers carry no unit (DESIGN §13.3), so an integer read where a unit is expected is refused as any plain number is.
+    assert_eq(refused("def main() =\n  val n: real<mm> = int64(\"3\")!\n  print(n)\n"),
+        "error: `n` must be real<mm>, but this is int64: a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<mm>` @2:21")
+    assert_eq(refused("def main() =\n  val v: [real<mm>] = int32(split(\"1\"))!\n  print(v)\n"),
+        "error: `v` must be [real<mm>], but this is [int32]: a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<mm>` @2:23")
+    // The unit is the operand's own: a conversion nested in another call's arguments takes none.
+    assert_eq(refused("def id(x: real): real = x\ndef main() =\n  val d: real<mm> = id(real64(\"1\")!)\n  print(d)\n"),
+        "error: `d` must be real<mm>, but this is real64: a plain number is dimensionless; give it a unit by multiplying, `y * 1.0<mm>` @3:21")
 
 @test("message takes an IoError, and a program's own message hides the prelude's")
 elab_text_message()

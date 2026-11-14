@@ -2,7 +2,8 @@
 // interpreter's formatValue rule run on JDK 27 (Double.toString for what is not a whole number below
 // 1e15). The values sit on each boundary the rule has: 1e-3 and 1e7 for plain decimal, 1e15 for the
 // whole-number path, the subnormal and largest doubles, -0.0, and digits that only a shortest
-// round-trip search gets right (0.1 + 0.2, 1e23).
+// round-trip search gets right (0.1 + 0.2, 1e23). The one departure is -0.0, which nex prints as
+// `-0.0` where the reference prints `0.0`, so that it reads back as itself (DESIGN §2.5).
 
 module {
   func.func private @nex_print_real(f64)

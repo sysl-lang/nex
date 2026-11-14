@@ -1,0 +1,18 @@
+// A variant built or named beside `==` or `!=` takes its type from the other side (DESIGN §17.1):
+// `Ok(())`, `Err(e)`, `None` and `Some(x)` on either side of a `Result` or an `Option`, and a
+// variant nested in another.
+
+def main() =
+  val rs: [Result[void, string]] = [Ok(()), Err("x")]
+  print(rs[1] == Ok(()))
+  print(Ok(()) == rs[1])
+  print(rs[2] != Err("x"))
+  print(Err("y") == rs[2])
+  val o: Option[int32] = None
+  print(None == o)
+  print(o == None)
+  print(Some(3) == o)
+  print(o != Some(3))
+  val n: Option[Result[int32, string]] = Some(Err("e"))
+  print(n == Some(Err("e")))
+  print(Some(Ok(1)) != n)

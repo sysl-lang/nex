@@ -528,7 +528,7 @@ impl Elab
 
             if outer.generic == g && name.len > outer.name.len
                 // Reported wherever it is found, since it refuses the generic for good.
-                self.diags.push(error(span, s"`${a.name}` would hold ever larger instances of itself, ${name} inside ${outer.name}, and has no size"))
+                self.diags.push(error(span, self.as_written(s"`${a.name}` would hold ever larger instances of itself, ${name} inside ${outer.name}, and has no size")))
                 self.gen.aggs[g] = GenAgg(a.decl, a.name, a.tparams, a.is_enum, a.variants, false)
                 return None
 
@@ -610,7 +610,7 @@ impl Elab
 
             if self.gen.fun_insts[i].generic == g && name.len > outer.len
                 // Reported wherever it is found, since it refuses the generic for good.
-                self.diags.push(error(span, s"`${f.name}` would need ever larger instances of itself, ${name} inside ${outer}, and they would never end"))
+                self.diags.push(error(span, self.as_written(s"`${f.name}` would need ever larger instances of itself, ${name} inside ${outer}, and they would never end")))
                 self.gen.funs[g] = GenFun(f.decl, f.name, f.tparams, f.params, f.ret, f.body, f.formals, f.result, false)
                 return None
 

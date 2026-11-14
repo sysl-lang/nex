@@ -233,6 +233,9 @@ be an array, the other then an array of the same shape or a scalar that broadcas
   `0.30000001192092896`) (**PROPOSED**). The spelling is the one the `real64` nearest that decimal
   gets, so a whole number is shortened too: the `real16` 65504 prints `65500.0` and the `real32`
   nearest 1e15 prints `1.0E15`. A complex prints as its two parts do.
+- **A negative zero prints as `-0.0`**, at every width, in a complex's parts (`1.0-0.0i`), in
+  `s"…"` and `string(x)`, so that it reads back as itself (§17.5). This departs from the reference,
+  which prints `0.0`. An `f"…"` spec writes what C's `printf` does: `f"${-0.0}%f"` is `-0.000000`.
 - `round` rounds half away from zero, as Fortran's `ANINT` does: `round(2.5)` is `3.0` and
   `round(-2.5)` is `-3.0`.
 - **The prelude's real functions** (`sqrt`, `exp`, `sin`, `floor`, …, ref §10.2) compute at the
@@ -3245,7 +3248,8 @@ end Result
   where their payloads are `Eq`, printed as `Some(3)`, `None`, `Ok(1.5)`, `Ok(())`, `Err(NotFound(in.dat))`. `T` may be `void`
   (§2.6): `Option[void]` and `Result[void, E]` carry `()`.
   A bare `None` or `Ok(…)` takes its arguments from the type expected (§2.6): `val n: Option[integer]
-  = None`.
+  = None`. Beside `==` or `!=` the other side is the type expected, either way round: `rs[1] ==
+  Ok(())`, `None == x`, `n == Some(Err(e))`, and an array literal of them, `[Ok(()), Err("x")] == rs`.
 - **They are prelude names, so a program's own declarations shadow them** (§11.5): a program
   declaring its own `enum Opt[T]` with `Some` and `None` keeps working, its `Some` hiding the
   prelude's in its module. Matching a prelude `Option` (one from `read_line`, say) with variants that
@@ -3354,7 +3358,13 @@ can be wrong where a number cannot: `real64("2.5")` is `Ok(2.5)`, `int32("4x")` 
   value** (§2.5's shortest form), NaN as a NaN, `-0.0` as `-0.0`; that is the contract
   `write_table` and `read_table` rest on.
 - **Units**: `val d: real<mm> = real64(s)!` is a number taken in millimetres; the text carries no
-  unit and none is parsed.
+  unit and none is parsed. The unit is the one the position expects of the value: of what `!` or
+  `?` takes out of the conversion, or of the `Ok` where the `Result` itself is bound
+  (`val r: Result[real<s>, IoError] = real64(s)`), and on a `[string]` of every element
+  (`val v: [real<mm>] = real64(split(line))!`). A real or complex conversion takes it; an integer
+  one cannot, since integers carry no unit (§13.3), so `val n: real<mm> = int64(s)!` is refused as
+  any plain number there is. Only the conversion's own position gives it: in
+  `real64(s)! + 1.0<mm>` the `+` expects nothing of its operand, and the plain number is refused.
 
 ### 17.6 Files
 

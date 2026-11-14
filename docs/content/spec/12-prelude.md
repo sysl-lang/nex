@@ -584,7 +584,7 @@ in [Units of measure](/spec/13-units/).
 | `write_bytes(path: string, data: [uint8]): Result[void, IoError]` | writes `data` as the file's contents | `OPEN(…, ACCESS='stream')` + `WRITE` |
 
 A real prints as the shortest decimal that reads back to the same value at its own width, so the
-`real32` nearest 0.3 prints as `0.3`. A complex prints as its two parts do. Text is formatted with
+`real32` nearest 0.3 prints as `0.3`, and a negative zero prints as `-0.0`. A complex prints as its two parts do. Text is formatted with
 interpolated strings: `s"…"` substitutes values, `f"…"` adds printf-style specs such as
 `$x%10.3f` (see [Lexical structure](/spec/02-lexical/)).
 
@@ -760,12 +760,15 @@ wrong where a number cannot: `real64("2.5")` is `Ok(2.5)`, and `int32("4x")` is
   `nan` in any case. A complex is `1.5+2.0i` as `print` writes one, or Fortran's `(1.5, 2.0)`.
 - **A real is rounded correctly at its own width**: `real32("0.1")` is the `real32` nearest 0.1,
   never the `real64` nearest rounded again. **Everything `print` writes reads back to the same
-  value**, NaN as a NaN; `"-0.0"` reads as a negative zero, though `print` spells one `0.0`.
+  value**, NaN as a NaN and `-0.0` as `-0.0`.
 - **On a `[string]` each element converts**, answering `Result[[T], IoError]`; the first element
   that does not read is the failure, its position in the array the column:
   `real64(split("1 2 x"))` is `Err(Malformed("", 1, 3, "expected a real64, found \"x\""))`.
 - **The column of a failure** is the byte where reading stopped, from 1: `int32("4x")` stops at 2.
   A number out of range is placed where it starts.
+- **A unit comes from the expected type**, never from the text: `val d: real<mm> = real64(s)!`
+  reads millimetres, through `?` as well, and `val v: [real<m>] = real64(split(line))!` gives
+  every element the unit. An integer carries no unit, so `val n: real<mm> = int64(s)!` is refused.
 
 The failure is an `IoError`, the prelude enum every failure of reading and writing text and files
 is:

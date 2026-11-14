@@ -219,8 +219,8 @@ conversions to `real`, `integer` and `complex`.
 
 `print` and string interpolation show a real as the shortest decimal that reads back to the same
 value at that real's own width: the `real32` nearest 0.3 prints as `0.3`, not as the digits of its
-64-bit expansion. A whole real prints with `.0` (`9.0`), and a complex prints as its two parts
-(`3.0+4.0i`).
+64-bit expansion. A whole real prints with `.0` (`9.0`), a negative zero keeps its sign (`-0.0`),
+and a complex prints as its two parts (`3.0+4.0i`, `1.0-0.0i`).
 
 {{< note >}}
 Shortest-form printing for `real32` and `real16` may change in detail.
