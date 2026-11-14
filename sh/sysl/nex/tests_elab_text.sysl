@@ -55,7 +55,7 @@ elab_text_conversions()
     // `?` passes the `IoError` on from a function declared to return one, and no other error type.
     assert_eq(refused("def f(s: string): Result[integer, IoError] = Ok(int64(s)? + 1)\ndef main() = print(f(\"1\"))\n"), "ok")
     assert_eq(refused("def f(s: string): Result[integer, string] = Ok(int64(s)? + 1)\ndef main() = print(f(\"1\"))\n"),
-        "error: `?` would return `Err(IoError)` from this function, which returns Result[int64, string]; there is no conversion between error types @1:56")
+        "error: `?` would return `Err(IoError)` from this function, which returns Result[int64, string]; there is no conversion between error types @1:48")
 
 @test("message takes an IoError, and a program's own message hides the prelude's")
 elab_text_message()

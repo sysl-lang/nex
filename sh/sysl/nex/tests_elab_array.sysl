@@ -245,7 +245,7 @@ array_shape_functions()
     assert_eq(refused("def f(v: [real]) = rows(v)\n" + MAIN), "error: `rows` takes a matrix (rank 2); this has rank 1 @1:25")
     assert_eq(refused("def f(m: [real; :, :]) = extent(m, 3)\n" + MAIN), "error: there is no axis 3: this array has rank 2 @1:36")
     assert_eq(refused("def f(m: [real; :, :]) = permute(m, (1, 1))\n" + MAIN), "error: axis 1 is given twice @1:41")
-    assert_eq(refused("def f(x: real) = length(x)\n" + MAIN), "error: `length` takes an array; this is real @1:25")
+    assert_eq(refused("def f(x: real) = length(x)\n" + MAIN), "error: `length` takes an array or a string; this is real @1:25")
 
 @test("map, filter, reduce and flatMap give a lambda its parameter types from the array")
 array_higher_order()

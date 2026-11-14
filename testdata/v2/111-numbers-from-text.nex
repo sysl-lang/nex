@@ -61,6 +61,8 @@ def main() =
   print(real64("2E2"))
   print(real64("7"))
   print(real64("-0.0"))
+  print(1.0 / real64("-0.0")!)
+  print(1.0 / real64("-1e-999")!)
   print(real64("1_000.000_1"))
   print(real64("inf"))
   print(real64("-Infinity"))

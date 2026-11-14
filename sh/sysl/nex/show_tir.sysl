@@ -32,6 +32,11 @@ show_tprogram(p: TProgram) -> string
     var out: Buf[string] = buf()
 
     for d in p.decls
+        // The shipped prelude's `IoError` is in every program, and shown in none.
+        d match
+            EnumDecl(e) -> if is_io_error(Nominal(e.name, buf())) then continue
+            _ -> ()
+
         out.push(d match
             StructDecl(s) -> s"(struct ${s.name}${show_fields(s.fields)})"
             EnumDecl(e) ->
