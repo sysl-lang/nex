@@ -473,7 +473,7 @@ impl Emitter
 
                 scalar = texpr(e.span, elem_of(e.ty), TBinary("*", scalar, fused_scalar(args[1], &leaves)))
 
-            if quiet(scalar, self.fpe_trap, leaves)
+            if tensor_leaves(leaves) && quiet(scalar, self.fpe_trap, leaves)
                 var f = Fused(leaves, scalar, buf(), "", None, false, buf())
 
                 f.first = self.fused_leaves(a, &f)

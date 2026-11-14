@@ -457,6 +457,75 @@ impl Emitter
         self.cast(span, self.nest_close(n, put), self.view_ty(t), t)
     end items_map
 
+    // An element-wise operation where an operand or the result is an array of non-numbers (`a == b`
+    // on two `[string]`): `scalar` computed at each element in storage order, operand `k` (value
+    // `vals[k]`, already checked to agree in shape with `first`, the first array among them) read
+    // at the element where it is an array and broadcast where it is not, into an array of type `t`.
+    items_mapped(*self, span: Span, t: Ty, operands: Buf[TExpr], vals: Buf[string], scalar: TExpr, first: Option[usize]) -> string
+        val f = first.unwrap()
+        val src = vals[f]
+        val st = operands[f].ty
+        val r = rank_of(t)
+        var dims: Buf[string] = buf()
+        var ns: Buf[string] = buf()
+
+        // Tensor order, nex's last axis first, as the loop nest takes them.
+        for k in 0..<r
+            dims.push(self.dim(span, src, st, r - k))
+
+        for d in backwards(dims)
+            ns.push(self.to_i64(d))
+
+        val et = elem_of(t)
+        var h = ""
+        var tt = ""
+        var init = ""
+
+        if is_items(t)
+            var total = "%one"
+
+            for x in ns
+                total = self.def(s"arith.muli $total, $x : i64")
+
+            h = self.new_items(span, t, total)
+
+            for k in 0..<r
+                self.set_extent(h, k + 1, ns[k])
+        else
+            tt = self.tensor_ty(span, self.view_ty(t))
+            init = self.def(s"tensor.empty(${joined(dims)}) : $tt")
+
+        val n = self.nest_open(dims, init, tt)
+        val m = self.mark()
+        var at: Buf[string] = buf()
+
+        for iv in backwards(n.ivs)
+            at.push(self.def(s"arith.index_cast $iv : index to i64"))
+
+        val k = self.linear(at, ns)
+        var frame: Buf[string] = buf()
+
+        for j in 0..<operands.len()
+            val ot = operands[j].ty
+
+            frame.push(if is_items(ot) then self.item_load(span, self.item_at(vals[j], k), elem_of(ot))
+                       elif !is_arr(ot) then vals[j]
+                       else self.def(s"tensor.extract ${vals[j]}[${joined(n.ivs)}] : ${self.tensor_ty(span, ot)}"))
+
+        val y = self.in_frame(frame, scalar)
+
+        if is_items(t)
+            self.item_init(span, h, k, y, et)
+            self.release_from(m)
+            self.nest_close(n, "")
+            return h
+
+        val put = self.def(s"tensor.insert $y into ${n.accs[n.accs.len() - 1]}[${joined(n.ivs)}] : $tt")
+
+        self.release_from(m)
+        self.cast(span, self.nest_close(n, put), self.view_ty(t), t)
+    end items_mapped
+
     // The length of any rank-1 array, as an `i64`, and element `k` (an `i64` from 1) of it.
     any_length(*self, span: Span, v: string, t: Ty) -> string =
         if is_items(t) then self.items_count(v) else self.to_i64(self.dim(span, v, t, 1))
