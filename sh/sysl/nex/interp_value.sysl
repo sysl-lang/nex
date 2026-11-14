@@ -58,6 +58,9 @@ private[nex] enum Value
     // A value of a host type (DESIGN §16.3): the host's object, shared with the host and released
     // when the last holder lets go.
     VHandle(h: &HostHandle)
+    // An open file (DESIGN §17.6), shared by every value holding it and closed when the last lets go
+    // (`interp_file.sysl`).
+    VFile(f: &FileBox)
     VVoid
 
 // How a computation stopped other than by giving its value: a trap, `stop`, or a `return`, `exit` or

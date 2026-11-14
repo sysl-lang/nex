@@ -109,23 +109,6 @@ impl Elab
             out.push(self.check(pos[2], INTEGER, "the count"))
             return texpr(span, Ty.Array(ty, dynamic_axes(1)), TBuiltin(name, out))
 
-        if name == "read_bytes"
-            if pos.len() != 1 then return self.arity(span, name, "a path")
-
-            var out: Buf[TExpr] = buf()
-
-            out.push(self.check(pos[0], Ty.Str, "the path"))
-            return texpr(span, Ty.Array(Int(8, false), dynamic_axes(1)), TBuiltin(name, out))
-
-        if name == "write_bytes"
-            if pos.len() != 2 then return self.arity(span, name, "a path and the bytes, `[uint8]`")
-
-            var out: Buf[TExpr] = buf()
-
-            out.push(self.check(pos[0], Ty.Str, "the path"))
-            out.push(self.check(pos[1], Ty.Array(Int(8, false), dynamic_axes(1)), "the bytes"))
-            return texpr(span, Void, TBuiltin(name, out))
-
         // The rest take an array first.
         if pos.len() == 0 then return self.arity(span, name, if name == "length" then "an array or a string" else "an array")
 

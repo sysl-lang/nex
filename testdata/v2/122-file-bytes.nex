@@ -1,0 +1,40 @@
+// args: a scratch directory
+// Binary files (DESIGN §17.6, §12.11): every one of the 256 byte values written by `write_bytes` and
+// read back by `read_bytes` in order, an empty array, a rewrite that shortens the file, bytes that
+// are not UTF-8 read as bytes, and text written as text read back as its bytes.
+
+def main(args: [string]) =
+  val dir = args[1]
+  val path = s"$dir/all.bin"
+  var every: [uint8] = zeros(256)
+  for k in 1..256
+    every[k] = uint8(k - 1)
+
+  write_bytes(path, every)!
+  val back = read_bytes(path)!
+  print(s"${length(back)} ${all(back == every)} ${back[1]} ${back[2]} ${back[128]} ${back[256]}")
+  var sum = 0
+  for k in 1..length(back)
+    sum += integer(back[k]) * k
+  print(sum)
+
+  // Backwards, so each value is at a new place.
+  var reversed: [uint8] = zeros(256)
+  for k in 1..256
+    reversed[k] = uint8(256 - k)
+  write_bytes(path, reversed)!
+  val again = read_bytes(path)!
+  print(s"${length(again)} ${all(again == reversed)} ${again[1]} ${again[256]}")
+
+  var none: [uint8] = zeros(0)
+  write_bytes(path, none)!
+  print(length(read_bytes(path)!))
+  print(read_text(path))
+
+  write_bytes(path, to_bytes([1, 2, 3]))!
+  print(read_bytes(path)!)
+  write_text(path, "hé\n")!
+  print(read_bytes(path)!)
+  print(length(read_text(path)!))
+
+  remove(path)!

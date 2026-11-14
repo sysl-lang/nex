@@ -1,0 +1,8 @@
+first
+second
+third
+n = 42
+n = 7
+after close
+still open
+File(stdout)

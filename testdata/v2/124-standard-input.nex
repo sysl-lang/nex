@@ -1,0 +1,18 @@
+// Standard input (DESIGN §17.6), read from the `.in` beside this program: `read_line(stdin)` up to
+// `Ok(None)` and past it, a CRLF line, an empty line and a last line without a newline; every
+// `stdin` value reading on from where the last stopped; writing to it a misuse.
+
+def next(f: File): string = read_line(f)! match
+  Some(line) -> s"<$line>"
+  None -> "end"
+
+def main() =
+  print(next(stdin))
+  val input = stdin
+  print(next(input))
+  print(next(stdin))
+  print(next(input))
+  print(next(stdin))
+  print(next(stdin))
+  assert_traps(() -> write_line(stdin, "x")!, "write_line on stdin, which is read")
+  print(stdin)

@@ -43,6 +43,15 @@ trap_with(message: string) -> never
     note_trap(message)
     raise_trap()
 
+// A failure nobody is left to hand to — a file's close as its last reference goes — ending the
+// program as a trap nothing catches ends it, whatever catch is open: the call it happens in is one
+// no frame may be abandoned across.
+ended_by_failure(message: string)
+    flush_output()
+    put(2, job_prefix() + uncaught_text(message))
+    abort_job(TRAP_STATUS)
+    abort()
+
 // A trap's message, kept for the catch; with nothing catching, written out, and the program ends.
 // A message built from values is noted here, in a call that returns, so that no frame holds it across
 // the `longjmp` of `raise_trap`.
@@ -108,6 +117,7 @@ trap_complex_div_zero() -> never
 // and ends the whole job with it.
 @export("nex_stop")
 stop(code: int) -> never
+    files_at_exit()
     flush_output()
 
     if code != 0 && job_rank >= 0 then put(2, s"${job_prefix()}stop $code\n")
@@ -120,6 +130,7 @@ stop(code: int) -> never
 // The end of `main`: what was printed is written out, and an MPI program leaves its job.
 @export("nex_finish")
 finish()
+    files_at_exit()
     flush_output()
     leave_job()
 

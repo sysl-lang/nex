@@ -328,7 +328,9 @@ impl Elab
 
                 return
             TBuiltin(name, args) ->
-                if name == "read_bytes" || name == "write_bytes" then self.fail(e.span, s"a parallel body does no I/O but `print` and `eprint`, and `${name}` is I/O")
+                val io = file_io_name(name)
+
+                if io.len > 0 then self.fail(e.span, s"a parallel body does no I/O but `print` and `eprint`, and `${io}` is I/O")
 
                 for a in args
                     *a.kind match

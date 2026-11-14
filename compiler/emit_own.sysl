@@ -51,6 +51,7 @@ impl Emitter
     // Whether a value of `t` holds a count on something.
     managed(*self, t: Ty) -> bool = t match
         Str -> true
+        File -> true
         Fn(_) -> true
         Array(_, _) -> is_items(t)
         Tuple(es) -> self.any_managed(es)
@@ -139,6 +140,7 @@ impl Emitter
     // The function releasing a value of `t` held in a slot: one reference, or each part.
     drop_for(*self, t: Ty) -> string = t match
         Str -> "nex_release_slot"
+        File -> "nex_release_slot"
         Array(_, _) -> "nex_release_slot"
         _ -> s"cell.${self.helper_index(t)}"
 
@@ -250,6 +252,7 @@ impl Emitter
     count(*self, v: string, t: Ty, up: bool)
         t match
             Str -> self.count_ref(v, up)
+            File -> self.count_ref(v, up)
             Fn(_) -> self.count_ref(self.def(s"llvm.extractvalue $v[1] : $CLOSURE"), up)
             Array(_, _) -> if is_items(t) then self.count_ref(v, up)
             _ ->

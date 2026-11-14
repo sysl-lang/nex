@@ -1,0 +1,47 @@
+// args: a scratch directory
+// A large file (DESIGN §17.6): 100000 lines written with `write_line`, past every buffer's size,
+// read back with `read_line` and with `read_lines`, appended to and counted again; and one line of
+// 300000 bytes, longer than any buffer, written and read whole.
+
+def main(args: [string]) =
+  val dir = args[1]
+  val path = s"$dir/large.txt"
+  val n = 100000
+  val out = open(path, Write)!
+  for k in 1..n
+    write_line(out, s"line $k of $n")!
+  close(out)!
+
+  val f = open(path, Read)!
+  var count = 0
+  var total = 0
+  var last = ""
+  while true
+    read_line(f)! match
+      Some(line) ->
+        count += 1
+        total += length(line)
+        last = line
+      None -> exit
+  print(s"$count lines, $total bytes, the last `$last`")
+
+  val lines = read_lines(path)!
+  print(s"${length(lines)} ${lines[1]} | ${lines[50000]} | ${lines[n]}")
+  print(length(read_text(path)!))
+
+  append_text(path, "one more\n")!
+  append_text(path, "and another")!
+  val more = read_lines(path)!
+  print(s"${length(more)} ${more[n + 1]} | ${more[n + 2]}")
+
+  var long = ""
+  for k in 1..30000
+    long += "0123456789"
+  write_text(path, long + "\n" + long)!
+  val g = open(path, Read)!
+  val first = read_line(g)!.get_or("")
+  val second = read_line(g)!.get_or("")
+  print(s"${length(first)} ${length(second)} ${first == long} ${second == long} ${read_line(g)!}")
+  close(g)!
+
+  remove(path)!

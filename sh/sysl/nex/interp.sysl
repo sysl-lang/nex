@@ -24,7 +24,7 @@ module sh.sysl.nex
 // is checked as the program is compiled, and each one it lacks is a diagnostic `… is not interpreted
 // yet`, as the compiler's is `… is not compiled yet`.
 
-import nex_runtime.sh.sysl.nex_runtime.{ZERO_STEP, arg_index_message, int_name, out_of_range_message}
+import nex_runtime.sh.sysl.nex_runtime.{NexFile, ZERO_STEP, arg_index_message, int_name, out_of_range_message, text_input}
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.{Diagnostic, Span, error}
 
@@ -46,14 +46,19 @@ val MAX_CALL_DEPTH = 10000
 // `p` run: its `main` called with `args` as the program's arguments, after every module-level binding
 // is initialized, what it prints handed to `write` as it is printed. Or, before anything runs, why it
 // cannot be interpreted. In `nex test`'s build (`TProgram.test_build`), `test` numbers the test run
-// instead of `main`, from 0 in `TProgram.tests`.
-interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit, fpe_trap: bool = false, test: Option[usize] = None) -> Result[Ending, Buf[Diagnostic]]
+// instead of `main`, from 0 in `TProgram.tests`. `stdin`, where it is given, is what the program's
+// standard input reads instead of the process's.
+interpret(p: TProgram, args: []const string, write: &Fn(Stream, string) -> unit, fpe_trap: bool = false, test: Option[usize] = None, stdin: Option[string] = None) -> Result[Ending, Buf[Diagnostic]]
     var kept: Buf[string] = buf()
 
     for a in args
         kept.push(a)
 
     val m = machine(p, kept, write, fpe_trap)
+
+    stdin match
+        Some(text) -> m.stdin = Some(text_input(text))
+        None -> ()
     var it = Interp(erased(p), m, buf(), buf(), buf(), 0, buf(), buf(), buf(), buf(), None, false, buf(), buf(), buf(), buf())
     val init = it.program(test)
 
@@ -153,6 +158,9 @@ private[nex] struct Machine
     trace: Buf[TraceFrame]
     site: Span
     sited: bool
+    // Where `stdin` reads from when it is not the process's standard input: a string the host or a
+    // test gives, or nothing, which a sandboxed script reads.
+    stdin: Option[&NexFile]
 
 // A frame a trap left: the function's name, and where in it the trap happened — the statement, or
 // the function's declaration where no statement says.
@@ -161,7 +169,7 @@ private[nex] struct TraceFrame
     span: Span
 
 private[nex] machine(p: TProgram, args: Buf[string], write: &Fn(Stream, string) -> unit, fpe: bool) -> &Machine =
-    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, cancel_token(), buf(), Span(0, 0), false)
+    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, cancel_token(), buf(), Span(0, 0), false, None)
 
 // The step limit of a run the host sets none for.
 private[nex] val NO_LIMIT: long = 9223372036854775807

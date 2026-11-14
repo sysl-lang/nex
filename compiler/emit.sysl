@@ -325,6 +325,7 @@ struct Emitter
         Complex(b) -> s"complex<f$b>"
         Bool -> "i1"
         Str -> "!llvm.ptr"
+        File -> "!llvm.ptr"
         Fn(_) -> CLOSURE
         Array(_, _) -> if is_arr(t) then self.tensor_ty(span, t) else "!llvm.ptr"
         Tuple(_) -> self.agg_ty(span, t)

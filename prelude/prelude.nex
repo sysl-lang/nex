@@ -24,3 +24,11 @@ enum IoError =
   Malformed(source: string, line: integer, column: integer, message: string)
   Failed(path: string, message: string)        // anything else the system reports
 end IoError
+
+// How `open(path, mode)` opens a file (DESIGN §17.6): `Read`, `Write` (create, or empty), or `Append`
+// (create, or write at the end).
+enum Mode =
+  Read
+  Write
+  Append
+end Mode

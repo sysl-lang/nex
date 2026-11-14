@@ -130,10 +130,18 @@ open_catch() -> Mark
     base_sink = open_sinks()
     m
 
+// Whether a trap is giving back what the frames it abandons held: a file closed then whose close
+// fails does not trap again (`files.sysl`).
+@thread_local private var giving_back = false
+
+unwinding() -> bool = giving_back
+
 // What the frames between a trap and the innermost catch hold, given back as the trap is raised:
 // every frame record above the catch's released, every sink opened since closed, every block on the
 // catch's ring freed.
 abandon()
+    giving_back = true
+
     while frames != base && frames != null
         val f = frames
         val guards: *Guard = ptr_cast(usize(f) + 16)
@@ -142,6 +150,8 @@ abandon()
 
         for k in 0..<usize(f.count)
             guards[k].drop(guards[k].slot)
+
+    giving_back = false
 
     close_sinks(base_sink)
 

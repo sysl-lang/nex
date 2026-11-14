@@ -1,0 +1,70 @@
+// args: a scratch directory
+// What reading and writing files fails with (DESIGN §17.3, §17.6): a missing file is `NotFound`
+// with its path, from `open`, every whole-file reader, `read_bytes` and `remove`; a directory where
+// a file is expected is `Failed` with the system's words, to read and to write; a file in a
+// directory that does not exist is `NotFound`, to write, to append and to open; each `message(e)`;
+// `exists` of a file, a directory and nothing; text that is not UTF-8 is `Malformed` at its line
+// and column, to `read_line`, `read_text` and `read_lines`, and the lines after it still read.
+
+def said(dir: string, r: Result[void, IoError]) = r match
+  Ok(_) -> print("ok")
+  Err(e) -> print(replace(s"$e | ${message(e)}", dir, "<dir>"))
+
+def failure[T](dir: string, r: Result[T, IoError]) = r match
+  Ok(_) -> print("ok")
+  Err(e) -> print(replace(s"$e | ${message(e)}", dir, "<dir>"))
+
+def main(args: [string]) =
+  val dir = args[1]
+  val missing = s"$dir/missing.txt"
+  val nowhere = s"$dir/no/such/dir/out.txt"
+
+  print("-- a missing file")
+  failure(dir, open(missing, Read))
+  failure(dir, read_text(missing))
+  failure(dir, read_lines(missing))
+  failure(dir, read_bytes(missing))
+  said(dir, remove(missing))
+
+  print("-- a directory where a file is expected")
+  failure(dir, open(dir, Read))
+  failure(dir, read_text(dir))
+  failure(dir, read_lines(dir))
+  failure(dir, read_bytes(dir))
+  failure(dir, open(dir, Write))
+  said(dir, write_text(dir, "x"))
+  said(dir, append_text(dir, "x"))
+
+  print("-- a directory that does not exist")
+  failure(dir, open(nowhere, Write))
+  failure(dir, open(nowhere, Append))
+  failure(dir, open(nowhere, Read))
+  said(dir, write_text(nowhere, "x"))
+  said(dir, append_text(nowhere, "x"))
+  said(dir, write_lines(nowhere, ["x"]))
+  var bytes: [uint8] = zeros(1)
+  said(dir, write_bytes(nowhere, bytes))
+
+  print("-- exists")
+  write_text(s"$dir/here.txt", "")!
+  print(s"${exists(s"$dir/here.txt")} ${exists(dir)} ${exists(missing)} ${exists(nowhere)}")
+
+  print("-- text that is not UTF-8")
+  var bad: [uint8] = to_bytes([111, 107, 10, 97, 98, 255, 99, 10, 101, 110, 100, 10])
+  write_bytes(s"$dir/bad.txt", bad)!
+  val f = open(s"$dir/bad.txt", Read)!
+  print(read_line(f))
+  failure(dir, read_line(f))
+  print(read_line(f))
+  print(read_line(f))
+  close(f)!
+  failure(dir, read_text(s"$dir/bad.txt"))
+  failure(dir, read_lines(s"$dir/bad.txt"))
+  read_text(s"$dir/bad.txt") match
+    Ok(_) -> print("read")
+    Err(e) -> e match
+      Malformed(_, line, column, _) -> print(s"line $line, column $column")
+      _ -> print("another failure")
+
+  remove(s"$dir/here.txt")!
+  remove(s"$dir/bad.txt")!

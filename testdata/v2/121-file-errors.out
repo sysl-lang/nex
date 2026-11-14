@@ -1,0 +1,32 @@
+-- a missing file
+NotFound(<dir>/missing.txt) | <dir>/missing.txt: no such file
+NotFound(<dir>/missing.txt) | <dir>/missing.txt: no such file
+NotFound(<dir>/missing.txt) | <dir>/missing.txt: no such file
+NotFound(<dir>/missing.txt) | <dir>/missing.txt: no such file
+NotFound(<dir>/missing.txt) | <dir>/missing.txt: no such file
+-- a directory where a file is expected
+Failed(<dir>, is a directory) | <dir>: is a directory
+Failed(<dir>, is a directory) | <dir>: is a directory
+Failed(<dir>, is a directory) | <dir>: is a directory
+Failed(<dir>, is a directory) | <dir>: is a directory
+Failed(<dir>, is a directory) | <dir>: is a directory
+Failed(<dir>, is a directory) | <dir>: is a directory
+Failed(<dir>, is a directory) | <dir>: is a directory
+-- a directory that does not exist
+NotFound(<dir>/no/such/dir/out.txt) | <dir>/no/such/dir/out.txt: no such file
+NotFound(<dir>/no/such/dir/out.txt) | <dir>/no/such/dir/out.txt: no such file
+NotFound(<dir>/no/such/dir/out.txt) | <dir>/no/such/dir/out.txt: no such file
+NotFound(<dir>/no/such/dir/out.txt) | <dir>/no/such/dir/out.txt: no such file
+NotFound(<dir>/no/such/dir/out.txt) | <dir>/no/such/dir/out.txt: no such file
+NotFound(<dir>/no/such/dir/out.txt) | <dir>/no/such/dir/out.txt: no such file
+NotFound(<dir>/no/such/dir/out.txt) | <dir>/no/such/dir/out.txt: no such file
+-- exists
+true true false false
+-- text that is not UTF-8
+Ok(Some(ok))
+Malformed(<dir>/bad.txt, 2, 3, not UTF-8) | <dir>/bad.txt:2:3: not UTF-8
+Ok(Some(end))
+Ok(None)
+Malformed(<dir>/bad.txt, 2, 3, not UTF-8) | <dir>/bad.txt:2:3: not UTF-8
+Malformed(<dir>/bad.txt, 2, 3, not UTF-8) | <dir>/bad.txt:2:3: not UTF-8
+line 2, column 3

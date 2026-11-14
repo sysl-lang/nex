@@ -1,0 +1,32 @@
+// Emission of the files of DESIGN §17.6: each `file_*` call of the typed IR (`elab_file.sysl`) is one
+// call of the runtime's `nex_file_*` entry (`runtime/files.sysl`), the function the interpreter calls
+// too. A `File` is an object of the counted heap, as a string is; a `File`, a string or an array of
+// strings the runtime answers is new, and the statement owns it.
+
+import nex.sh.sysl.nex.*
+import sysl.buf.{Buf, buf}
+
+impl Emitter
+    file_builtin(*self, name: string, args: Buf[TExpr], t: Ty) -> string
+        var vals = ""
+        var tys = ""
+
+        for k in 0..<args.len()
+            val a = args[k]
+            val sep = if k > 0 then ", " else ""
+
+            vals += sep + self.ex(a)
+            tys += sep + (if is_str(a.ty) || is_file(a.ty) || is_items(a.ty) then "!llvm.ptr" else "i64")
+
+        val ret = t match
+            Str -> "!llvm.ptr"
+            File -> "!llvm.ptr"
+            Array(_, _) -> "!llvm.ptr"
+            Bool -> "i1"
+            Void -> ""
+            _ -> "i64"
+
+        val r = self.call(s"nex_${name}", vals, tys, ret)
+
+        if ret == "!llvm.ptr" then self.own(r, t) else r
+end Emitter

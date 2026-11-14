@@ -876,6 +876,9 @@ struct Elab
                             Some(ty) -> return ty
                             None -> ()
 
+                        // The prelude's `File` (DESIGN §17.6), unless the program declares its own.
+                        if name == "File" then return Ty.File
+
                         if name == "c_ptr"
                             if self.in_extern then return CPtr
 

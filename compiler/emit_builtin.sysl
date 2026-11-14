@@ -55,6 +55,7 @@ impl Emitter
             return ""
 
         if is_text_builtin(name) then return self.text_builtin(span, name, args, t)
+        if is_file_builtin(name) then return self.file_builtin(name, args, t)
         if name == "assert_approx" then return self.assert_approx(span, args)
         if is_lapack(name) then return self.lapack(span, name, args, t)
         if is_items(t) || (args.len() > 0 && is_items(args[0].ty) && !self.is_args(args[0])) then return self.items_builtin(span, name, args, t)
@@ -329,6 +330,11 @@ impl Emitter
                 self.call(s"nex_put_complex${if bits == 64 then "" else s"$bits"}", s"$sink, $re, $im", s"i64, f$at, f$at", "")
             Bool -> self.call("nex_put_bool", s"$sink, $v", "i64, i1", "")
             Str -> self.call("nex_put_str", s"$sink, $v", "i64, !llvm.ptr", "")
+            // `File(run.log)` (DESIGN §17.6).
+            File ->
+                self.put_text(sink, "File(")
+                self.call("nex_put_str", s"$sink, ${self.own(self.call("nex_file_name", v, "!llvm.ptr", "!llvm.ptr"), Ty.Str)}", "i64, !llvm.ptr", "")
+                self.put_text(sink, ")")
             Array(_, _) -> if is_items(t) then self.put_items(span, sink, v, t) else self.put_array(span, sink, v, t)
             // A value with a unit inside a tuple or a struct, as `print` shows one (DESIGN §13.4).
             Measured(b, u) ->

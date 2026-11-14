@@ -1,0 +1,40 @@
+// args: a scratch directory
+// The ownership of files (DESIGN §17.6): files opened, read, written and dropped without `close`
+// in a loop, a `File` held by a struct, an `Option` and a `Result`, copied between locals and
+// returned from a `def`, a failed `open`'s `Err` dropped, and the whole-file functions' strings and
+// arrays, each released.
+
+struct Log
+  name: string
+  out: File
+
+def opened(path: string, mode: Mode): File = open(path, mode)!
+
+def count(path: string): integer =
+  val f = opened(path, Read)
+  var n = 0
+  while true
+    read_line(f)! match
+      Some(_) -> n += 1
+      None -> return n
+  n
+
+def main(args: [string]) =
+  val dir = args[1]
+  val path = s"$dir/log.txt"
+  for round in 1..50
+    val log = Log("log", opened(path, if round == 1 then Write else Append))
+    write_line(log.out, s"round $round")!
+    val kept: Option[File] = Some(log.out)
+    val r = open(s"$dir/missing.txt", Read)
+    print(s"${count(path)} ${is_err(r)} ${is_some(kept)}")
+  val g = open(path, Read)!
+  val h = g
+  print(read_line(h)!)
+  print(length(read_lines(path)!))
+  print(length(read_text(path)!))
+  write_bytes(s"$dir/b.bin", read_bytes(path)!)!
+  print(length(read_bytes(s"$dir/b.bin")!))
+  print(is_err(read_text(s"$dir/missing.txt")))
+  remove(path)!
+  remove(s"$dir/b.bin")!

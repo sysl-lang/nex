@@ -1,0 +1,32 @@
+plain.txt: <one><two><three>
+  again: None
+  whole: one|two|three
+unended.txt: <one><two><three>
+  again: None
+  whole: one|two|three
+crlf.txt: <one><two><><lastCR>
+  again: None
+  whole: one|two||lastCR
+empty.txt: 
+  again: None
+  whole: 
+newline.txt: <>
+  again: None
+  whole: 
+blanks.txt: <><><x><>
+  again: None
+  whole: ||x|
+flushed: [abc, , d]
+closed twice: abc
+
+d
+
+appended: [abc, , d, e]
+rewritten: fresh
+shared: [by one, by two]
+dropped: [kept, unflushed]
+Ok(one)
+Ok(<empty>)
+true
+File(<dir>/plain.txt)
+File(stdin) File(stdout) File(stderr)

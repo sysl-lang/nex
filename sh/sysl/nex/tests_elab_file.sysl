@@ -1,0 +1,66 @@
+module sh.sysl.nex
+@tests
+
+// Files (DESIGN §17.6) as the elaborator checks them: the arguments of each file function, a
+// `Result` that may not be dropped, `File` having no `==`, file I/O refused in a parallel body and in
+// an `@elemental` function, and a program's own declarations hiding the prelude's names. What the
+// programs print is `testdata/v2/120` to `125`'s, on both engines.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.join
+
+private val OPENED = "def main() =\n  val f = open(\"a\", Read)!\n"
+
+@test("each file function takes its own arguments, and names the one that is wrong")
+elab_file_arguments()
+    var got: Buf[string] = buf()
+    got.push(refused("def main() = print(open(\"a\"))\n"))
+    got.push(refused("def main() = print(open(1, Read))\n"))
+    got.push(refused("def main() = print(open(\"a\", 1))\n"))
+    got.push(refused("def main() = print(read_line(\"a\"))\n"))
+    got.push(refused(OPENED + "  print(write(f, 3))\n"))
+    got.push(refused("def main() = print(write_lines(\"a\", \"b\"))\n"))
+    got.push(refused("def main() = print(write_bytes(\"a\", [1.5]))\n"))
+    got.push(refused("def main() = print(exists(\"a\", \"b\"))\n"))
+    got.push(refused("def main() = print(read_text(path = \"a\"))\n"))
+
+    assert_eq(join(got.view(), "\n---\n"), "error: `open` takes a path and a `Mode`, `Read`, `Write` or `Append` @1:20\n---\nerror: the path must be string, but this is int64 @1:25\n---\nerror: the mode must be Mode, but this is int64 @1:30\n---\nerror: the file `read_line` takes must be File, but this is string @1:30\n---\nerror: the text must be string, but this is int64 @3:18\n---\nerror: the lines must be [string], but this is string @1:37\n---\nerror: the bytes must be [uint8], but this is [real64]: that would narrow it; convert it explicitly, `uint8(...)` @1:37\n---\nerror: `exists` takes a path @1:20\n---\nerror: `read_text` takes no named arguments @1:30")
+
+@test("a file function's Result is not dropped; exists answers a bool, which may be")
+elab_file_dropped()
+    var got: Buf[string] = buf()
+    got.push(refused("def main() =\n  write_text(\"a\", \"b\")\n"))
+    got.push(refused(OPENED + "  close(f)\n"))
+    got.push(refused(OPENED + "  write_line(f, \"x\")\n"))
+    got.push(refused("def main() =\n  exists(\"a\")\n  val _ = remove(\"a\")\n  print(\"ok\")\n"))
+
+    assert_eq(join(got.view(), "\n---\n"), "error: the `Result` of `write_text` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …` @2:3\n---\nerror: the `Result` of `close` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …` @3:3\n---\nerror: the `Result` of `write_line` is dropped: handle it with `!`, `?` or `match`, or discard it with `val _ = …` @3:3\n---\nok")
+
+@test("a File has no ==, and prints; Mode is the prelude's enum")
+elab_file_values()
+    var got: Buf[string] = buf()
+    got.push(refused(OPENED + "  print(f == f)\n"))
+    got.push(refused("def main() =\n  val m: Mode = Append\n  print(m)\n  print(stdout)\n"))
+
+    assert_eq(join(got.view(), "\n---\n"), "error: `==` cannot compare File with File @3:9\n---\nok")
+
+@test("file I/O is refused in a parallel body and in an @elemental function, through a def too")
+elab_file_parallel()
+    var got: Buf[string] = buf()
+    got.push(refused("def main() =\n  var y: [real] = zeros(4)\n  parallel for i in 1..4\n    y[i] = real(length(read_text(\"a\")!))\n"))
+    got.push(refused("def save(t: real) =\n  write_text(\"f\", string(t))!\ndef main() =\n  parallel for i in 1..4\n    save(real(i))\n"))
+    got.push(refused("@elemental def e(x: real) =\n  print(exists(\"f\"))\n  x\ndef main() = print(e(1.0))\n"))
+    got.push(refused("def main() =\n  parallel for i in 1..4\n    write_line(stdout, \"x\")!\n"))
+
+    assert_eq(join(got.view(), "\n---\n"), "error: a parallel body does no I/O but `print` and `eprint`, and `read_text` is I/O @4:24\n---\nerror: `save` does I/O with `write_text`, and a parallel body does no I/O but `print` and `eprint` @5:5\n---\nerror: an `@elemental` function may be run in any order, so it cannot do I/O with `exists` @1:1\n---\nerror: a parallel body does no I/O but `print` and `eprint`, and `write_line` is I/O @3:5")
+
+@test("a program's own open, File, stdout and Mode hide the prelude's")
+elab_file_hidden()
+    var got: Buf[string] = buf()
+    got.push(refused("def open(n: integer): integer = n + 1\ndef main() = print(open(2))\n"))
+    got.push(refused("struct File\n  name: string\ndef main() = print(File(\"x\"))\n"))
+    got.push(refused("val stdout = 3\ndef main() = print(stdout + 1)\n"))
+    got.push(refused("enum Mode =\n  Fast\n  Slow\ndef main() = print(Fast)\n"))
+    got.push(refused("def main() =\n  val f = open\n  print(1)\n"))
+
+    assert_eq(join(got.view(), "\n---\n"), "ok\n---\nok\n---\nok\n---\nok\n---\nerror: the prelude function `open` as a value is not elaborated yet @2:11")

@@ -1,0 +1,102 @@
+// args: a scratch directory
+// Files read and written a line at a time (DESIGN §17.6): `open` in each `Mode`, `read_line` up to
+// `Ok(None)` and past it, a last line without a newline, CRLF lines, an empty file and one holding
+// only a newline; `write`, `write_line`, `flush` and `close`, a second `close` doing nothing; two
+// references to one `File`, the close of either closing both and the last one going closing it;
+// `?` through a `def` that reads a file; the misuses that trap; a `File` printed. A `\r` before a
+// newline ends a line with it; one at the very end of a file without a newline is the line's own.
+
+// Every line left in `f`, each between `<` and `>`.
+def lines_of(f: File): Result[string, IoError] =
+  var out = ""
+  while true
+    read_line(f)? match
+      Some(line) -> out += s"<${replace(line, "\r", "CR")}>"
+      None -> return Ok(out)
+  Ok(out)
+
+def first_line(path: string): Result[string, IoError] =
+  val f = open(path, Read)?
+  val line = read_line(f)?
+  close(f)?
+  Ok(line.get_or("<empty>"))
+
+def show(dir: string, name: string) =
+  val f = open(s"$dir/$name", Read)!
+  print(s"$name: ${lines_of(f)!}")
+  print(s"  again: ${read_line(f)!}")
+  print(s"  whole: ${replace(join(read_lines(s"$dir/$name")!, "|"), "\r", "CR")}")
+
+def main(args: [string]) =
+  val dir = args[1]
+
+  write_text(s"$dir/plain.txt", "one\ntwo\nthree\n")!
+  write_text(s"$dir/unended.txt", "one\ntwo\nthree")!
+  write_text(s"$dir/crlf.txt", "one\r\ntwo\r\n\r\nlast\r")!
+  write_text(s"$dir/empty.txt", "")!
+  write_text(s"$dir/newline.txt", "\n")!
+  write_text(s"$dir/blanks.txt", "\n\nx\n\n")!
+  for name in ["plain.txt", "unended.txt", "crlf.txt", "empty.txt", "newline.txt", "blanks.txt"]
+    show(dir, name)
+
+  // Writing: `Write` empties the file, `Append` adds to its end.
+  val out = open(s"$dir/out.txt", Write)!
+  write(out, "a")!
+  write(out, "b")!
+  write_line(out, "c")!
+  write_line(out, "")!
+  write_line(out, "d")!
+  flush(out)!
+  print(s"flushed: ${read_lines(s"$dir/out.txt")!}")
+  close(out)!
+  close(out)!
+  print(s"closed twice: ${read_text(s"$dir/out.txt")!}")
+  val more = open(s"$dir/out.txt", Append)!
+  write_line(more, "e")!
+  close(more)!
+  print(s"appended: ${read_lines(s"$dir/out.txt")!}")
+  val again = open(s"$dir/out.txt", Write)!
+  write(again, "fresh")!
+  close(again)!
+  print(s"rewritten: ${read_text(s"$dir/out.txt")!}")
+
+  // Two references to one file: either's `close` closes both, and the last one going closes it.
+  val one = open(s"$dir/shared.txt", Write)!
+  val two = one
+  write_line(one, "by one")!
+  write_line(two, "by two")!
+  close(two)!
+  assert_traps(() -> write_line(one, "late")!, "write_line on a closed file")
+  print(s"shared: ${read_lines(s"$dir/shared.txt")!}")
+  def fill(path: string) =
+    val f = open(path, Write)!
+    val g = f
+    write_line(g, "kept")!
+    write(f, "unflushed")!
+  fill(s"$dir/dropped.txt")
+  print(s"dropped: ${read_lines(s"$dir/dropped.txt")!}")
+
+  // `?` through a `def`.
+  print(first_line(s"$dir/plain.txt"))
+  print(first_line(s"$dir/empty.txt"))
+  print(is_err(first_line(s"$dir/absent.txt")))
+
+  // Misuse is a bug, not an `IoError`.
+  val r = open(s"$dir/plain.txt", Read)!
+  assert_traps(() -> write_line(r, "x")!, "write_line on a file opened for Read")
+  assert_traps(() -> write(r, "x")!, "write on a file opened for Read")
+  val w = open(s"$dir/scratch.txt", Write)!
+  assert_traps(() -> print(read_line(w)!), "read_line on a file opened for Write")
+  close(w)!
+  close(r)!
+  assert_traps(() -> print(read_line(r)!), "read_line on a closed file")
+  assert_traps(() -> flush(w)!, "flush on a closed file")
+  val a = open(s"$dir/scratch.txt", Append)!
+  assert_traps(() -> print(read_line(a)!), "read_line on a file opened for Append")
+  close(a)!
+
+  print(replace(string(r), dir, "<dir>"))
+  print(s"${stdin} ${stdout} ${stderr}")
+
+  for name in ["plain.txt", "unended.txt", "crlf.txt", "empty.txt", "newline.txt", "blanks.txt", "out.txt", "shared.txt", "dropped.txt", "scratch.txt"]
+    remove(s"$dir/$name")!
