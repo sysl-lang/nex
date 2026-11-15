@@ -1,0 +1,49 @@
+// An expected type reaching a value argument whose type the result gives (DESIGN §2.6, §4.2):
+// `fill` of a bare `None`, `Ok(())` and `Err(...)` bound as arrays of `Option` and `Result`, at
+// rank 1 and 2, passed as an argument and returned; a generic `def` whose result is an array of its
+// parameter called the same way; and `fill` of numbers, which keeps its element type.
+
+def rep[T](n: integer, v: T): [T] = fill(n, v)
+
+def pair[T](a: T, b: T): [T] = [a, b]
+
+def nones(n: integer): [Option[integer]] = fill(n, None)
+
+def oks(n: integer): [Result[void, string]] =
+  return rep(n, Ok(()))
+
+def show(xs: [Option[integer]]) = print(s"${size(xs)}: ${xs}")
+
+def main() =
+  // fill, bound by a val.
+  val none: [Option[integer]] = fill(2, None)
+  print(none)
+  val ok: [Result[void, string]] = fill(3, Ok(()))
+  print(ok)
+  val bad: [Result[integer, string]] = fill(2, Err("x"))
+  print(bad)
+  val grid: [Option[real]; :, :] = fill((2, 2), None)
+  print(grid)
+  var some: [Option[integer]] = fill(3, None)
+  some[2] = Some(7)
+  print(some)
+  print(some[2] == Some(7))
+
+  // fill, through a parameter and a return.
+  show(fill(2, None))
+  print(nones(3))
+
+  // A generic def called the same way.
+  val r: [Option[integer]] = rep(2, None)
+  print(r)
+  val e: [Result[void, string]] = rep(2, Err("no"))
+  print(e)
+  print(oks(2))
+  show(rep(1, None))
+  val p: [Option[integer]] = pair(None, Some(4))
+  print(p)
+
+  // Numbers keep fill's element type.
+  val x: [real32] = fill(3, 1)
+  print(x)
+  print(fill(2, 1.5))

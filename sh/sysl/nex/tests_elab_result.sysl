@@ -99,6 +99,17 @@ elab_compare_variant_takes_context()
     assert_eq(refused(rs + "  print(Ok(()) == Ok(()))\n"),
         "error: cannot infer `E` of `Result` here: write the type where it is bound, `val x: Result[...] = Ok(...)` @4:9\nerror: cannot infer `E` of `Result` here: write the type where it is bound, `val x: Result[...] = Ok(...)` @4:19")
 
+@test("a Result or an Option built as the value of fill or of a generic def takes its type from the array expected")
+elab_variant_in_fill_takes_context()
+    val rep = "def rep[T](n: integer, v: T): [T] = fill(n, v)\n"
+
+    assert_eq(refused("def main() =\n  val rs: [Result[void, string]] = fill(2, Ok(()))\n  print(rs[1] == Ok(()))\n  print(rs)\n"), "ok")
+    assert_eq(refused("def main() =\n  val rs: [Result[integer, string]] = fill(2, Err(\"e\"))\n  val os: [Option[Result[integer, string]]] = fill(2, Some(Ok(1)))\n  print(rs)\n  print(os)\n"), "ok")
+    assert_eq(refused(rep + "def main() =\n  val rs: [Result[integer, string]] = rep(2, Ok(1))\n  val es: [Result[void, string]] = rep(2, Err(\"e\"))\n  print(rs)\n  print(es)\n"), "ok")
+    assert_eq(refused(rep + "def f(): [Result[void, string]] = rep(2, Ok(()))\ndef g(xs: [Result[void, string]]) = print(xs)\ndef main() =\n  print(f())\n  g(fill(1, Err(\"e\")))\n  g(rep(1, Ok(())))\n"), "ok")
+    // An expected Result whose value type differs from the one written is refused at the field.
+    assert_eq(refused("def main() =\n  val rs: [Result[integer, string]] = fill(2, Ok(\"x\"))\n"), "error: the field `value` must be int64, but this is string @2:50")
+
 @test("an instance of a generic enum a struct's field names has its arguments bound")
 elab_generic_enum_in_struct_field()
     assert_eq(refused("enum Res[T, E] =\n  Good(v: T)\n  Bad(e: E)\nend Res\nstruct R\n  value: Res[real, integer]\ndef main() = print(R(Good(1.5)))\n"), "ok")

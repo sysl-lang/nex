@@ -111,6 +111,26 @@ elab_generic_uninferable()
     assert_eq(refused(ID + "def main() = print(id())\n"), "error: cannot infer `T` of `id` here: no argument fixes it @2:20")
     assert_eq(refused(ID + "def main() = print(id(1, 2))\n"), "error: `id` takes 1 argument @2:26")
 
+@test("a generic call's expected type reaches an argument whose parameter type the others leave open")
+elab_generic_expected_reaches_argument()
+    val rep = "def rep[T](n: integer, v: T): [T] = fill(n, v)\n"
+    val pair = "def pair[T](a: T, b: T): [T] = [a, b]\n"
+
+    assert_eq(refused(rep + "def main() =\n  val n: [Option[integer]] = rep(2, None)\n  print(n)\n"), "ok")
+    assert_eq(refused(rep + "def main() =\n  val r: [Result[void, string]] = rep(2, Ok(()))\n  val e: [Result[void, string]] = rep(2, Err(\"x\"))\n  print(r)\n  print(e)\n"), "ok")
+    // From a parameter and from a return, declared or with `return`.
+    assert_eq(refused(rep + "def show(xs: [Option[integer]]) = print(xs)\ndef main() = show(rep(2, None))\n"), "ok")
+    assert_eq(refused(rep + "def f(): [Option[integer]] = rep(2, None)\ndef g(): [Result[void, string]] =\n  return rep(2, Ok(()))\ndef main() =\n  print(f())\n  print(g())\n"), "ok")
+    // The first argument the expected type reaches fixes `T`, and the next takes it from there.
+    assert_eq(refused(pair + "def main() =\n  val p: [Option[integer]] = pair(None, Some(4))\n  val q: [Option[integer]] = pair(Some(4), None)\n  print(p)\n  print(q)\n"), "ok")
+    // An argument that fixes `T` itself keeps it, and the result is converted.
+    assert_eq(elaborated(ID + "def main() =\n  val n: int32 = 3\n  val x: real = id(n)\n  print(x)\n"),
+        "(def main () void (block (val n#0:int32 (adopt:int32 3)) (val x#2:real64 (promote:real64 (call:int32 id[int32] n#0))) (print x#2)))\n(def id[int32] ((x#1 int32)) int32 x#1)")
+    // With no expected type a bare None still has none, and the expected type fixes no parameter itself.
+    assert_eq(refused(rep + "def main() = print(rep(2, None))\n"),
+        "error: cannot infer `T` of `Option` here: give it a type, `val x: Option[...] = None` @2:27\nerror: cannot infer `T` of `rep` here: no argument fixes it @2:20")
+    assert_eq(refused("def empty[T](): Option[T] = None\ndef main() =\n  val x: Option[integer] = empty()\n  print(x)\n"), "error: cannot infer `T` of `empty` here: no argument fixes it @3:28")
+
 @test("a generic that would need ever larger instances of itself is refused, plain recursion is not")
 elab_generic_nontermination()
     assert_eq(elaborated(BOX + "def f[T](x: T, n: integer): integer = if n == 0 then 0 else f(Box(x), n - 1)\ndef main() = print(f(1, 3))\n"),

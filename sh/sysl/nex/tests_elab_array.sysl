@@ -247,6 +247,18 @@ array_shape_functions()
     assert_eq(refused("def f(m: [real; :, :]) = permute(m, (1, 1))\n" + MAIN), "error: axis 1 is given twice @1:41")
     assert_eq(refused("def f(x: real) = length(x)\n" + MAIN), "error: `length` takes an array or a string; this is real @1:25")
 
+@test("fill's value expects the element type its expected type names, of any kind, from a val, a parameter or a return")
+array_fill_value_takes_expected_element()
+    assert_eq(refused("def main() =\n  val n: [Option[integer]] = fill(2, None)\n  print(n)\n"), "ok")
+    assert_eq(refused("def main() =\n  val r: [Result[void, string]] = fill(3, Ok(()))\n  val e: [Result[integer, string]] = fill(2, Err(\"x\"))\n  print(r)\n  print(e)\n"), "ok")
+    assert_eq(refused("def main() =\n  val g: [Option[real]; :, :] = fill((2, 2), None)\n  print(g)\n"), "ok")
+    assert_eq(refused("def show(xs: [Option[integer]]) = print(xs)\ndef main() = show(fill(2, None))\n"), "ok")
+    assert_eq(refused("def f(): [Option[integer]] = fill(2, None)\ndef g(): [Result[void, string]] =\n  return fill(2, Ok(()))\ndef main() =\n  print(f())\n  print(g())\n"), "ok")
+    // Numbers still take fill's element type, and with no expected type a bare None has none.
+    assert_eq(elaborated("def main() =\n  val x: [real32] = fill(3, 1)\n  print(x)\n"), "(def main () void (block (val x#0:[real32] (fill:[real32] 3 (adopt:real32 1))) (print x#0)))")
+    assert_eq(refused("def main() = print(fill(2, None))\n"), "error: cannot infer `T` of `Option` here: give it a type, `val x: Option[...] = None` @1:28")
+    assert_eq(refused("def main() =\n  val n: [Option[integer]] = fill(2, Some(\"x\"))\n"), "error: the field `value` must be int64, but this is string @2:43")
+
 @test("map, filter, reduce and flatMap give a lambda its parameter types from the array")
 array_higher_order()
     assert_eq(elaborated("def main() =\n  val xs = [1, 2, 3]\n  print(map(xs, x -> x * 1.5))\n  print(filter(xs, x -> x > 1))\n  print(reduce(xs, 0, (acc, x) -> acc + x))\n  print(flatMap(xs, x -> [x, x]))\n"),

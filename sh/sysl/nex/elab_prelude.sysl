@@ -295,10 +295,15 @@ impl Elab
         shape.len()
 
     // `zeros(shape)`, `ones(shape)`, `fill(shape, v)`, `identity(n)` (DESIGN §4.2).
+    // `zeros`, `ones` and `identity` take a numeric element type from `want`; `fill`'s value expects
+    // whatever element type `want` names, so `fill(2, None)` bound as an `[Option[integer]]` is one.
     constructor(*self, span: Span, name: string, pos: Buf[Expr], want: Option[Ty]) -> TExpr
-        val wanted = want match
-            Some(Array(e, _)) -> if is_numeric(*e) then Some(*e) else None
+        val wanted_elem = want match
+            Some(Array(e, _)) -> Some(*e)
             _ -> None
+        val wanted = wanted_elem match
+            Some(e) -> if is_numeric(e) then Some(e) else None
+            None -> None
 
         if name == "fill"
             if pos.len() != 2 then return self.arity(span, name, "a shape and a value")
@@ -319,7 +324,7 @@ impl Elab
         var elem = wanted.unwrap_or(INTEGER)
 
         if name == "fill"
-            val v = self.elab(pos[1], wanted)
+            val v = self.elab(pos[1], wanted_elem)
 
             if is_void(v.ty) then self.fail(pos[1].span, "an array cannot be filled with nothing: this is void")
             if is_array(v.ty) then self.fail(pos[1].span, s"an array element is not an array; this is ${self.shown(v)}")

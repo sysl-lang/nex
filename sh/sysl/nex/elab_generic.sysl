@@ -984,9 +984,13 @@ impl Elab
     // Infers a generic's arguments from the arguments of a call or a construction: those that are
     // not literals, then the literals, then the lambdas, each against its parameter's pattern. `pre`
     // holds each argument elaborated so far; the others are elaborated here, a lambda last, each
-    // expecting its parameter's type as far as it is known. False where an argument cannot match its
-    // parameter, which is reported.
-    private infer_from(*self, inf: *Infer, formals: Buf[Ty], what: Buf[string], slots: Buf[Option[usize]], args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> bool
+    // expecting its parameter's type as far as it is known. Where the arguments before it leave that
+    // type open, an argument that is not a literal expects it as `expected` fills it in: the result
+    // type matched against the expected type of the call, so `rep(2, None)` bound as an
+    // `[Option[integer]]` gives `None` the `Option[integer]` it needs. `expected` only gives the argument a type to be elaborated
+    // against; the argument's own type is what fixes the parameter. False where an argument cannot
+    // match its parameter, which is reported.
+    private infer_from(*self, inf: *Infer, expected: *Infer, formals: Buf[Ty], what: Buf[string], slots: Buf[Option[usize]], args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> bool
         var ok = true
 
         for pass in 0..<3
@@ -1000,7 +1004,12 @@ impl Elab
                 val lambda = is_lambda(e)
 
                 if pre[i].is_none() && lambda == (pass == 2)
-                    val hint = self.partial(e.span, formals[j], inf)
+                    var hint = self.partial(e.span, formals[j], inf)
+
+                    if has_param(hint) && !literal && !lambda
+                        val filled = self.partial(e.span, hint, expected)
+
+                        if !has_param(filled) then hint = filled
 
                     if lambda then self.pass_lambda(e)
 
@@ -1127,8 +1136,9 @@ impl Elab
     // -- calls ------------------------------------------------------------------------------------
 
     // A call of a name that has a generic `def`: its concrete `def` where it has one that takes the
-    // arguments, the generic instance the arguments infer otherwise.
-    generic_call(*self, span: Span, at: Span, n: string, g: usize, args: Buf[Expr]) -> TExpr
+    // arguments, the generic instance the arguments infer otherwise, each argument the expected type
+    // `want` reaches through the result type elaborated against it.
+    generic_call(*self, span: Span, at: Span, n: string, g: usize, args: Buf[Expr], want: Option[Ty]) -> TExpr
         val concrete = self.find_top(n) match
             Some(TopFun(k)) -> Some(k)
             _ -> None
@@ -1163,8 +1173,15 @@ impl Elab
 
         val slots = self.arg_slots(span, n, names, args, false)
         var inf = new_infer(n, f.tparams)
+        var expected = new_infer(n, f.tparams)
 
-        if !self.infer_from(&inf, f.formals, what, slots, args, &pre) then return self.invalid(span)
+        f.result match
+            Some(r) -> want match
+                Some(w) -> if !self.unify(r, w, &expected, true) then expected = new_infer(n, f.tparams)
+                None -> ()
+            None -> ()
+
+        if !self.infer_from(&inf, &expected, f.formals, what, slots, args, &pre) then return self.invalid(span)
 
         if !self.inferred(span, &inf, "no argument fixes it") || !self.constraints_hold(span, &inf) then return self.invalid(span)
 
@@ -1360,7 +1377,10 @@ impl Elab
 
         self.seed(&inf, g, want)
 
-        if !self.infer_from(&inf, formals, what, slots, args, &pre) then return self.invalid(span)
+        // The expected type has already given the arguments it can, through `seed`.
+        var expected = new_infer(template, a.tparams)
+
+        if !self.infer_from(&inf, &expected, formals, what, slots, args, &pre) then return self.invalid(span)
 
         val hint = s"write the type where it is bound, `val x: ${template}[...] = ${n}(...)`"
 
