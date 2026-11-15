@@ -172,36 +172,32 @@ private opened_beneath(d: &fs.Dir, path: string, mode: int) -> Option[&NexFile]
             reported_beneath(path, e)
             None
 
-// Every byte of `path` beneath `d`, as `whole` reads a file.
+// Every byte of `path` beneath `d`, as `whole` reads a file. The entry is checked first, since the
+// directory's own read does not refuse a file with a second hard link.
 private whole_beneath(d: &fs.Dir, path: string) -> Option[[]u8]
     if !admitted(d, path, true) then return None
 
-    var f = d.open(path) match
-        Ok(f) -> f
+    d.read_bytes(path) match
+        Ok(got) ->
+            succeeded()
+            Some(got)
         Err(e) ->
             reported_beneath(path, e)
-            return None
-
-    val got = sio.read_all(&f)
-    val failure = f.read_failure()
-
-    _ = f.close()
-
-    failure match
-        Some(e) ->
-            reported(path, e)
             None
-        None ->
-            var out: []u8 = [0; got.len()]
 
-            copy(out, got.view())
-            succeeded()
-            Some(out)
-
-// `bytes` made the whole of `path` beneath `d`, or added at its end where `append`: the file opened
-// as `open` opens one, the bytes collected in it, and handed over as its `close` hands them.
+// `bytes` made the whole of `path` beneath `d`, or added at its end where `append`: a whole write is
+// the directory's own, an append the file opened as `open` opens one with the bytes collected in it.
 private written_beneath(d: &fs.Dir, path: string, bytes: []const u8, append: bool)
-    val f = opened_beneath(d, path, if append then MODE_APPEND else MODE_WRITE) match
+    if !append
+        if !admitted(d, path, false) then return
+
+        d.write_bytes(path, bytes) match
+            Ok(_) -> succeeded()
+            Err(e) -> reported_beneath(path, e)
+
+        return
+
+    val f = opened_beneath(d, path, MODE_APPEND) match
         Some(f) -> f
         None -> return
 
