@@ -17,6 +17,7 @@ module sh.sysl.nex_runtime
 // just past the last field of a row that has too few.
 
 import sysl.buf.{Buf, buf}
+import sysl.fs as fs
 
 // The state of this thread's table: the read held for the typed IR and the write being gathered.
 //
@@ -193,14 +194,14 @@ private finished(c: &Cells) -> long
 
 // The lines of `path` after the first `skip` read as a table of the type `kind` names: how many
 // rows, the outcome saying whether it read. A `skip` below zero is a misuse.
-table_read(path: string, skip: long, kind: string) -> long
+table_read(path: string, skip: long, kind: string, beneath: Option[&fs.Dir] = None) -> long
     val c = begun(path, kind)
 
     if skip < 0
         file_set_outcome(FILE_MISUSE, "", 0, 0, s"read_table skips ${skip} lines; it skips none or more")
         return 0
 
-    val lines = file_read_lines(path)
+    val lines = file_read_lines(path, beneath)
 
     if file_status() != long(FILE_OK) then return 0
 
@@ -266,10 +267,10 @@ table_row()
     c.fresh = true
 
 // The table made the whole of `path`, the outcome saying whether it was written.
-table_write(path: string)
+table_write(path: string, beneath: Option[&fs.Dir] = None)
     val c = cells()
 
-    file_write_all(path, c.out.view(), false)
+    file_write_all(path, c.out.view(), false, beneath)
     c.out.clear()
 
 // -- the compiled program's entries ----------------------------------------------------------------

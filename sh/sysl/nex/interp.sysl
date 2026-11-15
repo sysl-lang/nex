@@ -26,6 +26,7 @@ module sh.sysl.nex
 
 import nex_runtime.sh.sysl.nex_runtime.{NexFile, ZERO_STEP, arg_index_message, int_name, out_of_range_message, text_input}
 import sysl.buf.{Buf, buf, buf_with_capacity}
+import sysl.fs.Dir
 import sh.sysl.parsing.{Diagnostic, Span, error}
 
 // Where a program's text goes: what `print` writes, and what `eprint` does.
@@ -161,6 +162,10 @@ private[nex] struct Machine
     // Where `stdin` reads from when it is not the process's standard input: a string the host or a
     // test gives, or nothing, which a sandboxed script reads.
     stdin: Option[&NexFile]
+    // The directory a sandboxed script's paths are opened beneath, and whether it may write there
+    // (DESIGN §17.8); none for a script given no grant, which reaches no file.
+    grant: Option[&Dir]
+    grant_writable: bool
 
 // A frame a trap left: the function's name, and where in it the trap happened — the statement, or
 // the function's declaration where no statement says.
@@ -169,7 +174,7 @@ private[nex] struct TraceFrame
     span: Span
 
 private[nex] machine(p: TProgram, args: Buf[string], write: &Fn(Stream, string) -> unit, fpe: bool) -> &Machine =
-    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, cancel_token(), buf(), Span(0, 0), false, None)
+    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, cancel_token(), buf(), Span(0, 0), false, None, None, false)
 
 // The step limit of a run the host sets none for.
 private[nex] val NO_LIMIT: long = 9223372036854775807

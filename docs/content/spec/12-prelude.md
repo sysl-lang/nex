@@ -872,8 +872,12 @@ def main(): Result[void, IoError] =
 ```
 
 An embedded script writes `stdout` and `stderr` where its `print` and
-`eprint` go, the host's `write`. A script its host sandboxes reaches no file: every function on a
-path answers `Denied`, `exists` answers `false`, and `stdin` reads as empty.
+`eprint` go, the host's `write`. A script its host sandboxes reaches only the one directory its host
+grants, every path taken from there: an absolute path, any `..` component (even `a/..`), a symbolic
+link anywhere along the path (even one pointing back inside) and a file with a second hard link all
+answer `Denied`. With no grant, every function on a path answers `Denied` and `exists` answers
+`false`; a grant for reading only answers `Denied` to every writer and to `remove`. A sandboxed
+script's `stdin` reads as empty.
 
 ## 12.17 Tables
 

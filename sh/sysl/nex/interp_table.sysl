@@ -3,9 +3,10 @@ module sh.sysl.nex
 // Tables (DESIGN §17.7) as the interpreter runs them: each `table_*` call of the typed IR
 // (`elab_table.sysl`) is the runtime's own function (`runtime/tables.sysl`), which a compiled program
 // calls through its `nex_table_*` entries, so both engines read, write and fail alike. A script the
-// host sandboxes (§17.8) reaches no path: reading or writing a table by one answers `Denied`.
+// host sandboxes (§17.8) reads and writes a table by its path beneath the directory its host grants,
+// and with no grant is answered `Denied`.
 
-import nex_runtime.sh.sysl.nex_runtime.{file_denied, table_begin, table_clear, table_columns, table_field, table_int, table_read, table_read_file,
+import nex_runtime.sh.sysl.nex_runtime.{table_begin, table_clear, table_columns, table_field, table_int, table_read, table_read_file,
                                         table_real, table_row, table_uint, table_write}
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
@@ -55,17 +56,15 @@ impl Interp
                 val lines = int_of(skip(c)?)
                 val k = str_of(kind(c)?)
 
-                if m.sandbox
-                    file_denied(path)
-                    return Ok(VInt(0))
+                if refused(m, path, false) then return Ok(VInt(0))
 
-                Ok(VInt(table_read(path, lines, k)))
+                Ok(VInt(table_read(path, lines, k, beneath(m))))
 
         // `table_write`.
         (c) ->
             val path = str_of(a(c)?)
 
-            if m.sandbox then file_denied(path) else table_write(path)
+            if !refused(m, path, true) then table_write(path, beneath(m))
 
             Ok(VVoid)
     end table_builtin

@@ -18,9 +18,9 @@ private struct Out
 
 // Options whose `write` keeps what the script prints in `o`.
 private kept(o: &Out, budget: long = 0, sandbox: bool = false) -> ScriptOptions =
-    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, budget, false, None)
+    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, budget, false, None, None)
 
-private quiet() -> ScriptOptions = ScriptOptions((s, t) -> (), false, 0, false, None)
+private quiet() -> ScriptOptions = ScriptOptions((s, t) -> (), false, 0, false, None, None)
 
 private loaded(text: string, host: Host = new_host(), opts: ScriptOptions = quiet()) -> &Script = load_script(text, "t.nex", host, opts) match
     Ok(s) -> s

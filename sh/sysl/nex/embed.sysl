@@ -29,6 +29,7 @@ module sh.sysl.nex
 
 import nex_runtime.sh.sysl.nex_runtime.text_input
 import sysl.buf.{Buf, buf}
+import sysl.fs.{Dir, open_dir}
 import sysl.sync.{Atomic, Relaxed}
 import sh.sysl.parsing.{Diagnostic, Source, Span, source, source_of}
 
@@ -148,19 +149,26 @@ new_host() -> Host = Host(buf(), buf())
 
 // -- loading -----------------------------------------------------------------------------------------
 
+// The one directory a sandboxed script may reach (DESIGN §17.8): its paths are opened beneath `dir`,
+// and none leads out of it. `writable` false grants reading only.
+struct FileGrant
+    dir: string
+    writable: bool
+
 // How a script is loaded and run. `write` takes what it prints, standard output and standard error;
 // `sandbox` refuses what a script from an untrusted source may not do (DESIGN §16.6); `budget` is how
 // many steps — a call's entry, a loop's pass — one `run` or `call` may take, 0 for no limit;
 // `fpe_trap` is `--fpe-trap`; `prelude` is the source prelude's directory for a script loaded from a
-// file.
+// file; `files` is the directory a sandboxed script is granted, or none, which leaves it no file.
 struct ScriptOptions
     write: &Fn(Stream, string) -> unit
     sandbox: bool
     budget: long
     fpe_trap: bool
     prelude: Option[string]
+    files: Option[FileGrant]
 
-script_options() -> ScriptOptions = ScriptOptions((s, text) -> if s == StdOut then prints(text) else eprints(text), false, 0, false, None)
+script_options() -> ScriptOptions = ScriptOptions((s, text) -> if s == StdOut then prints(text) else eprints(text), false, 0, false, None, None)
 
 // A diagnostic as a value: the file it is in, its line and column there (from 1), its span in that
 // file's text, its message, and the whole of it rendered as `nex` prints it.
@@ -227,13 +235,43 @@ load_script_file(entry: string, host: Host, opts: ScriptOptions = script_options
         Ok(p) -> compiled(p, texts, host, opts)
         Err(ds) -> Err(texts.values(ds))
 
+// The directory `opts` grants, held open from now on so that what is beneath it is reached through
+// it, whatever is later done to the path that named it; or the diagnostic refusing the grant: one
+// given to a script that is not sandboxed, which would not confine it, or a directory that cannot be
+// held open — not there, not a directory, or a symbolic link as its own last component.
+private granted(opts: ScriptOptions) -> Result[Option[&Dir], Buf[NexDiagnostic]]
+    val g = opts.files match
+        Some(g) -> g
+        None -> return Ok(None)
+
+    var one: Buf[NexDiagnostic] = buf()
+
+    if !opts.sandbox
+        val message = s"the file grant of ${g.dir} confines only a sandboxed script, and this one is not sandboxed"
+
+        one.push(NexDiagnostic(g.dir, 0, 0, Span(0, 0), message, message))
+        return Err(one)
+
+    open_dir(g.dir) match
+        Ok(d) -> Ok(Some(d))
+        Err(e) ->
+            val message = s"the granted directory ${g.dir}: $e"
+
+            one.push(NexDiagnostic(g.dir, 0, 0, Span(0, 0), message, message))
+            Err(one)
+
 // The program compiled for the interpreter, its machine holding the host's functions and types.
 private compiled(p: TProgram, texts: Texts, host: Host, opts: ScriptOptions) -> Result[&Script, Buf[NexDiagnostic]]
+    val grant = granted(opts)?
     val m = machine(p, buf(), opts.write, opts.fpe_trap)
 
     m.hosts = host.functions
     m.host_types = host.types
     m.sandbox = opts.sandbox
+    m.grant = grant
+    m.grant_writable = opts.files match
+        Some(g) -> g.writable
+        None -> false
 
     // A sandboxed script's standard input is empty (DESIGN §17.8).
     if opts.sandbox then m.stdin = Some(text_input(""))

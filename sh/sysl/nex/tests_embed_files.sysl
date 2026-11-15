@@ -15,7 +15,7 @@ private struct Gathered
     text: StrBuilder
 
 private gathering(o: &Gathered, sandbox: bool) -> ScriptOptions =
-    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None)
+    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None, None)
 
 // `text` run as a script, what it wrote to the host, and its status.
 private ran_script(text: string, sandbox: bool) -> string
