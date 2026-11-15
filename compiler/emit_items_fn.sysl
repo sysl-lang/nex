@@ -54,6 +54,31 @@ impl Emitter
         self.call("nex_items_fill_from", s"$h, $v", "!llvm.ptr, !llvm.ptr", "")
         h
 
+    // `fill(d1, …, dk, x)` or `fill((d1, …, dk), x)` of a non-number `x`: a new array of those
+    // extents, each element the value `x`, which every element holds a count on.
+    items_fill(*self, span: Span, args: Buf[TExpr], t: Ty) -> string
+        var total = "%one"
+        var ns: Buf[string] = buf()
+
+        for d in self.shape_args(span, args, 0, args.len() - 1)
+            val x = self.to_i64(d)
+
+            ns.push(x)
+            total = self.def(s"arith.muli $total, $x : i64")
+
+        val et = elem_of(t)
+        val one = self.alloca(self.mem_ty(span, et))
+
+        self.store(span, one, self.ex(args[args.len() - 1]), et)
+
+        val h = self.new_items(span, t, total)
+
+        for k in 0..<ns.len()
+            self.set_extent(h, k + 1, ns[k])
+
+        self.call("nex_items_fill_with", s"$h, $one", "!llvm.ptr, !llvm.ptr", "")
+        h
+
     // `filter(a, p)`: the elements for which `p` holds, in storage order. The result is made as long
     // as `a` and cut to the elements kept.
     items_filtered(*self, span: Span, args: Buf[TExpr], t: Ty) -> string

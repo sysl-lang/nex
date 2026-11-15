@@ -404,6 +404,15 @@ run_fortran_leak_nothing()
     for r in reports
         assert(r.contains(": 0 leaks for 0 total leaked bytes."), r)
 
+@test("a call of a `@host` function from a lambda, `map` or a module-level `val` is refused by the compiler too")
+emit_host_call_places()
+    val decl = "@host extern def box(w: real): real\n"
+    val said = "error: `box` is a host function, which a program embedding nex gives; a compiled program has no host, so this one runs interpreted, embedded @1:1"
+
+    assert_eq(emitted(decl + "def main() =\n  val f = (x: real) -> box(x)\n  print(f(1.0))\n").err().unwrap_or(""), said)
+    assert_eq(emitted(decl + "def main() =\n  val a: [real] = [1.0, 2.0]\n  print(map(a, x -> box(x)))\n").err().unwrap_or(""), said)
+    assert_eq(emitted(decl + "val b = box(3.0)\ndef main() = print(b)\n").err().unwrap_or(""), said)
+
 @test("a compiled program has no host, so a `@host` function or type is refused by the compiler; the embedded interpreter runs it")
 emit_host_refused()
     assert_eq(emitted("@host extern def box(w: real): real\ndef main() =\n  print(box(1.0))\n").err().unwrap_or(""),

@@ -171,7 +171,7 @@ run_v2()
     finish(b)
     assert(r.failed.len() == 0, join(r.failed.view(), "\n"))
     assert_eq(join(r.waiting.view(), "\n"), "")
-    assert_eq(r.passed, if fortran then 97 else 93)
+    assert_eq(r.passed, if fortran then 98 else 94)
 
 @test("eprint of several arguments writes them on one line to standard error, and print() an empty line")
 run_eprint_many()

@@ -1,0 +1,21 @@
+[abc, abc, abc]
+0
+[ab]
+[ab!, ab!]
+0
+[abd, x, abdy, abd]
+[abc, abc, abc]
+[[m, m, m], [m, m, m]]
+(2, 3)
+[[ab, ab], [z, ab], [ab, ab]]
+(0, 4)
+[[ab]]
+oaboaboabdoor#
+[Some(ab?), Some(ab?)]
+[None, None]
+[Err(no ab), Ok(7)]
+[(1, abt), (2, u)]
+[P { name=q, n=9 }, P { name=ab, n=1 }]
+23
+[[true, true], [true, true]]
+[[false, false], [false, false]]
