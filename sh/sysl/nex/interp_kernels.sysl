@@ -136,7 +136,7 @@ private int_zip[T: Elem](k: int, bits: int, signed: bool, x: Value, y: Value, xa
 
     Ok(dense_data(T.holding(out), a.ext))
 
-private real_zip[T: Elem](k: int, fpe: bool, x: Value, y: Value, xa: bool, ya: bool) -> Answer
+private real_zip[T: Elem + AnyBits](k: int, fpe: bool, x: Value, y: Value, xa: bool, ya: bool) -> Answer
     val a = shape_of(x, y, xa, ya)?
     val n = usize(count_of(a))
     var (xs, i, si) = operand[T](x, xa)
@@ -156,6 +156,8 @@ private real_zip[T: Elem](k: int, fpe: bool, x: Value, y: Value, xa: bool, ya: b
             j += sj
 
         return Ok(dense_data(DBool(out), a.ext))
+
+    if !fpe then return Ok(dense_data(T.holding(real_arith[T](k, xs.view(), i, si, ys.view(), j, sj, n)), a.ext))
 
     var out: Buf[T] = buf()
 
@@ -177,6 +179,44 @@ private real_zip[T: Elem](k: int, fpe: bool, x: Value, y: Value, xa: bool, ya: b
         j += sj
 
     Ok(dense_data(T.holding(out), a.ext))
+
+// `n` results of `+`, `-`, `*` or `/` (`k`) on the elements of `xs` from `i` by `si` and of `ys`
+// from `j` by `sj`, without `--fpe-trap`, which leaves nothing to trap: each computed in `real64` and
+// stored at the width, as the checked loop computes it, with the operation chosen once for the loop.
+private real_arith[T: Elem + AnyBits](k: int, xs: []const T, i: usize, si: usize, ys: []const T, j: usize, sj: usize, n: usize) -> Buf[T]
+    var out: Buf[T] = buf()
+
+    out.reserve(n)
+
+    val o = out.spare()
+    var a = i
+    var b = j
+
+    @unchecked
+        if k == ADD
+            for p in 0..<n
+                o[p] = T(real(xs[a]) + real(ys[b]))
+                a += si
+                b += sj
+        elif k == SUB
+            for p in 0..<n
+                o[p] = T(real(xs[a]) - real(ys[b]))
+                a += si
+                b += sj
+        elif k == MUL
+            for p in 0..<n
+                o[p] = T(real(xs[a]) * real(ys[b]))
+                a += si
+                b += sj
+        else
+            for p in 0..<n
+                o[p] = T(real(xs[a]) / real(ys[b]))
+                a += si
+                b += sj
+
+    out.set_len(n)
+    out
+end real_arith
 
 private complex_zip[F: Float](k: int, bits: int, x: Value, y: Value, xa: bool, ya: bool) -> Answer
     val a = shape_of(x, y, xa, ya)?

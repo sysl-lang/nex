@@ -1,0 +1,135 @@
+// Chains of element-wise operations (DESIGN §7.1, §9.5), which the compiled program fuses where nothing
+// in them can trap: each operation rounded at its width, conversions and widenings inside the chain,
+// views as leaves, a leaf that is the place assigned, broadcast scalars, complex numbers, comparisons,
+// a call among the leaves, and the traps: a shape mismatch deep in a chain, reported before a later
+// leaf is evaluated, and a chain that can trap, which reports its first operation's trap. Then powers
+// and the IEEE edges through a chain.
+
+def noisy(x: [real]): [real] =
+  print("noisy called")
+  x
+
+def main() =
+  // real32 and real16 rounded after every operation; the line after each is the chain computed in
+  // real64 and rounded once, which differs.
+  val a: [real32] = [0.1, 0.7, 1.3, 2.9]
+  val b: [real32] = [3.3, 0.3, 1.1, 0.01]
+  print(a * b + a / b - b * b)
+  print(real32(real(a) * real(b) + real(a) / real(b) - real(b) * real(b)))
+  val h: [real16] = [0.1, 0.7, 1.3, 2.9]
+  print(h * h + h / 3.0 - h)
+  print(real16(real(h) * real(h) + real(h) / 3.0 - real(h)))
+  print(sqrt(h * h + 1.0) - h ^ 2)
+
+  // Widths mixed: widenings, an integer widened to a real, a narrowing conversion inside the chain.
+  val w: [real64] = [1.0e-3, 2.5, -7.25, 1.0e10]
+  val n: [int32] = [1, -2, 3, 40000]
+  print(real(a) * w + w / real(b))
+  print(real32(w * w) * a + b)
+  print(real(n) * 0.5 + w)
+  print(n * 2 + n)
+
+  // Views as leaves: reversed, strided, a row of a matrix, and two windows of one matrix.
+  val x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+  val y = [0.5, 0.25, 0.125, 2.0, 4.0, 8.0]
+  print(x[6..1 by -1] * y + x)
+  print(x[1..6 by 2] - y[2..6 by 2] * 2.0 + 1.0)
+  val g = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+  print(g[:, 3..1 by -1] * g + 1.0)
+  print(g[2, :] * 2.0 + g[1, 3..1 by -1])
+
+  // A leaf that is the place assigned, and an array that shares the place's storage.
+  var t = [1.0, 2.0, 3.0, 4.0]
+  t = t[4..1 by -1] + t * 2.0
+  print(t)
+  var u = [1.0, 2.0, 3.0, 4.0]
+  val keep = u
+  u = u * u + u[4..1 by -1]
+  print(u)
+  print(keep)
+
+  // Scalars broadcast on either side, and a chain of more than one block of elements.
+  val k = 3.0
+  print(2.0 - x * x / k + k)
+  var many: [real] = zeros(5000)
+  for i in 1..5000
+    many[i] = 1.0 / i
+  val each = many * many + 1.0 - many
+  print(sum(each))
+  print(each[1])
+  print(each[2049])
+  print(each[5000])
+
+  // Complex numbers, and a complex chain giving reals.
+  val z = [1.0 + 2.0i, 0.5 - 1.0i, -3.0 + 0.25i]
+  val v = [2.0 - 1.0i, 1.0 + 1.0i, 0.5i]
+  print(z * v + z - v * 2.0)
+  print(abs(z * v) + 1.0)
+
+  // Comparisons and booleans.
+  print(x * 2.0 > y + 3.0)
+  print((x > 2.0) == (y < 1.0))
+  print(not (x * y >= 2.0))
+  print((x * 2.0 > 5.0) and (y + 1.0 < 4.0))
+
+  // A call among the leaves runs in its turn.
+  print(x * 2.0 + noisy(y) * x)
+
+  // A shape mismatch deep in a chain traps before a later leaf is evaluated, and after an earlier one.
+  val short = [1.0, 2.0]
+  assert_traps(() -> print((x + y) * (x - short) + noisy(y)), "shape mismatch")
+  assert_traps(() -> print(noisy(y) + (x - short) * 2.0), "shape mismatch")
+
+  // A chain that can trap runs operation by operation: the division by zero at the third element is
+  // reported, not the overflow of the addition at the first.
+  val p: [int8] = [100, 2, 3]
+  val d: [int8] = [1, 1, 0]
+  assert_traps(() -> print(p div d + p), "integer division by zero")
+  assert_traps(() -> print(p * 2 + 1), "int8 overflow")
+
+  // Powers in chains, at every width: an exponent array, reversed and strided views, a scalar base.
+  val e = [0.5, 3.0, -1.0, 1.5, 2.5, 0.25]
+  print(x ^ e[6..1 by -1] + y ^ 3 - 2.0 ^ y)
+  print(real32(x[1..3]) ^ real32(e[4..6]) * 2.0 + real32(y[1..6 by 2]) ^ 3 * real32(x[1..3]))
+  print(real16(y) ^ 3 - real16(x) ^ real16(e) / 4.0)
+  val edges = [0.0, -0.0, 1.0e200, -1.0e-200, inf, -inf, nan, 1.0e154]
+  print(edges ^ 3 + edges)
+  print(edges[8..1 by -1] / edges - edges * 0.5)
+
+  // Each operation alone at every width: two arrays, a reversed and a strided operand, a scalar on
+  // either side, an overflow to infinity, an empty array, and a division by zero, which gives an
+  // infinity without --fpe-trap.
+  val a16: [real16] = [0.1, 0.7, 1.3, 2.9, 1000.0]
+  val b16: [real16] = [3.3, 0.3, 1.1, 0.01, 7.0]
+  print(a16 + b16)
+  print(a16 - b16[5..1 by -1])
+  print(a16[1..5 by 2] * b16[1..3])
+  print(a16 / 3.0)
+  print(3.0 / a16)
+  print(a16 ^ 3)
+  print(a16 ^ b16)
+  print(2.0 ^ a16[2..3])
+  val a32: [real32] = [0.1, 0.7, 1.3, 2.9, 1.0e30]
+  val b32: [real32] = [3.3, 0.3, 1.1, 0.01, 1.0e10]
+  print(a32 + b32)
+  print(a32 - b32[5..1 by -1])
+  print(a32[1..5 by 2] * b32[1..3])
+  print(a32 / 3.0)
+  print(3.0 / a32)
+  print(a32 ^ 3)
+  print(a32[1..4] ^ b32[1..4])
+  val a64 = [0.1, 0.7, 1.3, 2.9, 1.0e300]
+  val b64 = [3.3, 0.3, 1.1, 0.01, 1.0e10]
+  print(a64 + b64)
+  print(a64 - b64[5..1 by -1])
+  print(a64[1..5 by 2] * b64[1..3])
+  print(a64 / 3.0)
+  print(3.0 / a64)
+  print(a64 ^ 3)
+  print(a64 ^ b64)
+  val none: [real] = zeros(0)
+  print(none + none * 2.0)
+  print(none ^ 3)
+  val zero = 0.0
+  print(a64 / zero)
+  print("done")

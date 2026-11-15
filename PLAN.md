@@ -574,6 +574,24 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       110 ns → 36 ns for the lambda. Outputs identical, and trap stacks and step counts identical to
       the frame-per-call path (`tests_embed.sysl`). What is left is the call's bookkeeping — the step,
       the depth, the captures stored again — and the body's own closures over boxed values.
+      Real `+ - * /` without `--fpe-trap`, and `^` of reals where nothing is checked, are one loop per
+      operation chosen before it, unchecked subscripts writing the result's storage (`real_arith`),
+      the same `real64` computation stored at the width; the checked loops stay for `--fpe-trap`. Median
+      of 5, interleaved, under load 4: the point-distance kernel `d = sqrt((x2 - x1)^2 + (y2 - y1)^2)`
+      over 10⁶ `real64`s 22 ns → 11 ns an element (0.34 ns compiled), `bench/interp-elementwise.nex`
+      0.26 s → 0.089 s, `bench/interp-elemental.nex` 0.50 s → 0.43 s; outputs identical
+      (`testdata/v2/135`, on both engines). Of the 11 ns, two libm `pow` calls for the squares are
+      about 7. **Fusing a chain into one pass was built and measured, and not kept**: each operation's
+      loop run on blocks of 2 048 or 16 384 elements of every operand, no array the size of the result
+      made but the last, was 4.8 ns against 3.5 ns for the same loops operation by operation (with the
+      squares as products), the per-block arrays and the copy of each result block costing more than
+      the memory traffic it saves, which the unchecked loops had already made small. **The squares are
+      an open question between the engines**: the compiled program's `x ^ 2` with a literal exponent
+      is `x * x` (LLVM folds `pow(x, 2.0)`), and libm's `pow(x, 2.0)` differs from `x * x` in the last
+      bit for 137 of 100 000 `real64`s and 607 of 100 000 `real32`s, so the interpreter's `x ^ 2`
+      already differs from the compiled one's there, while an exponent read at run time is libm's on
+      both. Computing a literal square as the product would make them agree and take the kernel to
+      about 4 ns; it waits on deciding which `^ 2` nex means.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel

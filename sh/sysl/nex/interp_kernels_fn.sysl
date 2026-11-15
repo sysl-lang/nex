@@ -307,7 +307,7 @@ private real_exponents(y: Value, ya: bool, int_exponent: bool, n_signed: bool, b
 
     (out, 0, step)
 
-private real_pow_zip[T: Elem](bits: int, fpe: bool, x: Value, y: Value, xa: bool, ya: bool, int_exponent: bool, n_signed: bool) -> Answer
+private real_pow_zip[T: Elem + AnyBits](bits: int, fpe: bool, x: Value, y: Value, xa: bool, ya: bool, int_exponent: bool, n_signed: bool) -> Answer
     val a = shape_of(x, y, xa, ya)?
     val n = usize(count_of(a))
     var (xs, i, si) = operand[T](x, xa)
@@ -315,6 +315,21 @@ private real_pow_zip[T: Elem](bits: int, fpe: bool, x: Value, y: Value, xa: bool
     var out: Buf[T] = buf()
 
     out.reserve(n)
+
+    // Unchecked, nothing traps: each power stored as the checked loop stores it.
+    if !fpe || bits == 16
+        val o = out.spare()
+        val xv = xs.view()
+        val ev = es.view()
+
+        @unchecked
+            for p in 0..<n
+                o[p] = T(real_power(real(xv[i]), ev[j], bits))
+                i += si
+                j += sj
+
+        out.set_len(n)
+        return Ok(dense_data(T.holding(out), a.ext))
 
     for _ in 0..<n
         val p = real(xs[i])
