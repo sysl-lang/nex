@@ -4,7 +4,7 @@
 // states too.
 
 import nex.sh.sysl.nex.NEX_VERSION
-import sysl.fs.{make_temp_dir, read_text, remove_dir_all}
+import sysl.fs.{make_temp_dir, read_text, remove_dir_all, write_text}
 import sysl.process.{Status, capture}
 import sysl.testing.compiler
 
@@ -32,3 +32,30 @@ cli_version()
         val text = read_text(repo(manifest)).unwrap()
 
         assert(text.contains(s"version = \"$NEX_VERSION\""), s"$manifest does not state version $NEX_VERSION")
+
+@test("a call of a `@host` function under `nex run` is a diagnostic on either engine (`run --interp`, and the compiler's `emit`), never a panic")
+cli_host_call_refused()
+    val work = make_temp_dir("nex-cli-host").unwrap()
+    val nex = s"$work/nex"
+    val src = s"$work/host.nex"
+    val built = capture(compiler(), ["build", repo("compiler"), "-o", nex], stderr = true).unwrap()
+
+    assert(built.status.ok(), built.err.unwrap_or(""))
+    write_text(src, "@host extern def area(w: real<mm>): real<mm^2>\ndef main() = print(area(2mm))\n").unwrap()
+
+    val interpreted = capture(nex, ["run", "--interp", src], stderr = true).unwrap()
+    val compiled = capture(nex, ["emit", src], stderr = true).unwrap()
+
+    _ = remove_dir_all(work)
+
+    val said = interpreted.err.unwrap_or("")
+
+    assert(!interpreted.status.ok())
+    assert(said.contains("`area` is a host function, and the program running this script gives none of that name"), said)
+    assert(!said.contains("panic"), said)
+
+    val refused = compiled.err.unwrap_or("")
+
+    assert(!compiled.status.ok())
+    assert(refused.contains("`area` is a host function, which a program embedding nex gives"), refused)
+    assert(!refused.contains("panic"), refused)

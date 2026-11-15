@@ -552,6 +552,26 @@ emb_host_declarations()
     assert_eq(refusal("@host struct Mesh\n", h), "`Mesh` is a host type, and the program running this script gives none of that name @1:1")
     assert_eq(refusal("extern def cbrt(x: real): real\n", h), "a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled @1:1")
 
+@test("a call of a host function the host does not give is the declaration's diagnostic, never a panic")
+emb_host_call_not_given()
+    val k: &Kernel = Kernel(0, buf())
+    val h = kernel_host(k)
+    val none = "`sphere` is a host function, and the program running this script gives none of that name @1:1"
+    val decl = "@host extern def sphere(r: real<mm>): real<mm^2>\n"
+
+    assert_eq(refusal(decl + "def main() = print(sphere(2mm))\n", h), none)
+    assert_eq(refusal(decl + "def main() = print(sphere(2mm))\n"), none)
+    assert_eq(refusal(decl + "def main() =\n  val f = (x: real<mm>) -> sphere(x)\n  print(f(1mm))\n", h), none)
+    assert_eq(refusal(decl + "def main() =\n  val a: [real<mm>] = [1mm, 2mm]\n  print(map(a, x -> sphere(x)))\n", h), none)
+    assert_eq(refusal(decl + "val area = sphere(3mm)\ndef main() = print(area)\n", h), none)
+
+@test("a host that gives other functions but not the one called is refused the same way")
+emb_host_call_other_given()
+    val k: &Kernel = Kernel(0, buf())
+    val h = kernel_host(k)
+
+    assert_eq(refusal("@host extern def sphere(r: real): real\n@host extern def fail(r: real): real\ndef main() = print(fail(sphere(1.0)))\n", h), "`sphere` is a host function, and the program running this script gives none of that name @1:1")
+
 // -- traps, the budget, the sandbox ------------------------------------------------------------------
 
 @test("a trap is an Err with its message and the nex frames it left, innermost first, each with its file, line and column")
