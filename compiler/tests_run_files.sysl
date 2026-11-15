@@ -6,6 +6,7 @@
 // programs of `testdata/v2/120` to `125` and `testdata/leaks/files` cover the rest.
 
 import nex_runtime.sh.sysl.nex_runtime.fail_flushes_under
+import nex_runtime.sh.sysl.nex_runtime.fail_reads_under
 import sysl.fs.{make_dir, read_text, remove_dir_all, write_text}
 import sysl.process.{Output, Status}
 
@@ -104,6 +105,40 @@ private ran_failing(b: Bench, prefix: string, text: string, case: string) -> Out
 
     fail_flushes_under("")
     out
+
+@test("a read that fails answers Failed with the system's reason, from read_line and read_table(file), while a whole-file read is untouched, on both engines")
+run_files_read_failure_reason()
+    val b = bench()
+    val dir = s"${b.work}/read-fails"
+
+    make_dir(dir).unwrap()
+
+    val bad = s"$dir/bad-"
+
+    write_text(s"${bad}in.txt", "1 2\n3 4\n").unwrap()
+
+    var text = "def shown(r: Result[string, IoError]) = r match\n  Ok(_) -> print(\"ok\")\n  Err(e) ->\n    print(message(e))\n"
+    text += "def line_of(f: File): Result[string, IoError] =\n  read_line(f)? match\n    Some(s) -> Ok(s)\n    None -> Ok(\"end\")\n"
+    text += s"def main() =\n  val f = open(\"${bad}in.txt\", Read)!\n  shown(line_of(f))\n"
+    text += s"  val g = open(\"${bad}in.txt\", Read)!\n  val t: Result[[real64; :, :], IoError] = read_table(g)\n  t match\n    Ok(_) -> print(\"ok\")\n    Err(e) -> print(message(e))\n"
+    text += s"  read_text(\"${bad}in.txt\") match\n    Ok(s) -> print(s)\n    Err(e) -> print(message(e))\n"
+
+    val hook = s"${b.work}/run_files_read_failure_reason-fault.c"
+
+    write_text(hook, s"void nex_test_fail_reads(const char *prefix);\n__attribute__((constructor)) static void fault(void) { nex_test_fail_reads(\"$bad\"); }\n").unwrap()
+    fail_reads_under(bad)
+
+    val out = ran(b, text, links = [hook], case = "run_files_read_failure_reason")
+
+    fail_reads_under("")
+
+    remove_dir_all(dir).unwrap()
+    finish(b)
+
+    val why = s"${bad}in.txt: is a directory\n"
+
+    assert_eq(out.text, why + why + "1 2\n3 4\n\n")
+    assert(out.status == Status.Exited(0), s"${out.status}")
 
 @test("a close that fails as the last reference goes warns on stderr and the program goes on: a scope's end, an overwritten binding, the program's end")
 run_files_dropped_close_warns()
