@@ -1,0 +1,381 @@
+module sh.sysl.nex
+@tests
+
+// The file grant of a sandboxed script (DESIGN §16.6, §17.8): every path is opened beneath the one
+// directory its host grants, through a descriptor held from the moment it is loaded. No `..`, no
+// absolute path and no symbolic link anywhere along a path leads anywhere, nor does a file with a
+// second hard link, and each is answered `Denied` with nothing outside the directory read or
+// written — which every test checks on the disk afterwards. Each test has a directory of its own:
+// `<root>/g` is granted, and `<root>/secret` and `<root>/out` lie outside it.
+
+import sysl.fs.{exists, hard_link, is_link, make_dir_all, make_temp_dir, read_bytes, read_text, remove_dir_all, rename, symlink, write_text}
+import sysl.buf.{Buf, buf}
+import sysl.text.{StrBuilder, replace_all, str_builder}
+
+private struct Gathered
+    text: StrBuilder
+
+private options(o: &Gathered, sandbox: bool, grant: Option[FileGrant]) -> ScriptOptions =
+    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None, grant)
+
+// A fresh root with the granted directory `g` (holding `a.txt` and `sub/f.txt`), and outside it
+// `secret` and `out/x`.
+private made_root(name: string) -> string
+    val root = make_temp_dir(name).unwrap()
+
+    make_dir_all(s"$root/g/sub").unwrap()
+    make_dir_all(s"$root/out").unwrap()
+    write_text(s"$root/secret", "s").unwrap()
+    write_text(s"$root/out/x", "o").unwrap()
+    write_text(s"$root/g/a.txt", "inside").unwrap()
+    write_text(s"$root/g/sub/f.txt", "f").unwrap()
+    root
+
+// The nex every script begins with: `root`, so that a message names it as `<root>`; `shown`, which
+// prints an outcome under a label; and `tried`, which makes every operation of §17.6 and §17.7 on one
+// path, the writers' text `x`.
+private prelude(root: string) -> string =
+    s"val root = \"$root\"\n" +
+    "def shown[T](label: string, r: Result[T, IoError]) = r match\n" +
+    "  Ok(_) -> print(replace(s\"$label: reached\", root, \"<root>\"))\n" +
+    "  Err(e) -> print(replace(s\"$label: ${message(e)}\", root, \"<root>\"))\n" +
+    "def tried(p: string) =\n" +
+    "  shown(s\"read_text $p\", read_text(p))\n" +
+    "  shown(s\"read_lines $p\", read_lines(p))\n" +
+    "  shown(s\"read_bytes $p\", read_bytes(p))\n" +
+    "  shown(s\"open Read $p\", open(p, Read))\n" +
+    "  shown(s\"open Write $p\", open(p, Write))\n" +
+    "  shown(s\"open Append $p\", open(p, Append))\n" +
+    "  shown(s\"write_text $p\", write_text(p, \"x\"))\n" +
+    "  shown(s\"append_text $p\", append_text(p, \"x\"))\n" +
+    "  shown(s\"write_lines $p\", write_lines(p, [\"x\"]))\n" +
+    "  shown(s\"write_bytes $p\", write_bytes(p, to_bytes([1])))\n" +
+    "  shown(s\"read_table $p\", read_table(p))\n" +
+    "  shown(s\"write_table $p\", write_table(p, [1.0]))\n" +
+    "  shown(s\"remove $p\", remove(p))\n" +
+    "  print(replace(s\"exists $p: ${exists(p)}\", root, \"<root>\"))\n"
+
+private val OPERATIONS = ["read_text", "read_lines", "read_bytes", "open Read", "open Write", "open Append", "write_text", "append_text", "write_lines",
+                          "write_bytes", "read_table", "write_table", "remove"]
+
+// What `tried(p)` prints where every operation on `p` is refused: `Denied` from each, and `false`
+// from `exists`. `p` is as the output shows it, `<root>` for the root.
+private denied_everywhere(p: string) -> string
+    var out = ""
+
+    for op in OPERATIONS
+        out += s"$op $p: $p: permission denied\n"
+
+    out + s"exists $p: false\n"
+
+// The script `text` loaded with `grant`, or the first diagnostic refusing it.
+private loaded(text: string, o: &Gathered, sandbox: bool, grant: Option[FileGrant]) -> Result[&Script, string] =
+    load_script(text, "t.nex", new_host(), options(o, sandbox, grant)) match
+        Ok(s) -> Ok(s)
+        Err(ds) -> Err(ds[0].message)
+
+// What the script `s` wrote to `o` as it ran, and its status.
+private finished(s: &Script, o: &Gathered) -> string
+    val status = s.run().unwrap()
+
+    o.text.finish() + s"status $status\n"
+
+// `body`, the lines of `main`, run sandboxed with `<root>/g` granted.
+private ran_granted(root: string, body: string, writable: bool = true) -> string
+    val o: &Gathered = Gathered(str_builder())
+
+    val s = loaded(prelude(root) + "def main() =\n" + body, o, true, Some(FileGrant(s"$root/g", writable))) match
+        Ok(s) -> s
+        Err(message) -> panic(message)
+
+    finished(s, o)
+
+// The outside of `root` as it was made: nothing read from it was changed, and nothing new is there.
+private assert_outside_untouched(root: string)
+    assert_eq(read_text(s"$root/secret").unwrap(), "s")
+    assert_eq(read_text(s"$root/out/x").unwrap(), "o")
+
+    for name in ["x", "made", "new", "out/new", "out/a.txt"]
+        assert(!exists(s"$root/$name"), s"a file was made outside the grant: $name")
+
+// -- what the grant reaches -----------------------------------------------------------------------
+
+@test("a granted script reads, writes, appends, opens handles, and reads and writes bytes and tables beneath its directory")
+emb_grant_inside()
+    val root = made_root("nex-grant-inside")
+
+    write_text(s"$root/g/in.dat", "1 2\n3 4\n").unwrap()
+
+    var body = "  write_text(\"a.txt\", \"one\\ntwo\\n\")!\n  append_text(\"a.txt\", \"three\\n\")!\n  print(read_lines(\"a.txt\")!)\n"
+
+    body += "  write_lines(\"sub/new.txt\", [\"made\", \"beneath\"])!\n  print(read_text(\"sub/new.txt\")!)\n"
+    body += "  val f = open(\"sub/h.txt\", Write)!\n  write_line(f, \"by handle\")!\n  close(f)!\n"
+    body += "  val g = open(\"sub/h.txt\", Append)!\n  write_line(g, \"appended\")!\n  close(g)!\n"
+    body += "  val r = open(\"./sub/h.txt\", Read)!\n  print(read_line(r)!)\n  print(read_line(r)!)\n  print(read_line(r)!)\n"
+    body += "  write_bytes(\"b.bin\", to_bytes([1, 2, 255]))!\n  print(read_bytes(\"b.bin\")!)\n"
+    body += "  write_table(\"t.dat\", read_table(\"in.dat\")!, sep = \",\")!\n  val t = read_table(\"t.dat\")!\n  print(t)\n"
+    body += "  val h = open(\"in.dat\", Read)!\n  val u: [int32; :, :] = read_table(h)!\n  print(u)\n"
+    body += "  print(exists(\"a.txt\"))\n  print(exists(\"sub\"))\n  remove(\"a.txt\")!\n  print(exists(\"a.txt\"))\n"
+    body += "  shown(\"missing\", read_text(\"nope.txt\"))\n  shown(\"a directory\", read_text(\"sub\"))\n  print(read_line(stdin)!)\n"
+
+    val out = ran_granted(root, body)
+    val made = read_text(s"$root/g/sub/new.txt").unwrap()
+    val handled = read_text(s"$root/g/sub/h.txt").unwrap()
+    val bytes = read_bytes(s"$root/g/b.bin").unwrap()
+    val table = read_text(s"$root/g/t.dat").unwrap()
+    val removed = !exists(s"$root/g/a.txt")
+
+    assert_outside_untouched(root)
+    remove_dir_all(root).unwrap()
+
+    assert_eq(out, "[one, two, three]\nmade\nbeneath\n\nSome(by handle)\nSome(appended)\nNone\n[1, 2, 255]\n[[1.0, 2.0], [3.0, 4.0]]\n[[1, 2], [3, 4]]\n" +
+                   "true\ntrue\nfalse\nmissing: nope.txt: no such file\na directory: sub: is a directory\nNone\nstatus 0\n")
+    assert_eq(made, "made\nbeneath\n")
+    assert_eq(handled, "by handle\nappended\n")
+    assert_eq(bytes.len, 3)
+    assert_eq(bytes[2], 255)
+    assert_eq(table, "1.0,2.0\n3.0,4.0\n")
+    assert(removed, "remove left the file inside the grant")
+
+@test("a grant for reading only reads beneath its directory and answers Denied to every writer and to remove")
+emb_grant_read_only()
+    val root = made_root("nex-grant-read-only")
+    val out = ran_granted(root, "  tried(\"a.txt\")\n  tried(\"sub/new.txt\")\n", false)
+    val kept = read_text(s"$root/g/a.txt").unwrap()
+    val made = exists(s"$root/g/sub/new.txt")
+
+    assert_outside_untouched(root)
+    remove_dir_all(root).unwrap()
+
+    var expected = "read_text a.txt: reached\nread_lines a.txt: reached\nread_bytes a.txt: reached\nopen Read a.txt: reached\n"
+
+    for op in ["open Write", "open Append", "write_text", "append_text", "write_lines", "write_bytes"]
+        expected += s"$op a.txt: a.txt: permission denied\n"
+
+    expected += "read_table a.txt: a.txt:1:1: expected a real64, found \"inside\"\nwrite_table a.txt: a.txt: permission denied\n"
+    expected += "remove a.txt: a.txt: permission denied\nexists a.txt: true\n"
+
+    for op in OPERATIONS
+        val reading = op == "read_text" || op == "read_lines" || op == "read_bytes" || op == "open Read" || op == "read_table"
+        val outcome = if reading then "no such file" else "permission denied"
+
+        expected += s"$op sub/new.txt: sub/new.txt: $outcome\n"
+
+    expected += "exists sub/new.txt: false\nstatus 0\n"
+
+    assert_eq(out, expected)
+    assert_eq(kept, "inside")
+    assert(!made, "a read-only grant made a file")
+
+// -- `..` and absolute paths ------------------------------------------------------------------------
+
+@test("every path with a .. component, leaving or not, and every absolute path, inside or out, is Denied to every operation")
+emb_grant_dot_dot_and_absolute()
+    val root = made_root("nex-grant-dot-dot")
+    var deep = ""
+
+    for k in 0..<200
+        deep += "sub/"
+
+    val paths = ["../secret", "../x", "sub/../../secret", "sub/..", "sub/../a.txt", "./../secret", deep + "../../secret"]
+    var body = ""
+
+    for p in paths
+        body += s"  tried(\"$p\")\n"
+
+    body += "  tried(s\"$root/secret\")\n  tried(s\"$root/g/a.txt\")\n  tried(s\"$root/x\")\n"
+
+    val out = ran_granted(root, body)
+    val inside = read_text(s"$root/g/a.txt").unwrap()
+
+    assert_outside_untouched(root)
+    remove_dir_all(root).unwrap()
+
+    var expected = ""
+
+    for p in paths
+        expected += denied_everywhere(p)
+
+    expected += denied_everywhere("<root>/secret") + denied_everywhere("<root>/g/a.txt") + denied_everywhere("<root>/x")
+
+    assert_eq(out, expected + "status 0\n")
+    assert_eq(inside, "inside")
+
+// -- symbolic links ------------------------------------------------------------------------------------
+
+@test("a symbolic link as the last component or above it, pointing out of the grant or back into it, or dangling, is Denied to every operation")
+emb_grant_links()
+    val root = made_root("nex-grant-links")
+
+    symlink(s"$root/secret", s"$root/g/door").unwrap()
+    symlink("a.txt", s"$root/g/rel").unwrap()
+    symlink(s"$root/out", s"$root/g/outdir").unwrap()
+    symlink("sub", s"$root/g/subl").unwrap()
+    symlink(s"$root/made", s"$root/g/dangle").unwrap()
+    symlink(s"$root/g", s"$root/g/sub/loop").unwrap()
+
+    val paths = ["door", "rel", "dangle", "outdir/x", "outdir/new", "subl/f.txt", "subl/new.txt", "sub/loop/a.txt"]
+    var body = ""
+
+    for p in paths
+        body += s"  tried(\"$p\")\n"
+
+    val out = ran_granted(root, body)
+    val inside = read_text(s"$root/g/a.txt").unwrap()
+    val beneath = read_text(s"$root/g/sub/f.txt").unwrap()
+    val made = exists(s"$root/g/sub/new.txt")
+    var links_kept = true
+
+    for name in ["door", "rel", "outdir", "subl", "dangle"]
+        links_kept = links_kept && is_link(s"$root/g/$name")
+
+    assert_outside_untouched(root)
+    remove_dir_all(root).unwrap()
+
+    var expected = ""
+
+    for p in paths
+        expected += denied_everywhere(p)
+
+    assert_eq(out, expected + "status 0\n")
+    assert_eq(inside, "inside")
+    assert_eq(beneath, "f")
+    assert(!made, "a write through a link to a directory inside made a file")
+    assert(links_kept, "remove deleted a link")
+
+@test("a symbolic link swapped in after the grant is Denied, and a granted directory moved and replaced by a link is still the one reached")
+emb_grant_swapped()
+    val root = made_root("nex-grant-swapped")
+    val o: &Gathered = Gathered(str_builder())
+    val body = "  tried(\"sub/f.txt\")\n  write_text(\"w.txt\", \"w\")!\n  print(read_text(\"a.txt\")!)\n"
+
+    val s = loaded(prelude(root) + "def main() =\n" + body, o, true, Some(FileGrant(s"$root/g", true))) match
+        Ok(s) -> s
+        Err(message) -> panic(message)
+
+    // After loading: `sub` becomes a link out, and the granted directory itself is moved away and a
+    // link to `out` put where it was.
+    rename(s"$root/g/sub", s"$root/sub-moved").unwrap()
+    symlink(s"$root/out", s"$root/g/sub").unwrap()
+    rename(s"$root/g", s"$root/g-moved").unwrap()
+    symlink(s"$root/out", s"$root/g").unwrap()
+
+    val out = finished(s, o)
+    val written = read_text(s"$root/g-moved/w.txt").unwrap()
+    val leaked = exists(s"$root/out/w.txt") || exists(s"$root/out/f.txt")
+
+    assert_outside_untouched(root)
+    remove_dir_all(root).unwrap()
+
+    assert_eq(out, denied_everywhere("sub/f.txt") + "inside\nstatus 0\n")
+    assert_eq(written, "w")
+    assert(!leaked, "a write went through a link swapped in after the grant")
+
+// -- hard links ------------------------------------------------------------------------------------
+
+@test("a file with a second hard link is neither read nor written, and remove takes only its name beneath the grant")
+emb_grant_hard_link()
+    val root = made_root("nex-grant-hard")
+
+    hard_link(s"$root/secret", s"$root/g/hard").unwrap()
+
+    val out = ran_granted(root, "  tried(\"hard\")\n")
+    val still = exists(s"$root/secret")
+
+    assert_outside_untouched(root)
+    remove_dir_all(root).unwrap()
+
+    var expected = ""
+
+    for op in OPERATIONS
+        expected += if op == "remove" then "remove hard: reached\n" else s"$op hard: hard: permission denied\n"
+
+    assert_eq(out, expected + "exists hard: false\nstatus 0\n")
+    assert(still, "removing the hard link removed the file outside")
+
+// -- empty, `.` and long paths ------------------------------------------------------------------------
+
+@test("an empty path, the granted directory as ., and paths too long for the system reach nothing outside")
+emb_grant_odd_paths()
+    val root = made_root("nex-grant-odd")
+    var long = ""
+
+    for k in 0..<110
+        long += "aaaaaaaaaa/"
+
+    var name = ""
+
+    for k in 0..<300
+        name += "b"
+
+    var body = "  tried(\"\")\n  tried(\".\")\n"
+
+    body += s"  shown(\"long read\", read_text(\"${long}x\"))\n  shown(\"long write\", write_text(\"${long}x\", \"x\"))\n"
+    body += s"  shown(\"long name\", write_text(\"$name\", \"x\"))\n"
+
+    val out = ran_granted(root, body)
+
+    assert_outside_untouched(root)
+    remove_dir_all(root).unwrap()
+
+    var expected = ""
+
+    for op in OPERATIONS
+        expected += s"$op : : no such file\n"
+
+    expected += "exists : false\n"
+
+    for op in OPERATIONS
+        val outcome = if op == "remove" then "permission denied" else "is a directory"
+
+        expected += s"$op .: .: $outcome\n"
+
+    expected += "exists .: true\n"
+    expected += s"long read: ${long}x: File name too long\nlong write: ${long}x: File name too long\nlong name: $name: File name too long\n"
+
+    assert_eq(out, expected + "status 0\n")
+
+// -- the grant itself ------------------------------------------------------------------------------
+
+@test("a grant is refused at load where the script is not sandboxed, or its directory is missing, a file, or a link as its last component")
+emb_grant_refused()
+    val root = made_root("nex-grant-refused")
+
+    symlink(s"$root/g", s"$root/gl").unwrap()
+
+    val o: &Gathered = Gathered(str_builder())
+    val text = "def main() = print(1)\n"
+    var refusals: Buf[string] = buf()
+
+    for (dir, sandbox) in [(s"$root/g", false), (s"$root/none", true), (s"$root/secret", true), (s"$root/gl", true)]
+        refusals.push(loaded(text, o, sandbox, Some(FileGrant(dir, true))) match
+            Ok(_) -> "loaded"
+            Err(message) -> replace_all(message, root, "<root>"))
+
+    remove_dir_all(root).unwrap()
+
+    assert_eq(refusals[0], "the file grant of <root>/g confines only a sandboxed script, and this one is not sandboxed")
+    assert_eq(refusals[1], "the granted directory <root>/none: no such file or directory")
+    assert_eq(refusals[2], "the granted directory <root>/secret: not a directory")
+    assert_eq(refusals[3], "the granted directory <root>/gl: the path goes through a symbolic link")
+
+@test("a granted directory named through a symbolic link above its last component is the host's path, and is granted")
+emb_grant_through_host_link()
+    val root = made_root("nex-grant-host-link")
+
+    symlink(root, s"$root/up").unwrap()
+
+    val o: &Gathered = Gathered(str_builder())
+
+    val s = loaded("def main() =\n  write_text(\"w.txt\", \"w\")!\n  print(read_text(\"a.txt\")!)\n", o, true, Some(FileGrant(s"$root/up/g", true))) match
+        Ok(s) -> s
+        Err(message) -> panic(message)
+
+    val out = finished(s, o)
+    val written = read_text(s"$root/g/w.txt").unwrap()
+
+    assert_outside_untouched(root)
+    remove_dir_all(root).unwrap()
+
+    assert_eq(out, "inside\nstatus 0\n")
+    assert_eq(written, "w")

@@ -1,0 +1,74 @@
+// `fill` of values that are not numbers (DESIGN §4.2): strings, a user enum, `Option` and `Result`,
+// tuples, structs and functions, at ranks 1 and 2, of no and of one element, into a `val` and a
+// `var`; each element a value of its own, so a write to one leaves the others as they were.
+
+struct P
+  name: string
+  n: integer
+
+enum Cell =
+  Wall
+  Open(label: string)
+
+def glyph(c: Cell): string =
+  c match
+    Wall -> "#"
+    Open(l) -> l
+
+def words(n: integer, w: string): [string] = fill(n, w + "!")
+
+def main() =
+  val s = "ab"
+  val three = fill(3, s + "c")
+  print(three)
+  print(length(fill(0, s)))
+  print(fill(1, s))
+  print(words(2, s))
+  print(length(words(0, s)))
+
+  var v = fill(4, s + "d")
+  v[2] = "x"
+  v[3] = v[3] + "y"
+  print(v)
+  print(three)
+
+  val m = fill((2, 3), "m")
+  print(m)
+  print(shape(m))
+  var g = fill((3, 2), s)
+  g[2, 1] = "z"
+  print(g)
+  print(shape(fill((0, 4), s)))
+  print(fill((1, 1), s))
+
+  val cells = fill(3, Open("o" + s))
+  var walls = fill(2, Wall)
+  walls[1] = Open("door")
+  var line = ""
+  for c in cells
+    line = line + glyph(c)
+  for c in walls
+    line = line + glyph(c)
+  print(line)
+
+  val maybe: [Option[string]] = fill(2, Some(s + "?"))
+  print(maybe)
+  val no: Option[integer] = None
+  print(fill(2, no))
+  val err: Result[integer, string] = Err("no " + s)
+  var done = fill(2, err)
+  done[2] = Ok(7)
+  print(done)
+
+  var pairs = fill(2, (1, s + "t"))
+  pairs[2] = (2, "u")
+  print(pairs)
+  var ps = fill(2, P(s, 1))
+  ps[1] = P("q", 9)
+  print(ps)
+
+  val k = 10
+  val fs = fill(2, (x: integer) -> x + k)
+  print(fs[1](1) + fs[2](2))
+  print(fill((2, 2), (1, "w")) == fill((2, 2), (1, "w")))
+  print(fill((2, 2), (1, "w")) == fill((2, 2), (1, "v")))

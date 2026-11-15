@@ -86,7 +86,7 @@ def build(width: real<in>, count: integer) = ...
 A host function is handed its arguments in the units its declaration names, an array as one typed
 buffer, and a host type's object is reference counted, its `release` called when nex and the host
 have both let go. A step budget and `cancel()` stop a runaway script, and a sandboxed script may
-not `stop`. `examples/embed/` is a whole host; `sysl build examples/embed -o embed` builds it.
+not `stop` and reaches files only beneath the one directory its host grants (`FileGrant`). `examples/embed/` is a whole host; `sysl build examples/embed -o embed` builds it.
 
 ## Licence
 

@@ -106,8 +106,8 @@ private reported(path: string, e: fs.IoError) = e match
     NotPermitted -> failed(FILE_DENIED, path, "")
     _ -> failed(FILE_FAILED, path, e.message())
 
-// The operation on `path` refused: a sandboxed script, which no grant lets reach a file (DESIGN
-// §17.8).
+// The operation on `path` refused: a sandboxed script that no grant lets reach a file, or one
+// writing where its grant is for reading only (DESIGN §17.8).
 file_denied(path: string) = failed(FILE_DENIED, path, "")
 
 // The outcome `code` set by another part of the runtime (`tables.sysl`), with the line and column a
@@ -117,11 +117,106 @@ file_set_outcome(code: int, path: string, line: long, column: long, message: str
     fail_line = line
     fail_column = column
 
+// -- beneath a granted directory (DESIGN §17.8) ---------------------------------------------------
+//
+// Every function here that takes a path also takes `beneath`: `None` for the path as the system
+// reads it, or the directory a sandboxed script was granted, which the path is then opened beneath
+// through `sysl.fs.Dir`. The kernel confines that opening itself, one component at a time from the
+// directory's descriptor, so no `..`, no absolute path and no symbolic link anywhere along the path —
+// pointing out of the directory or back into it — is followed. Each such refusal is `Denied`.
+//
+// Two refusals are this runtime's own, made from a reading of the entry before it is opened: a
+// symbolic link as the last component, which `exists` answers false to and `remove` will not delete,
+// and a file with more than one hard link, which may be a file outside the directory under a second
+// name and is neither read nor written. A link put in place between that reading and the opening is
+// still refused by the opening; a second hard link made in between is not, which only a program that
+// can already write in the directory can do.
+
+// What a `Dir` reported about `path`: `Denied` where it refused the path as leading out of the
+// directory or through a link, else as `reported` says.
+private reported_beneath(path: string, e: fs.IoError)
+    if e.refused_link() || e.escaped() then failed(FILE_DENIED, path, "") else reported(path, e)
+
+// Whether `path` beneath `d` may be opened, the outcome saying why not where it may not: not a link,
+// not a file with a second hard link, and, for `reading`, not a directory. Nothing there yet may be
+// opened, to be made or to fail as the opening fails.
+private admitted(d: &fs.Dir, path: string, reading: bool) -> bool
+    d.link_metadata(path) match
+        Ok(m) ->
+            if m.is_link() || (m.is_file() && m.links > 1)
+                failed(FILE_DENIED, path, "")
+                return false
+
+            if reading && m.is_dir()
+                failed(FILE_FAILED, path, fs.IoError.IsADirectory.message())
+                return false
+
+            true
+        Err(e) ->
+            if e == fs.IoError.NotFound then return true
+
+            reported_beneath(path, e)
+            false
+
+// `path` beneath `d` opened as `mode`, as `file_open` opens one.
+private opened_beneath(d: &fs.Dir, path: string, mode: int) -> Option[&NexFile]
+    if !admitted(d, path, mode == MODE_READ) then return None
+
+    val opened = if mode == MODE_READ then d.open(path) elif mode == MODE_WRITE then d.create(path) else d.append(path)
+
+    opened match
+        Ok(f) ->
+            succeeded()
+            Some(new_file(path, mode, Some(f)))
+        Err(e) ->
+            reported_beneath(path, e)
+            None
+
+// Every byte of `path` beneath `d`, as `whole` reads a file.
+private whole_beneath(d: &fs.Dir, path: string) -> Option[[]u8]
+    if !admitted(d, path, true) then return None
+
+    var f = d.open(path) match
+        Ok(f) -> f
+        Err(e) ->
+            reported_beneath(path, e)
+            return None
+
+    val got = sio.read_all(&f)
+    val failure = f.read_failure()
+
+    _ = f.close()
+
+    failure match
+        Some(e) ->
+            reported(path, e)
+            None
+        None ->
+            var out: []u8 = [0; got.len()]
+
+            copy(out, got.view())
+            succeeded()
+            Some(out)
+
+// `bytes` made the whole of `path` beneath `d`, or added at its end where `append`: the file opened
+// as `open` opens one, the bytes collected in it, and handed over as its `close` hands them.
+private written_beneath(d: &fs.Dir, path: string, bytes: []const u8, append: bool)
+    val f = opened_beneath(d, path, if append then MODE_APPEND else MODE_WRITE) match
+        Some(f) -> f
+        None -> return
+
+    f.out.extend(bytes)
+    file_close(f)
+
 // -- opening ------------------------------------------------------------------------------------------
 
 // `path` opened as `mode` (`MODE_READ`, `MODE_WRITE` or `MODE_APPEND`), or `None` with the outcome
 // saying why. A directory is not a file to read, though the system opens one.
-file_open(path: string, mode: int) -> Option[&NexFile]
+file_open(path: string, mode: int, beneath: Option[&fs.Dir] = None) -> Option[&NexFile]
+    beneath match
+        Some(d) -> return opened_beneath(d, path, mode)
+        None -> ()
+
     if mode == MODE_READ && fs.is_dir(path)
         failed(FILE_FAILED, path, fs.IoError.IsADirectory.message())
         return None
@@ -255,14 +350,16 @@ private filled(f: &NexFile) -> bool
 
     f.os match
         Some(os) ->
-            var file = os
+            var file = if read_faulty(f.path) then fs.open("/").unwrap() else os
             val got = file.read(chunk[..])
 
             if got.len == 0
-                // `sysl.fs.File` latches a failed read without saying which failure it was.
-                if file.failed()
-                    failed(FILE_FAILED, f.path, "the file could not be read")
-                    return false
+                // A failed read is reported with the system's own reason.
+                file.read_failure() match
+                    Some(e) ->
+                        reported(f.path, e)
+                        return false
+                    None -> ()
 
                 f.ended = true
             else
@@ -411,13 +508,33 @@ fail_flushes_under(prefix: string)
 fail_flushes_under_c(prefix: *u8)
     faulty_c = prefix
 
+// The same for reads: every read of a file whose path starts with the prefix is made from a directory
+// instead, which the system refuses with `IsADirectory` as it does any read that fails. Set from sysl
+// with `fail_reads_under`, from a compiled program with `nex_test_fail_reads`.
+@thread_local private var faulty_read_prefix = ""
+@thread_local private var faulty_read_c: *u8 = null
+
+fail_reads_under(prefix: string)
+    faulty_read_prefix = prefix
+
+@export("nex_test_fail_reads")
+fail_reads_under_c(prefix: *u8)
+    faulty_read_c = prefix
+
+private read_faulty(path: string) -> bool =
+    (faulty_read_prefix != "" && path.starts_with(faulty_read_prefix)) || (faulty_read_c != null && path.starts_with(c_text(faulty_read_c)))
+
 private faulty(path: string) -> bool =
     (faulty_prefix != "" && path.starts_with(faulty_prefix)) || (faulty_c != null && path.starts_with(c_text(faulty_c)))
 
 // -- whole files ----------------------------------------------------------------------------------
 
 // The bytes of `path`, or `None` with the outcome.
-private whole(path: string) -> Option[[]u8]
+private whole(path: string, beneath: Option[&fs.Dir]) -> Option[[]u8]
+    beneath match
+        Some(d) -> return whole_beneath(d, path)
+        None -> ()
+
     if fs.is_dir(path)
         failed(FILE_FAILED, path, fs.IoError.IsADirectory.message())
         return None
@@ -448,16 +565,16 @@ private checked_text(path: string, b: []const u8) -> bool
             false
 
 // The whole of `path` as text.
-file_read_text(path: string) -> string
-    whole(path) match
+file_read_text(path: string, beneath: Option[&fs.Dir] = None) -> string
+    whole(path, beneath) match
         Some(b) -> if checked_text(path, b) then from_utf8_unchecked(b).copy() else ""
         None -> ""
 
 // The lines of `path`, as `read_line` reads them.
-file_read_lines(path: string) -> Buf[string]
+file_read_lines(path: string, beneath: Option[&fs.Dir] = None) -> Buf[string]
     var out: Buf[string] = buf()
 
-    val b = whole(path) match
+    val b = whole(path, beneath) match
         Some(b) -> b
         None -> return out
 
@@ -478,31 +595,54 @@ file_read_lines(path: string) -> Buf[string]
 end file_read_lines
 
 // `bytes` made the whole of `path`, or added at its end where `append`.
-file_write_all(path: string, bytes: []const u8, append: bool)
-    val r = if append then fs.append_bytes(path, bytes) else fs.write_bytes(path, bytes)
+file_write_all(path: string, bytes: []const u8, append: bool, beneath: Option[&fs.Dir] = None)
+    beneath match
+        Some(d) -> return written_beneath(d, path, bytes, append)
+        None -> ()
+
+    val r =if append then fs.append_bytes(path, bytes) else fs.write_bytes(path, bytes)
 
     r match
         Ok(_) -> succeeded()
         Err(e) -> reported(path, e)
 
 // Each of `lines` followed by a newline, made the whole of `path`.
-file_write_lines(path: string, lines: []const string)
+file_write_lines(path: string, lines: []const string, beneath: Option[&fs.Dir] = None)
     var bytes: Buf[u8] = buf()
 
     for s in lines
         bytes.extend(s.bytes)
         bytes.push(u8('\n'))
 
-    file_write_all(path, bytes.view(), false)
+    file_write_all(path, bytes.view(), false, beneath)
 
-// Whether anything is at `path`.
-file_exists(path: string) -> bool = fs.exists(path)
+// Whether anything is at `path`; beneath a directory, anything but a symbolic link, which nothing
+// there opens.
+file_exists(path: string, beneath: Option[&fs.Dir] = None) -> bool = beneath match
+    Some(d) -> d.link_metadata(path) match
+        Ok(m) -> !m.is_link()
+        Err(_) -> false
+    None -> fs.exists(path)
 
-// The file at `path` deleted.
-file_remove(path: string)
-    fs.remove_file(path) match
+// The file at `path` deleted; beneath a directory, never a symbolic link.
+file_remove(path: string, beneath: Option[&fs.Dir] = None)
+    val linked = beneath match
+        Some(d) -> d.link_metadata(path) match
+            Ok(m) -> m.is_link()
+            Err(_) -> false
+        None -> false
+
+    if linked
+        failed(FILE_DENIED, path, "")
+        return
+
+    val removed = beneath match
+        Some(d) -> d.remove_file(path)
+        None -> fs.remove_file(path)
+
+    removed match
         Ok(_) -> succeeded()
-        Err(e) -> reported(path, e)
+        Err(e) -> reported_beneath(path, e)
 
 // The bytes `read_bytes` read, held between the call that reads them and the one that hands them
 // to the new array, whole.
@@ -520,12 +660,12 @@ private held_bytes() -> &Buf[u8]
     b
 
 // The bytes of `path` held for `file_bytes_taken`, and how many there are.
-file_read_bytes(path: string) -> long
+file_read_bytes(path: string, beneath: Option[&fs.Dir] = None) -> long
     val held = held_bytes()
 
     held.clear()
 
-    whole(path) match
+    whole(path, beneath) match
         Some(b) ->
             held.extend(b)
             long(b.len)

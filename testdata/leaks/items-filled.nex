@@ -1,0 +1,42 @@
+// args: a scratch directory
+// The ownership of arrays made by `fill` of values that are not numbers: a computed string, an enum
+// holding one, a tuple, a struct, a closure and a `File`, held once per element, the elements
+// written over, the arrays returned from a `def` and dropped in a loop, each released.
+
+struct P
+  name: string
+  n: integer
+
+enum Cell =
+  Wall
+  Open(label: string)
+
+def row(n: integer, w: string): [string] = fill(n, w + "-")
+
+def main(args: [string]) =
+  val dir = args[1]
+  var total = 0
+  for k in 1..20
+    val s = s"w$k"
+    var v = row(k, s)
+    v[1] = s + "!"
+    total += length(v)
+    var g = fill((k, 2), s + "g")
+    g[k, 2] = "x"
+    val cells = fill(k, Open(s))
+    var walls = fill(2, Wall)
+    walls[2] = cells[1]
+    var pairs = fill(k, (k, s + "t"))
+    pairs[1] = (0, "u")
+    val ps = fill(k, P(s + "p", k))
+    val fs = fill(k, (x: integer) -> x + length(s))
+    total += fs[1](0) + length(g) + length(cells) + length(pairs) + ps[k].n + length(fill(0, s))
+  print(total)
+  val path = s"$dir/filled.txt"
+  val f = open(path, Write)!
+  val outs = fill(3, f)
+  for o in outs
+    write_line(o, "line")!
+  close(f)!
+  print(length(read_lines(path)!))
+  remove(path)!

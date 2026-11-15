@@ -182,12 +182,12 @@ elab_generic_struct_errors()
 @test("void is a type argument, its one value ()")
 elab_generic_void()
     assert_eq(elaborated(BOX + "def main() =\n  val b = Box(print(1))\n  print(b.value)\n"),
-        "(struct Box[void] (value void))\n(def main () void (block (val b#0:Box[void] (new:Box[void] (print 1))) (block (.value b#0) (print \"()\"))))")
+        "(struct Box[void] (value void))\n(def main () void (block (val b#0:Box[void] (new:Box[void] (print 1))) (print (block:string (.value b#0) \"()\"))))")
     assert_eq(elaborated(BOX + "def main() =\n  val b: Box[void] = Box(())\n  print(b)\n"),
         "(struct Box[void] (value void))\n(def main () void (block (val b#0:Box[void] (new:Box[void] ())) (print b#0)))")
     assert_eq(elaborated(OPT + "def main() =\n  val o: Opt[void] = Some(())\n  print(o)\n"),
         "(enum Opt[void] (Some (value void)) None)\n(def main () void (block (val o#0:Opt[void] (variant:Opt[void] Some ())) (print o#0)))")
-    assert_eq(elaborated(ID + "def main() = print(id(()))\n"), "(def main () void (block (call id[void] ()) (print \"()\")))\n(def id[void] ((x#0 void)) void x#0)")
+    assert_eq(elaborated(ID + "def main() = print(id(()))\n"), "(def main () void (print (block:string (call id[void] ()) \"()\")))\n(def id[void] ((x#0 void)) void x#0)")
     assert_eq(elaborated(RESULT + "def main() =\n  val r: Result[void, string] = Ok(())\n  print(s\"${r} ${()}\")\n"),
         "(enum Result[void, string] (Ok (value void)) (Err (error string)))\n(def main () void (block (val r#0:Result[void, string] (variant:Result[void, string] Ok ())) (print (s r#0 \" \" (block:string () \"()\")))))")
     assert_eq(refused("struct Node[T]\n  next: Node[T]\ndef f(n: Node[integer]) = ()\n" + MAIN), "error: `Node[int64]` contains itself; a struct or an enum holds its fields by value, so it can hold itself only through an array @1:1")

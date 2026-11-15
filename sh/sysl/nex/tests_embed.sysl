@@ -18,9 +18,9 @@ private struct Out
 
 // Options whose `write` keeps what the script prints in `o`.
 private kept(o: &Out, budget: long = 0, sandbox: bool = false) -> ScriptOptions =
-    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, budget, false, None)
+    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, budget, false, None, None)
 
-private quiet() -> ScriptOptions = ScriptOptions((s, t) -> (), false, 0, false, None)
+private quiet() -> ScriptOptions = ScriptOptions((s, t) -> (), false, 0, false, None, None)
 
 private loaded(text: string, host: Host = new_host(), opts: ScriptOptions = quiet()) -> &Script = load_script(text, "t.nex", host, opts) match
     Ok(s) -> s
@@ -552,6 +552,26 @@ emb_host_declarations()
     assert_eq(refusal("@host struct Mesh\n", h), "`Mesh` is a host type, and the program running this script gives none of that name @1:1")
     assert_eq(refusal("extern def cbrt(x: real): real\n", h), "a call of C is not interpreted: the interpreter never calls C, so a program declaring an `extern` runs compiled @1:1")
 
+@test("a call of a host function the host does not give is the declaration's diagnostic, never a panic")
+emb_host_call_not_given()
+    val k: &Kernel = Kernel(0, buf())
+    val h = kernel_host(k)
+    val none = "`sphere` is a host function, and the program running this script gives none of that name @1:1"
+    val decl = "@host extern def sphere(r: real<mm>): real<mm^2>\n"
+
+    assert_eq(refusal(decl + "def main() = print(sphere(2mm))\n", h), none)
+    assert_eq(refusal(decl + "def main() = print(sphere(2mm))\n"), none)
+    assert_eq(refusal(decl + "def main() =\n  val f = (x: real<mm>) -> sphere(x)\n  print(f(1mm))\n", h), none)
+    assert_eq(refusal(decl + "def main() =\n  val a: [real<mm>] = [1mm, 2mm]\n  print(map(a, x -> sphere(x)))\n", h), none)
+    assert_eq(refusal(decl + "val area = sphere(3mm)\ndef main() = print(area)\n", h), none)
+
+@test("a host that gives other functions but not the one called is refused the same way")
+emb_host_call_other_given()
+    val k: &Kernel = Kernel(0, buf())
+    val h = kernel_host(k)
+
+    assert_eq(refusal("@host extern def sphere(r: real): real\n@host extern def fail(r: real): real\ndef main() = print(fail(sphere(1.0)))\n", h), "`sphere` is a host function, and the program running this script gives none of that name @1:1")
+
 // -- traps, the budget, the sandbox ------------------------------------------------------------------
 
 @test("a trap is an Err with its message and the nex frames it left, innermost first, each with its file, line and column")
@@ -597,6 +617,25 @@ emb_trap_stack_per_element()
     val x = loaded("def main() =\n  def odd(v: integer): bool = v div (v - 3) > 0\n  print(filter([1, 2, 3], odd))\n")
 
     assert_eq(ran(x), "trap: integer division by zero\n  in odd at t.nex:2:31\n  in main at t.nex:3:9")
+
+@test("an element index outside its axis traps at the statement, read or written, local, module-level or through an inout window, at every axis")
+emb_trap_stack_element_index()
+    var got: Buf[string] = buf()
+
+    got.push(ran(loaded("def get(v: [real; :, :], i: integer, j: integer): real =\n  val x = v[i, j]\n  x\n\ndef main() =\n  val m = [[1.0, 2.0], [3.0, 4.0]]\n  print(get(m, 1, 2))\n  print(get(m, 1, 3))\n")))
+    got.push(ran(loaded("def main() =\n  var a = [1, 2, 3]\n  for i in 1..4\n    a[i] += 1\n  print(a)\n")))
+    got.push(ran(loaded("var cube: [integer; :, :, :] = zeros((2, 2, 2))\n\ndef put(k: integer) =\n  cube[1, 2, k] = 5\n\ndef main() =\n  put(2)\n  put(3)\n")))
+    got.push(ran(loaded("def poke(v: inout [integer], i: integer) =\n  v[i] = 0\n\ndef main() =\n  var a = [1, 2, 3, 4]\n  poke(a[2..3], 2)\n  print(a)\n  poke(a[.. by -2], 3)\n")))
+    got.push(ran(loaded("def main() =\n  val t = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]\n  print(t[2, end, 1])\n  print(t[1, end + 1, 1])\n")))
+    got.push(ran(loaded("def main() =\n  var a = [1, 2, 3]\n  val b = a\n  a[2] = 20\n  print(b)\n  a[0] = 1\n")))
+
+    assert_eq(join(got.view(), "\n--\n"),
+              "trap: index out of bounds\n  in get at t.nex:2:3\n  in main at t.nex:8:9\n--\n" +
+              "trap: index out of bounds\n  in main at t.nex:3:3\n--\n" +
+              "trap: index out of bounds\n  in put at t.nex:3:1\n  in main at t.nex:8:3\n--\n" +
+              "trap: index out of bounds\n  in poke at t.nex:1:1\n  in main at t.nex:8:3\n--\n" +
+              "trap: index out of bounds\n  in main at t.nex:4:3\n--\n" +
+              "trap: index out of bounds\n  in main at t.nex:6:3")
 
 @test("a function called once an element takes a step for each call, so a budget stops a long map part way")
 emb_budget_per_element()
@@ -653,6 +692,62 @@ emb_cancel()
     assert_eq(ran(s), "cancelled by the host")
     assert_eq(called(s, "once", none()), "i64:1")
     holder.s = None
+
+@test("a host function's cancel halts the run at the very next step, a call's entry or a loop's pass, however many steps came before")
+emb_cancel_next_step()
+    val holder: &Holder = Holder(None)
+    var h = new_host()
+    h.give("tick", (args) ->
+        val at = args[0] match
+            NInt(n, _, _) -> n == 3000
+            _ -> false
+
+        holder.s match
+            Some(s) -> if at then s.cancel()
+            None -> ()
+
+        Ok(NNothing)
+    )
+
+    val s = loaded("@host extern def tick(n: integer)\n\nvar k = 0\nvar entered = 0\n\ndef step(n: integer) =\n  entered += 1\n  tick(n)\n\ndef main() =\n  while true\n    k += 1\n    tick(k)\n\ndef calls() =\n  while true\n    k += 1\n    step(k)\n", h)
+
+    holder.s = Some(s)
+    assert_eq(ran(s), "cancelled by the host")
+    assert_eq(shown(s.get("k").unwrap()), "i64:3000")
+    assert(s.set("k", int_value(0)).is_ok(), "k reset")
+    assert_eq(called(s, "calls", none()), "cancelled by the host")
+    assert_eq(shown(s.get("k").unwrap()), "i64:3000")
+    assert_eq(shown(s.get("entered").unwrap()), "i64:3000")
+    holder.s = None
+
+@test("a budget stops recursion at the call whose entry spends it, its argument already made, past many cancel checks")
+emb_budget_mid_call()
+    val o: &Out = Out(str_builder())
+    val text = "var n = 0\nvar args_made = 0\n\ndef arg(k: integer): integer =\n  args_made += 1\n  k\n\n" +
+               "def down(k: integer): integer =\n  n += 1\n  down(arg(k + 1))\n\ndef pair(a: integer, b: integer): integer = a + b\n\n" +
+               "def deep(k: integer): integer = if k == 0 then 0 else pair(1, deep(k - 1))\n"
+    val s = loaded(text, new_host(), kept(o, 3001))
+
+    // `down` enters at the odd steps and `arg` at the even ones; the 1501st `down` is step 3001.
+    assert_eq(called(s, "down", one(int_value(0))), "stopped after 3001 steps, the host's budget")
+    assert_eq(shown(s.get("n").unwrap()), "i64:1500")
+    assert_eq(shown(s.get("args_made").unwrap()), "i64:1500")
+    // `deep(k)` takes 2k + 1 steps: its k + 1 entries, then each `pair`'s.
+    assert_eq(called(s, "deep", one(int_value(1499))), "i64:1499")
+    assert_eq(called(s, "deep", one(int_value(1500))), "stopped after 3001 steps, the host's budget")
+    assert_eq(called(s, "deep", one(int_value(1499))), "i64:1499")
+
+@test("a trap through recursion, a local def and a lambda names each frame it leaves, the frames reused or not")
+emb_trap_stack_frames()
+    val text = "def f(n: integer): integer =\n  if n == 0 then 1 div n else f(n - 1) + 1\n\ndef warm(a: integer): integer = a + 1\n\n" +
+               "def main() =\n  def g(k: integer): integer = f(k) * 2\n  val h = (k: integer) -> g(k) + 1\n  print(warm(warm(1)))\n  print(h(2))\n"
+    val s = loaded(text)
+
+    assert_eq(ran(s), FRAMES_STACK)
+    assert_eq(ran(s), FRAMES_STACK)
+
+// `f(0)` has no statement to site it, so its declaration does; each caller is sited at its call.
+private val FRAMES_STACK = "trap: integer division by zero\n  in f at t.nex:1:1\n  in f at t.nex:2:31\n  in f at t.nex:2:31\n  in g at t.nex:7:32\n  in a lambda at t.nex:8:27\n  in main at t.nex:10:9"
 
 // What the cancelling thread is handed: the script's token, and nothing else of the script.
 private struct Stopper

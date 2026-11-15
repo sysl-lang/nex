@@ -3174,7 +3174,8 @@ kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
 - **Another thread stops a run through the script's `CancelToken`.** `cancel_token()` answers a
   `&sync CancelToken`, one atomic word shared with the script and nothing else of it, so a
   modeller's UI thread may hold it while a worker thread runs the script; its `cancel()` halts the run
-  in progress at its next step, as `Script.cancel()` does, and the step reads it without a lock. A
+  in progress within 1,024 steps, since a step reads it, without a lock, once every 1,024 steps
+  (`Script.cancel()`, on the running thread, halts it at the very next one). A
   cancel that arrives between requests is cleared by the next one starting, so a host cancels a run
   it knows has begun.
 
@@ -3466,7 +3467,26 @@ directory. **A sandboxed one (§16.6) reaches only the directory its host grants
 - **`writable = false` grants reading only**: `open(p, Write)`, `open(p, Append)`, the writers and
   `remove` answer `Denied`.
 - A script that is not sandboxed is not confined. A host that wants a confined but trusted script
-  sandboxes it and grants a directory.
+  sandboxes it and grants a directory. **A grant given to a script that is not sandboxed refuses the
+  load**, rather than being ignored, so a host never believes it confined a script it did not.
+- **The grant is held open from the load** (`sysl.fs.Dir`, `open_dir`): what the script reaches is
+  beneath that directory even after the path that named it is moved or replaced by a link. A
+  directory that cannot be held open — missing, not a directory, or a symbolic link as its own last
+  component — refuses the load with one diagnostic; links above its last component are the host's
+  own path, and are followed.
+- **Every `..` is refused, even `a/..` and `a/../b`**, which never leave: between resolving `a` and
+  its `..`, `a` can be moved elsewhere. An empty path is `NotFound`; `.` is the granted directory,
+  which `exists` answers `true` to and which every other function fails on as a directory (`remove`
+  as `Denied`).
+- **A symbolic link as the last component is refused by every function**, `exists` answering `false`
+  and `remove` not deleting the link, although deleting it would not follow it.
+- **A file with a second hard link is neither read nor written** (`Denied`), since it may be a file
+  outside the directory under a second name, which no path check can tell; `remove` deletes only its
+  name beneath the directory. The link count is read just before the opening, so a second link made
+  in between is not seen — which only a process already able to write in the directory can do, a
+  script having no way to make a link.
+- **Compiled programs are never sandboxed**: the sandbox and its grant are options of the embedding
+  API (§16), and `nex run` without `--interp` reaches files as any program does.
 
 ### 17.9 What the two engines share
 

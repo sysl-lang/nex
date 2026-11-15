@@ -15,7 +15,7 @@ private struct Gathered
 // `text` run as a script, sandboxed or not, what it wrote to the host, and its status.
 private ran_script(text: string, sandbox: bool) -> string
     val o: &Gathered = Gathered(str_builder())
-    val opts = ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None)
+    val opts = ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None, None)
 
     val s = load_script(text, "t.nex", new_host(), opts) match
         Ok(s) -> s

@@ -15,7 +15,7 @@ private struct Gathered
     text: StrBuilder
 
 private gathering(o: &Gathered, sandbox: bool) -> ScriptOptions =
-    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None)
+    ScriptOptions((s, t) -> if s == StdOut then o.text.push(t) else o.text.push(s"err: $t"), sandbox, 0, false, None, None)
 
 // `text` run as a script, what it wrote to the host, and its status.
 private ran_script(text: string, sandbox: bool) -> string
@@ -46,6 +46,16 @@ emb_files_unsandboxed()
     remove_dir_all(dir).unwrap()
     assert_eq(out, "[one, two]\ntrue\nstatus 0\n")
     assert_eq(written, "from the script\n")
+
+@test("a file a call opened and kept only in its frame is closed when the call returns, before the next call of that frame's size")
+emb_files_closed_at_return()
+    val dir = make_temp_dir("nex-embed-frames").unwrap()
+    val text = s"def note(p: string, line: string) =\n  val f = open(p, Write)!\n  write_line(f, line)!\n\n" +
+               s"def main() =\n  note(\"$dir/a.txt\", \"first\")\n  print(read_lines(\"$dir/a.txt\")!)\n  note(\"$dir/a.txt\", \"second\")\n  print(read_lines(\"$dir/a.txt\")!)\n"
+    val out = ran_script(text, false)
+
+    remove_dir_all(dir).unwrap()
+    assert_eq(out, "[first]\n[second]\nstatus 0\n")
 
 @test("a sandboxed script is answered Denied by every file operation, false by exists, and reads stdin as empty")
 emb_files_sandboxed()

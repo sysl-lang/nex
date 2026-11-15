@@ -574,24 +574,51 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       110 ns → 36 ns for the lambda. Outputs identical, and trap stacks and step counts identical to
       the frame-per-call path (`tests_embed.sysl`). What is left is the call's bookkeeping — the step,
       the depth, the captures stored again — and the body's own closures over boxed values.
+      Integer operations chosen per width and signedness when the program is compiled to closures
+      (a 64-bit `+ - *` through sysl's `checked_add` and siblings, 64-bit `div` and `%`, constant
+      ends for 32 bits and fewer, 128 bits for no width nex has), and an aggregate's fields built at
+      their final size, measured per pass (median of 5, interleaved, under load 12): an integer `for`
+      body of `*`, `+`, `%` and a store 49.7 → 44.2 ns; the same as a `while` 73.6 → 70.2 ns; a
+      struct built and both fields read 103 → 95 ns; a tuple 115 → 109 ns; an enum variant built and
+      matched 227 → 208 ns. Outputs and step counts identical. What is left is mostly the
+      out-of-line copy and release of a `Value` and the closure calls themselves.
+      A scalar call's frame is now taken from the frames returned calls gave back, by slot count,
+      cleared and in stack order (`take_frame`), the function read where the machine holds it
+      rather than copied, and the cancel flag read every 1024 steps (the budget is still compared
+      at every step). Measured apart from the integer change (median of 5, 1 and 5 reps,
+      `--units 12`, under load 4–10, outputs identical): a call of `f(a, b)` 78 ns → 29 ns (a pass of 127 ns → 76 ns, against 47 ns for
+      the same body inline); a `fib` call 73 ns → 41 ns; an enum built and matched through a call
+      236 ns → 169 ns a pass; an empty `for` pass 17.5 ns → 15.6 ns; `bench/interp-elemental.nex`
+      0.53 s → 0.49 s and `bench/interp-map.nex` 0.66 s → 0.59 s.
+      An index list of single indices (`a[i]`, `a[i, j]`, read or written) computes the element's
+      storage position inline from the window's offset and its extent and stride per axis, with no
+      window, tuple or place built; a local or module-level target is read and written at its slot,
+      the copy-on-write check made there (`positions`, `interp_array_code.sysl`). Measured (median of
+      5, interleaved, under load 17, a scalar loop's own pass included): an element read in a loop
+      80 ns → 39 ns, `a[i] = a[i] * 0.5 + 1.0` 167 ns → 53 ns, a three-point stencil update
+      283 ns → 103 ns, a column-order `gemv` update 214 ns → 67 ns; `bench/interp-index.nex` (10
+      passes of each over 200 000 `real64` elements and a 400 × 400 matrix) 1.39 s → 0.50 s, against
+      0.004 s compiled. Outputs identical, and trap messages, sites and stacks identical to the window
+      path (`tests_embed.sysl`, `testdata/v2/139-element-indexing.nex`).
       Real `+ - * /` without `--fpe-trap`, and `^` of reals where nothing is checked, are one loop per
       operation chosen before it, unchecked subscripts writing the result's storage (`real_arith`),
       the same `real64` computation stored at the width; the checked loops stay for `--fpe-trap`. Median
       of 5, interleaved, under load 4: the point-distance kernel `d = sqrt((x2 - x1)^2 + (y2 - y1)^2)`
       over 10⁶ `real64`s 22 ns → 11 ns an element (0.34 ns compiled), `bench/interp-elementwise.nex`
       0.26 s → 0.089 s, `bench/interp-elemental.nex` 0.50 s → 0.43 s; outputs identical
-      (`testdata/v2/135`, on both engines). Of the 11 ns, two libm `pow` calls for the squares are
-      about 7. **Fusing a chain into one pass was built and measured, and not kept**: each operation's
-      loop run on blocks of 2 048 or 16 384 elements of every operand, no array the size of the result
-      made but the last, was 4.8 ns against 3.5 ns for the same loops operation by operation (with the
-      squares as products), the per-block arrays and the copy of each result block costing more than
-      the memory traffic it saves, which the unchecked loops had already made small. **The squares are
-      an open question between the engines**: the compiled program's `x ^ 2` with a literal exponent
-      is `x * x` (LLVM folds `pow(x, 2.0)`), and libm's `pow(x, 2.0)` differs from `x * x` in the last
-      bit for 137 of 100 000 `real64`s and 607 of 100 000 `real32`s, so the interpreter's `x ^ 2`
-      already differs from the compiled one's there, while an exponent read at run time is libm's on
-      both. Computing a literal square as the product would make them agree and take the kernel to
-      about 4 ns; it waits on deciding which `^ 2` nex means.
+      (`testdata/v2/140-element-wise-chains.nex`, on both engines). Of the 11 ns, two libm `pow` calls
+      for the squares are about 7. **Fusing a chain into one pass was built and measured, and not
+      kept**: each operation's loop run on blocks of 2 048 or 16 384 elements of every operand, no
+      array the size of the result made but the last, was 4.8 ns against 3.5 ns for the same loops
+      operation by operation (with the squares as products), the per-block arrays and the copy of each
+      result block costing more than the memory traffic it saves, which the unchecked loops had
+      already made small. **The squares are an open question between the engines**: the compiled
+      program's `x ^ 2` with a literal exponent is `x * x` (LLVM folds `pow(x, 2.0)`), and libm's
+      `pow(x, 2.0)` differs from `x * x` in the last bit for 137 of 100 000 `real64`s and 607 of
+      100 000 `real32`s, so the interpreter's `x ^ 2` already differs from the compiled one's there,
+      while an exponent read at run time is libm's on both. Computing a literal square as the product
+      would make them agree and take the kernel to about 4 ns; it waits on deciding which `^ 2` nex
+      means.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel
