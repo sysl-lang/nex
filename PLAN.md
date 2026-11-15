@@ -619,6 +619,21 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       while an exponent read at run time is libm's on both. Computing a literal square as the product
       would make them agree and take the kernel to about 4 ns; it waits on deciding which `^ 2` nex
       means.
+      Scalar nodes call fewer closures (`interp_scalar.sysl`): an operand that is a local whose slot
+      holds its value, a chain's operand, a literal or a named constant is read inside its operator's
+      closure rather than through a closure of its own; an `if` or `while` condition that compares two
+      integers or two reals of one type, and `and`, `or` and `not` over such conditions, answer a
+      `bool` with no `Value` between; `x = e` on such a local stores with no operator, `x = x op e`
+      stores from the operation's own closure, and `x op= e` reads a leaf value in place; a `for`
+      counter no lambda captures is stored in its slot; and a call of a program function reads a
+      local argument from the caller's slot. Each operand is still read when its closure would have
+      run, so steps, traps and their stacks are unchanged (`tests_embed.sysl`,
+      `testdata/v2/142-scalar-hot-paths.nex`, on both engines). Median of 5, interleaved, `nex run
+      --interp`, whole program, outputs identical: the integer `for` probe 0.266 s → 0.175 s, the
+      `while` probe 0.405 s → 0.265 s, scalar reals 0.405 s → 0.263 s, a call of `f(s, i)` 0.220 s →
+      0.177 s, a struct pass 0.369 s → 0.346 s, an enum pass 0.576 s → 0.487 s, a sequential
+      Mandelbrot 0.912 s → 0.599 s, the three-point stencil 0.436 s → 0.402 s, `fib(37)` 2.13 s →
+      1.78 s.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel

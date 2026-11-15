@@ -291,6 +291,30 @@ private[nex] call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answ
     give_frame(m, frame)
     r
 
+// The same call, argument `j` read from slot `at[j]` of the caller's frame where that is not -1, and
+// otherwise computed by `args[j]`, left to right.
+private[nex] call_fun_at(m: &Machine, k: usize, args: Buf[Code], at: Buf[long], c: &Cells) -> Answer
+    val frame = take_frame(m, m.funs[k].slots)
+
+    for j in 0..<args.len()
+        val s = at[j]
+
+        if s >= 0
+            frame.v[j] = c.v[usize(s)]
+        else
+            val a = args[j]
+
+            a(c) match
+                Ok(v) -> frame.v[j] = v
+                Err(sig) ->
+                    give_frame(m, frame)
+                    return Err(sig)
+
+    val r = run_frame(m, m.funs[k].code, frame, k, false)
+
+    give_frame(m, frame)
+    r
+
 // A call of lambda `k` made with `env`: the arguments in the first slots of its frame, what it
 // captures after them. The lambda is read where the machine holds it, as `call_fun` reads a function.
 private call_lambda(m: &Machine, k: usize, env: Buf[Value], args: Buf[Code], c: &Cells) -> Answer
@@ -806,17 +830,17 @@ impl Interp
 
                 return (c) -> Ok(VStr(text(c)?))
             TIf(cond, a, b) ->
-                val k = self.ex(cond)
+                val k = self.test(cond)
                 val t = self.ex(a)
 
                 b match
                     Some(x) ->
                         val f = self.ex(x)
 
-                        return (c) -> if bool_of(k(c)?) then t(c) else f(c)
+                        return (c) -> if k(c)? then t(c) else f(c)
                     None ->
                         return (c) ->
-                            if bool_of(k(c)?) then t(c)?
+                            if k(c)? then t(c)?
 
                             Ok(VVoid)
             TWhile(id, cond, body) -> return self.while_loop(id, cond, body)
@@ -1298,17 +1322,6 @@ impl Interp
         elif op == "^" && !ty_eq(lt, rt) then self.power(span, lt, rt)
         else self.op2(span, op, lt)
 
-    binary(*self, span: Span, op: string, l: TExpr, r: TExpr) -> Code
-        val a = self.ex(l)
-        val b = self.ex(r)
-
-        self.operator(span, op, l.ty, r.ty) match
-            Some(f) -> (c) ->
-                val x = a(c)?
-
-                f(x, b(c)?)
-            None -> self.later(span, s"`$op` on ${show_ty(l.ty)}")
-
     unary(*self, span: Span, op: string, v: TExpr) -> Code
         val a = self.ex(v)
 
@@ -1417,27 +1430,54 @@ impl Interp
     // -- calls -------------------------------------------------------------------------------------
 
     call(*self, span: Span, callee: TExpr, args: Buf[TExpr]) -> Code
+        val m = self.m
+
+        // A function of the program's own: an argument that is a local whose slot holds its value is
+        // read from the slot as the call stores it (`call_fun_at`).
+        *callee.kind match
+            TFnRef(name) ->
+                self.fun_number(name) match
+                    Some(k) ->
+                        var codes: Buf[Code] = buf()
+                        var at: Buf[long] = buf()
+                        var leaves = false
+
+                        for a in args
+                            val l = *a.kind match
+                                TBorrow(_) -> LCode
+                                _ -> self.leaf(a)
+
+                            l match
+                                LSlot(s) ->
+                                    at.push(long(s))
+                                    codes.push(self.constant_code(VVoid))
+                                    leaves = true
+                                _ ->
+                                    at.push(-1)
+                                    codes.push(self.argument(a))
+
+                        if !leaves then return (c) -> sited(m, call_fun(m, k, codes, c), span)
+
+                        return (c) -> sited(m, call_fun_at(m, k, codes, at, c), span)
+                    None -> ()
+            _ -> ()
+
         var codes: Buf[Code] = buf()
 
         for a in args
             codes.push(self.argument(a))
 
-        val m = self.m
-
         *callee.kind match
             TFnRef(name) ->
-                self.fun_number(name) match
-                    Some(k) -> return (c) -> sited(m, call_fun(m, k, codes, c), span)
-                    None ->
-                        self.host_extern(name) match
-                            Some(x) ->
-                                val h = self.host_call(x, codes)
+                self.host_extern(name) match
+                    Some(x) ->
+                        val h = self.host_call(x, codes)
 
-                                return (c) -> sited(m, h(c), span)
-                            None -> ()
+                        return (c) -> sited(m, h(c), span)
+                    None -> ()
 
-                        // An `extern`, refused where it is declared.
-                        return if self.is_extern(name) then (c) -> Ok(VVoid) else self.later(span, s"a call of `$name`")
+                // An `extern`, refused where it is declared.
+                return if self.is_extern(name) then (c) -> Ok(VVoid) else self.later(span, s"a call of `$name`")
             _ -> ()
 
         val f = self.ex(callee)
@@ -1462,6 +1502,11 @@ impl Interp
         gemm_update(self.prog, op, target, value) match
             Some(g) -> return self.gemm_assign(g)
             None -> ()
+
+        *target.kind match
+            TLocal(id) ->
+                if !self.indirect(id) then return self.local_assign(span, op, id, target, value)
+            _ -> ()
 
         val v = self.ex(value)
         val m = self.m
@@ -1504,13 +1549,13 @@ impl Interp
                     store_through(at, step(deref(at), x)?)
 
     while_loop(*self, id: usize, cond: TExpr, body: TExpr) -> Code
-        val k = self.ex(cond)
+        val k = self.test(cond)
         val b = self.ex(body)
         val m = self.m
 
         (c) ->
             loop
-                if !bool_of(k(c)?) then break
+                if !k(c)? then break
 
                 tick(m) match
                     Some(s) -> return Err(s)
@@ -1538,6 +1583,9 @@ impl Interp
             Some(s) -> self.ex(s)
             None -> self.constant_code(VInt(1))
         val bind = self.local_binder(var_id)
+        // A counter no lambda captures is stored in its slot directly.
+        val direct = !self.captured[var_id]
+        val vs = self.slot_of(var_id)
         val b = self.ex(body)
         val m = self.m
 
@@ -1559,7 +1607,7 @@ impl Interp
             var k = first
 
             loop
-                bind(c, VInt(long.wrap(k)))
+                if direct then c.v[vs] = VInt(long.wrap(k)) else bind(c, VInt(long.wrap(k)))
 
                 tick(m) match
                     Some(s) -> return Err(s)

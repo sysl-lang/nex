@@ -667,6 +667,30 @@ emb_budget()
 
     assert_eq(ran(t), "stopped after 50 steps, the host's budget")
 
+@test("scalar arithmetic, comparisons, updates of a local and range loops take a step only at a call's entry and a loop's pass, in order")
+emb_budget_scalar_shapes()
+    val o: &Out = Out(str_builder())
+    val text = "var n = 0\n\ndef f(a: integer, b: integer): integer = (a * 31 + b) % 1000003\n\n" +
+               "def hot(k: integer): integer =\n  var s = 0\n  var x = 0.5\n  for i in 1..k\n    s = (s * 31 + i) % 1000003\n    s += i\n    x = x * 0.5 + 1.0\n    if s < 100 and x <= 2.0 then s = s + 1\n" +
+               "  var j = 0\n  while j < k and not (x > 5.0)\n    j += 1\n    n += 1\n    s = f(s, j)\n  for i in 10..1 by -3\n    s = s - i\n  s\n"
+
+    // `hot(10)` takes 35 steps: its entry, the ten passes of the first loop, ten passes of the
+    // `while` each with a call of `f`, and the last loop's four passes.
+    assert_eq(called(loaded(text, new_host(), kept(o, 36)), "hot", one(int_value(10))), "i64:541360")
+    assert_eq(called(loaded(text, new_host(), kept(o, 35)), "hot", one(int_value(10))), "stopped after 35 steps, the host's budget")
+
+    // Step 12 is the `while`'s first pass and 13 its call; the budget ends at the second pass, then
+    // at the second call.
+    val a = loaded(text, new_host(), kept(o, 14))
+
+    assert_eq(called(a, "hot", one(int_value(10))), "stopped after 14 steps, the host's budget")
+    assert_eq(shown(a.get("n").unwrap()), "i64:1")
+
+    val b = loaded(text, new_host(), kept(o, 15))
+
+    assert_eq(called(b, "hot", one(int_value(10))), "stopped after 15 steps, the host's budget")
+    assert_eq(shown(b.get("n").unwrap()), "i64:2")
+
 private struct Holder
     s: Option[&Script]
 

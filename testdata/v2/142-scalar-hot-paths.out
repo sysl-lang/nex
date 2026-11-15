@@ -1,0 +1,49 @@
+127
+-2147483648
+0
+9223372036854775806
+32767
+-3
+-2
+inf
+-inf
+nan
+not <
+not <=
+not >
+not >=
+not ==
+!=
+unordered
+false false false false true
+not <
+not <=
+not >
+not >=
+not ==
+!=
+false true true true false
+not <
+<=
+not >
+>=
+==
+not !=
+false true true true false
+12
+24
+19
+21
+46
+-1.75
+0
+10741
+10748
+6
+-125
+-499997
+0.3
+false
+mixed ok
+5 1.25
+1 -0.75

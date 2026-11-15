@@ -1,0 +1,133 @@
+// Scalar operations whose operands are locals and constants, at their edges: overflow and division
+// by zero where an operand is a local or a literal, comparisons of NaN as conditions and as values,
+// a local updated by an expression that reads it, a call changing a local between the operands
+// that read it, range loops that are empty or step down, and every integer width.
+
+def add8(a: int8, b: int8): int8 = a + b
+def inc8(a: int8): int8 = a + 1
+def mul32(a: int32): int32 = 65536 * a
+def sub_u8(a: uint8, b: uint8): uint8 = a - b
+def quot(a: integer, b: integer): integer = a div b
+def rem(a: integer, b: integer): integer = a % 0 + b
+def per(a: integer): integer = 7 div a
+def grow(a: int64): int64 =
+  var x = a
+  x = x * 2
+  x
+def bump(a: int16): int16 =
+  var x = a
+  x += 1
+  x
+def halves(a: real): real = a / 0.0
+
+// Each comparison of a NaN, as a condition and as a value.
+def nan_tests(x: real, y: real) =
+  if x < y then print("<") else print("not <")
+  if x <= y then print("<=") else print("not <=")
+  if x > y then print(">") else print("not >")
+  if x >= y then print(">=") else print("not >=")
+  if x == y then print("==") else print("not ==")
+  if x != y then print("!=") else print("not !=")
+  if not (x < y) and x != x then print("unordered")
+  print(s"${x < y} ${x <= 1.0} ${2.0 > x} ${x == x} ${x != x}")
+
+// `+=` and `x = x op e` with the operand read before the value that changes it.
+var log = 0
+def side(k: integer): integer =
+  log += k
+  log
+
+def main() =
+  // Overflow inside an operation of locals and of a local and a literal.
+  print(add8(100, 27))
+  assert_traps(() -> print(add8(100, 28)), "int8 overflow")
+  assert_traps(() -> print(inc8(127)), "int8 overflow")
+  print(mul32(-32768))
+  assert_traps(() -> print(mul32(32768)), "int32 overflow")
+  print(sub_u8(5, 5))
+  assert_traps(() -> print(sub_u8(4, 5)), "uint8 overflow")
+  print(grow(4611686018427387903))
+  assert_traps(() -> print(grow(4611686018427387904)), "int64 overflow")
+  print(bump(32766))
+  assert_traps(() -> print(bump(32767)), "int16 overflow")
+
+  // Division and remainder by zero, the divisor a local, a literal or a constant.
+  print(quot(-7, 2))
+  assert_traps(() -> print(quot(1, 0)), "division by zero")
+  assert_traps(() -> print(quot(-9223372036854775807 - 1, -1)), "int64 overflow")
+  assert_traps(() -> print(rem(1, 2)), "by zero")
+  assert_traps(() -> print(per(0)), "division by zero")
+  print(per(-3))
+  print(halves(1.0))
+  print(halves(-1.0))
+  print(halves(0.0))
+
+  // NaN compared, as conditions and as values.
+  nan_tests(nan, 1.0)
+  nan_tests(1.0, nan)
+  nan_tests(1.0, 1.0)
+
+  // A local updated by an expression that reads it, and one a call changes between two reads.
+  var s = 3
+  s = s * s + s
+  print(s)
+  s += s
+  print(s)
+  s = s - side(5)
+  print(s)
+  log = 10
+  log = log + side(1)
+  print(log)
+  log += side(2)
+  print(log)
+  var t: real = 1.5
+  t = t * t
+  t = 0.5 - t
+  print(t)
+
+  // Range loops: empty, stepping down, a negative step that cannot reach, and one pass.
+  var n = 0
+  for i in 1..0
+    n += 1
+  for i in 5..<5
+    n += 100
+  print(n)
+  for i in 10..1 by -3
+    n = n * 10 + i
+  print(n)
+  for i in 1..10 by -1
+    n = 0
+  for i in 7..7
+    n = n + i
+  print(n)
+  var u: uint8 = 0
+  for k in 250..255
+    u = u + 1
+  print(u)
+  var w: int8 = -128
+  for k in 1..3
+    w = w + 100
+    w = w - 99
+  print(w)
+
+  // Mixed widths meeting in one expression, each widened as the types say.
+  val a8: int8 = -5
+  val b32: int32 = 100000
+  val c64 = 3
+  val r32: real32 = 0.1
+  print(a8 * b32 + c64)
+  print(r32 + 0.2)
+  print(r32 * r32 < 0.01)
+  if a8 < b32 and r32 < 1.0 then print("mixed ok")
+
+  // A `while` on a comparison, and one on two joined by `and` and `not`.
+  var k = 0
+  var x = 0.0
+  while k < 5
+    k += 1
+    x = x + 0.25
+  print(s"$k $x")
+  while k > 0 and not (x < 0.0)
+    k -= 2
+    x = x - 1.0
+  print(s"$k $x")

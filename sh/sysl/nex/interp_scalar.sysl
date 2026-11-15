@@ -1,0 +1,274 @@
+module sh.sysl.nex
+
+// Scalar operations compiled with fewer closures. A node's closure calls its children's, and on a
+// scalar hot path the children are mostly a local or a constant, whose closure does nothing but hand
+// back a slot's value or a value made when the program was compiled. So an operand that is one of
+// those — a *leaf* — is read where it is, inside its parent's closure, and a condition is computed as
+// a `bool` rather than as a `Value` to be taken apart again. What runs is the same work in the same
+// order: each operand is read when its closure would have run, so an operand evaluated after a local
+// is read sees the local as it was, and every operation is the operator the node's types chose, with
+// its traps. Nothing here is a step (`tick`), and no statement's site changes, so step counts and a
+// trap's message and stack are those of the closures it replaces.
+
+import sh.sysl.parsing.Span
+
+// Where an operand's value is when it needs no closure of its own: a slot of the frame that holds it,
+// or a constant; or neither, and the operand has its code.
+private[nex] enum Leaf
+    LSlot(s: usize)
+    LConst(v: Value)
+    LCode
+
+// A condition: the `bool` it answers, or the signal that stopped it.
+private[nex] type Test = &Fn(@keeps &Cells) -> Result[bool, Signal]
+
+impl Interp
+    // Whether `e` is read where it is: a local whose slot holds its value (not a place, and not an
+    // array, which a read marks shared), a chain's operand, a literal or a named constant.
+    leaf(*self, e: TExpr) -> Leaf
+        if self.holds_array(e.ty) then return LCode
+
+        self.unheld(e.ty) match
+            Some(_) -> return LCode
+            None -> ()
+
+        *e.kind match
+            TLiteral(v, _) -> LConst(self.literal(e.span, v, e.ty))
+            TConstant(name, _) -> LConst(self.named_constant(e.span, name, e.ty))
+            TLocal(id) -> if self.args_local == Some(id) || self.indirect(id) then LCode else LSlot(self.slot_of(id))
+            TChainOperand(k) -> LSlot(self.chains[self.chains.len() - 1] + k)
+            _ -> LCode
+
+    // The code of an operand that is not a leaf; a leaf's is never run.
+    unless_leaf(*self, e: TExpr, l: Leaf) -> Code = l match
+        LCode -> self.ex(e)
+        _ -> self.constant_code(VVoid)
+
+    // `l op r`, its operands compiled left to right, a leaf read inside the operation's closure.
+    binary(*self, span: Span, op: string, l: TExpr, r: TExpr) -> Code
+        val la = self.leaf(l)
+        val a = self.unless_leaf(l, la)
+        val lb = self.leaf(r)
+        val b = self.unless_leaf(r, lb)
+
+        self.operator(span, op, l.ty, r.ty) match
+            Some(f) -> applied(f, la, a, lb, b)
+            None -> self.later(span, s"`$op` on ${show_ty(l.ty)}")
+
+    // `e`, a `bool`, as the condition of an `if` or a `while`. A comparison of two integers or two
+    // reals of one type is made on the numbers, `and`, `or` and `not` on the `bool`s, each operand in
+    // the order and with the short circuit the value's code has.
+    test(*self, e: TExpr) -> Test
+        if !is_array(e.ty)
+            *e.kind match
+                TBinary(op, l, r) ->
+                    self.comparison(op, l, r) match
+                        Some(t) -> return t
+                        None -> ()
+                TLogical(op, l, r) ->
+                    val a = self.test(l)
+                    val b = self.test(r)
+
+                    if op == "and" then return (c) -> if a(c)? then b(c) else Ok(false)
+
+                    return (c) -> if a(c)? then Ok(true) else b(c)
+                TUnary(op, v) ->
+                    if op == "not"
+                        val a = self.test(v)
+
+                        return (c) -> Ok(!a(c)?)
+                _ -> ()
+
+        val k = self.ex(e)
+
+        (c) -> Ok(bool_of(k(c)?))
+
+    // `l op r` as a condition, where `op` compares two integers or two reals of one type.
+    comparison(*self, op: string, l: TExpr, r: TExpr) -> Option[Test]
+        val k = comparison_number(op)
+
+        if k < 0 || is_array(l.ty) || is_array(r.ty) || !ty_eq(l.ty, r.ty) then return None
+
+        val (real_, signed) = base_of(l.ty) match
+            Int(_, s) -> (false, s)
+            Real(_) -> (true, true)
+            _ -> return None
+        val la0 = self.leaf(l)
+        val a0 = self.unless_leaf(l, la0)
+        val lb = self.leaf(r)
+        val b = self.unless_leaf(r, lb)
+        // A constant on the left is rare; it is given the code a constant has.
+        val (la, a) = la0 match
+            LConst(v) -> (LCode, self.constant_code(v))
+            _ -> (la0, a0)
+
+        Some(if real_ then real_test(k, la, a, lb, b) else int_test(k, signed, la, a, lb, b))
+
+    // `target = value` or `target op= value` on a local whose slot holds its value: the value stored
+    // with no operator where it is `=`; for `x = x op e` the operation's closure stores into the slot
+    // itself; and a leaf value is read inside the closure.
+    local_assign(*self, span: Span, op: string, id: usize, target: TExpr, value: TExpr) -> Code
+        if op == "="
+            *value.kind match
+                TBinary(bop, l, r) ->
+                    val same = *l.kind match
+                        TLocal(lid) -> lid == id
+                        _ -> false
+
+                    if same && !is_array(r.ty)
+                        self.leaf(l) match
+                            LSlot(s) ->
+                                val lb = self.leaf(r)
+                                val b = self.unless_leaf(r, lb)
+
+                                self.operator(value.span, bop, l.ty, r.ty) match
+                                    Some(f) -> return updated(f, s, lb, b)
+                                    None -> return self.later(value.span, s"`$bop` on ${show_ty(l.ty)}")
+                            _ -> ()
+                _ -> ()
+
+            val lv = self.leaf(value)
+            val v = self.unless_leaf(value, lv)
+            val s = self.slot_of(id)
+
+            return lv match
+                LSlot(j) -> (c) ->
+                    c.v[s] = c.v[j]
+                    Ok(VVoid)
+                LConst(x) -> (c) ->
+                    c.v[s] = x
+                    Ok(VVoid)
+                LCode -> (c) ->
+                    c.v[s] = v(c)?
+                    Ok(VVoid)
+
+        val lv = self.leaf(value)
+        val v = self.unless_leaf(value, lv)
+        val f = self.operator(span, op[0..<op.len - 1], target.ty, value.ty) match
+            Some(f) -> f
+            None -> return self.later(span, s"`$op` on ${show_ty(target.ty)}")
+        val s = self.slot_of(id)
+
+        // The value is evaluated before the local is read, as `x op= e` does.
+        lv match
+            LSlot(j) -> (c) ->
+                c.v[s] = f(c.v[s], c.v[j])?
+                Ok(VVoid)
+            LConst(y) -> (c) ->
+                c.v[s] = f(c.v[s], y)?
+                Ok(VVoid)
+            LCode -> (c) ->
+                val x = v(c)?
+
+                c.v[s] = f(c.v[s], x)?
+                Ok(VVoid)
+    end local_assign
+
+// `f` applied to two operands, each a leaf read where it is or its code run, the left first.
+private[nex] applied(f: Op2, la: Leaf, a: Code, lb: Leaf, b: Code) -> Code = la match
+    LSlot(i) -> lb match
+        LSlot(j) -> (c) -> f(c.v[i], c.v[j])
+        LConst(y) -> (c) -> f(c.v[i], y)
+        LCode -> (c) ->
+            val x = c.v[i]
+
+            f(x, b(c)?)
+    LConst(x) -> lb match
+        LSlot(j) -> (c) -> f(x, c.v[j])
+        LConst(y) -> (c) -> f(x, y)
+        LCode -> (c) -> f(x, b(c)?)
+    LCode -> lb match
+        LSlot(j) -> (c) ->
+            val x = a(c)?
+
+            f(x, c.v[j])
+        LConst(y) -> (c) -> f(a(c)?, y)
+        LCode -> (c) ->
+            val x = a(c)?
+
+            f(x, b(c)?)
+
+// `x = x op r` for the local in slot `s`: the local read first, then `r`, then the operation stored.
+private updated(f: Op2, s: usize, lb: Leaf, b: Code) -> Code = lb match
+    LSlot(j) -> (c) ->
+        c.v[s] = f(c.v[s], c.v[j])?
+        Ok(VVoid)
+    LConst(y) -> (c) ->
+        c.v[s] = f(c.v[s], y)?
+        Ok(VVoid)
+    LCode -> (c) ->
+        val x = c.v[s]
+
+        c.v[s] = f(x, b(c)?)?
+        Ok(VVoid)
+
+// The comparison `op` by number, -1 for an operator that is not one.
+private comparison_number(op: string) -> int =
+    if op == "==" then 0 elif op == "!=" then 1 elif op == "<" then 2 elif op == "<=" then 3
+    elif op == ">" then 4 elif op == ">=" then 5 else -1
+
+// Comparison `k` of two integers held as `long`s: a signed one orders as the `long`, an unsigned one
+// as its bits, as `int_op`'s comparisons do.
+private int_holds(k: int, signed: bool, x: long, y: long) -> bool
+    if !signed
+        val p = ulong.wrap(x)
+        val q = ulong.wrap(y)
+
+        return if k == 0 then p == q elif k == 1 then p != q elif k == 2 then p < q elif k == 3 then p <= q elif k == 4 then p > q else p >= q
+
+    if k == 0 then x == y elif k == 1 then x != y elif k == 2 then x < y elif k == 3 then x <= y elif k == 4 then x > y else x >= y
+
+// Comparison `k` of two reals, a NaN comparing false but for `!=`, as `real_op`'s do.
+private real_holds(k: int, x: real, y: real) -> bool =
+    if k == 0 then x == y elif k == 1 then x != y elif k == 2 then x < y elif k == 3 then x <= y elif k == 4 then x > y else x >= y
+
+// The left operand is a slot or code; the right a slot, a constant or code.
+private int_test(k: int, signed: bool, la: Leaf, a: Code, lb: Leaf, b: Code) -> Test = la match
+    LSlot(i) -> lb match
+        LSlot(j) -> (c) -> Ok(int_holds(k, signed, int_of(c.v[i]), int_of(c.v[j])))
+        LConst(y) ->
+            val n = int_of(y)
+
+            (c) -> Ok(int_holds(k, signed, int_of(c.v[i]), n))
+        LCode -> (c) ->
+            val x = int_of(c.v[i])
+
+            Ok(int_holds(k, signed, x, int_of(b(c)?)))
+    _ -> lb match
+        LSlot(j) -> (c) ->
+            val x = int_of(a(c)?)
+
+            Ok(int_holds(k, signed, x, int_of(c.v[j])))
+        LConst(y) ->
+            val n = int_of(y)
+
+            (c) -> Ok(int_holds(k, signed, int_of(a(c)?), n))
+        LCode -> (c) ->
+            val x = int_of(a(c)?)
+
+            Ok(int_holds(k, signed, x, int_of(b(c)?)))
+
+private real_test(k: int, la: Leaf, a: Code, lb: Leaf, b: Code) -> Test = la match
+    LSlot(i) -> lb match
+        LSlot(j) -> (c) -> Ok(real_holds(k, real_of(c.v[i]), real_of(c.v[j])))
+        LConst(y) ->
+            val r = real_of(y)
+
+            (c) -> Ok(real_holds(k, real_of(c.v[i]), r))
+        LCode -> (c) ->
+            val x = real_of(c.v[i])
+
+            Ok(real_holds(k, x, real_of(b(c)?)))
+    _ -> lb match
+        LSlot(j) -> (c) ->
+            val x = real_of(a(c)?)
+
+            Ok(real_holds(k, x, real_of(c.v[j])))
+        LConst(y) ->
+            val r = real_of(y)
+
+            (c) -> Ok(real_holds(k, real_of(a(c)?), r))
+        LCode -> (c) ->
+            val x = real_of(a(c)?)
+
+            Ok(real_holds(k, x, real_of(b(c)?)))
