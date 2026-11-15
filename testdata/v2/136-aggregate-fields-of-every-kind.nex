@@ -1,0 +1,73 @@
+// Structs, tuples and variants built from fields of every kind and read back: integers, reals,
+// complex numbers, booleans, strings, arrays and other aggregates, nested two deep; a variant with no
+// fields; and an array held in a field stays a value of its own, unchanged by writes
+// to the array it was built from or to a copy of the aggregate.
+
+struct Inner
+  k: int32
+  name: string
+
+struct Mixed
+  n: integer
+  x: real
+  z: complex
+  ok: bool
+  s: string
+  xs: [integer]
+  inner: Inner
+  pair: (real, string)
+
+enum Shape =
+  Circle(r: real, label: string)
+  Poly(sides: [integer], inner: Inner)
+  Empty
+
+def describe(sh: Shape): string =
+  sh match
+    Circle(r, label) -> s"circle $label $r"
+    Poly(sides, inner) -> s"poly ${length(sides)} ${sides[1]} ${inner.name} ${inner.k}"
+    Empty -> "empty"
+
+def main() =
+  var arr = [1, 2, 3]
+  val m = Mixed(-7, 2.5, 1.0 + 2.0i, true, "text", arr, Inner(42, "in"), (0.25, "p"))
+  arr[1] = 100
+  print(m.n)
+  print(m.x)
+  print(m.z)
+  print(m.ok)
+  print(m.s)
+  print(m.xs)
+  print(m.inner.k)
+  print(m.inner.name)
+  print(m.pair.1)
+  print(m.pair.2)
+  print(arr)
+  var c = m
+  c.xs[2] = 200
+  c.inner.name = "changed"
+  print(m.xs)
+  print(m.inner.name)
+  print(c.xs)
+  print(c.inner.name)
+  val t = (3, "three", [4.0, 5.0], Inner(-1, "t"), (true, 9))
+  print(t.1)
+  print(t.2)
+  print(t.3)
+  print(t.4.name)
+  print(t.5.1)
+  print(t.5.2)
+  val (a, b, xs, inner, nested) = t
+  print(a)
+  print(b)
+  print(xs)
+  print(inner.k)
+  print(nested.2)
+  for sh in [Circle(1.5, "c"), Poly([3, 4], Inner(5, "q")), Empty]
+    print(describe(sh))
+  val none: Shape = Empty
+  print(describe(none))
+  print(none == Empty)
+  print(none == Circle(1.5, "c"))
+  print(m == c)
+  print(m == m)
