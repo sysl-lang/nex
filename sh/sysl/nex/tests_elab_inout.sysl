@@ -128,3 +128,11 @@ ino_captured_route()
 ino_escaping_capture()
     assert(in_main("def f(v: inout integer): () -> integer = () -> v\n", "  ()\n").starts_with("error: this lambda captures the `inout` parameter `v`"))
     assert_eq(in_main("def twice(k: () -> integer): integer = k() + k()\ndef f(v: inout integer) = v = twice(() -> v)\n", "  ()\n"), "ok")
+
+// A lambda written as an argument escapes all the same where the callee answers it: `f`'s result
+// outlives the caller's place `v` borrows, which the compiled program then reads after it is gone.
+@test("a lambda passed as an argument that the callee answers escapes, and may not capture an inout parameter", ignore: "the escape check judges a lambda written as an argument non-escaping whatever the callee does with it")
+ino_escaping_through_callee()
+    val got = in_main("def keep(k: () -> integer): () -> integer = k\ndef f(v: inout integer): () -> integer = keep(() -> v)\n", "  ()\n")
+
+    assert(got.starts_with("error: this lambda captures the `inout` parameter `v`"), got)

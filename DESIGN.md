@@ -3174,7 +3174,8 @@ kernel. The API is the library's `embed.sysl`; `examples/embed/` is a host.
 - **Another thread stops a run through the script's `CancelToken`.** `cancel_token()` answers a
   `&sync CancelToken`, one atomic word shared with the script and nothing else of it, so a
   modeller's UI thread may hold it while a worker thread runs the script; its `cancel()` halts the run
-  in progress at its next step, as `Script.cancel()` does, and the step reads it without a lock. A
+  in progress within 1,024 steps, since a step reads it, without a lock, once every 1,024 steps
+  (`Script.cancel()`, on the running thread, halts it at the very next one). A
   cancel that arrives between requests is cleared by the next one starting, so a host cancels a run
   it knows has begun.
 

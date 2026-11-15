@@ -397,8 +397,8 @@ impl NexError
         ScriptRefused(message) -> message
 
 // What stops a script's run in progress from any thread: a modeller's UI thread holds it while a
-// worker runs the script, and `cancel` halts the run at its next step, a call's entry or a loop's
-// pass, with `ScriptHalt`. It is one atomic word, so holding it shares nothing else of the script.
+// worker runs the script, and `cancel` halts the run within `CANCEL_POLL` steps (a step is a call's
+// entry or a loop's pass), with `ScriptHalt`. It is one atomic word, so holding it shares nothing else of the script.
 struct CancelToken
     flag: Atomic[int]
 
@@ -544,6 +544,7 @@ struct Script
     // call it. The next `run` or `call` starts uncancelled.
     cancel(*self)
         self.m.cancel.cancel()
+        self.m.poll = 0
 
     // What another thread holds to cancel this script's runs: the token `cancel` sets.
     cancel_token(self) -> &sync CancelToken = self.m.cancel
@@ -581,6 +582,7 @@ struct Script
         self.m.steps = 0
         self.m.limit = self.budget
         self.m.cancel.clear()
+        self.m.poll = 0
         self.m.depth = 0
         self.m.trace = buf()
         self.m.sited = false
