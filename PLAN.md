@@ -574,6 +574,14 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       110 ns → 36 ns for the lambda. Outputs identical, and trap stacks and step counts identical to
       the frame-per-call path (`tests_embed.sysl`). What is left is the call's bookkeeping — the step,
       the depth, the captures stored again — and the body's own closures over boxed values.
+      A scalar call's frame is now taken from the frames returned calls gave back, by slot count,
+      cleared and in stack order (`take_frame`), the function read where the machine holds it
+      rather than copied, and the cancel flag read every 1024 steps (the budget is still compared
+      at every step). Measured (median of 5, 1 and 5 reps, `--units 12`, under load 4–10, outputs
+      identical): a call of `f(a, b)` 78 ns → 29 ns (a pass of 127 ns → 76 ns, against 47 ns for
+      the same body inline); a `fib` call 73 ns → 41 ns; an enum built and matched through a call
+      236 ns → 169 ns a pass; an empty `for` pass 17.5 ns → 15.6 ns; `bench/interp-elemental.nex`
+      0.53 s → 0.49 s and `bench/interp-map.nex` 0.66 s → 0.59 s.
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel

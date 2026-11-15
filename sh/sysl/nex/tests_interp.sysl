@@ -299,6 +299,67 @@ itp_closure_traps()
     assert_eq(interpreted(main_of(["val big: int8 = 100", "val f = () -> big + big", "assert_traps(f, \"int8 overflow\")", "print(\"caught\")", "print(f())"])),
               "caught\ntrap: int8 overflow")
 
+// -- frames -----------------------------------------------------------------------------------------
+//
+// A returned call's frame is cleared and handed to the next call of its size (`take_frame`), so these
+// are the shapes a frame reused too soon, or kept too long, would get wrong.
+
+@test("recursion to the depth limit, caught, leaves every frame given back: the same recursion runs again whole, its locals its own")
+itp_frames_depth_again()
+    val down = "def down(n: integer): integer =\n  val a = n * 2\n  val b = a - n\n  if n == 0 then 0 else b - n + 1 + down(n - 1)\n"
+    val limit = MAX_CALL_DEPTH - 2
+
+    assert_eq(interpreted(down + main_of([s"assert_traps(() -> print(down(${limit + 1})), \"nested\")", s"print(down($limit))",
+                                          s"assert_traps(() -> print(down(${limit + 5})), \"nested\")", "print(down(5))"])),
+              s"$limit\n5\nexit 0")
+    assert_eq(interpreted(down + main_of([s"print(down($limit))", s"print(down(${limit + 1}))"])), s"$limit\ntrap: ${call_depth_message()}")
+
+@test("mutual recursion between functions of different frame sizes, and recursion in an argument, answer what they compute")
+itp_frames_mutual()
+    val text = "def even(n: integer): bool = if n == 0 then true else odd(n - 1)\n" +
+               "def odd(n: integer): bool =\n  val m = n\n  val k = m - 1\n  if m == 0 then false else even(k)\n" +
+               "def fib(n: integer): integer = if n < 2 then n else fib(n - 1) + fib(n - 2)\n" +
+               "def add(a: integer, b: integer): integer = a + b\n"
+
+    assert_eq(interpreted(text + main_of(["print(even(1000))", "print(odd(777))", "print(even(9))", "print(fib(20))", "print(add(fib(10), add(fib(fib(5)), add(1, 2))))"])),
+              "true\ntrue\nfalse\n6765\n63\nexit 0")
+
+@test("a trap in an argument gives the frame back: the call made again, and calls of its size after it, see none of what was stored")
+itp_frames_argument_trap()
+    val text = "def pair(a: integer, b: integer, c: integer): integer = a * 100 + b * 10 + c\n" +
+               "def zero(): integer = 0\n" +
+               "def inner(n: integer): integer =\n  val q = 10 div n\n  q\n" +
+               "def outer(n: integer): integer =\n  val keep = n + 1\n  keep + inner(n)\n"
+
+    assert_eq(interpreted(text + main_of(["assert_traps(() -> print(pair(1, 2, 3 div zero())), \"division by zero\")", "print(pair(4, 5, 6))",
+                                          "assert_traps(() -> print(outer(0)), \"division by zero\")", "print(outer(5))", "assert_traps(() -> print(pair(7, outer(0), 9)))", "print(pair(1, 1, 1))"])),
+              "456\n8\n111\nexit 0")
+
+@test("a closure made in a call that has returned keeps its cells while later calls reuse that call's frame")
+itp_frames_closure_outlives()
+    val text = "def make(k: integer): (() -> integer) =\n  var n = k\n  val m = k * 2\n  () ->\n    n += m\n    n\n" +
+               "def noise(a: integer): integer =\n  var x = a + 1\n  var y = x + 1\n  y\n"
+
+    assert_eq(interpreted(text + main_of(["val f = make(1)", "print(noise(50))", "val g = make(10)", "print(noise(60))", "print(f())", "print(g())", "print(f())", "print(noise(70))", "print(g())"])),
+              "52\n62\n3\n30\n5\n72\n50\nexit 0")
+
+@test("a local def that calls itself, captures a local and recurses deep, run again after a return, answers each time")
+itp_frames_local_def()
+    val text = "def run(base: integer, n: integer): integer =\n  def walk(k: integer): integer = if k == 0 then base else k + walk(k - 1)\n  walk(n)\n"
+
+    assert_eq(interpreted(text + main_of(["print(run(1000, 100))", "print(run(7, 3))", "print(run(0, 5000))", "print(run(-1, 0))"])),
+              "6050\n13\n12502500\n-1\nexit 0")
+
+@test("a function called from map calls map again, the frames nesting as calls do, and a trap inside both is caught")
+itp_frames_map_reentrant()
+    val text = "def inner(j: integer): integer = j * j\n" +
+               "def row(i: integer): integer =\n  val w = i * 10\n  sum(map([1, 2, 3], j -> w + inner(j) + i))\n" +
+               "def bad(i: integer): integer =\n  sum(map([1, 2, 3], j -> j div (i - 2)))\n"
+
+    assert_eq(interpreted(text + main_of(["print(map([1, 2, 3], i -> row(i)))", "assert_traps(() -> print(map([1, 2, 3], i -> bad(i))), \"division by zero\")",
+                                          "print(map([1, 2], i -> row(i) + row(i + 1)))"])),
+              "[47, 80, 113]\n[127, 193]\nexit 0")
+
 // -- refusals ---------------------------------------------------------------------------------------
 
 @test("what the interpreter does not run yet is refused before anything runs, at the construct")

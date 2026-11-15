@@ -25,7 +25,7 @@ module sh.sysl.nex
 // yet`, as the compiler's is `… is not compiled yet`.
 
 import nex_runtime.sh.sysl.nex_runtime.{NexFile, ZERO_STEP, arg_index_message, int_name, out_of_range_message, text_input}
-import sysl.buf.{Buf, buf}
+import sysl.buf.{Buf, buf, buf_filled}
 import sh.sysl.parsing.{Diagnostic, Span, error}
 
 // Where a program's text goes: what `print` writes, and what `eprint` does.
@@ -161,6 +161,11 @@ private[nex] struct Machine
     // Where `stdin` reads from when it is not the process's standard input: a string the host or a
     // test gives, or nothing, which a sandboxed script reads.
     stdin: Option[&NexFile]
+    // The frames of calls that have returned, by how many slots they hold, each cleared, for the
+    // next call needing that many (`take_frame`).
+    free: Buf[Buf[&Cells]]
+    // Steps until the next look at whether the host has cancelled the run (`tick`).
+    poll: int
 
 // A frame a trap left: the function's name, and where in it the trap happened — the statement, or
 // the function's declaration where no statement says.
@@ -169,19 +174,32 @@ private[nex] struct TraceFrame
     span: Span
 
 private[nex] machine(p: TProgram, args: Buf[string], write: &Fn(Stream, string) -> unit, fpe: bool) -> &Machine =
-    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, cancel_token(), buf(), Span(0, 0), false, None)
+    Machine(args, write, fpe, Cells(buf()), buf(), buf(), 0, p, buf(), buf(), false, 0, NO_LIMIT, cancel_token(), buf(), Span(0, 0), false, None, buf(), 0)
 
 // The step limit of a run the host sets none for.
 private[nex] val NO_LIMIT: long = 9223372036854775807
 
+// How many steps pass between two looks at the cancel flag another thread may set.
+private[nex] val CANCEL_POLL = 1024
+
 // Counts a step: a call's entry or a loop's pass. Answers the signal that halts the run where the
-// host's budget is spent or the host has cancelled it.
+// host's budget is spent, at exactly the step that spends it, or where the host has cancelled it. The
+// flag is read every `CANCEL_POLL` steps, and at the first step after `Script.cancel`, which sets
+// `poll` to 0.
 private[nex] tick(m: &Machine) -> Option[Signal]
     m.steps += 1
+    m.poll -= 1
 
-    if m.steps < m.limit && !m.cancel.cancelled() then return None
+    if m.poll <= 0
+        m.poll = CANCEL_POLL
 
-    Some(Halted(if m.cancel.cancelled() then "cancelled by the host" else s"stopped after ${m.limit} steps, the host's budget"))
+        if m.cancel.cancelled() then return Some(Halted(CANCELLED))
+
+    if m.steps < m.limit then return None
+
+    Some(Halted(if m.cancel.cancelled() then CANCELLED else s"stopped after ${m.limit} steps, the host's budget"))
+
+private[nex] val CANCELLED = "cancelled by the host"
 
 // `r`, a call's answer at `span`, the site of the trap it may be.
 private[nex] sited(m: &Machine, r: Answer, span: Span) -> Answer
@@ -201,13 +219,39 @@ private[nex] site(m: &Machine, s: Signal, span: Span)
             m.sited = true
         _ -> ()
 
-private[nex] frame_of(slots: usize) -> &Cells
-    var v: Buf[Value] = buf()
+private[nex] frame_of(slots: usize) -> &Cells = Cells(buf_filled(slots, VVoid))
 
-    for _ in 0..<slots
-        v.push(VVoid)
+// A frame of `slots` cleared slots for a call: one a returned call gave back, or a new one.
+//
+// **A frame is never held past its call**, which is what lets it be given back and handed to the
+// next. A lambda or a local `def` holds what it captures in cells of their own (`cell`), never the
+// frame, and copies those cells out of the frame into its environment when it is made (`closure`); a
+// local `def` holds itself in a slot of its own frame, as a value. The one reference to a frame a
+// value can hold is the place an `inout` argument passes, `VRef(frame, slot)`, held in the callee's
+// frame while the caller's runs; an escaping lambda may not capture an `inout` parameter (DESIGN
+// §8.3). `assert_traps` runs a lambda written as its argument in the frame it was written in, and a
+// function called once an element runs in a frame of its own (`Repeated`), neither of which comes
+// from here. So calls take and give back frames in stack order.
+private[nex] take_frame(m: &Machine, slots: usize) -> &Cells
+    if slots < m.free.len()
+        m.free[slots].pop() match
+            Some(f) -> return f
+            None -> ()
 
-    Cells(v)
+    frame_of(slots)
+
+// `frame` given back once its call has returned: each slot let go in order, as freeing the frame
+// lets them go, and the frame kept for the next call of its size.
+private[nex] give_frame(m: &Machine, frame: &Cells)
+    val n = frame.v.len()
+
+    for j in 0..<n
+        frame.v[j] = VVoid
+
+    while m.free.len() <= n
+        m.free.push(buf())
+
+    m.free[n].push(frame)
 
 private[nex] emit(m: &Machine, s: Stream, text: string)
     val w = m.write
@@ -223,36 +267,52 @@ private[nex] landed(s: Signal, loop_id: usize) -> int = s match
 
 // A call of function `k`: its frame made, the arguments stored in its first slots, its body run, a
 // `return` taken as its value.
+// The function is not copied out of the machine: its slot count and code are read where they are,
+// and its name and declaration only for a trap's stack.
 private[nex] call_fun(m: &Machine, k: usize, args: Buf[Code], c: &Cells) -> Answer
-    val f = m.funs[k]
-    val frame = frame_of(f.slots)
+    val frame = take_frame(m, m.funs[k].slots)
 
     for j in 0..<args.len()
         val a = args[j]
 
-        frame.v[j] = a(c)?
+        a(c) match
+            Ok(v) -> frame.v[j] = v
+            Err(s) ->
+                give_frame(m, frame)
+                return Err(s)
 
-    run_frame(m, f.code, frame, f.name, f.span)
+    val r = run_frame(m, m.funs[k].code, frame, k, false)
+
+    give_frame(m, frame)
+    r
 
 // A call of lambda `k` made with `env`: the arguments in the first slots of its frame, what it
-// captures after them.
+// captures after them. The lambda is read where the machine holds it, as `call_fun` reads a function.
 private call_lambda(m: &Machine, k: usize, env: Buf[Value], args: Buf[Code], c: &Cells) -> Answer
-    val l = m.lambdas[k]
-    val frame = frame_of(l.slots)
+    val frame = take_frame(m, m.lambdas[k].slots)
 
     for j in 0..<args.len()
         val a = args[j]
 
-        frame.v[j] = a(c)?
+        a(c) match
+            Ok(v) -> frame.v[j] = v
+            Err(s) ->
+                give_frame(m, frame)
+                return Err(s)
+
+    val at = m.lambdas[k].params
 
     for j in 0..<env.len()
-        frame.v[l.params + j] = env[j]
+        frame.v[at + j] = env[j]
 
-    l.self_slot match
+    m.lambdas[k].self_slot match
         Some(s) -> frame.v[s] = VClosure(k, env)
         None -> ()
 
-    run_frame(m, l.code, frame, l.name, l.span)
+    val r = run_frame(m, m.lambdas[k].code, frame, k, true)
+
+    give_frame(m, frame)
+    r
 
 // A function value called once for each element of a loop — a user's `@elemental` function, the
 // function `map`, `filter` or `reduce` is given — in one frame made for the loop and reused by every
@@ -269,19 +329,20 @@ private[nex] struct Repeated
     at: usize
     self_slot: Option[usize]
     me: Value
-    name: string
-    span: Span
+    // The function by number, or the lambda where `lambda` says, which a trap's stack names.
+    k: usize
+    lambda: bool
 
 // `f` ready to be called once an element; none where it is not a function.
 private[nex] repeated(m: &Machine, f: Value) -> Option[Repeated] = f match
     VFn(k) ->
         val g = m.funs[k]
 
-        Some(Repeated(m, g.code, frame_of(g.slots), buf(), 0, None, VVoid, g.name, g.span))
+        Some(Repeated(m, g.code, frame_of(g.slots), buf(), 0, None, VVoid, k, false))
     VClosure(k, env) ->
         val l = m.lambdas[k]
 
-        Some(Repeated(m, l.code, frame_of(l.slots), env, l.params, l.self_slot, f, l.name, l.span))
+        Some(Repeated(m, l.code, frame_of(l.slots), env, l.params, l.self_slot, f, k, true))
     _ -> None
 
 // `repeated`, with the trap a call of a value that is not a function is.
@@ -303,10 +364,11 @@ impl Repeated
             Some(s) -> self.frame.v[s] = self.me
             None -> ()
 
-        sited(self.m, run_frame(self.m, self.code, self.frame, self.name, self.span), site)
+        sited(self.m, run_frame(self.m, self.code, self.frame, self.k, self.lambda), site)
 
-// A body run in its frame, a call deeper. A trap leaving it adds the frame to the trap's stack.
-private run_frame(m: &Machine, code: Code, frame: &Cells, name: string, span: Span) -> Answer
+// A body run in its frame, a call deeper. A trap leaving it adds the frame to the trap's stack, named
+// by function `k`, or lambda `k` where `lambda` says.
+private run_frame(m: &Machine, code: Code, frame: &Cells, k: usize, lambda: bool) -> Answer
     if m.depth >= MAX_CALL_DEPTH then return trapped(call_depth_message())
 
     tick(m) match
@@ -323,6 +385,8 @@ private run_frame(m: &Machine, code: Code, frame: &Cells, name: string, span: Sp
         Err(s) -> s match
             Returning(v) -> Ok(v)
             Trapped(_) ->
+                val (name, span) = if lambda then (m.lambdas[k].name, m.lambdas[k].span) else (m.funs[k].name, m.funs[k].span)
+
                 m.trace.push(TraceFrame(name, if m.sited then m.site else span))
                 m.sited = false
                 Err(s)
