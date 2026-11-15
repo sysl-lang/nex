@@ -1,0 +1,23 @@
+// `print` writes its arguments on one line, a space between them, each as it prints alone (DESIGN §2.5,
+// spec §12): any types, a string without quotes, an array, an aggregate, a unit after its value.
+
+struct Point
+  x: real
+  y: real
+
+def nothing() = ()
+
+def main() =
+  print(1, 2.5, true)
+  print("n =", 42)
+  print()
+  print([1, 2, 3], "and", [1.5, -0.0])
+  print(Point(1.0, 2.0), (1, "a"))
+  print(-0.0, 0.0)
+  print(9.81<m/s^2>, 3.0<s>)
+  print(nothing(), 7)
+  print(7)
+  val one = 1
+  print(s"one $one", "two")
+  for k, x in enumerate([1, 2, 3, 4, 5])
+    print(k, x)

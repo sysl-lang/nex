@@ -31,6 +31,12 @@ elab_inquiry()
     assert_eq(refused("def main() = print(huge(true))\n"), "error: `huge` takes an integer or a real, and this is bool @1:20")
     assert_eq(refused("def main() = print(huge(1.0, 2.0))\n"), "error: `huge` takes one value, whose type it describes @1:20")
 
+@test("print and eprint take any number of values, and refuse a function among them")
+elab_print_many()
+    assert_eq(refused("def main() = print(1, \"a\", [1.5])\n"), "ok")
+    assert_eq(refused("def main() = eprint()\n"), "ok")
+    assert_eq(refused("def f(x: integer) = x\ndef main() = print(1, f)\n"), "error: a function cannot be printed @2:23")
+
 @test("the representation functions take reals; exponent gives an integer and the classifications a bool")
 elab_representation()
     assert_eq(refused("def f(x: real32, a: [real]) =\n  val e: integer = exponent(x)\n  val f: real32 = fraction(x) + spacing(x) + nearest(x, -1.0) + scale(x, int8(3)) + set_exponent(x, 2)\n  val n: [bool] = is_nan(a)\n  val k: bool = is_finite(x)\n  val es: [integer] = exponent(a)\n" + MAIN), "ok")

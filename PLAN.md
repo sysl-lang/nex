@@ -574,11 +574,19 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       110 ns → 36 ns for the lambda. Outputs identical, and trap stacks and step counts identical to
       the frame-per-call path (`tests_embed.sysl`). What is left is the call's bookkeeping — the step,
       the depth, the captures stored again — and the body's own closures over boxed values.
+      Integer operations chosen per width and signedness when the program is compiled to closures
+      (a 64-bit `+ - *` through sysl's `checked_add` and siblings, 64-bit `div` and `%`, constant
+      ends for 32 bits and fewer, 128 bits for no width nex has), and an aggregate's fields built at
+      their final size, measured per pass (median of 5, interleaved, under load 12): an integer `for`
+      body of `*`, `+`, `%` and a store 49.7 → 44.2 ns; the same as a `while` 73.6 → 70.2 ns; a
+      struct built and both fields read 103 → 95 ns; a tuple 115 → 109 ns; an enum variant built and
+      matched 227 → 208 ns. Outputs and step counts identical. What is left is mostly the
+      out-of-line copy and release of a `Value` and the closure calls themselves.
       A scalar call's frame is now taken from the frames returned calls gave back, by slot count,
       cleared and in stack order (`take_frame`), the function read where the machine holds it
       rather than copied, and the cancel flag read every 1024 steps (the budget is still compared
-      at every step). Measured (median of 5, 1 and 5 reps, `--units 12`, under load 4–10, outputs
-      identical): a call of `f(a, b)` 78 ns → 29 ns (a pass of 127 ns → 76 ns, against 47 ns for
+      at every step). Measured apart from the integer change (median of 5, 1 and 5 reps,
+      `--units 12`, under load 4–10, outputs identical): a call of `f(a, b)` 78 ns → 29 ns (a pass of 127 ns → 76 ns, against 47 ns for
       the same body inline); a `fib` call 73 ns → 41 ns; an enum built and matched through a call
       236 ns → 169 ns a pass; an empty `for` pass 17.5 ns → 15.6 ns; `bench/interp-elemental.nex`
       0.53 s → 0.49 s and `bench/interp-map.nex` 0.66 s → 0.59 s.

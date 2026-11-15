@@ -45,9 +45,12 @@ impl Emitter
             // A program that runs threads gathers the line and writes it at once (DESIGN §9.4).
             val sink = if self.threaded then self.call("nex_sink_new", "", "", "i64") else dest
 
-            *args[0].kind match
-                TInterp(parts, _) -> self.interp_into(sink, parts)
-                _ -> self.put_value(args[0].span, sink, self.ex(args[0]), args[0].ty)
+            for k in 0..<args.len()
+                if k > 0 then self.put_text(sink, " ")
+
+                *args[k].kind match
+                    TInterp(parts, _) -> self.interp_into(sink, parts)
+                    _ -> self.put_value(args[k].span, sink, self.ex(args[k]), args[k].ty)
 
             if self.threaded then self.call("nex_line_end", s"$sink, $dest", "i64, i64", "")
             else self.call("nex_put_newline", sink, "i64", "")
