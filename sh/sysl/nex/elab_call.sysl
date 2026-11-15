@@ -748,8 +748,6 @@ impl Elab
     end scalar_result
 
     print_call(*self, span: Span, name: string, args: Buf[Expr]) -> TExpr
-        if args.len() > 1 then return self.arity(span, name, "one value; interpolate several: `s\"$a $b\"`")
-
         var out: Buf[TExpr] = buf()
 
         for a in args
@@ -761,12 +759,8 @@ impl Elab
                     var items: Buf[TExpr] = buf()
 
                     items.push(v)
-
-                    var text: Buf[TExpr] = buf()
-
-                    text.push(texpr(a.span, Ty.Str, TLiteral(StrVal("()"), false)))
-
-                    return texpr(span, Void, TBlock(items, texpr(span, Void, TBuiltin(name, text))))
+                    out.push(texpr(a.span, Ty.Str, TBlock(items, texpr(a.span, Ty.Str, TLiteral(StrVal("()"), false)))))
+                    continue
                 Fn(_) -> self.fail(a.span, s"a function cannot be printed")
                 _ -> ()
 
