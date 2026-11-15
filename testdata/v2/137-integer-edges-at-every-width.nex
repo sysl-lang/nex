@@ -1,0 +1,178 @@
+// `+`, `-`, `*`, `div`, `%` and negation at the edges of every integer type (DESIGN §2.5): one past
+// each end traps with the type's name, the most negative value `* -1`, `div -1` and negated traps
+// while its `% -1` is 0, a zero divisor traps, and `div` and `%` truncate toward zero for every sign
+// of operand. What stops short of an end is exact.
+
+def main() =
+  val a8: int8 = 127
+  val b8: int8 = -128
+  val m8: int8 = -1
+  val z8: int8 = 0
+  val s8: int8 = 7
+  val n8: int8 = -7
+  val t8: int8 = 2
+  assert_traps(() -> print(a8 + 1), "int8 overflow")
+  assert_traps(() -> print(b8 - 1), "int8 overflow")
+  assert_traps(() -> print(a8 * t8), "int8 overflow")
+  assert_traps(() -> print(b8 * m8), "int8 overflow")
+  assert_traps(() -> print(b8 div m8), "int8 overflow")
+  assert_traps(() -> print(-b8), "int8 overflow")
+  assert_traps(() -> print(s8 div z8), "integer division by zero")
+  assert_traps(() -> print(s8 % z8), "`%` by zero")
+  print(a8 - 1 + 1)
+  print(b8 + 1 - 1)
+  print(a8 * m8)
+  print(b8 % m8)
+  print(-a8)
+  print(b8 div t8)
+  print(n8 div t8)
+  print(n8 % t8)
+  print(s8 div -t8)
+  print(s8 % -t8)
+  print(n8 div -t8)
+  print(n8 % -t8)
+  print(b8 < a8)
+
+  val a16: int16 = 32767
+  val b16: int16 = -32768
+  val m16: int16 = -1
+  val z16: int16 = 0
+  val n16: int16 = -7
+  val t16: int16 = 2
+  assert_traps(() -> print(a16 + 1), "int16 overflow")
+  assert_traps(() -> print(b16 - 1), "int16 overflow")
+  assert_traps(() -> print(a16 * t16), "int16 overflow")
+  assert_traps(() -> print(b16 * m16), "int16 overflow")
+  assert_traps(() -> print(b16 div m16), "int16 overflow")
+  assert_traps(() -> print(-b16), "int16 overflow")
+  assert_traps(() -> print(a16 div z16), "integer division by zero")
+  assert_traps(() -> print(a16 % z16), "`%` by zero")
+  print(a16 - 1 + 1)
+  print(b16 + 1 - 1)
+  print(b16 % m16)
+  print(-a16)
+  print(n16 div t16)
+  print(n16 % t16)
+  print(n16 div -t16)
+  print(n16 % -t16)
+
+  val a32: int32 = 2147483647
+  val b32: int32 = -2147483648
+  val m32: int32 = -1
+  val z32: int32 = 0
+  val n32: int32 = -7
+  val t32: int32 = 2
+  val h32: int32 = 46341
+  assert_traps(() -> print(a32 + 1), "int32 overflow")
+  assert_traps(() -> print(b32 - 1), "int32 overflow")
+  assert_traps(() -> print(h32 * h32), "int32 overflow")
+  assert_traps(() -> print(b32 * m32), "int32 overflow")
+  assert_traps(() -> print(b32 div m32), "int32 overflow")
+  assert_traps(() -> print(-b32), "int32 overflow")
+  assert_traps(() -> print(a32 div z32), "integer division by zero")
+  assert_traps(() -> print(a32 % z32), "`%` by zero")
+  print(a32 - 1 + 1)
+  print(b32 + 1 - 1)
+  print((h32 - 1) * (h32 - 1))
+  print(b32 % m32)
+  print(-a32)
+  print(n32 div t32)
+  print(n32 % t32)
+  print(n32 div -t32)
+  print(n32 % -t32)
+
+  val a64: int64 = 9223372036854775807
+  val b64: int64 = -9223372036854775807 - 1
+  val m64: int64 = -1
+  val z64: int64 = 0
+  val n64: int64 = -7
+  val t64: int64 = 2
+  val h64: int64 = 3037000500
+  assert_traps(() -> print(a64 + 1), "int64 overflow")
+  assert_traps(() -> print(b64 - 1), "int64 overflow")
+  assert_traps(() -> print(h64 * h64), "int64 overflow")
+  assert_traps(() -> print(b64 * m64), "int64 overflow")
+  assert_traps(() -> print(b64 div m64), "int64 overflow")
+  assert_traps(() -> print(-b64), "int64 overflow")
+  assert_traps(() -> print(a64 div z64), "integer division by zero")
+  assert_traps(() -> print(a64 % z64), "`%` by zero")
+  print(a64 - 1 + 1)
+  print(b64 + 1 - 1)
+  print((h64 - 1) * (h64 - 1))
+  print(a64 * m64)
+  print(b64 % m64)
+  print(-a64)
+  print(b64 div t64)
+  print(b64 % t64)
+  print(n64 div t64)
+  print(n64 % t64)
+  print(n64 div -t64)
+  print(n64 % -t64)
+  print(b64 < a64)
+
+  val a8u: uint8 = 255
+  val z8u: uint8 = 0
+  val o8u: uint8 = 1
+  val t8u: uint8 = 2
+  assert_traps(() -> print(a8u + 1), "uint8 overflow")
+  assert_traps(() -> print(z8u - 1), "uint8 overflow")
+  assert_traps(() -> print(a8u * t8u), "uint8 overflow")
+  assert_traps(() -> print(-o8u), "uint8 overflow")
+  assert_traps(() -> print(a8u div z8u), "integer division by zero")
+  assert_traps(() -> print(a8u % z8u), "`%` by zero")
+  print(a8u - 1 + 1)
+  print(-z8u)
+  print(a8u div t8u)
+  print(a8u % t8u)
+  print(z8u < a8u)
+
+  val a16u: uint16 = 65535
+  val z16u: uint16 = 0
+  val o16u: uint16 = 1
+  val t16u: uint16 = 2
+  assert_traps(() -> print(a16u + 1), "uint16 overflow")
+  assert_traps(() -> print(z16u - 1), "uint16 overflow")
+  assert_traps(() -> print(a16u * t16u), "uint16 overflow")
+  assert_traps(() -> print(-o16u), "uint16 overflow")
+  assert_traps(() -> print(a16u div z16u), "integer division by zero")
+  assert_traps(() -> print(a16u % z16u), "`%` by zero")
+  print(a16u - 1 + 1)
+  print(a16u div t16u)
+  print(a16u % t16u)
+
+  val a32u: uint32 = 4294967295
+  val z32u: uint32 = 0
+  val o32u: uint32 = 1
+  val h32u: uint32 = 65536
+  assert_traps(() -> print(a32u + 1), "uint32 overflow")
+  assert_traps(() -> print(z32u - 1), "uint32 overflow")
+  assert_traps(() -> print(h32u * h32u), "uint32 overflow")
+  assert_traps(() -> print(a32u * a32u), "uint32 overflow")
+  assert_traps(() -> print(-o32u), "uint32 overflow")
+  assert_traps(() -> print(a32u div z32u), "integer division by zero")
+  assert_traps(() -> print(a32u % z32u), "`%` by zero")
+  print(a32u - 1 + 1)
+  print(h32u * (h32u - 1))
+  print(a32u div h32u)
+  print(a32u % h32u)
+  print(z32u < a32u)
+
+  val a64u: uint64 = 18446744073709551615
+  val z64u: uint64 = 0
+  val o64u: uint64 = 1
+  val h64u: uint64 = 4294967296
+  assert_traps(() -> print(a64u + 1), "uint64 overflow")
+  assert_traps(() -> print(z64u - 1), "uint64 overflow")
+  assert_traps(() -> print(h64u * h64u), "uint64 overflow")
+  assert_traps(() -> print(a64u * a64u), "uint64 overflow")
+  assert_traps(() -> print(-o64u), "uint64 overflow")
+  assert_traps(() -> print(a64u div z64u), "integer division by zero")
+  assert_traps(() -> print(a64u % z64u), "`%` by zero")
+  print(a64u - 1 + 1)
+  print(h64u * (h64u - 1))
+  print(a64u div h64u)
+  print(a64u % h64u)
+  print(a64u div 3)
+  print(a64u % 10)
+  print(z64u < a64u)
+  print(a64u > h64u)

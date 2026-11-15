@@ -661,8 +661,15 @@ impl Interp
     // instead traps.
     host_call(*self, x: TExtern, codes: Buf[Code]) -> Code
         val name = display_name(x.name)
-        val f = host_named(self.m, name).unwrap().f
         val m = self.m
+
+        // A function the host does not give is already a diagnostic of the declaration; the call is
+        // compiled to a trap so that compiling goes on to report the rest.
+        val given = host_named(m, name)
+
+        if given.is_none() then return (c) -> trapped(s"`$name` is a host function, and the program running this script gives none of that name")
+
+        val f = given.unwrap().f
         var params: Buf[Ty] = buf()
         var ret = x.ret
 

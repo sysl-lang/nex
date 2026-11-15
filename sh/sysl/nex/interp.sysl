@@ -25,7 +25,7 @@ module sh.sysl.nex
 // yet`, as the compiler's is `… is not compiled yet`.
 
 import nex_runtime.sh.sysl.nex_runtime.{NexFile, ZERO_STEP, arg_index_message, int_name, out_of_range_message, text_input}
-import sysl.buf.{Buf, buf}
+import sysl.buf.{Buf, buf, buf_with_capacity}
 import sh.sysl.parsing.{Diagnostic, Span, error}
 
 // Where a program's text goes: what `print` writes, and what `eprint` does.
@@ -874,10 +874,16 @@ impl Interp
         for e in elems
             codes.push(self.ex(e))
 
-        (c) ->
-            var fields: Buf[Value] = buf()
+        val n = codes.len()
 
-            for k in 0..<codes.len()
+        // An aggregate with no fields holds an empty buffer, which needs no storage.
+        if n == 0 then return (c) -> Ok(VAgg(tag, buf()))
+
+        // The fields' buffer is made at its final size, so filling it never grows it.
+        (c) ->
+            var fields = buf_with_capacity(n, VVoid)
+
+            for k in 0..<n
                 val f = codes[k]
 
                 fields.push(f(c)?)
@@ -1240,7 +1246,7 @@ impl Interp
         if op == "not" then return (c) -> Ok(VBool(!bool_of(a(c)?)))
 
         base_of(v.ty) match
-            Int(bits, signed) -> (c) -> int_result(-wide(int_of(a(c)?), signed), bits, signed)
+            Int(bits, signed) -> int_negation(a, bits, signed)
             Real(_) -> (c) -> Ok(VReal(-real_of(a(c)?)))
             Complex(_) -> (c) ->
                 val z = a(c)?

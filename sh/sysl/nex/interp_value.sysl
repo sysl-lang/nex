@@ -23,7 +23,7 @@ module sh.sysl.nex
 import nex_runtime.sh.sysl.nex_runtime.{COMPLEX_DIVISION_BY_ZERO, INT_DIVISION_BY_ZERO, REAL_DIVISION_BY_ZERO, REAL_INVALID, REAL_OVERFLOW,
                                         MODULO_BY_ZERO, REMAINDER_BY_ZERO, bool_text, complex_text, format_real_nex, int_spec_text, int_text, ipow_checked, out_of_range_message,
                                         overflow_message, real_spec_text, str_spec_text, uint_text}
-import sysl.buf.{Buf, buf}
+import sysl.buf.{Buf, buf, buf_with_capacity}
 
 // The storage of a frame: a function call's locals, or the program's module-level bindings.
 private[nex] struct Cells
@@ -112,15 +112,17 @@ private[nex] tag_of(v: Value) -> usize = v match
     VAgg(tag, _) -> tag
     _ -> 0
 
-// Field `k` of an aggregate.
+// Field `k` of an aggregate. The typed IR asks for a field only of an aggregate, so any other value
+// ends the program; with no other answer, the field is read where it lives, its buffer taking no
+// count.
 private[nex] field_at(v: Value, k: usize) -> Value = v match
     VAgg(_, fields) -> fields[k]
-    _ -> VVoid
+    _ -> panic("a field of a value that is not an aggregate")
 
 // `v` with field `k` replaced by `x`, the fields copied so that no other value sharing them sees it.
 private[nex] with_field(v: Value, k: usize, x: Value) -> Value = v match
     VAgg(tag, fields) ->
-        var out: Buf[Value] = buf()
+        var out = buf_with_capacity(fields.len(), VVoid)
 
         for f in fields
             out.push(f)
@@ -199,34 +201,154 @@ private[nex] wrapped(r: i128, bits: int, signed: bool) -> long
 
     if signed && low > highest(bits, true) then long.wrap(low - (i128(1) << bits)) else long.wrap(low)
 
-// `a op b` on integers of `bits` bits.
+// `a op b` on integers of `bits` bits. The operation is chosen for the width and signedness here,
+// once, so a run does no work on them: a 64-bit `+`, `-` or `*` is the machine's overflow-checked
+// operation (`checked_add` and its siblings), and one of 32 bits or fewer is exact in 64 bits and
+// checked against the type's ends, which are worked out here. Any other width is computed in 128 bits.
 private[nex] int_op(op: string, bits: int, signed: bool) -> Option[Op2]
-    if op == "+" then return Some((a, b) -> int_result(wide(int_of(a), signed) + wide(int_of(b), signed), bits, signed))
-    if op == "-" then return Some((a, b) -> int_result(wide(int_of(a), signed) - wide(int_of(b), signed), bits, signed))
-    if op == "*" then return Some((a, b) -> int_result(wide(int_of(a), signed) * wide(int_of(b), signed), bits, signed))
-    if op == "div" then return Some((a, b) -> int_div(wide(int_of(a), signed), wide(int_of(b), signed), bits, signed))
-    if op == "%" then return Some((a, b) -> int_rem(wide(int_of(a), signed), wide(int_of(b), signed)))
+    if op == "+" || op == "-" || op == "*" then return Some(int_arith(op, bits, signed))
+    if op == "div" then return Some(int_quot(bits, signed))
+    if op == "%" then return Some(int_rem(bits, signed))
     if op == "^" then return Some((a, b) -> int_pow(int_of(a), int_of(b), bits, signed, signed))
     if op == "==" then return Some((a, b) -> Ok(VBool(int_of(a) == int_of(b))))
     if op == "!=" then return Some((a, b) -> Ok(VBool(int_of(a) != int_of(b))))
-    if op == "<" then return Some((a, b) -> Ok(VBool(wide(int_of(a), signed) < wide(int_of(b), signed))))
-    if op == "<=" then return Some((a, b) -> Ok(VBool(wide(int_of(a), signed) <= wide(int_of(b), signed))))
-    if op == ">" then return Some((a, b) -> Ok(VBool(wide(int_of(a), signed) > wide(int_of(b), signed))))
-    if op == ">=" then return Some((a, b) -> Ok(VBool(wide(int_of(a), signed) >= wide(int_of(b), signed))))
+
+    // A signed integer orders as the `long` it is held in, an unsigned one as that `long`'s bits.
+    if signed
+        if op == "<" then return Some((a, b) -> Ok(VBool(int_of(a) < int_of(b))))
+        if op == "<=" then return Some((a, b) -> Ok(VBool(int_of(a) <= int_of(b))))
+        if op == ">" then return Some((a, b) -> Ok(VBool(int_of(a) > int_of(b))))
+        if op == ">=" then return Some((a, b) -> Ok(VBool(int_of(a) >= int_of(b))))
+    else
+        if op == "<" then return Some((a, b) -> Ok(VBool(ulong.wrap(int_of(a)) < ulong.wrap(int_of(b)))))
+        if op == "<=" then return Some((a, b) -> Ok(VBool(ulong.wrap(int_of(a)) <= ulong.wrap(int_of(b)))))
+        if op == ">" then return Some((a, b) -> Ok(VBool(ulong.wrap(int_of(a)) > ulong.wrap(int_of(b)))))
+        if op == ">=" then return Some((a, b) -> Ok(VBool(ulong.wrap(int_of(a)) >= ulong.wrap(int_of(b)))))
 
     None
 
-// `div` truncates toward zero; the most negative value divided by -1 overflows.
-private int_div(x: i128, y: i128, bits: int, signed: bool) -> Answer
-    if y == 0 then return trapped(INT_DIVISION_BY_ZERO)
+// `r`, computed exactly, as an integer between `lo` and `hi`, or the overflow `message` words.
+private[nex] bounded(r: long, lo: long, hi: long, message: string) -> Answer =
+    if r >= lo && r <= hi then Ok(VInt(r)) else trapped(message)
 
-    int_result(x / y, bits, signed)
+// A checked 64-bit result, or the overflow `message` words.
+private[nex] checked_long(r: Option[long], message: string) -> Answer = r match
+    Some(n) -> Ok(VInt(n))
+    None -> trapped(message)
+
+private checked_ulong(r: Option[ulong], message: string) -> Answer = r match
+    Some(n) -> Ok(VInt(long.wrap(n)))
+    None -> trapped(message)
+
+// The ends of an integer type of 32 bits or fewer, as the `long`s it is held in.
+private[nex] low_end(bits: int, signed: bool) -> long = long.wrap(lowest(bits, signed))
+
+private[nex] high_end(bits: int, signed: bool) -> long = long.wrap(highest(bits, signed))
+
+// `+`, `-` or `*` at `bits` bits.
+private int_arith(op: string, bits: int, signed: bool) -> Op2
+    val message = overflow_message(bits, signed)
+
+    if bits == 64 && signed
+        if op == "+" then return (a, b) -> checked_long(int_of(a).checked_add(int_of(b)), message)
+        if op == "-" then return (a, b) -> checked_long(int_of(a).checked_sub(int_of(b)), message)
+
+        return (a, b) -> checked_long(int_of(a).checked_mul(int_of(b)), message)
+
+    if bits == 64
+        if op == "+" then return (a, b) -> checked_ulong(ulong.wrap(int_of(a)).checked_add(ulong.wrap(int_of(b))), message)
+        if op == "-" then return (a, b) -> checked_ulong(ulong.wrap(int_of(a)).checked_sub(ulong.wrap(int_of(b))), message)
+
+        return (a, b) -> checked_ulong(ulong.wrap(int_of(a)).checked_mul(ulong.wrap(int_of(b))), message)
+
+    if bits <= 32
+        val lo = low_end(bits, signed)
+        val hi = high_end(bits, signed)
+
+        if op == "+" then return (a, b) -> bounded(int_of(a) + int_of(b), lo, hi, message)
+        if op == "-" then return (a, b) -> bounded(int_of(a) - int_of(b), lo, hi, message)
+        if signed then return (a, b) -> bounded(int_of(a) * int_of(b), lo, hi, message)
+
+        // Two `uint32`s multiply past `long` but not past `ulong`.
+        val top = ulong.wrap(hi)
+
+        return (a, b) ->
+            val p = ulong.wrap(int_of(a)) * ulong.wrap(int_of(b))
+
+            if p <= top then Ok(VInt(long.wrap(p))) else trapped(message)
+
+    if op == "+" then return (a, b) -> int_result(wide(int_of(a), signed) + wide(int_of(b), signed), bits, signed)
+    if op == "-" then return (a, b) -> int_result(wide(int_of(a), signed) - wide(int_of(b), signed), bits, signed)
+
+    (a, b) -> int_result(wide(int_of(a), signed) * wide(int_of(b), signed), bits, signed)
+
+// `div` truncates toward zero; the most negative value divided by -1 overflows.
+private int_quot(bits: int, signed: bool) -> Op2
+    val message = overflow_message(bits, signed)
+
+    if bits == 64 && signed then return (a, b) ->
+        val y = int_of(b)
+
+        if y == 0 then trapped(INT_DIVISION_BY_ZERO) else checked_long(int_of(a).checked_div(y), message)
+
+    if bits == 64 then return (a, b) ->
+        val y = ulong.wrap(int_of(b))
+
+        if y == 0 then trapped(INT_DIVISION_BY_ZERO) else Ok(VInt(long.wrap(ulong.wrap(int_of(a)) / y)))
+
+    if bits <= 32
+        val lo = low_end(bits, signed)
+        val hi = high_end(bits, signed)
+
+        // A quotient of two values held in 32 bits or fewer is exact in a `long`.
+        return (a, b) ->
+            val y = int_of(b)
+
+            if y == 0 then trapped(INT_DIVISION_BY_ZERO) else bounded(int_of(a) / y, lo, hi, message)
+
+    (a, b) ->
+        val y = wide(int_of(b), signed)
+
+        if y == 0 then trapped(INT_DIVISION_BY_ZERO) else int_result(wide(int_of(a), signed) / y, bits, signed)
 
 // `%` takes the dividend's sign; the most negative value `% -1` is 0.
-private int_rem(x: i128, y: i128) -> Answer
-    if y == 0 then return trapped(REMAINDER_BY_ZERO)
+private int_rem(bits: int, signed: bool) -> Op2
+    if bits == 64 && signed then return (a, b) ->
+        val y = int_of(b)
 
-    Ok(VInt(long.wrap(x % y)))
+        if y == 0 then trapped(REMAINDER_BY_ZERO) elif y == -1 then Ok(VInt(0)) else Ok(VInt(int_of(a) % y))
+
+    if bits == 64 then return (a, b) ->
+        val y = ulong.wrap(int_of(b))
+
+        if y == 0 then trapped(REMAINDER_BY_ZERO) else Ok(VInt(long.wrap(ulong.wrap(int_of(a)) % y)))
+
+    // A value held in 32 bits or fewer has a remainder exact in a `long`, `% -1` included.
+    if bits <= 32 then return (a, b) ->
+        val y = int_of(b)
+
+        if y == 0 then trapped(REMAINDER_BY_ZERO) else Ok(VInt(int_of(a) % y))
+
+    (a, b) ->
+        val y = wide(int_of(b), signed)
+
+        if y == 0 then trapped(REMAINDER_BY_ZERO) else Ok(VInt(long.wrap(wide(int_of(a), signed) % y)))
+
+// `-a` at `bits` bits, chosen for the width as `int_op` chooses: the most negative signed value, and
+// any unsigned one but zero, overflows.
+private[nex] int_negation(a: Code, bits: int, signed: bool) -> Code
+    val message = overflow_message(bits, signed)
+
+    if bits == 64 && signed then return (c) -> checked_long(int_of(a(c)?).checked_neg(), message)
+    if !signed then return (c) -> if int_of(a(c)?) == 0 then Ok(VInt(0)) else trapped(message)
+
+    if bits <= 32
+        val lo = low_end(bits, signed)
+        val hi = high_end(bits, signed)
+
+        return (c) -> bounded(-int_of(a(c)?), lo, hi, message)
+
+    (c) -> int_result(-wide(int_of(a(c)?), signed), bits, signed)
 
 // `modulo` takes the divisor's sign: a remainder of the other sign has the divisor added once, which
 // cannot overflow, since the remainder is smaller than the divisor. By zero it traps as `%` does.

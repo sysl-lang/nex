@@ -574,6 +574,14 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       110 ns → 36 ns for the lambda. Outputs identical, and trap stacks and step counts identical to
       the frame-per-call path (`tests_embed.sysl`). What is left is the call's bookkeeping — the step,
       the depth, the captures stored again — and the body's own closures over boxed values.
+      Integer operations chosen per width and signedness when the program is compiled to closures
+      (a 64-bit `+ - *` through sysl's `checked_add` and siblings, 64-bit `div` and `%`, constant
+      ends for 32 bits and fewer, 128 bits for no width nex has), and an aggregate's fields built at
+      their final size, measured per pass (median of 5, interleaved, under load 12): an integer `for`
+      body of `*`, `+`, `%` and a store 49.7 → 44.2 ns; the same as a `while` 73.6 → 70.2 ns; a
+      struct built and both fields read 103 → 95 ns; a tuple 115 → 109 ns; an enum variant built and
+      matched 227 → 208 ns. Outputs and step counts identical. What is left is mostly the
+      out-of-line copy and release of a `Value` and the closure calls themselves.
       An index list of single indices (`a[i]`, `a[i, j]`, read or written) computes the element's
       storage position inline from the window's offset and its extent and stride per axis, with no
       window, tuple or place built; a local or module-level target is read and written at its slot,
@@ -583,7 +591,7 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       283 ns → 103 ns, a column-order `gemv` update 214 ns → 67 ns; `bench/interp-index.nex` (10
       passes of each over 200 000 `real64` elements and a 400 × 400 matrix) 1.39 s → 0.50 s, against
       0.004 s compiled. Outputs identical, and trap messages, sites and stacks identical to the window
-      path (`tests_embed.sysl`, `testdata/v2/135-element-indexing.nex`).
+      path (`tests_embed.sysl`, `testdata/v2/139-element-indexing.nex`).
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel

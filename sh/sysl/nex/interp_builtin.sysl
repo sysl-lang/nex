@@ -32,10 +32,20 @@ impl Interp
 
         if name == "print" || name == "eprint"
             val stream = if name == "print" then StdOut else StdErr
-            val text = self.text_of(args[0])
+            var texts: Buf[TextCode] = buf()
+
+            for a in args
+                texts.push(self.text_of(a))
 
             return (c) ->
-                emit(m, stream, text(c)? + "\n")
+                var line = ""
+
+                for k in 0..<texts.len()
+                    if k > 0 then line += " "
+
+                    line += texts[k](c)?
+
+                emit(m, stream, line + "\n")
                 Ok(VVoid)
 
         // `!` on a `None` or an `Err` (DESIGN §17.2): a trap whose message is the string given.
