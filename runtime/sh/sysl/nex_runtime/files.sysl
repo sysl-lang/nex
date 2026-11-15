@@ -350,14 +350,16 @@ private filled(f: &NexFile) -> bool
 
     f.os match
         Some(os) ->
-            var file = os
+            var file = if read_faulty(f.path) then fs.open("/").unwrap() else os
             val got = file.read(chunk[..])
 
             if got.len == 0
-                // `sysl.fs.File` latches a failed read without saying which failure it was.
-                if file.failed()
-                    failed(FILE_FAILED, f.path, "the file could not be read")
-                    return false
+                // A failed read is reported with the system's own reason.
+                file.read_failure() match
+                    Some(e) ->
+                        reported(f.path, e)
+                        return false
+                    None -> ()
 
                 f.ended = true
             else
@@ -505,6 +507,22 @@ fail_flushes_under(prefix: string)
 @export("nex_test_fail_flushes")
 fail_flushes_under_c(prefix: *u8)
     faulty_c = prefix
+
+// The same for reads: every read of a file whose path starts with the prefix is made from a directory
+// instead, which the system refuses with `IsADirectory` as it does any read that fails. Set from sysl
+// with `fail_reads_under`, from a compiled program with `nex_test_fail_reads`.
+@thread_local private var faulty_read_prefix = ""
+@thread_local private var faulty_read_c: *u8 = null
+
+fail_reads_under(prefix: string)
+    faulty_read_prefix = prefix
+
+@export("nex_test_fail_reads")
+fail_reads_under_c(prefix: *u8)
+    faulty_read_c = prefix
+
+private read_faulty(path: string) -> bool =
+    (faulty_read_prefix != "" && path.starts_with(faulty_read_prefix)) || (faulty_read_c != null && path.starts_with(c_text(faulty_read_c)))
 
 private faulty(path: string) -> bool =
     (faulty_prefix != "" && path.starts_with(faulty_prefix)) || (faulty_c != null && path.starts_with(c_text(faulty_c)))
