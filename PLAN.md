@@ -582,6 +582,24 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       struct built and both fields read 103 → 95 ns; a tuple 115 → 109 ns; an enum variant built and
       matched 227 → 208 ns. Outputs and step counts identical. What is left is mostly the
       out-of-line copy and release of a `Value` and the closure calls themselves.
+      A scalar call's frame is now taken from the frames returned calls gave back, by slot count,
+      cleared and in stack order (`take_frame`), the function read where the machine holds it
+      rather than copied, and the cancel flag read every 1024 steps (the budget is still compared
+      at every step). Measured apart from the integer change (median of 5, 1 and 5 reps,
+      `--units 12`, under load 4–10, outputs identical): a call of `f(a, b)` 78 ns → 29 ns (a pass of 127 ns → 76 ns, against 47 ns for
+      the same body inline); a `fib` call 73 ns → 41 ns; an enum built and matched through a call
+      236 ns → 169 ns a pass; an empty `for` pass 17.5 ns → 15.6 ns; `bench/interp-elemental.nex`
+      0.53 s → 0.49 s and `bench/interp-map.nex` 0.66 s → 0.59 s.
+      An index list of single indices (`a[i]`, `a[i, j]`, read or written) computes the element's
+      storage position inline from the window's offset and its extent and stride per axis, with no
+      window, tuple or place built; a local or module-level target is read and written at its slot,
+      the copy-on-write check made there (`positions`, `interp_array_code.sysl`). Measured (median of
+      5, interleaved, under load 17, a scalar loop's own pass included): an element read in a loop
+      80 ns → 39 ns, `a[i] = a[i] * 0.5 + 1.0` 167 ns → 53 ns, a three-point stencil update
+      283 ns → 103 ns, a column-order `gemv` update 214 ns → 67 ns; `bench/interp-index.nex` (10
+      passes of each over 200 000 `real64` elements and a 400 × 400 matrix) 1.39 s → 0.50 s, against
+      0.004 s compiled. Outputs identical, and trap messages, sites and stacks identical to the window
+      path (`tests_embed.sysl`, `testdata/v2/139-element-indexing.nex`).
     - **I4 — parallel, units and traps**: `parallel` constructs run sequentially with the
       compiler's blocks and reduction tree, so the bits are the same; units of measure; every trap
       message and `assert_traps`. Built (`interp_parallel.sysl`, `interp_units.sysl`): a `parallel

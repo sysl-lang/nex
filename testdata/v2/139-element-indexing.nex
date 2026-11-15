@@ -1,0 +1,233 @@
+// One element read and written by single indices (DESIGN §5.1, §6.2, §8.2): ranks 1 to 3 and
+// compound assignment; strided, reversed, column and `origin` views as the target, read and written
+// through; `end` inside an index; an index outside each axis trapping on a read and on a write; a
+// write to an array another holder shares, which copies it and leaves the holder alone; writes
+// through `inout` arrays and windows; every element kind; a module-level array and a struct's array
+// field as the target; and the value evaluated before the index.
+
+struct Box
+  items: [string]
+  data: [real]
+
+var grid: [integer; :, :] = [[1, 2, 3], [4, 5, 6]]
+
+var order = 0
+
+def tick(k: integer): integer =
+  order = order * 10 + k
+  k
+
+def set_second(v: inout [real], x: real) =
+  v[2] = x
+
+def scale_all(v: inout [integer], by: integer) =
+  for k in 1..length(v)
+    v[k] *= by
+
+def put_grid(i: integer, j: integer, x: integer) =
+  grid[i, j] = x
+
+def read1(v: [integer], i: integer): integer = v[i]
+
+def read2(v: [real; :, :], i: integer, j: integer): real = v[i, j]
+
+def read3(v: [integer; :, :, :], i: integer, j: integer, k: integer): integer = v[i, j, k]
+
+def write_local1(i: integer) =
+  var v = [1, 2, 3]
+  v[i] += 1
+  print(v)
+
+def write_local2(i: integer, j: integer) =
+  var v = [[1, 2], [3, 4]]
+  v[i, j] = 0
+  print(v)
+
+def write_inout2(v: inout [integer; :, :], i: integer, j: integer) =
+  v[i, j] = 0
+
+def main() =
+  // Ranks 1 to 3, read and written, plain and compound.
+  var a = [10, 20, 30, 40, 50, 60, 70, 80, 90]
+  a[3] = 33
+  a[4] += 4
+  a[end] -= 9
+  a[end - 1] *= 2
+  print(a)
+  print(a[1] + a[3] + a[end])
+  var m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+  m[2, 3] = 60.0
+  m[1, 2] += 0.5
+  m[end, 1] /= 2.0
+  print(m)
+  print(m[1, 2] + m[2, 3] + m[end, end - 1])
+  var t = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+  t[1, 2, 1] = 30
+  t[2, 2, 2] += 100
+  t[end, 1, end] = -6
+  print(t)
+  print(t[1, 2, 1] + t[2, 2, 2] + t[2, 1, 2])
+  var sum3 = 0
+  for i in 1..2
+    for j in 1..2
+      for k in 1..2
+        sum3 += t[i, j, k]
+  print(sum3)
+
+  // Views as the target: strided, reversed, a column, an origin view, each read and written through.
+  var b = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  val s = b[2..10 by 3]
+  print(s[1] + s[2] + s[3])
+  val r = b[.. by -1]
+  print(r[1] * 100 + r[end])
+  val c = m[:, 2]
+  print(c[1] + c[2])
+  val g = origin(b, 0)
+  print(g[0] + g[9])
+  val gm = origin([[1, 2, 3], [4, 5, 6]], 0, -1)
+  print(gm[1, -1] * 10 + gm[0, 1])
+  b[2..10 by 3][2] = -5
+  b[.. by -1][1] = 100
+  print(b)
+  var w = b[3..8 by 2]
+  w[2] = 0
+  print(w)
+  print(b)
+  var rv = b[.. by -2]
+  rv[end] += 1000
+  print(rv)
+  print(b)
+
+  // An index outside an axis traps on a read and on a write, at every axis of every rank.
+  val ac = a
+  val mc = m
+  val tc = t
+  assert_traps(() -> print(read1(ac, 0)), "index out of bounds")
+  assert_traps(() -> print(read1(ac, 10)), "index out of bounds")
+  assert_traps(() -> print(read2(mc, 3, 1)), "index out of bounds")
+  assert_traps(() -> print(read2(mc, 1, 0)), "index out of bounds")
+  assert_traps(() -> print(read2(mc, 1, 4)), "index out of bounds")
+  assert_traps(() -> print(read3(tc, 3, 1, 1)), "index out of bounds")
+  assert_traps(() -> print(read3(tc, 1, 0, 1)), "index out of bounds")
+  assert_traps(() -> print(read3(tc, 1, 1, 3)), "index out of bounds")
+  assert_traps(() -> print(s[4]), "index out of bounds")
+  assert_traps(() -> print(g[10]), "index out of bounds")
+  assert_traps(() -> print(g[-1]), "index out of bounds")
+  assert_traps(() -> write_local1(4), "index out of bounds")
+  assert_traps(() -> write_local1(0), "index out of bounds")
+  assert_traps(() -> write_local2(3, 1), "index out of bounds")
+  assert_traps(() -> write_local2(1, 3), "index out of bounds")
+  write_local2(2, 1)
+  var oobm = [[1, 2], [3, 4]]
+  val w1 = () ->
+    write_inout2(oobm, 1, 3)
+  assert_traps(w1, "index out of bounds")
+  assert_traps(() -> put_grid(1, 4, 0), "index out of bounds")
+  assert_traps(() -> put_grid(0, 1, 0), "index out of bounds")
+
+  // A write to a shared array copies it: the other holder keeps its values, also in a loop.
+  var p = [1, 2, 3, 4]
+  val q = p
+  p[1] = 100
+  print(p)
+  print(q)
+  var p2 = p
+  for k in 1..4
+    p2[k] = p2[k] * 2 + q[k]
+  print(p2)
+  print(p)
+  print(q)
+  var pm = [[1, 2], [3, 4]]
+  val pmk = pm
+  pm[2, 1] = pm[1, 1] + pmk[2, 2]
+  print(pm)
+  print(pmk)
+  val keep = p
+  scale_all(p, 3)
+  print(p)
+  print(keep)
+
+  // Writes through `inout`: the whole array, a window, a strided and a reversed one, a column.
+  var x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+  val xk = x
+  set_second(x, -2.0)
+  set_second(x[3..5], -4.0)
+  set_second(x[1..6 by 2], -5.0)
+  set_second(x[.. by -1], -50.0)
+  print(x)
+  print(xk)
+  var xm = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+  set_second(xm[:, 2], 0.25)
+  set_second(xm[1, :], 0.5)
+  print(xm)
+
+  // Every element kind.
+  var i8s: [int8] = [1, -2, 127]
+  i8s[3] -= 27
+  i8s[1] = i8s[2] * 3
+  print(i8s)
+  var u16s: [uint16] = [1, 2, 65535]
+  u16s[3] -= 2
+  print(u16s)
+  var i32s: [int32] = [5, 6]
+  i32s[2] = i32s[1] * 1000000
+  print(i32s)
+  var h: [real16] = [0.5, 1.5, 2.5]
+  h[2] = h[1] + h[3]
+  h[3] *= 0.1
+  print(h)
+  var f: [real32] = [0.1, 0.2]
+  f[1] += f[2]
+  print(f)
+  var d: [real] = [0.1, 0.2]
+  d[2] += d[1]
+  print(d)
+  var z: [complex] = [1 + 2i, 3 - 1i]
+  z[1] *= z[2]
+  print(z)
+  var zf: [complex[real32]] = [0.5 + 0.25i, 2.0 + 0i]
+  zf[2] += zf[1]
+  print(zf)
+  var bs = [true, false, true]
+  bs[2] = not bs[1]
+  bs[3] = bs[2] and false
+  print(bs)
+  var names = [["ann", "bob"], ["cy", "dee"]]
+  val names0 = names
+  names[2, 1] = names[1, 2] + "!"
+  print(names)
+  print(names0)
+  print(names[2, 1] + names[1, 1])
+
+  // A module-level array and a struct's array field as the target.
+  grid[2, 2] = 50
+  grid[1, end] += grid[2, 2]
+  put_grid(1, 1, -1)
+  print(grid)
+  print(grid[1, 3] + grid[2, 1])
+  var bx = Box(["a", "b"], [1.0, 2.0, 3.0])
+  val bk = bx
+  bx.data[2] = 20.0
+  bx.data[end] += 0.5
+  bx.items[1] = "z"
+  print(bx.data)
+  print(bx.items)
+  print(bk.data)
+  print(bx.data[1] + bx.data[2])
+  var boxes = [Box(["p"], [1.0]), Box(["q"], [2.0, 3.0])]
+  val held = boxes[2]
+  boxes[2].data[1] = 9.0
+  print(boxes[2].data)
+  print(held.data)
+
+  // The value is evaluated before the index, and each index once, left to right.
+  var e = [0, 0, 0]
+  e[tick(1)] = tick(2)
+  print(order)
+  order = 0
+  print(m[tick(2), tick(3)])
+  print(order)
+  order = 0
+  e[tick(3)] += tick(1)
+  print(order)
+  print(e)
