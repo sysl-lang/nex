@@ -13,7 +13,7 @@ import sysl.buf.{Buf, buf}
 import sysl.fs.{exists, read_text}
 import sysl.process.{Output, Var, capture}
 import sysl.testing.skip
-import sysl.text.{from_utf8, join, replace_all, split}
+import sysl.text.{from_utf8, join, parse_int, replace_all, split}
 
 private val V2_PARALLEL_INDEX = from_utf8(embed("../testdata/v2/index.tsv")).unwrap()
 
@@ -53,6 +53,93 @@ private outputs(b: Bench, case: string, text: string, threads: []const string = 
             Err(e) -> fail_with(s"${r.on}: $e")
 
     out
+
+// The frame `libomp` allocates from while it registers itself at its first parallel region. The
+// allocation is never freed, so `leaks --atExit` reports it against every program that forks a team,
+// whatever the program does.
+private val LIBOMP_STARTUP = "__kmp_register_library_startup"
+
+// The number of leaks a `leaks` report's summary line counts ("Process 7: 1 leak for 640 total leaked
+// bytes."), or -1 when the report has no summary line.
+private leaks_counted(report: string) -> int
+    for line in split(report, "\n")
+        if line.contains(" leak for ") || line.contains(" leaks for ") then
+            val words = split(split(line, " leak")[0], " ")
+
+            return parse_int(words[words.len - 1]).unwrap_or(-1)
+
+    -1
+
+// How many of the leaks in a `leaks` report were allocated under `libomp`'s startup registration. A
+// leak is told by its allocation stack, the frames printed under its `STACK OF n INSTANCES OF ...`
+// heading up to the `====` line, never by the heading's text or the size.
+private libomp_startup_leaks(report: string) -> int
+    var ignored = 0
+    var instances = 0
+    var in_stack = false
+    var startup = false
+
+    for line in split(report, "\n")
+        if line.starts_with("STACK OF ") then
+            if in_stack && startup then ignored += instances
+
+            instances = parse_int(split(line, " ")[2]).unwrap_or(0)
+            in_stack = true
+            startup = false
+        else if in_stack && line.starts_with("====") then
+            if startup then ignored += instances
+
+            in_stack = false
+        else if in_stack && line.contains(LIBOMP_STARTUP) then
+            startup = true
+
+    if in_stack && startup then ignored += instances
+
+    ignored
+
+// Whether a `leaks` report finds the program clean: every leak it counts was allocated by `libomp`'s
+// own startup.
+private leaks_clean(report: string) -> bool
+    val counted = leaks_counted(report)
+
+    counted >= 0 && counted - libomp_startup_leaks(report) == 0
+
+// `leaks --atExit` over `exe` on seven threads, as a report; a machine without the tool reports none.
+private leak_report(exe: string) -> string
+    if !exists("/usr/bin/leaks") then return ": 0 leaks for 0 total leaked bytes."
+
+    capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap().text
+
+private val LEAKS_HEAD = "Process 32507: 203 nodes malloced for 18 KB\n"
+
+private val LIBOMP_LEAK = "STACK OF 1 INSTANCE OF 'ROOT LEAK: <malloc in __kmp_str_format>':\n6   lambda   0x102564a1c n.main + 508\n5   libomp.dylib   0x1026b09e0 __kmpc_fork_call + 52\n2   libomp.dylib   0x1026c2dbc __kmp_register_library_startup() + 780\n1   libomp.dylib   0x1026d7504 __kmp_str_format + 32\n0   libsystem_malloc.dylib   0x18891c630 _malloc_zone_malloc_instrumented_or_legacy + 152 \n====\n    1 (640 bytes) ROOT LEAK: <malloc in __kmp_str_format 0x7bfac30500> [640]\n\n"
+
+private val NEX_LEAK = "STACK OF 2 INSTANCES OF 'ROOT LEAK: <malloc in nex_alloc>':\n3   lambda   0x102564a1c n.main + 508\n2   lambda   0x102564b00 nex_alloc + 32\n0   libsystem_malloc.dylib   0x18891c630 malloc + 152 \n====\n    2 (96 bytes) ROOT LEAK: <malloc in nex_alloc 0x7bfac30600> [48]\n\n"
+
+@test("a leaks report with only libomp's startup leak is clean")
+leaks_clean_libomp_only()
+    assert(leaks_clean(s"${LEAKS_HEAD}Process 32507: 1 leak for 640 total leaked bytes.\n\n$LIBOMP_LEAK"))
+
+@test("a leaks report with libomp's startup leak and a real leak is not clean")
+leaks_dirty_with_real_leak()
+    assert(!leaks_clean(s"${LEAKS_HEAD}Process 32507: 3 leaks for 736 total leaked bytes.\n\n$LIBOMP_LEAK$NEX_LEAK"))
+    assert(!leaks_clean(s"${LEAKS_HEAD}Process 32507: 3 leaks for 736 total leaked bytes.\n\n$NEX_LEAK$LIBOMP_LEAK"))
+    assert(!leaks_clean(s"${LEAKS_HEAD}Process 32507: 2 leaks for 96 total leaked bytes.\n\n$NEX_LEAK"))
+
+@test("a leak that only mentions kmp in its message, not its stack, is not clean")
+leaks_dirty_kmp_in_message_only()
+    val other = "STACK OF 1 INSTANCE OF 'ROOT LEAK: <malloc in __kmp_register_library_startup>':\n2   lambda   0x102564a1c n.main + 508\n1   lambda   0x102564b00 nex_alloc + 32\n0   libsystem_malloc.dylib   0x18891c630 malloc + 152 \n====\n    1 (64 bytes) ROOT LEAK: <malloc in __kmp_register_library_startup 0x7bfac30600> [64]\n\n"
+
+    assert(!leaks_clean(s"${LEAKS_HEAD}Process 32507: 1 leak for 64 total leaked bytes.\n\n$other"))
+
+@test("a leaks report counting leaks it prints no stack for is not clean")
+leaks_dirty_without_stack()
+    assert(!leaks_clean(s"${LEAKS_HEAD}Process 32507: 2 leaks for 700 total leaked bytes.\n\n$LIBOMP_LEAK"))
+    assert(!leaks_clean("no summary at all"))
+
+@test("a leaks report with no leaks is clean")
+leaks_clean_no_leaks()
+    assert(leaks_clean(s"${LEAKS_HEAD}Process 32507: 0 leaks for 0 total leaked bytes.\n"))
 
 @test("every parallel program of testdata/v2 prints its .out, bit for bit, on 1, 2 and 7 threads")
 par_run_thread_counts()
@@ -152,12 +239,12 @@ par_run_no_leaks_or_races()
     assert(r.failed.len() == 0 && r.passed == 1, join(r.failed.view(), "\n"))
 
     val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
-    val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
+    val leaks = leak_report(exe)
 
     finish(b)
     assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
     assert_eq(guarded.text, expected)
-    assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), leaks.text)
+    assert(leaks_clean(leaks), leaks)
 
 // An axpy over arrays of any length, as a loop and as a `parallel for`, the second's body region
 // `p.0`; and a call of each that reads `x` past its end.
@@ -216,11 +303,11 @@ par_traps_leak_nothing()
         val exe = executable(b, name)
         val expected = read_text(repo(s"testdata/leaks/$name.out")).unwrap()
         val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
-        val leaks = capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap()
+        val leaks = leak_report(exe)
 
         assert(guarded.status.ok(), s"$name under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
         assert_eq(guarded.text, expected)
-        assert(leaks.text.contains(": 0 leaks for 0 total leaked bytes."), s"$name: ${leaks.text}")
+        assert(leaks_clean(leaks), s"$name: $leaks")
 
     finish(b)
 
@@ -246,8 +333,7 @@ par_lambda_captures_written_array()
     val exe = executable(b, "lambda")
     val sequential = outputs(b, "lambda-seq", replace_all(LAMBDA_IN_PARALLEL, "parallel ", ""), ["1"])[0].text
     val guarded = capture(exe, [], env = [Var("OMP_NUM_THREADS", "7"), Var("DYLD_INSERT_LIBRARIES", "/usr/lib/libgmalloc.dylib")], stderr = true).unwrap()
-    val leaks = if exists("/usr/bin/leaks") then capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap().text
-                else ": 0 leaks for 0 total leaked bytes."
+    val leaks = leak_report(exe)
 
     finish(b)
     assert_eq(sequential, expected)
@@ -257,7 +343,7 @@ par_lambda_captures_written_array()
 
     assert(guarded.status.ok(), s"under Guard Malloc: ${guarded.status}\n${guarded.err.unwrap_or("")}")
     assert_eq(guarded.text, expected)
-    assert(leaks.contains(": 0 leaks for 0 total leaked bytes."), leaks)
+    assert(leaks_clean(leaks), leaks)
 
 @test("a lambda in a parallel body may not read another iteration's element of the array the body writes")
 par_lambda_reads_only_own_element()
@@ -276,8 +362,7 @@ par_fused_bits()
     val sequential = outputs(b, "fused-seq", replace_all(FUSED, "parallel ", ""), ["1"])[0].text
     val outs = outputs(b, "fused", FUSED)
     val exe = executable(b, "fused")
-    val leaks = if exists("/usr/bin/leaks") then capture("/usr/bin/leaks", ["--atExit", "--", exe], env = [Var("OMP_NUM_THREADS", "7")], stderr = true).unwrap().text
-                else ": 0 leaks for 0 total leaked bytes."
+    val leaks = leak_report(exe)
 
     finish(b)
     assert_eq(split(sequential, "\n")[0], "0.75")
@@ -286,7 +371,7 @@ par_fused_bits()
     for o in outs
         assert_eq(o.text, sequential)
 
-    assert(leaks.contains(": 0 leaks for 0 total leaked bytes."), leaks)
+    assert(leaks_clean(leaks), leaks)
 
 // `y = parallel a * x + y` on an `inout` array, and a `dot` and a `sum` of a product.
 private val FUSED_SHAPES = "def axpy(a: real, x: [real], y: inout [real]) =\n  y = parallel a * x + y\n\ndef dots(x: [real], y: [real]): real = (parallel dot(x, y)) + (parallel sum(x * y))\n\ndef main() =\n  val x: [real] = linspace(0.0, 1.0, 10001)\n  var y: [real] = ones(10001)\n  axpy(0.5, x, y)\n  print(dots(x, y))\n"
