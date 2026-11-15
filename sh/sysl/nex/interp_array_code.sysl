@@ -10,7 +10,7 @@ module sh.sysl.nex
 // what is evaluated after it, the operation reads the storage as it was. Anything else reads the
 // array as a value that may be kept (`interp_array.sysl`).
 
-import nex_runtime.sh.sysl.nex_runtime.{SHAPE_MISMATCH, SLICE_LENGTH_MISMATCH, ZERO_RANGE_STEP}
+import nex_runtime.sh.sysl.nex_runtime.{INDEX_OUT_OF_BOUNDS, SHAPE_MISMATCH, SLICE_LENGTH_MISMATCH, ZERO_RANGE_STEP}
 import sysl.buf.{Buf, buf}
 import sh.sysl.parsing.Span
 
@@ -23,6 +23,43 @@ private type Sub = &Fn(@keeps &Cells, &Arr, usize) -> Result[Cut, Signal]
 
 // An optional bound or stride.
 private type Bound = &Fn(@keeps &Cells) -> Result[Option[long], Signal]
+
+// What an index list of single indices does to the array it is given: each index evaluated and
+// checked against its axis in turn, as `at_axis` checks it, and the storage position of the element
+// they name answered.
+private type Pos = &Fn(@keeps &Cells, @keeps &Arr) -> Result[long, Signal]
+
+// Whether `e` may read the array an index list is taken of: an `end` inside it, or a lambda, whose
+// body is compiled apart from it.
+private mentions_end(e: TExpr) -> bool
+    *e.kind match
+        TArray(op) -> *op match
+            TEnd(_) -> return true
+            _ -> ()
+        TLambdaRef(_) -> return true
+        _ -> ()
+
+    for x in children(e)
+        if mentions_end(x) then return true
+
+    false
+
+// `y` written at storage position `p` of the array slot `s` of `cells` holds, its storage copied
+// first where it is shared, as `owned` copies it.
+private put_slot(cells: &Cells, s: usize, p: long, y: Value)
+    val w = arr_of(cells.v[s])
+    val d = if w.store.shared then owned(VRef(cells, s, buf())).store.d else w.store.d
+
+    data_set(d, usize(p), y)
+
+// The storage position of index `i` on axis `k` (from 0) of `a`, added to `p`, or the trap of an
+// index outside the axis.
+private at_pos(a: &Arr, k: usize, i: long, p: long) -> Result[long, Signal]
+    val z = long.wrap(unshift(a, k, i) - 1)
+
+    if ulong.wrap(z) >= ulong.wrap(a.ext[k]) then return Err(Trapped(INDEX_OUT_OF_BOUNDS))
+
+    Ok(p + z * a.str[k])
 
 // Whether evaluating `e` can write a local: an assignment or an `inout` borrow inside it.
 private[nex] writes(e: TExpr) -> bool
@@ -325,12 +362,117 @@ impl Interp
             (c) -> Ok(Some(long.wrap(wide(int_of(k(c)?), signed))))
         None -> (c) -> Ok(None)
 
+    // `subs` as a `Pos` where every subscript is a single index: the element's storage position
+    // computed from the window's offset and its extent and stride per axis, with no window built.
+    // The array is stored for `end` only where a subscript may read it.
+    positions(*self, subs: Buf[TSub]) -> Option[Pos]
+        for s in subs
+            s match
+                TSubAt(_) -> ()
+                _ -> return None
+
+        val slot = self.next
+
+        self.next += 1
+        self.ends.push(slot)
+
+        var ks: Buf[Code] = buf()
+        var signs: Buf[bool] = buf()
+        var ends = false
+
+        for s in subs
+            s match
+                TSubAt(i) ->
+                    ks.push(self.ex(i))
+                    signs.push(is_signed(base_of(i.ty)))
+                    if mentions_end(i) then ends = true
+                _ -> ()
+
+        self.ends.pop()
+
+        val n = ks.len()
+
+        if n == 1
+            val k0 = ks[0]
+            val s0 = signs[0]
+
+            return Some((c, a) ->
+                if ends then c.v[slot] = VArr(a)
+
+                at_pos(a, 0, long.wrap(wide(int_of(k0(c)?), s0)), a.offset)
+            )
+
+        if n == 2
+            val k0 = ks[0]
+            val k1 = ks[1]
+            val s0 = signs[0]
+            val s1 = signs[1]
+
+            return Some((c, a) ->
+                if ends then c.v[slot] = VArr(a)
+
+                val p = at_pos(a, 0, long.wrap(wide(int_of(k0(c)?), s0)), a.offset)?
+
+                at_pos(a, 1, long.wrap(wide(int_of(k1(c)?), s1)), p)
+            )
+
+        Some((c, a) ->
+            if ends then c.v[slot] = VArr(a)
+
+            var p = a.offset
+
+            for k in 0..<n
+                val f = ks[k]
+
+                p = at_pos(a, k, long.wrap(wide(int_of(f(c)?), signs[k])), p)?
+
+            Ok(p)
+        )
+    end positions
+
+    // The frame slot a local array target is read from directly, where `lent` would read it so: a
+    // local of the function's own frame, neither captured nor `inout`.
+    own_slot(*self, e: TExpr) -> Option[usize]
+        if self.unheld(e.ty).is_some() then return None
+
+        *e.kind match
+            TLocal(id) ->
+                if !is_array(e.ty) || self.indirect(id) || self.args_local == Some(id) then return None
+
+                Some(self.slot_of(id))
+            _ -> None
+
     // `a[i, j]` read: one element. An element that holds arrays shares their storage with the
     // array's, as a read out of a place does.
     element(*self, e: TExpr, target: TExpr, subs: Buf[TSub]) -> Code
-        val t = self.lent_if(target, !subs_write(subs))
-        val take = self.subscripts(subs)
         val keep = self.holds_array(e.ty)
+        val quiet = !subs_write(subs)
+        val direct = if quiet then self.own_slot(target) else None
+
+        // Single indices: the position computed inline, a local target read from its slot.
+        direct match
+            Some(s) -> self.positions(subs) match
+                Some(pos) ->
+                    return (c) ->
+                        val a = arr_of(c.v[s])
+                        val x = stored(a, pos(c, a)?)
+
+                        Ok(if keep then shared(x) else x)
+                None -> ()
+            None -> ()
+
+        val t = self.lent_if(target, quiet)
+
+        self.positions(subs) match
+            Some(pos) ->
+                return (c) ->
+                    val a = arr_of(t(c)?)
+                    val x = stored(a, pos(c, a)?)
+
+                    Ok(if keep then shared(x) else x)
+            None -> ()
+
+        val take = self.subscripts(subs)
 
         (c) ->
             val (a, axes) = take(c, t(c)?)?
@@ -397,7 +539,7 @@ impl Interp
         val scalar = broadcast || !is_array(value.ty)
         val v = self.ex(value)
         val base = self.place_ref(target)
-        val take = self.subscripts(subs)
+        val pos = self.positions(subs)
         val et = elem_of(target.ty)
         val vt = elem_of(value.ty)
 
@@ -411,29 +553,50 @@ impl Interp
                         else self.lifted(span, op[0..<op.len - 1], target.ty, if scalar then vt else value.ty) match
                             Some(f) -> f
                             None -> return self.later(span, s"`$op` on ${show_ty(et)}")
-        var whole = true
-
-        for s in subs
-            s match
-                TSubAt(_) -> ()
-                _ -> whole = false
-
-        if whole
-            return (c) ->
-                val x = v(c)?
-                val r = base(c)?
-                val (a, axes) = take(c, deref(r))?
-                var p = a.offset
-
-                for k in 0..<axes.len()
-                    p += axes[k].first * a.str[k]
-
-                val y = step(stored(a, p), x)?
-
-                data_set(owned(r).store.d, usize(p), y)
-                Ok(VVoid)
-
         val assigns = op == "="
+
+        // Single indices: one element, its position computed inline. A local or module-level target
+        // is read from its slot and written there, copied first where its storage is shared.
+        pos match
+            Some(at) ->
+                val m = self.m
+
+                *target.kind match
+                    TLocal(id) ->
+                        if !self.indirect(id)
+                            val s = self.slot_of(id)
+
+                            return (c) ->
+                                val x = v(c)?
+                                val a = arr_of(c.v[s])
+                                val p = at(c, a)?
+
+                                put_slot(c, s, p, if assigns then x else step(stored(a, p), x)?)
+                                Ok(VVoid)
+                    TGlobalRef(name) ->
+                        val g = self.global_number(name)
+
+                        return (c) ->
+                            val x = v(c)?
+                            val a = arr_of(m.globals.v[g])
+                            val p = at(c, a)?
+
+                            put_slot(m.globals, g, p, if assigns then x else step(stored(a, p), x)?)
+                            Ok(VVoid)
+                    _ -> ()
+
+                return (c) ->
+                    val x = v(c)?
+                    val r = base(c)?
+                    val a = arr_of(deref(r))
+                    val p = at(c, a)?
+                    val y = if assigns then x else step(stored(a, p), x)?
+
+                    data_set(owned(r).store.d, usize(p), y)
+                    Ok(VVoid)
+            None -> ()
+
+        val take = self.subscripts(subs)
 
         (c) ->
             val x = v(c)?
