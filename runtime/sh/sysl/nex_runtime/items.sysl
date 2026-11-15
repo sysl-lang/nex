@@ -378,6 +378,18 @@ items_fill_from(q: *u8, p: *u8)
         memcpy(e, at(p, t), z)
         if b.hold != null then b.hold(e)
 
+// Every element of the new array at `q` given the value at `x`, counted once per element.
+@export("nex_items_fill_with")
+items_fill_with(q: *u8, x: *u8)
+    val b = items(q)
+    val z = usize(b.size)
+
+    for t in 0..<items_count(q)
+        val e = &b.data[usize(t) * z]
+
+        memcpy(e, x, z)
+        if b.hold != null then b.hold(e)
+
 // The elements of the array at `part`, in storage order, appended to the new array of one axis at
 // `p`, each counted again.
 @export("nex_items_append")
