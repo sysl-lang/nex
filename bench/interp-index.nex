@@ -1,0 +1,35 @@
+// The interpreter's single-element indexing (PLAN.md M13): scalar loops over 200 000 `real64`
+// elements, 10 passes of an element read, an element update, a three-point stencil and a 400 × 400
+// column-order matrix-vector product. Timed from outside, on either engine.
+
+def main() =
+  val n = 200000
+  var a: [real] = zeros(n)
+  var b: [real] = zeros(n)
+  for i in 1..n
+    a[i] = 1.0 / i
+  val m = 400
+  var g: [real; :, :] = zeros((m, m))
+  var x: [real] = zeros(m)
+  var y: [real] = zeros(m)
+  for j in 1..m
+    x[j] = 1.0 * (j % 5) - 2.0
+    for i in 1..m
+      g[i, j] = 1.0 / (i + j)
+  var s = 0.0
+  for pass in 1..10
+    for i in 1..n
+      s = s + a[i]
+    for i in 1..n
+      a[i] = a[i] * 0.5 + 1.0
+    for i in 2..n - 1
+      b[i] = (a[i - 1] + a[i] + a[i + 1]) / 3.0
+    for i in 1..m
+      y[i] = 0.0
+    for j in 1..m
+      val xj = x[j]
+      for i in 1..m
+        y[i] = y[i] + g[i, j] * xj
+  print(s)
+  print(sum(b))
+  print(sum(y))
