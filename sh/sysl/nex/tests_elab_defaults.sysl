@@ -111,8 +111,12 @@ dft_forward_defaulted()
     assert_eq(refused("def f(x: integer, y: integer = g(x)) = print(x + y)\ndef g(a: integer, b: integer = a + 1): integer = a * b\ndef main() = f(2)\n"), "ok")
     // A generic callee declared later, its default filled in its instance.
     assert_eq(refused("def f(n: integer = first(5)) = print(n)\ndef first[T](x: T, k: integer = 1): T = x\ndef main() = f()\n"), "ok")
-    // A concrete `def` beside a generic one of its name, chosen by a forward call relying on its default.
-    assert_eq(refused("def f(n: integer = pick(5)) = print(n)\ndef pick(x: integer, k: integer = 1): integer = x + k\ndef pick[T](x: T, y: T, k: integer = 1): T = x\ndef main() = f()\n"), "ok")
+    // A concrete `def` beside a generic one of its name is an overload set, whose members take no
+    // defaults (ref §6.5): each default is refused, and a forward call relying on one finds no member.
+    assert_eq(refused("def f(n: integer = pick(5)) = print(n)\ndef pick(x: integer, k: integer = 1): integer = x + k\ndef pick[T](x: T, y: T, k: integer = 1): T = x\ndef main() = f()\n"),
+        "error: `pick` is overloaded, so its parameters take no defaults: a call of an overloaded function gives every argument, by position @2:35\nerror: `pick` is overloaded, so its parameters take no defaults: a call of an overloaded function gives every argument, by position @3:38\nerror: no `pick` takes the arguments (int64); its overloads are `pick(int64, int64)` and `pick[T](T, T, integer)` @1:20")
+    // The same forward call to a lone concrete `def` relying on its default is accepted.
+    assert_eq(refused("def f(n: integer = pick(5)) = print(n)\ndef pick(x: integer, k: integer = 1): integer = x + k\ndef main() = f()\n"), "ok")
     // A function's defaults elaborated while another's are, its result type inferred from its body.
     assert_eq(refused("def f(n: integer = g()) = print(n)\ndef g(k: integer = 3) = k * 2\ndef main() = f()\n"), "ok")
 
