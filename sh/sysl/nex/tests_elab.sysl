@@ -57,7 +57,7 @@ elab_top_level_statement()
 @test("a name is declared once at the top level, once per block and once per parameter list")
 elab_redeclaration()
     assert_eq(refused("val x = 1\nval x = 2\n" + MAIN), "error: redeclaration of `x` @2:1")
-    assert_eq(refused("def f() = 1\ndef f() = 2\n" + MAIN), "error: redeclaration of `f` @2:1")
+    assert_eq(refused("def f() = 1\ndef f() = 2\n" + MAIN), "error: redeclaration of `f` with the parameter types (): each overload of a name takes parameter types of its own @2:1")
     assert_eq(refused("def f(a: integer, a: integer) = a\n" + MAIN), "error: redeclaration of `a` @1:1")
     assert_eq(refused("def main() =\n  val a = 1\n  val a = 2\n"), "error: redeclaration of `a` @3:7")
 

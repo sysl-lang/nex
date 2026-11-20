@@ -309,6 +309,9 @@ impl Elab
         if self.names_a_parameter(span, n) then return self.invalid(span)
 
         val g = self.global(span, n)
+        val set = self.overload_set(span, n, g)
+
+        if overload_count(set) > 1 then return self.overloaded_value(span, n, set, want)
 
         self.find_top(g) match
             Some(TopValue(k)) ->

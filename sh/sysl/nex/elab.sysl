@@ -283,6 +283,9 @@ struct Elab
         for k in 0..<count
             self.sig_types(k)
 
+        // Every overload's parameter types are known now, which name it apart from the others.
+        self.check_overloads()
+
         for k in 0..<count
             self.ensure_defaults(k, self.funs[k].decl.span)
 
@@ -374,7 +377,7 @@ struct Elab
                 Extern(n, params, ret) ->
                     val name = self.own_name(d, n)
 
-                    if self.declare(d.span, name)
+                    if self.declare_fun(d.span, name)
                         self.tops.push(Top(name, TopExtern(self.externs.len())))
                         self.externs.push(ExternSrc(d, name, params, ret))
                         self.note_private(d, name)
@@ -671,7 +674,9 @@ struct Elab
         if self.fret_known[k] then return self.fret[k]
 
         if self.fstate[k] == Working
-            self.fail(span, s"`${self.funs[k].name}` is used before its result type is known; declare it: `def ${self.funs[k].name}(...): T`")
+            val name = overload_base(self.funs[k].name)
+
+            self.fail(span, s"`${name}` is used before its result type is known; declare it: `def ${name}(...): T`")
             return Error
 
         self.ensure_body(k)

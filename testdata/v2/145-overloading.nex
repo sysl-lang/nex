@@ -1,0 +1,53 @@
+// Overloading by parameter types: the nearest integer and real widths, a literal's own type, a
+// concrete overload before a generic one, arrays against scalars and ranks against ranks, an
+// `@elemental` overload applied element by element, units, `inout`, function values, method-call
+// syntax, and overloads calling one another.
+
+def kind(x: int32): string = "int32"
+def kind(x: int64): string = "int64"
+def kind(x: real32): string = "real32"
+def kind(x: real64): string = "real64"
+def kind(x: string): string = "string"
+def kind[T](x: T): string = "generic"
+
+def shape(x: real): string = "scalar"
+def shape(x: [real]): string = "vector"
+def shape(x: [real; :, :]): string = "matrix"
+
+@elemental def twice(x: real): real = 2.0 * x
+def twice(x: [real; :, :]): real = sum(x)
+
+def speed(d: real<m>): real<m> = d
+def speed(t: real<s>): real<s> = 2.0 * t
+
+def reset(a: inout [integer]) = a[1] = 0
+def reset(n: integer): integer = 0
+
+def total(x: integer): integer = x
+def total(x: [integer]): integer =
+  var n = 0
+  for v in x
+    n += total(v)
+  n
+
+def apply(f: (integer) -> string, x: integer): string = f(x)
+
+def main() =
+  val a: int8 = 1
+  val b: int16 = 1
+  val c: uint16 = 1
+  val r: real16 = 1.0
+  val q: real32 = 1.0
+  print(kind(a), kind(b), kind(c), kind(7), kind(2.5))
+  print(kind(r), kind(q), kind("s"), kind(true), kind((1, 2)))
+  print(shape(1.0), shape([1.0, 2.0]), shape([[1.0], [2.0]]))
+  print(twice([1.0, 2.5]))
+  print(twice([[1.0, 2.0], [3.0, 4.0]]))
+  print(speed(3.0<m>), speed(3.0<s>), speed(1.0<km>))
+  var xs = [5, 6, 7]
+  reset(xs)
+  print(xs, reset(9))
+  print(total(4), total([1, 2, 3]), [10, 20].total())
+  print(apply(kind, 3))
+  val k: (real) -> string = kind
+  print(k(1.0))

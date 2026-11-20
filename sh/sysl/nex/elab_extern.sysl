@@ -121,7 +121,11 @@ impl Elab
                 self.fail(x.decl.span, s"`@${a.name}` is not an attribute of an `extern def`, which takes `@link`, `@symbol`, `@pure` and `@fortran`")
 
         for j in 0..<k
-            if !self.xout[j].host && self.xout[j].symbol == symbol then self.fail(x.decl.span, s"`${display_name(x.name)}` and `${display_name(self.xout[j].name)}` both name the C symbol `${symbol}`")
+            if !self.xout[j].host && self.xout[j].symbol == symbol
+                if self.xout[j].name == x.name
+                    self.fail(x.decl.span, s"`${display_name(x.name)}` is overloaded, and each `extern` of it binds a C symbol of its own, but two name `${symbol}`: give each its symbol, `@symbol(\"...\")`")
+                else
+                    self.fail(x.decl.span, s"`${display_name(x.name)}` and `${display_name(self.xout[j].name)}` both name the C symbol `${symbol}`")
 
         self.xout.push(TExtern(x.decl.span, x.name, tys, modes, ret, symbol, links, frameworks, pure, strided, partner, fortran, false))
     end resolve_extern

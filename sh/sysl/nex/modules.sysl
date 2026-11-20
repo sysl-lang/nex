@@ -156,9 +156,10 @@ with_shipped_prelude(p: Program, mods: Modules) -> (Program, Modules, usize)
     (Program(decls), Modules(names, test_only, files, Some(m), mods.test_build, mods.imports, mods.refused, mods.privates, mods.qualified, mods.script, mods.mpi), past)
 end with_shipped_prelude
 
-// The name a value of a struct or an enum is printed with: its own, without its module's path.
+// The name a value of a struct or an enum is printed with: its own, without its module's path; and
+// a function's, without the parameter types an overload's internal name holds.
 display_name(internal: string) -> string
-    val head = split(internal, "[")[0]
+    val head = split(split(internal, "(")[0], "[")[0]
     val parts = split(head, ".")
 
     parts[parts.len - 1]

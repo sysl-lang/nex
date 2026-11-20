@@ -1,0 +1,607 @@
+module sh.sysl.nex
+
+// Overloading by parameter types (ref §6.5, §6.10; DESIGN §11.6).
+//
+// **Several functions may share a name**: concrete `def`s, generic `def`s and `extern def`s. A name
+// that denotes more than one function is an overload set, and a call of it chooses one by the types
+// of its arguments, which it elaborates first, each on its own:
+//
+// 1. **The concrete bucket first.** Every concrete `def` and `extern` that takes the arguments as
+//    they are, widened along DESIGN §2.2's arrows, or applied element by element where it is
+//    `@elemental`, is a candidate, and each argument costs how far it travels to its parameter's
+//    type. A candidate wins when no other is cheaper at any argument and it is cheaper than each
+//    other at one; where none wins, the call is ambiguous.
+// 2. **The generic bucket only where no concrete candidate applies.** A generic `def` applies where
+//    its type arguments infer and its constraints admit them. One applicable generic is called; two
+//    are ambiguous.
+// 3. **Otherwise no overload takes the arguments**, and the diagnostic lists what each one takes.
+//
+// **An overload set is called by position**, every argument given: its members take no defaults
+// and its calls no named arguments. **Each concrete member and `extern` has an internal name of its
+// own**, its name with its parameter types, `f(int64, real64)`, which is what both engines and the
+// MLIR emitter know it by; an `extern` binds the C symbol its `@symbol` names. Where several generic
+// `def`s share a name, each one's instances are named after its head, `f[T: Numeric](T)[real64]`.
+//
+// **A name imported into a module that declares functions of that name**, or imported from two
+// modules, is one overload set when every declaration it reaches is a function.
+
+import sysl.buf.{Buf, buf}
+import sysl.text.join
+import sh.sysl.parsing.Span
+
+// The functions a name denotes at one use: its concrete `def`s, `extern`s and generic `def`s.
+struct Overloads
+    funs: Buf[usize]
+    externs: Buf[usize]
+    gens: Buf[usize]
+
+overload_count(o: Overloads) -> usize = o.funs.len() + o.externs.len() + o.gens.len()
+
+// The name an overload's internal name is written with: `f` of `f(int64, real64)`.
+overload_base(name: string) -> string
+    if !name.ends_with(")") then return name
+
+    name.index_of("(") match
+        Some(k) -> name[..<k]
+        None -> name
+
+// How far a value of the numeric type `a` travels to the numeric type `b`: a step from integer to
+// real or from real to complex costs 100, a change of signedness 50, and each doubling or halving
+// of the width 1. Closer is cheaper, so `f(1)` takes `f(x: int64)` over `f(x: real64)`, and an
+// `int32` takes `int64` over `real64`.
+private distance(a: Ty, b: Ty) -> int
+    if !is_numeric(a) || !is_numeric(b) then return 0
+
+    var d = 100 * gap(family(a), family(b))
+
+    if is_int(a) && is_int(b) && is_signed(a) != is_signed(b) then d += 50
+
+    d + gap(width_step(bits_of(a)), width_step(bits_of(b)))
+
+private family(t: Ty) -> int = t match
+    Int(_, _) -> 0
+    Real(_) -> 1
+    _ -> 2
+
+private width_step(bits: int) -> int = if bits <= 8 then 0 elif bits <= 16 then 1 elif bits <= 32 then 2 else 3
+
+private gap(a: int, b: int) -> int = if a > b then a - b else b - a
+
+// Whether `e` is a place an `inout` parameter may borrow.
+private is_place_expr(e: Expr) -> bool = *e.kind match
+    Name(_) -> true
+    Field(_, _) -> true
+    TupleField(_, _) -> true
+    Index(_, _) -> true
+    _ -> false
+
+private lambda_arity(e: Expr) -> Option[usize] = *e.kind match
+    Lambda(ps, _) -> Some(ps.len())
+    _ -> None
+
+private fn_arity(t: Ty) -> Option[usize] = base_of(t) match
+    Fn(s) -> Some(s.params.len())
+    _ -> None
+
+// Whether costs `a` are no worse than `b` at every argument and better at one.
+private dominates(a: Buf[int], b: Buf[int]) -> bool
+    var better = false
+
+    for i in 0..<a.len()
+        if a[i] > b[i] then return false
+        if a[i] < b[i] then better = true
+
+    better
+
+private types_text(tys: Buf[Ty], modes: Buf[Mode]) -> string
+    var out: Buf[string] = buf()
+
+    for k in 0..<tys.len()
+        out.push(if modes[k] == Inout then "inout " + show_ty(tys[k]) else show_ty(tys[k]))
+
+    "(" + join(out.view(), ", ") + ")"
+
+private plain_types_text(tys: Buf[Ty]) -> string
+    var out: Buf[string] = buf()
+
+    for t in tys
+        out.push(show_ty(t))
+
+    "(" + join(out.view(), ", ") + ")"
+
+private same_types(a: Buf[Ty], b: Buf[Ty]) -> bool
+    if a.len() != b.len() then return false
+
+    for k in 0..<a.len()
+        if !ty_eq(a[k], b[k]) then return false
+
+    true
+
+// A list as a sentence: `a`, `a and b`, `a, b and c`.
+private listed(items: Buf[string]) -> string
+    if items.len() == 0 then return ""
+    if items.len() == 1 then return items[0]
+
+    var out = items[0]
+
+    for k in 1..<items.len() - 1
+        out += ", " + items[k]
+
+    out + " and " + items[items.len() - 1]
+
+impl Elab
+    // -- declarations -----------------------------------------------------------------------------
+
+    // Whether every top-level declaration called `name` is a function.
+    functions_only(self, name: string) -> bool
+        for t in self.tops
+            if t.name == name
+                t.kind match
+                    TopValue(_) -> return false
+                    _ -> ()
+
+        true
+
+    // The functions of each overloaded name, checked once every signature's types are known, and
+    // each given its internal name.
+    check_overloads(*self)
+        var seen: Buf[string] = buf()
+
+        for t in self.tops
+            t.kind match
+                TopValue(_) -> continue
+                _ -> ()
+
+            if !contains(seen, t.name)
+                seen.push(t.name)
+                self.check_overload_set(t.name)
+
+        for g in self.gen.funs
+            if !contains(seen, g.name)
+                seen.push(g.name)
+                self.check_overload_set(g.name)
+
+    // The functions declared with the internal name `name`.
+    private declared_as(self, name: string) -> Overloads
+        var o = Overloads(buf(), buf(), buf())
+
+        for t in self.tops
+            if t.name == name
+                t.kind match
+                    TopFun(k) -> o.funs.push(k)
+                    TopExtern(k) -> o.externs.push(k)
+                    TopValue(_) -> ()
+
+        for g in 0..<self.gen.funs.len()
+            if self.gen.funs[g].name == name then o.gens.push(g)
+
+        o
+
+    private check_overload_set(*self, name: string)
+        val o = self.declared_as(name)
+
+        if overload_count(o) < 2 then return
+
+        val shown = display_name(name)
+        var spans: Buf[Span] = buf()
+
+        for k in o.funs
+            spans.push(self.funs[k].decl.span)
+
+        for k in o.externs
+            spans.push(self.externs[k].decl.span)
+
+        for g in o.gens
+            spans.push(self.gen.funs[g].decl.span)
+
+        // The program's one entry, and a test, are each one `def`.
+        if name == "main" || contains(self.tests, name)
+            val why = if name == "main" then "a program has one `main`, which is not overloaded" else "a test is one `def`, which is not overloaded"
+
+            for k in 1..<spans.len()
+                self.fail(spans[k], s"redeclaration of `${shown}`: ${why}")
+
+            return
+
+        for k in o.externs
+            if has_attr(self.externs[k].decl.attrs, "host") then self.fail(self.externs[k].decl.span, s"`${shown}` is a `@host` function, which the host gives by its name, so it is not overloaded")
+
+        for k in o.funs
+            if self.funs[k].uparams.len() > 0 then self.fail(self.funs[k].decl.span, s"`${shown}` is generic over units, and a function generic over units is not overloaded: give it a name of its own")
+
+            for p in self.funs[k].params
+                p.default match
+                    Some(d) -> self.no_default(d.span, shown)
+                    None -> ()
+
+        for g in o.gens
+            for p in self.gen.funs[g].params
+                p.default match
+                    Some(d) -> self.no_default(d.span, shown)
+                    None -> ()
+
+        // The concrete members, each by its parameter types, which no two share.
+        var tys: Buf[Buf[Ty]] = buf()
+        var at: Buf[Span] = buf()
+
+        for k in o.funs
+            tys.push(self.fsig[k].tys)
+            at.push(self.funs[k].decl.span)
+
+        for k in o.externs
+            tys.push(self.xout[k].params)
+            at.push(self.externs[k].decl.span)
+
+        for j in 0..<tys.len()
+            for i in 0..<j
+                if same_types(tys[i], tys[j])
+                    self.fail(at[j], s"redeclaration of `${shown}` with the parameter types ${plain_types_text(tys[j])}: each overload of a name takes parameter types of its own")
+                    break
+
+        if tys.len() >= 2
+            for k in o.funs
+                var f = self.funs[k]
+
+                f.name = name + plain_types_text(self.fsig[k].tys)
+                self.funs[k] = f
+
+            for k in o.externs
+                val m = name + plain_types_text(self.xout[k].params)
+                var x = self.externs[k]
+                var t = self.xout[k]
+
+                x.name = m
+                t.name = m
+                self.externs[k] = x
+                self.xout[k] = t
+
+        if o.gens.len() >= 2
+            var heads: Buf[string] = buf()
+
+            for g in o.gens
+                val head = name + generic_head(self.gen.funs[g])
+
+                if contains(heads, head) then self.fail(self.gen.funs[g].decl.span, s"redeclaration of `${shown}` as the generic ${generic_head(self.gen.funs[g])}: each overload of a name takes parameter types of its own")
+
+                heads.push(head)
+                self.gen.symbols[g] = head
+    end check_overload_set
+
+    private no_default(*self, span: Span, shown: string)
+        self.fail(span, s"`${shown}` is overloaded, so its parameters take no defaults: a call of an overloaded function gives every argument, by position")
+
+    // -- uses -------------------------------------------------------------------------------------
+
+    // The functions the name `n`, written at `span` and denoting the internal name `q`, reaches: those
+    // declared as `q`, and, in a module, those of every import of `n` and of the module's own `n`,
+    // where each of them is a function.
+    overload_set(self, span: Span, n: string, q: string) -> Overloads
+        var names: Buf[string] = buf()
+
+        names.push(q)
+
+        if !self.mods.single() && !n.contains(".") && self.functions_only(q)
+            val m = self.mods.module_at(span.start)
+            val own = self.mods.qualify(m, n)
+
+            if !contains(names, own) && self.top_exists(own) && self.functions_only(own) then names.push(own)
+
+            for i in self.mods.imports
+                if i.owner == m && i.alias == n && !contains(names, i.target) && self.functions_only(i.target) then names.push(i.target)
+
+        var o = Overloads(buf(), buf(), buf())
+
+        for name in names
+            val d = self.declared_as(name)
+
+            o.funs.extend(d.funs.view())
+            o.externs.extend(d.externs.view())
+            o.gens.extend(d.gens.view())
+
+        o
+    end overload_set
+
+    // A call of the overload set `o` of the name `n`: the member the arguments' types choose.
+    overloaded_call(*self, span: Span, at: Span, n: string, o: Overloads, args: Buf[Expr], want: Option[Ty]) -> TExpr
+        for a in args
+            *a.kind match
+                NamedArg(_, _) ->
+                    self.fail(a.span, s"`${n}` is overloaded, so its arguments are passed by position")
+                    return self.invalid(span)
+                _ -> ()
+
+        val base = self.diags.len()
+        var pre = self.elaborate_args(args)
+
+        if self.diags.len() > base then return self.invalid(span)
+
+        for v in pre
+            v match
+                Some(x) -> if has_error(x.ty) then return self.invalid(span)
+                None -> ()
+
+        // The concrete bucket: each candidate's cost at each argument.
+        var costs: Buf[Buf[int]] = buf()
+        var funs: Buf[Option[usize]] = buf()
+        var externs: Buf[Option[usize]] = buf()
+
+        for k in o.funs
+            self.def_costs(k, args, &pre) match
+                Some(c) ->
+                    costs.push(c)
+                    funs.push(Some(k))
+                    externs.push(None)
+                None -> ()
+
+        for k in o.externs
+            self.extern_costs(k, args, &pre) match
+                Some(c) ->
+                    costs.push(c)
+                    funs.push(None)
+                    externs.push(Some(k))
+                None -> ()
+
+        if costs.len() > 0
+            var best: Buf[usize] = buf()
+
+            for i in 0..<costs.len()
+                var beaten = false
+
+                for j in 0..<costs.len()
+                    if j != i && dominates(costs[j], costs[i]) then beaten = true
+
+                if !beaten then best.push(i)
+
+            if best.len() == 1
+                val i = best[0]
+
+                funs[i] match
+                    Some(k) -> return self.concrete_call(span, at, k, args, &pre)
+                    None -> return self.call_extern(span, at, externs[i].unwrap(), args)
+
+            var tied: Buf[string] = buf()
+
+            for i in best
+                tied.push(funs[i] match
+                    Some(k) -> self.def_text(n, k)
+                    None -> self.extern_text(n, externs[i].unwrap()))
+
+            self.fail(span, s"this call of `${n}` is ambiguous: ${listed(tied)} take the arguments ${self.args_text(&pre)} equally well; convert an argument to the type of the one meant")
+            return self.invalid(span)
+
+        // The generic bucket, where no concrete member applies.
+        var fit: Buf[usize] = buf()
+
+        for g in o.gens
+            if self.generic_fits(at, n, g, args, want, &pre) then fit.push(g)
+
+        if fit.len() == 1 then return self.generic_call_with(span, at, n, fit[0], args, want, &pre)
+
+        if fit.len() > 1
+            var heads: Buf[string] = buf()
+
+            for g in fit
+                heads.push(s"`${n}${generic_head(self.gen.funs[g])}`")
+
+            self.fail(span, s"this call of `${n}` is ambiguous: the generic ${listed(heads)} both take the arguments ${self.args_text(&pre)}; add a concrete overload for them, or constrain one of the generics")
+            return self.invalid(span)
+
+        self.fail(span, s"no `${n}` takes the arguments ${self.args_text(&pre)}; its overloads are ${listed(self.candidates_text(n, o))}")
+        self.invalid(span)
+    end overloaded_call
+
+    // The overload set `o` of `n` as a value: the member whose parameter types the function type
+    // expected here names.
+    overloaded_value(*self, span: Span, n: string, o: Overloads, want: Option[Ty]) -> TExpr
+        val sig = want match
+            Some(Fn(s)) -> *s
+            _ ->
+                self.fail(span, s"`${n}` is overloaded, so a value of it is the overload the function type expected here names: give that type, as in `val g: (int64) -> int64 = ${n}`; its overloads are ${listed(self.candidates_text(n, o))}")
+                return self.invalid(span)
+
+        var funs: Buf[usize] = buf()
+        var externs: Buf[usize] = buf()
+
+        for k in o.funs
+            if same_types(self.fsig[k].tys, sig.params) && same_modes(self.fsig[k].modes, sig.modes) then funs.push(k)
+
+        for k in o.externs
+            if same_types(self.xout[k].params, sig.params) && same_modes(self.xout[k].modes, sig.modes) then externs.push(k)
+
+        if funs.len() + externs.len() == 1
+            if funs.len() == 1 then return texpr(span, self.fun_type(funs[0], span), TFnRef(self.funs[funs[0]].name))
+
+            return self.extern_value(span, externs[0], self.xout[externs[0]].name)
+
+        if funs.len() + externs.len() == 0 && o.gens.len() == 1 then return self.generic_value(span, o.gens[0], want)
+
+        val wanted = types_text(sig.params, sig.modes)
+
+        if funs.len() + externs.len() > 1
+            self.fail(span, s"`${n}` has more than one overload taking ${wanted}, so which one this value is cannot be told")
+        else
+            self.fail(span, s"no `${n}` takes ${wanted}, the parameter types the function type expected here names; its overloads are ${listed(self.candidates_text(n, o))}")
+
+        self.invalid(span)
+    end overloaded_value
+
+    // -- choosing ---------------------------------------------------------------------------------
+
+    // What the `k`th `def` costs at each argument, or `None` where it does not take them.
+    private def_costs(*self, k: usize, args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> Option[Buf[int]]
+        val sig = self.fsig[k]
+
+        if args.len() != sig.tys.len() then return None
+
+        val elemental = self.is_elemental(k)
+        var out: Buf[int] = buf()
+
+        for i in 0..<args.len()
+            self.arg_cost(args[i], pre[i], sig.tys[i], sig.modes[i], elemental) match
+                Some(c) -> out.push(c)
+                None -> return None
+
+        Some(out)
+
+    // What the `k`th extern costs at each argument it is given (not a `@data` one), or `None`.
+    private extern_costs(*self, k: usize, args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> Option[Buf[int]]
+        val x = self.xout[k]
+        var given: Buf[usize] = buf()
+
+        for j in 0..<x.params.len()
+            if x.partner[j].is_none() then given.push(j)
+
+        if args.len() != given.len() then return None
+
+        var out: Buf[int] = buf()
+
+        for i in 0..<args.len()
+            val j = given[i]
+            val ty = x.params[j]
+
+            if is_assumed(ty)
+                // Any array of numbers or `bool`, or one such value, at any rank: the least close.
+                val ok = pre[i] match
+                    Some(v) -> !carries_unit(v.ty) && (is_numeric(elem_of(v.ty)) || ty_eq(elem_of(v.ty), Bool)) && (x.modes[j] != Inout || is_place_expr(args[i]))
+                    None -> false
+
+                if !ok then return None
+
+                out.push(500)
+                continue
+
+            val want = if has_data(x.partner, j) then without_c_ptr(ty) else ty
+
+            pre[i] match
+                Some(v) -> if carries_unit(v.ty) then return None
+                None -> ()
+
+            self.arg_cost(args[i], pre[i], want, x.modes[j], false) match
+                Some(c) -> out.push(c)
+                None -> return None
+
+        Some(out)
+    end extern_costs
+
+    // What an argument costs to pass to a parameter of type `p` and mode `mode`, or `None` where it
+    // cannot: 0 for its own type, `distance` along the arrows, a literal as far as the type it
+    // adopts is from its own, and 1000 more for an array passed element by element.
+    private arg_cost(self, e: Expr, v: Option[TExpr], p: Ty, mode: Mode, elemental: bool) -> Option[int]
+        val x = v match
+            Some(x) -> x
+            None ->
+                // A lambda, which waits for its parameter types: a function of as many parameters.
+                val n = lambda_arity(e).unwrap_or(0)
+
+                return if fn_arity(p).unwrap_or(n + 1) == n then Some(0) else None
+
+        if is_wild(x.ty) || has_error(p) then return Some(0)
+
+        if mode == Inout
+            if is_place_expr(e) && ty_eq(x.ty, p) then return Some(0)
+
+            return None
+
+        if is_array(x.ty)
+            if is_array(p) then return array_cost(x.ty, p)
+
+            if !elemental then return None
+
+            scalar_cost(NOT_LITERAL, elem_of(x.ty), p) match
+                Some(c) -> return Some(c + 1000)
+                None -> return None
+
+        if is_array(p) then return None
+
+        scalar_cost(self.literal_class(e), x.ty, p)
+
+    private def_text(self, n: string, k: usize) -> string = s"`${n}${types_text(self.fsig[k].tys, self.fsig[k].modes)}`"
+
+    private extern_text(self, n: string, k: usize) -> string
+        val x = self.xout[k]
+        var tys: Buf[Ty] = buf()
+        var modes: Buf[Mode] = buf()
+
+        for j in 0..<x.params.len()
+            if x.partner[j].is_none()
+                tys.push(x.params[j])
+                modes.push(x.modes[j])
+
+        s"`${n}${types_text(tys, modes)}`"
+
+    private candidates_text(self, n: string, o: Overloads) -> Buf[string]
+        var out: Buf[string] = buf()
+
+        for k in o.funs
+            out.push(self.def_text(n, k))
+
+        for k in o.externs
+            out.push(self.extern_text(n, k))
+
+        for g in o.gens
+            out.push(s"`${n}${generic_head(self.gen.funs[g])}`")
+
+        out
+
+    // The arguments' types as a call gives them, `(int64, [real64])`.
+    private args_text(self, pre: *Buf[Option[TExpr]]) -> string
+        var out: Buf[string] = buf()
+
+        for v in *pre
+            out.push(v match
+                Some(x) -> show_ty(x.ty)
+                None -> "a lambda")
+
+        "(" + join(out.view(), ", ") + ")"
+end Elab
+
+// A scalar of type `a`, of literal class `class`, passed for a scalar parameter of type `p`.
+private scalar_cost(class: int, a: Ty, p: Ty) -> Option[int]
+    if ty_eq(a, p) then return Some(0)
+
+    if class != NOT_LITERAL && !has_unit(a) && !has_unit(p)
+        adoption(class, p) match
+            Some(t) -> if ty_eq(t, p) then return Some(distance(a, p))
+            None -> ()
+
+    if promotes(a, p) then return Some(distance(base_of(a), base_of(p)))
+    if converts(a, p) then return Some(1 + distance(base_of(a), base_of(p)))
+
+    None
+
+// An array of type `a` passed for an array parameter of type `p`: of its rank, its elements widened.
+private array_cost(a: Ty, p: Ty) -> Option[int]
+    if axes_of(a).len() != axes_of(p).len() then return None
+
+    val from = elem_of(a)
+    val to = elem_of(p)
+
+    if ty_eq(from, to) then return Some(0)
+    if promotes(from, to) then return Some(distance(base_of(from), base_of(to)))
+    if converts(from, to) then return Some(1 + distance(base_of(from), base_of(to)))
+
+    None
+
+private same_modes(a: Buf[Mode], b: Buf[Mode]) -> bool
+    if a.len() != b.len() then return false
+
+    for k in 0..<a.len()
+        if a[k] != b[k] then return false
+
+    true
+
+// A generic `def`'s head as a diagnostic and its instances' names give it: `[T: Numeric](T, [T])`.
+generic_head(f: GenFun) -> string
+    var tps: Buf[string] = buf()
+
+    for tp in f.tparams
+        tps.push(tp.constraint match
+            Some(c) -> s"${tp.name}: ${c}"
+            None -> tp.name)
+
+    var ps: Buf[string] = buf()
+
+    for p in f.params
+        ps.push(if p.mode == Inout then "inout " + show_type(p.typ) else show_type(p.typ))
+
+    "[" + join(tps.view(), ", ") + "](" + join(ps.view(), ", ") + ")"
