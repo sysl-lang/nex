@@ -129,10 +129,81 @@ ino_escaping_capture()
     assert(in_main("def f(v: inout integer): () -> integer = () -> v\n", "  ()\n").starts_with("error: this lambda captures the `inout` parameter `v`"))
     assert_eq(in_main("def twice(k: () -> integer): integer = k() + k()\ndef f(v: inout integer) = v = twice(() -> v)\n", "  ()\n"), "ok")
 
-// A lambda written as an argument escapes all the same where the callee answers it: `f`'s result
-// outlives the caller's place `v` borrows, which the compiled program then reads after it is gone.
-@test("a lambda passed as an argument that the callee answers escapes, and may not capture an inout parameter", ignore: "the escape check judges a lambda written as an argument non-escaping whatever the callee does with it")
+// A callee that answered the lambda it was given would let `f`'s result outlive the caller's place
+// `v` borrows: the callee is refused, since a function parameter may not escape.
+@test("a callee may not answer the lambda passed to it, so a lambda passed as an argument never outlives the call")
 ino_escaping_through_callee()
     val got = in_main("def keep(k: () -> integer): () -> integer = k\ndef f(v: inout integer): () -> integer = keep(() -> v)\n", "  ()\n")
 
+    assert(got.starts_with("error: function parameter `k` may not escape: it is returned; a function parameter may only be called or passed on as an argument"), got)
+
+@test("a lambda given to a construction is stored, so it escapes and may not capture an inout parameter")
+ino_escaping_into_construction()
+    val got = in_main("def f(v: inout integer): Option[() -> integer] = Some(() -> v)\n", "  ()\n")
+    val boxed = in_main("struct B\n  f: () -> integer\ndef f(v: inout integer): B = B(() -> v)\n", "  ()\n")
+
     assert(got.starts_with("error: this lambda captures the `inout` parameter `v`"), got)
+    assert(boxed.starts_with("error: this lambda captures the `inout` parameter `v`"), boxed)
+
+// -- rule 4: a function parameter does not escape --------------------------------------------------
+
+private val FNP = "error: function parameter "
+
+private refuses_escape(decls: string, how: string)
+    val got = in_main(decls, "  ()\n")
+
+    assert(got.starts_with(FNP + how), got)
+
+@test("a function parameter may not be returned, by its body's value, a `return` or a `val` that holds it")
+fnp_returned()
+    refuses_escape("def keep(k: () -> integer): () -> integer = k\n", "`k` may not escape: it is returned")
+    refuses_escape("def keep(k: () -> integer): () -> integer =\n  return k\n", "`k` may not escape: it is returned")
+    refuses_escape("def keep(k: () -> integer): () -> integer =\n  val f = k\n  f\n", "`k` may not escape: `f`, which holds it, is returned")
+    refuses_escape("def keep(c: bool, k: () -> integer, j: () -> integer): () -> integer = if c then k else j\n", "`k` may not escape: it is returned")
+
+@test("a function parameter may not be stored in a var, an array, a tuple, a struct, a variant, a module var or an inout parameter")
+fnp_stored()
+    refuses_escape("def keep(k: () -> integer): integer =\n  var f = k\n  f()\n", "`k` may not escape: it is stored in a `var`")
+    refuses_escape("def zero(): integer = 0\ndef keep(k: () -> integer): integer =\n  var f = zero\n  f = k\n  f()\n","`k` may not escape: it is stored in the `var` `f`")
+    refuses_escape("def keep(k: () -> integer): integer =\n  val a = [k, k]\n  1\n", "`k` may not escape: it is stored in an array")
+    refuses_escape("def keep(k: () -> integer): integer =\n  val t = (k, 1)\n  t.2\n", "`k` may not escape: it is stored in a tuple")
+    refuses_escape("struct B\n  f: () -> integer\ndef keep(k: () -> integer): B = B(k)\n", "`k` may not escape: it is stored in a struct")
+    refuses_escape("struct B\n  f: () -> integer\ndef keep(k: () -> integer, b: inout B) = b.f = k\n", "`k` may not escape: it is stored in the field `f`")
+    refuses_escape("def keep(k: () -> integer): Option[() -> integer] = Some(k)\n", "`k` may not escape: it is stored in the variant `Some`")
+    refuses_escape("def zero(): integer = 0\nvar g: () -> integer = zero\ndef keep(k: () -> integer) = g = k\n", "`k` may not escape: it is stored in the module variable `g`")
+    refuses_escape("def keep(k: () -> integer, r: inout () -> integer) = r = k\n", "`k` may not escape: it is stored in the `inout` parameter `r`")
+    refuses_escape("def keep(k: () -> integer): integer =\n  val a = fill(2, k)\n  1\n", "`k` may not escape: it is passed to `fill`, which keeps it")
+
+@test("a lambda that captures a function parameter is held to the same rule, and so is a local def")
+fnp_captured()
+    refuses_escape("def keep(k: () -> integer): () -> integer = () -> k() + 1\n", "`k` may not escape: a lambda that captures it is returned")
+    refuses_escape("def keep(k: () -> integer): integer =\n  var f = () -> k()\n  f()\n", "`k` may not escape: a lambda that captures it is stored in a `var`")
+    refuses_escape("def keep(k: () -> integer): () -> integer =\n  def g(): integer = k() + 1\n  g\n", "`k` may not escape: `g`, which holds it, is returned")
+    refuses_escape("def twice(f: () -> () -> integer): integer = f()()\ndef keep(k: () -> integer): integer = twice(() -> k)\n", "`k` may not escape: it is returned by a lambda")
+
+@test("a lambda's own function parameter may not escape either")
+fnp_lambda_parameter()
+    val got = in_main("def apply(h: (() -> integer) -> () -> integer): integer = h(() -> 1)()\n", "  print(apply((g) -> g))\n")
+
+    assert(got.starts_with(FNP + "`g` may not escape: it is returned by a lambda"), got)
+
+@test("a generic parameter instantiated to a function type may not escape, and the instance is named")
+fnp_generic()
+    val got = in_main("def keep[T](k: T): T = k\ndef f(v: inout integer): integer =\n  val g = keep(() -> v)\n  g()\n", "  ()\n")
+
+    assert(got.starts_with(FNP + "`k` may not escape: it is returned"), got)
+    assert(got.contains("(in `keep["), got)
+    assert_eq(in_main("def keep[T](k: T): T = k\n", "  print(keep(3))\n"), "ok")
+
+@test("a function parameter may be called, passed on, held by a val, captured by a lambda passed straight, and given to map")
+fnp_allowed()
+    val app = "def app(k: () -> integer): integer = k() + 1\n"
+
+    assert_eq(in_main(app, "  print(app(() -> 1))\n"), "ok")
+    assert_eq(in_main(app + "def pass(k: () -> integer): integer = app(k)\n", "  print(pass(() -> 1))\n"), "ok")
+    assert_eq(in_main(app + "def use(k: () -> integer): integer =\n  val f = k\n  f() + app(f)\n", "  print(use(() -> 1))\n"), "ok")
+    assert_eq(in_main(app + "def via(k: () -> integer): integer = app(() -> k() * 2)\n", "  print(via(() -> 1))\n"), "ok")
+    assert_eq(in_main(app + "def loc(k: () -> integer): integer =\n  def g(): integer = k() + 1\n  g() + app(g)\n", "  print(loc(() -> 1))\n"), "ok")
+    assert_eq(in_main(app + "def pick(c: bool, a: () -> integer, b: () -> integer): integer = app(if c then a else b)\n", "  print(pick(true, () -> 1, () -> 2))\n"), "ok")
+    assert_eq(in_main("def sq(k: (integer) -> integer): [integer] = map([1, 2, 3], k)\n", "  print(sq((x) -> x * x))\n"), "ok")
+    assert_eq(in_main("def apply(h: (() -> integer) -> integer): integer = h(() -> 1)\n", "  print(apply((g) -> g() + 1))\n"), "ok")

@@ -247,7 +247,9 @@ impl Elab
 
     // -- after the whole program ------------------------------------------------------------------
 
-    // Decides every transfer and refuses an `origin` view wherever a body lets one out.
+    // Decides every transfer and refuses an `origin` view wherever a body lets one out; checks the
+    // function parameters of the lambdas a module-level binding makes (a `def`'s are checked with its
+    // body).
     finish_views(*self)
         for f in self.fout
             self.decide_transfers(f.body)
@@ -259,6 +261,7 @@ impl Elab
 
         for g in self.gout
             self.origin_uses(g.init)
+            self.check_fn_params(buf(), g.init)
 
     // Every `TTransfer` in one body: a move where the body owns the source and is done with it.
     private decide_transfers(self, body: TExpr)
