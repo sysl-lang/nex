@@ -1002,6 +1002,20 @@ the checker rejects:
    passed beside the `inout` argument, under rule 2.
 4. **Escaping captures.** An `inout` parameter may be captured by a non-escaping lambda (one passed
    straight as an argument, such as `assert_traps(() -> f(v), "…")`) but never by an escaping one.
+   A lambda given to a construction (`Some(() -> v)`, `Box(() -> v)`) is stored, so it escapes.
+
+   What makes a lambda passed as an argument non-escaping is that **a function parameter may not
+   escape**. Inside a body, a read-mode parameter of function type — of a `def`, a local `def` or a
+   lambda — may be called, passed as an argument to a call (whose parameter is then a function
+   parameter of the callee, under the same rule) or to a prelude function that does not keep it
+   (`map`, `filter`), and held by a `val`, which is then held to the same rule. It may not be
+   returned (by the body's value or a `return`), stored in a `var`, an array, a tuple, a struct field
+   or an enum variant (`Some(k)`), assigned to a module-level `var` or an `inout` parameter, or given
+   to a prelude function whose result would hold it (`fill(2, k)`); a lambda or local `def` that
+   captures it is held to the same rule as the parameter itself. *"function parameter `k` may not
+   escape: it is returned"*. A generic parameter `T` is not a function type where the generic's body
+   is checked; an instance whose `T` is one (`keep(() -> v)` with `def keep[T](k: T): T = k`) has its
+   body checked as every `def` is, and is refused there, naming the instance.
 
 ### 8.4 Traps and the uniqueness rule
 

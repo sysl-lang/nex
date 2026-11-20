@@ -1,0 +1,49 @@
+// What a function parameter may do (DESIGN §8.3): be called, be passed on to another function
+// parameter, be held by a `val` and called through it, be captured by a lambda written straight as
+// an argument, be called from a local `def`, be chosen by an `if` and passed on, and be given to the
+// prelude's `map` and `filter`. A lambda passed this way may capture an `inout` parameter,
+// and writes through it while the call runs.
+
+def app(k: () -> integer): integer = k() + 1
+
+def pass(k: () -> integer): integer = app(k)
+
+def twice(f: (integer) -> integer, x: integer): integer = f(f(x))
+
+def held(k: () -> integer): integer =
+  val f = k
+  f() * 10 + app(f)
+
+def via(k: () -> integer): integer = app(() -> k() * 2)
+
+def wrapped(k: (integer) -> integer): integer =
+  def g(x: integer): integer = k(x) + 100
+  g(1) + twice(g, 2)
+
+def pick(c: bool, a: () -> integer, b: () -> integer): integer = app(if c then a else b)
+
+def squares(k: (integer) -> integer, xs: [integer]): [integer] = map(xs, k)
+
+def evens(p: (integer) -> bool, xs: [integer]): [integer] = filter(xs, p)
+
+def apply(h: (() -> integer) -> integer): integer = h(() -> 5)
+
+def bump(n: inout integer, times: integer) =
+  for i in 1..times
+    n = twice((x) -> x + n, 0)
+
+def main() =
+  print(app(() -> 1))
+  print(pass(() -> 2))
+  print(twice((x) -> x * 3, 2))
+  print(held(() -> 4))
+  print(via(() -> 5))
+  print(wrapped((x) -> x * x))
+  print(pick(true, () -> 10, () -> 20))
+  print(pick(false, () -> 10, () -> 20))
+  print(sum(squares((x) -> x * x, [1, 2, 3, 4])))
+  print(sum(evens((x) -> x % 2 == 0, [1, 2, 3, 4, 5, 6])))
+  print(apply((g) -> g() + g()))
+  var n = 1
+  bump(n, 3)
+  print(n)

@@ -1,0 +1,239 @@
+module sh.sysl.nex
+
+// A parameter of function type does not escape its call (DESIGN §8.3).
+//
+// **Inside a body, a function parameter is called or passed on, and nothing else.** It may be the
+// callee of a call, an argument of a call (whose parameter is then a function parameter of the callee,
+// under the same rule), an argument of a prelude function that does not keep it, or the value of a
+// `val`, which then holds it under the same rule. It may not be returned, stored in a `var`, a field,
+// an array, a tuple, an enum variant or a module variable, or assigned to an `inout` parameter; a
+// lambda that captures it is held to the same rule as the parameter itself. A lambda's own function
+// parameters are function parameters too.
+//
+// So a function value an argument gives never outlives the call it is given to, which is what lets a
+// lambda written straight as an argument capture an `inout` parameter (rule 4).
+//
+// A generic parameter `T` is not a function type where the generic's body is checked; an instance
+// whose `T` is one has its body checked again, as every `def` is, and is refused there.
+
+import sysl.buf.{Buf, buf}
+
+// The locals that hold a function parameter's value in the body being checked, each with the name of
+// the parameter it holds and its own name where it is a `val` holding it (`""` for the parameter),
+// and the lambdas already looked into.
+struct Held
+    ids: Buf[usize]
+    names: Buf[string]
+    vias: Buf[string]
+    lambdas: Buf[usize]
+
+impl Held
+    name_of(self, id: usize) -> Option[string]
+        for k in 0..<self.ids.len()
+            if self.ids[k] == id then return Some(self.names[k])
+
+        None
+
+    // How a diagnostic names the held local `id`: `it`, or the `val` that holds it.
+    subject(self, id: usize) -> string
+        for k in 0..<self.ids.len()
+            if self.ids[k] == id && self.vias[k].len > 0 then return s"`${self.vias[k]}`, which holds it,"
+
+        "it"
+
+    add(*self, id: usize, name: string, via: string)
+        self.ids.push(id)
+        self.names.push(name)
+        self.vias.push(via)
+
+fn_param_escapes(name: string, how: string) -> string =
+    s"function parameter `${name}` may not escape: ${how}; a function parameter may only be called or passed on as an argument"
+
+impl Elab
+    // Refuses every use in the body of a function whose parameters are `params`, and in the lambdas
+    // it makes, that lets a function parameter outlive the call.
+    check_fn_params(*self, params: Buf[usize], body: TExpr)
+        var h = Held(buf(), buf(), buf(), buf())
+
+        self.hold_params(&h, params)
+        self.fn_param_uses(&h, body, "returned", "returned")
+
+    private hold_params(self, h: *Held, params: Buf[usize])
+        for id in params
+            val info = self.locals[id]
+            val read = info.kind match
+                LParam(m) -> m != Inout
+                _ -> false
+            val callable = info.ty match
+                Fn(_) -> true
+                _ -> false
+
+            if read && callable then h.add(id, info.name, "")
+
+    // The function parameter whose value `e` may be: a local holding one, a lambda capturing one, or
+    // a branch or block giving one.
+    private held_param(self, h: *Held, e: TExpr) -> Option[string] = *e.kind match
+        TLocal(id) -> h.name_of(id)
+        TLambdaRef(lid) ->
+            for c in self.captures
+                if c.lambda == lid
+                    val n = h.name_of(c.local)
+
+                    if n.is_some() then return n
+
+            None
+        TPromote(v) -> self.held_param(h, v)
+        TBlock(_, r) -> self.held_param(h, r)
+        TIf(_, a, b) ->
+            val n = self.held_param(h, a)
+
+            if n.is_some() then return n
+
+            b match
+                Some(x) -> self.held_param(h, x)
+                None -> None
+        TMatch(_, arms) ->
+            for a in arms
+                val n = self.held_param(h, a.body)
+
+                if n.is_some() then return n
+
+            None
+        _ -> None
+
+    // Each use of a held value in `e`, whose value goes where `sink` says: `""` where it is called,
+    // passed as an argument, bound to a `val` or not used, and otherwise what keeps it. `ret` is what
+    // a `return` in it does with its value.
+    private fn_param_uses(*self, h: *Held, e: TExpr, sink: string, ret: string)
+        *e.kind match
+            TLocal(id) ->
+                if sink.len > 0
+                    h.name_of(id) match
+                        Some(n) -> self.fail(e.span, fn_param_escapes(n, s"${h.subject(id)} is ${sink}"))
+                        None -> ()
+            TLambdaRef(lid) ->
+                if sink.len > 0
+                    self.held_param(h, e) match
+                        Some(n) -> self.fail(e.span, fn_param_escapes(n, s"a lambda that captures it is ${sink}"))
+                        None -> ()
+
+                for l in h.lambdas
+                    if l == lid then return
+
+                h.lambdas.push(lid)
+
+                val l = self.lambdas[lid]
+                val by = if l.name.len > 0 then s"returned by `${l.name}`" else "returned by a lambda"
+
+                self.hold_params(h, l.params)
+                self.fn_param_uses(h, l.body, by, by)
+            TPromote(v) -> self.fn_param_uses(h, v, sink, ret)
+            TBlock(items, r) ->
+                for x in items
+                    self.fn_param_uses(h, x, "", ret)
+
+                self.fn_param_uses(h, r, sink, ret)
+            TIf(c, a, b) ->
+                self.fn_param_uses(h, c, "", ret)
+                self.fn_param_uses(h, a, sink, ret)
+
+                b match
+                    Some(x) -> self.fn_param_uses(h, x, sink, ret)
+                    None -> ()
+            TMatch(s, arms) ->
+                self.fn_param_uses(h, s, "matched by a `match`", ret)
+
+                for a in arms
+                    self.fn_param_uses(h, a.body, sink, ret)
+            TLet(id, init) ->
+                val bound = self.locals[id].kind match
+                    LVal -> true
+                    _ -> false
+
+                if !bound then return self.fn_param_uses(h, init, "stored in a `var`", ret)
+
+                self.held_param(h, init) match
+                    Some(n) -> h.add(id, n, self.locals[id].name)
+                    None -> ()
+
+                self.fn_param_uses(h, init, "", ret)
+            TReturn(v) -> v match
+                Some(x) -> self.fn_param_uses(h, x, ret, ret)
+                None -> ()
+            TAssign(_, t, v) ->
+                self.fn_param_uses(h, t, "", ret)
+                self.fn_param_uses(h, v, self.store_sink(t), ret)
+            TCall(f, args) ->
+                self.fn_param_uses(h, f, "", ret)
+
+                for a in args
+                    self.fn_param_uses(h, a, "", ret)
+            TBuiltin(name, args) ->
+                var seen: Buf[string] = buf()
+                val kept = if self.holds_fn(e.ty, &seen) then s"passed to `${name}`, which keeps it" else ""
+
+                for a in args
+                    self.fn_param_uses(h, a, kept, ret)
+            TTuple(elems) ->
+                for x in elems
+                    self.fn_param_uses(h, x, "stored in a tuple", ret)
+            TNew(args) ->
+                for x in args
+                    self.fn_param_uses(h, x, "stored in a struct", ret)
+            TVariant(n, _, args) ->
+                for x in args
+                    self.fn_param_uses(h, x, s"stored in the variant `${n}`", ret)
+            TArray(op) -> *op match
+                TArrayLit(items) ->
+                    for x in items
+                        self.fn_param_uses(h, x, "stored in an array", ret)
+                _ ->
+                    for c in children(e)
+                        self.fn_param_uses(h, c, "", ret)
+            _ ->
+                for c in children(e)
+                    self.fn_param_uses(h, c, "", ret)
+    end fn_param_uses
+
+    // Where a value assigned to the place `t` is kept.
+    private store_sink(self, t: TExpr) -> string = *t.kind match
+        TLocal(id) -> self.locals[id].kind match
+            LParam(_) -> s"stored in the `inout` parameter `${self.locals[id].name}`"
+            _ -> s"stored in the `var` `${self.locals[id].name}`"
+        TGlobalRef(n) -> s"stored in the module variable `${n}`"
+        TField(_, n, _) -> s"stored in the field `${n}`"
+        TTupleField(_, _) -> "stored in a tuple"
+        _ -> "stored in an array"
+
+    // Whether a value of type `t` can hold a function value; `seen` holds the structs and enums
+    // already being looked into.
+    private holds_fn(self, t: Ty, seen: *Buf[string]) -> bool = t match
+        Fn(_) -> true
+        Ty.Array(_, _) -> self.holds_fn(elem_of(t), seen)
+        Ty.Tuple(elems) ->
+            for x in elems
+                if self.holds_fn(x, seen) then return true
+
+            false
+        Nominal(n, _) ->
+            for s in seen
+                if s == n then return false
+
+            seen.push(n)
+
+            self.find_struct(n) match
+                Some(k) ->
+                    for f in self.agg.structs[k].fields
+                        if self.holds_fn(f.ty, seen) then return true
+                None -> ()
+
+            self.find_enum(n) match
+                Some(k) ->
+                    for v in self.agg.enums[k].variants
+                        for f in v.fields
+                            if self.holds_fn(f.ty, seen) then return true
+                None -> ()
+
+            false
+        _ -> false
+end Elab

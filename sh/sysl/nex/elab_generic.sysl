@@ -989,8 +989,9 @@ impl Elab
     // type matched against the expected type of the call, so `rep(2, None)` bound as an
     // `[Option[integer]]` gives `None` the `Option[integer]` it needs. `expected` only gives the argument a type to be elaborated
     // against; the argument's own type is what fixes the parameter. False where an argument cannot
-    // match its parameter, which is reported.
-    private infer_from(*self, inf: *Infer, expected: *Infer, formals: Buf[Ty], what: Buf[string], slots: Buf[Option[usize]], args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> bool
+    // match its parameter, which is reported. A lambda written straight as an argument of a `call` is
+    // borrowed for the call; one a construction is given is stored, and escapes.
+    private infer_from(*self, inf: *Infer, expected: *Infer, formals: Buf[Ty], what: Buf[string], slots: Buf[Option[usize]], args: Buf[Expr], pre: *Buf[Option[TExpr]], call: bool) -> bool
         var ok = true
 
         for pass in 0..<3
@@ -1011,7 +1012,7 @@ impl Elab
 
                         if !has_param(filled) then hint = filled
 
-                    if lambda then self.pass_lambda(e)
+                    if lambda && call then self.pass_lambda(e)
 
                     pre[i] = Some(self.elab(e, if lambda || !has_param(hint) then Some(hint) else None))
 
@@ -1181,7 +1182,7 @@ impl Elab
                 None -> ()
             None -> ()
 
-        if !self.infer_from(&inf, &expected, f.formals, what, slots, args, &pre) then return self.invalid(span)
+        if !self.infer_from(&inf, &expected, f.formals, what, slots, args, &pre, true) then return self.invalid(span)
 
         if !self.inferred(span, &inf, "no argument fixes it") || !self.constraints_hold(span, &inf) then return self.invalid(span)
 
@@ -1380,7 +1381,7 @@ impl Elab
         // The expected type has already given the arguments it can, through `seed`.
         var expected = new_infer(template, a.tparams)
 
-        if !self.infer_from(&inf, &expected, formals, what, slots, args, &pre) then return self.invalid(span)
+        if !self.infer_from(&inf, &expected, formals, what, slots, args, &pre, false) then return self.invalid(span)
 
         val hint = s"write the type where it is bound, `val x: ${template}[...] = ${n}(...)`"
 
