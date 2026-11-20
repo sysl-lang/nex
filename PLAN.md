@@ -612,13 +612,12 @@ of the corpus as migrated above); `v2` counts are the programs the milestone add
       array the size of the result made but the last, was 4.8 ns against 3.5 ns for the same loops
       operation by operation (with the squares as products), the per-block arrays and the copy of each
       result block costing more than the memory traffic it saves, which the unchecked loops had
-      already made small. **The squares are an open question between the engines**: the compiled
-      program's `x ^ 2` with a literal exponent is `x * x` (LLVM folds `pow(x, 2.0)`), and libm's
-      `pow(x, 2.0)` differs from `x * x` in the last bit for 137 of 100 000 `real64`s and 607 of
-      100 000 `real32`s, so the interpreter's `x ^ 2` already differs from the compiled one's there,
-      while an exponent read at run time is libm's on both. Computing a literal square as the product
-      would make them agree and take the kernel to about 4 ns; it waits on deciding which `^ 2` nex
-      means.
+      already made small. **The squares are decided (2026-11-19)**: `x ^ 2` with a literal exponent
+      (`2` or `2.0`) means `x * x` in both engines. libm's `pow(x, 2.0)` differs from `x * x` in the
+      last bit for 137 of 100 000 `real64`s and 607 of 100 000 `real32`s, and the compiled program
+      had the product only because LLVM folds `pow(x, 2.0)`. The elaborator now gives such a power
+      the operator `sq`, which both engines compute as the product; an exponent read at run time is
+      libm's `pow` on both (`testdata/v2/143-literal-square.nex`).
       Scalar nodes call fewer closures (`interp_scalar.sysl`): an operand that is a local whose slot
       holds its value, a chain's operand, a literal or a named constant is read inside its operator's
       closure rather than through a closure of its own; an `if` or `while` condition that compares two

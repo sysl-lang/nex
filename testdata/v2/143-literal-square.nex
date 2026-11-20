@@ -1,0 +1,43 @@
+// `x ^ 2` with a literal exponent 2 (an integer or the real 2.0) is `x * x` in both engines, computed
+// in real64 and stored at the width; an exponent read at run time is still `pow`.
+def main(args: [string]) =
+  val n = 2 + length(args)
+  val p: real64 = 62.21442291886404
+  val q: real64 = 88.93980822624992
+  val r: real32 = 0.6401426
+  val s: real32 = 8.975333
+  val h: real16 = 1.5
+  print(p ^ 2 == p * p)
+  print(q ^ 2.0 == q * q)
+  print(r ^ 2 == r * r)
+  print(s ^ 2.0 == s * s)
+  print(p ^ n == p * p)
+  print(r ^ n == r * r)
+  print(p ^ 2)
+  print(r ^ 2)
+  print(h ^ 2)
+  print((-p) ^ 2)
+  print((-3.0) ^ 2)
+  print(0.0 ^ 2)
+  print((-0.0) ^ 2)
+  print((0.0 / 0.0) ^ 2)
+  print((1.0 / 0.0) ^ 2)
+  print((-1.0 / 0.0) ^ 2.0)
+  val a: [real64] = [p, -q, 0.0, 1.0 / 0.0, 0.0 / 0.0]
+  val b: [real32] = [r, -s, 3.0, -1.0 / 0.0]
+  val c: [real16] = [h, -h, 255.0]
+  print(a ^ 2)
+  print(a ^ 2.0)
+  print(b ^ 2)
+  print(c ^ 2)
+  print(a ^ n)
+  print(b ^ n)
+  print(a ^ 2 == a * a)
+  print(b ^ 2.0 == b * b)
+  print((a - 1.0) ^ 2)
+  var t = p
+  t = t ^ 2
+  print(t)
+  val i = 7
+  print(i ^ 2)
+  print([1, 2, 3] ^ 2)

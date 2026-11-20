@@ -418,6 +418,7 @@ private[nex] real_op(op: string, bits: int, fpe: bool) -> Option[Op2]
     if op == "*" then return Some((a, b) -> real_arith(real_of(a), real_of(b), 2, bits, fpe))
     if op == "/" then return Some((a, b) -> real_arith(real_of(a), real_of(b), 3, bits, fpe))
     if op == "^" then return Some((a, b) -> real_pow(real_of(a), real_of(b), bits, fpe))
+    if op == "sq" then return Some((a, _) -> real_arith(real_of(a), real_of(a), 2, bits, fpe))
     if op == "==" then return Some((a, b) -> Ok(VBool(real_of(a) == real_of(b))))
     if op == "!=" then return Some((a, b) -> Ok(VBool(real_of(a) != real_of(b))))
     if op == "<" then return Some((a, b) -> Ok(VBool(real_of(a) < real_of(b))))

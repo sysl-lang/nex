@@ -210,6 +210,10 @@ be an array, the other then an array of the same shape or a scalar that broadcas
   machine has a fused instruction. The compiled engine emits plain `fmul` and `fadd`, with no
   `contract` flag and no `llvm.fmuladd`. A fused operation happens only where the source asks for it:
   `fma(a, b, c)` (§7.3).
+- **A real raised to the literal exponent 2, written `2` or `2.0`, is computed as `x * x`** (a real
+  `^ 2` of a scalar or element-wise), the same number in both engines and never a library `pow`,
+  which differs from the product in the last bit for some bases; any other exponent, one read at run
+  time included, is `pow`.
 - **A complex product is (ac − bd) + (ad + bc)i**, its four products and two sums each rounded once at
   the width, as gfortran computes it under its default `-fcx-fortran-rules` (less the fused
   instruction gfortran uses where the machine has one). There is no C Annex G recovery of an

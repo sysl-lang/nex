@@ -541,11 +541,11 @@ impl Elab
         val pu = unit_pow(u, k)
 
         if self.exact(span, pu).is_none() then return texpr(span, Error, TBinary("^", base, exp))
-        if is_int(exp.ty) then return texpr(span, measured(base_of(base.ty), pu), TBinary("^", base, exp))
+        if is_int(exp.ty) then return texpr(span, measured(base_of(base.ty), pu), TBinary(power_op(base, exp), base, exp))
 
         val c = self.common_of(span, "^", base_of(base.ty), exp.ty).unwrap_or(Error)
 
-        texpr(span, measured(c, pu), TBinary("^", promote(base, measured(c, u)), promote(exp, c)))
+        texpr(span, measured(c, pu), TBinary(power_op(promote(base, measured(c, u)), promote(exp, c)), promote(base, measured(c, u)), promote(exp, c)))
     end measured_power
 
     // -- the prelude ------------------------------------------------------------------------------

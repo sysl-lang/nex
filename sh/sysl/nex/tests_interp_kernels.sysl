@@ -38,12 +38,13 @@ itk_real_pow()
 
         assert_eq(interpreted(text), expected[k] + "exit 0")
 
-@test("complex ^ of complex exponents follows complex.pow's lowering, and real32 ^ traps an overflow under --fpe-trap where real16's does not")
+@test("complex ^ of complex exponents follows complex.pow's lowering, and real32 ^ 2 traps an overflow under --fpe-trap, as real16 ^ 2 does, where real16 ^ a run-time exponent does not")
 itk_complex_pow_fpe()
     assert_eq(interpreted(main_of(["val z = [1 + 2i, 0.25i - 0.5, 3 - 1i]", "print(z ^ 2)", "print(z ^ z)"])),
               "[-3.0+4.000000000000002i, 0.18749999999999994-0.2500000000000001i, 8.000000000000002-6.000000000000001i]\n" +
               "[-0.22251715680177264+0.1007091311360754i, 0.05910942608313866-0.6821959902860281i, -11.89819175985218-19.59292159660941i]\nexit 0")
-    assert_eq(interpreted(main_of(["val f = real32([1.0e30, 2.0])", "val h = real16([300.0])", "print(h ^ 2)", "print(f[2..2] ^ 2)",
+    assert_eq(interpreted(main_of(["val f = real32([1.0e30, 2.0])", "val h = real16([300.0])", "val two = 2", "print(h ^ two)", "print(f[2..2] ^ 2)",
+                                   "assert_traps(() -> print(h ^ 2), \"overflow\")",
                                    "assert_traps(() -> print(f ^ 2), \"overflow\")"]), fpe = true),
               "[inf]\n[4.0]\nexit 0")
 

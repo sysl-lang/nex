@@ -586,13 +586,16 @@ impl Elab
         var ca = ea
         var cb = eb
 
+        var eop = op
+
         *s.kind match
-            TBinary(_, x, y) ->
+            TBinary(o, x, y) ->
                 ca = x.ty
                 cb = y.ty
+                if op == "^" then eop = o
             _ -> ()
 
-        texpr(span, Ty.Array(s.ty, axes), TArray(TElementwise(op, promote(a, with_elem(a.ty, ca)), promote(b, with_elem(b.ty, cb)))))
+        texpr(span, Ty.Array(s.ty, axes), TArray(TElementwise(eop, promote(a, with_elem(a.ty, ca)), promote(b, with_elem(b.ty, cb)))))
     end elementwise
 
     // `-a` on numbers, `not a` on bools, element by element.

@@ -777,6 +777,12 @@ impl Interp
                 Some(f) -> return Some(f)
                 None -> ()
 
+        // A square reads its base alone: the product loop is given the base as both operands.
+        if op == "sq"
+            zip_kernel("*", et, self.m.fpe, la, la) match
+                Some(f) -> return Some((x, _) -> f(x, x))
+                None -> ()
+
         if ty_eq(et, elem_or(rt))
             zip_kernel(op, et, self.m.fpe, la, ra) match
                 Some(f) -> return Some(f)

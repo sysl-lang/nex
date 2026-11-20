@@ -102,7 +102,8 @@ quiet(s: TExpr, fpe: bool, leaves: Buf[TExpr]) -> bool = *s.kind match
         if o == "==" || o == "!=" || o == "<" || o == "<=" || o == ">" || o == ">=" then return true
         if fpe then return false
 
-        // A real raised to any power.
+        // A real squared, or raised to any power.
+        if o == "sq" then return is_real(base_of(a.ty))
         if o == "^" then return is_real(base_of(a.ty)) && (is_floating(b.ty) || is_int(base_of(b.ty)))
         if !is_floating(a.ty) || !is_floating(b.ty) then return false
 

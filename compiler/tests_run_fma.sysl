@@ -70,6 +70,20 @@ run_fma_fpe()
     assert_eq(invalid.err.unwrap_or(""), "trap: floating-point invalid operation\n")
     assert_eq(finite.text, "true\ntrue\n")
 
+@test("a literal square under --fpe-trap traps on overflow and on NaN made from numbers as the product does, and passes infinities and NaN through, on both engines")
+run_literal_square_fpe()
+    val b = bench()
+    val over = ran(b, "def main() =\n  val big = 1.0e200\n  print(big ^ 2)\n", fpe_trap = true)
+    val over_array = ran(b, "def main() =\n  val big = [1.0e200, 2.0]\n  print(big ^ 2.0)\n", fpe_trap = true)
+    val over_real32 = ran(b, "def main() =\n  val big: real32 = 1.0e20\n  print(big ^ 2)\n", fpe_trap = true)
+    val through = ran(b, "def main() =\n  print(inf ^ 2)\n  print(nan ^ 2)\n  print(3.0 ^ 2)\n", fpe_trap = true)
+
+    finish(b)
+    assert_eq(over.err.unwrap_or(""), "trap: floating-point overflow\n")
+    assert_eq(over_array.err.unwrap_or(""), "trap: floating-point overflow\n")
+    assert_eq(over_real32.err.unwrap_or(""), "trap: floating-point overflow\n")
+    assert_eq(through.text, "inf\nnan\n9.0\n")
+
 // The text of function `name` in the LLVM IR `ir`, from its `define` to its closing brace.
 private function_ir(ir: string, name: string) -> string
     for chunk in split(ir, "\ndefine ")

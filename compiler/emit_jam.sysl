@@ -155,7 +155,7 @@ impl JamScan
             TConstant(_, _) -> scalar_number(e.ty)
             TLocal(id) -> scalar_number(p.locals[id].ty)
             TPromote(v) -> scalar_number(e.ty) && self.pure(p, v, inner)
-            TBinary(op, l, r) -> floating(e.ty) && (op == "+" || op == "-" || op == "*" || op == "/") && self.pure(p, l, inner) && self.pure(p, r, inner)
+            TBinary(op, l, r) -> floating(e.ty) && (op == "+" || op == "-" || op == "*" || op == "/" || op == "sq") && self.pure(p, l, inner) && self.pure(p, r, inner)
             TUnary(op, v) -> op == "-" && floating(e.ty) && self.pure(p, v, inner)
             TArray(_) -> self.element(p, e, inner, false)
             _ -> false

@@ -189,7 +189,7 @@ elab_division_and_power()
     assert_eq(elaborated("def f(a: int32, b: int64) =\n  print(a / b)\n  print(a div b)\n  print(b % a)\n" + MAIN),
         "(def f ((a#0 int32) (b#1 int64)) void (block (print (/:real64 (promote:real64 a#0) (promote:real64 b#1))) (print (div:int64 (promote:int64 a#0) b#1)) (print (%:int64 b#1 (promote:int64 a#0)))))\n(def main () void ())")
     assert_eq(elaborated("def f(x: real32, k: int8, n: integer) =\n  print(x ^ n)\n  print(k ^ 2)\n  print(x ^ 0.5)\n  print(-x^2)\n" + MAIN),
-        "(def f ((x#0 real32) (k#1 int8) (n#2 int64)) void (block (print (^:real32 x#0 n#2)) (print (^:int8 k#1 2)) (print (^:real32 x#0 (adopt:real32 0.5))) (print (-:real32 (^:real32 x#0 2)))))\n(def main () void ())")
+        "(def f ((x#0 real32) (k#1 int8) (n#2 int64)) void (block (print (^:real32 x#0 n#2)) (print (^:int8 k#1 2)) (print (^:real32 x#0 (adopt:real32 0.5))) (print (-:real32 (sq:real32 x#0 2)))))\n(def main () void ())")
     assert_eq(refused("def f(x: real) = x div 2\n" + MAIN), "error: `div` needs two integers; found real and real64 @1:18")
 
 @test("comparisons, and, or and not take what DESIGN 2.6 says they take")

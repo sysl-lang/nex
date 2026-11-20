@@ -61,7 +61,7 @@ units_array_multiplicative()
     assert_eq(elaborated("def main() =\n  val x = [1.0<m>]\n  print(-x * 2.0)\n"),
         "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.*:[real64<m>] (.-:[real64<m>] x#0) 2.0)) \" m\"))))")
     assert_eq(elaborated("def main() =\n  val x = [1.0<m>]\n  print(x^2)\n"),
-        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.^:[real64<m^2>] x#0 2)) \" m^2\"))))")
+        "(def main () void (block (val x#0:[real64<m>] (array:[real64<m>] 1.0<m>)) (print (s (strip:[real64] (.sq:[real64<m^2>] x#0 2)) \" m^2\"))))")
     assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  val n = 2\n  print(x^n)\n"), not_constant("@4:9"))
     assert_eq(refused("def main() =\n  val x = [1.0<m>]\n  print(x^[1.0, 2.0])\n"), not_constant("@3:9"))
 

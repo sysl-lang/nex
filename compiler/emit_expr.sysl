@@ -375,6 +375,8 @@ impl Emitter
 
             return self.fpe_check(self.def(s"math.powf $a, $b : $t"), a, b, bits)
 
+        if op == "sq" then return self.fpe_check(self.def(s"arith.mulf $a, $a : $t"), a, a, bits)
+
         if op == "+" || op == "-" || op == "*" || op == "/"
             if op == "/" && self.fpe_trap
                 val zero = self.real_const(0.0, bits)

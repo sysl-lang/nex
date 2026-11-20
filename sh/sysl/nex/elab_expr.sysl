@@ -568,11 +568,13 @@ impl Elab
             self.fail(span, s"`^` needs numbers; found ${self.shown(base)} and ${self.shown(exp)}")
             return texpr(span, Error, TBinary("^", base, exp))
 
-        if is_int(exp.ty) then return texpr(span, base.ty, TBinary("^", base, exp))
+        if is_int(exp.ty) then return texpr(span, base.ty, TBinary(power_op(base, exp), base, exp))
 
         val c = self.common_values(span, "^", base, exp).unwrap_or(Error)
+        val pb = promote(base, c)
+        val pe = promote(exp, c)
 
-        texpr(span, c, TBinary("^", promote(base, c), promote(exp, c)))
+        texpr(span, c, TBinary(power_op(pb, pe), pb, pe))
     end power_of
 
     unary(*self, span: Span, op: string, x: Expr, want: Option[Ty]) -> TExpr
@@ -1214,3 +1216,16 @@ copy_fx(fx: Fx) -> Fx
 
     xch.extend(fx.xch.view())
     Fx(scope, marks, loops, frames, fx.in_const, reds, fx.subst, fx.instance, fx.params, fx.owner, xch, fx.par)
+
+// The operator of `base ^ exp`: `sq`, the product of the base with itself, where the base is a real
+// and the exponent is the literal 2, written as an integer or as the real 2.0 (DESIGN §2.5), so that
+// both engines compute `x * x` and not a library `pow`, which differs from it in the last bit for
+// some bases. The exponent stays as the second operand, unread. Any other power keeps `^`.
+power_op(base: TExpr, exp: TExpr) -> string =
+    if is_real(base_of(elem_of(base.ty))) && !is_array(exp.ty) && is_two(exp) then "sq" else "^"
+
+private is_two(e: TExpr) -> bool = *e.kind match
+    TLiteral(IntVal(2), _) -> true
+    TLiteral(RealVal(v), _) -> v == 2.0
+    TPromote(v) -> is_two(v)
+    _ -> false
