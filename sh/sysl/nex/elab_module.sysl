@@ -35,6 +35,10 @@ impl Elab
     note_private(*self, d: Decl, internal: string)
         if d.private_ then self.mods.privates.push(internal)
 
+    // Whether `internal` names functions and nothing else: `def`s, generic `def`s and `extern`s.
+    is_function_name(self, internal: string) -> bool =
+        (self.find_top(internal).is_some() || self.find_generic_fun(internal).is_some()) && self.functions_only(internal) && !self.is_aggregate_name(internal) && !self.is_intrinsic(internal)
+
     // Whether some declaration has this internal name.
     top_exists(self, internal: string) -> bool =
         self.find_top(internal).is_some() || self.is_aggregate_name(internal) || self.find_generic_fun(internal).is_some() || self.is_intrinsic(internal)
@@ -207,15 +211,23 @@ impl Elab
 
         self.mods.qualified.push(ImportName(m, path, path))
 
+    // Functions merge: an imported function beside the module's own functions of its name, or beside
+    // another module's imported under it, overloads them (`elab_overload.sysl`).
     private bind_import(*self, span: Span, m: usize, from: usize, alias: string, internal: string)
-        if self.top_exists(self.mods.qualify(m, alias))
+        val own = self.mods.qualify(m, alias)
+        val merges = self.is_function_name(internal)
+
+        if self.top_exists(own) && !(merges && self.is_function_name(own))
             self.fail(span, s"the imported `${alias}` clashes with this module's own `${alias}`")
             return
 
         for i in self.mods.imports
             if i.owner == m && i.alias == alias
-                if i.target != internal then self.fail(span, s"`${alias}` is imported twice, as `${i.target}` and as `${internal}`")
-                return
+                if i.target == internal then return
+
+                if !(merges && self.is_function_name(i.target))
+                    self.fail(span, s"`${alias}` is imported twice, as `${i.target}` and as `${internal}`")
+                    return
 
         for q in self.mods.qualified
             if q.owner == m && first_word(q.target) == alias

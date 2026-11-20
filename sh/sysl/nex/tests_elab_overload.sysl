@@ -1,0 +1,133 @@
+module sh.sysl.nex
+@tests
+
+// Overloading by parameter types (DESIGN §11.6): which member of an overload set a call chooses, the
+// internal name each member is known by, and the diagnostics of an ambiguous call, a call no member
+// takes, and the declarations an overload set refuses.
+
+private val MAIN = "def main() = ()\n"
+
+private val WIDTHS = "def f(x: int32): integer = 1\ndef f(x: int64): integer = 2\ndef f(x: real64): integer = 3\n"
+
+private val REALS = "def g(x: real32): integer = 1\ndef g(x: real64): integer = 2\n"
+
+// Whether the typed IR of `text` holds every one of `parts`; the IR itself where it does not.
+private holds(text: string, parts: []const string) -> string
+    val out = elaborated(text)
+
+    for p in parts
+        if !out.contains(p) then return out
+
+    "ok"
+
+@test("an integer argument takes the overload nearest its width; a literal its own type")
+overload_integer_widths()
+    assert_eq(holds(WIDTHS + "def main() =\n  val a: int16 = 1\n  val b: int64 = 1\n  val c: int8 = 1\n  print(f(a))\n  print(f(b))\n  print(f(c))\n  print(f(7))\n  print(f(2.5))\n",
+        ["(call:int64 f(int32) (promote:int32 a#", "(call:int64 f(int64) b#", "(call:int64 f(int32) (promote:int32 c#", "(call:int64 f(int64) 7)", "(call:int64 f(real64) 2.5)", "(def f(int32) ((x#", "(def f(int64) ((x#", "(def f(real64) ((x#"]), "ok")
+    // An unsigned integer crosses to the signed overload it fits, and a real to the real one.
+    assert_eq(holds(WIDTHS + "def main() =\n  val u: uint8 = 1\n  val r: real32 = 1.0\n  print(f(u))\n  print(f(r))\n",
+        ["(call:int64 f(int32) (promote:int32 u#", "(call:int64 f(real64) (promote:real64 r#"]), "ok")
+    // A literal adopts the overload whose type is nearest its own: `int32` before `real64`.
+    assert_eq(holds("def h(x: int32): integer = 1\ndef h(x: real64): integer = 2\ndef main() = print(h(3))\n", ["(call:int64 h(int32) (adopt:int32 3))"]), "ok")
+
+@test("a real argument takes the overload nearest its width")
+overload_real_widths()
+    assert_eq(holds(REALS + "def main() =\n  val a: real16 = 1.0\n  val b: real32 = 1.0\n  val n: int8 = 1\n  val m: int64 = 1\n  print(g(a))\n  print(g(b))\n  print(g(1.5))\n  print(g(n))\n  print(g(m))\n",
+        ["(call:int64 g(real32) (promote:real32 a#", "(call:int64 g(real32) b#", "(call:int64 g(real64) 1.5)", "(call:int64 g(real32) (promote:real32 n#", "(call:int64 g(real64) (promote:real64 m#"]), "ok")
+    // Neither overload is nearer at both arguments: ambiguous.
+    assert_eq(refused("def p(a: int32, b: int64): integer = 1\ndef p(a: int64, b: int32): integer = 2\ndef main() =\n  val x: int16 = 1\n  print(p(x, x))\n"),
+        "error: this call of `p` is ambiguous: `p(int32, int64)` and `p(int64, int32)` take the arguments (int16, int16) equally well; convert an argument to the type of the one meant @5:9")
+
+@test("a concrete overload wins where it applies, a generic one is consulted only where none does")
+overload_concrete_beats_generic()
+    val fs = "def f(x: integer): integer = 100\ndef f[T](x: T): integer = 200\n"
+
+    assert_eq(holds(fs + "def main() =\n  val s: int32 = 1\n  print(f(1))\n  print(f(s))\n  print(f(\"hi\"))\n",
+        ["(call:int64 f 1)", "(call:int64 f (promote:int64 s#", "(call:int64 f[string] \"hi\")"]), "ok")
+    assert_eq(refused(fs + "def main() = print(f(x = 1))\n"), "error: `f` is overloaded, so its arguments are passed by position @3:22")
+
+@test("two generic overloads that both apply are ambiguous; one that alone applies is called")
+overload_two_generics()
+    val gs = "def g[T](x: T): integer = 1\ndef g[T: Numeric](x: T): integer = 2\n"
+
+    assert_eq(refused(gs + "def main() = print(g(1))\n"),
+        "error: this call of `g` is ambiguous: the generic `g[T](T)` and `g[T: Numeric](T)` both take the arguments (int64); add a concrete overload for them, or constrain one of the generics @3:20")
+    assert_eq(holds(gs + "def main() = print(g(\"s\"))\n", ["(call:int64 g[T](T)[string] \"s\")", "(def g[T](T)[string] "]), "ok")
+    // A concrete overload settles it.
+    assert_eq(holds(gs + "def g(x: integer): integer = 3\ndef main() = print(g(1))\n", ["(call:int64 g 1)"]), "ok")
+    assert_eq(refused("def g[T](x: T): integer = 1\ndef g[U](x: U): integer = 2\n" + MAIN), "ok")
+    assert_eq(refused("def g[T](x: T): integer = 1\ndef g[T](y: T): integer = 2\n" + MAIN), "error: redeclaration of `g` as the generic [T](T): each overload of a name takes parameter types of its own @2:1")
+
+@test("a call no overload takes lists what each one takes")
+overload_no_match()
+    assert_eq(refused("def f(x: int32): integer = 1\ndef f(x: string): integer = 2\ndef f[T: Numeric](x: [T]): integer = 3\ndef main() = print(f(true))\n"),
+        "error: no `f` takes the arguments (bool); its overloads are `f(int32)`, `f(string)` and `f[T: Numeric]([T])` @4:20")
+    assert_eq(refused("def f(x: int32): integer = 1\ndef f(x: string): integer = 2\ndef main() =\n  val n: int64 = 1\n  print(f(n))\n"),
+        "error: no `f` takes the arguments (int64); its overloads are `f(int32)` and `f(string)` @5:9")
+    assert_eq(refused("def f(x: int32): integer = 1\ndef f(x: string): integer = 2\ndef main() = print(f(1, 2))\n"),
+        "error: no `f` takes the arguments (int64, int64); its overloads are `f(int32)` and `f(string)` @3:20")
+
+@test("an array and a scalar of one element type, and arrays of two ranks, are told apart")
+overload_arrays_and_ranks()
+    val fs = "def f(x: real): integer = 1\ndef f(x: [real]): integer = 2\ndef f(x: [real; :, :]): integer = 3\n"
+
+    assert_eq(holds(fs + "def main() =\n  val a = [1.0, 2.0]\n  val m = [[1.0, 2.0], [3.0, 4.0]]\n  print(f(1.0))\n  print(f(a))\n  print(f(m))\n",
+        ["(call:int64 f(real64) 1.0)", "(call:int64 f([real64]) a#", "(call:int64 f([real64; :, :]) m#"]), "ok")
+    // An `@elemental` scalar overload takes an array only where no array overload does.
+    assert_eq(holds("@elemental def e(x: real): real = x\ndef e(x: [real; :, :]): real = 0.0\ndef main() =\n  val a = [1.0, 2.0]\n  val m = [[1.0]]\n  print(e(a))\n  print(e(m))\n",
+        ["e(real64)", "(call:real64 e([real64; :, :]) m#"]), "ok")
+    assert_eq(refused(fs + "def main() = print(f([[[1.0]]]))\n"),
+        "error: no `f` takes the arguments ([real64; :, :, :]); its overloads are `f(real64)`, `f([real64])` and `f([real64; :, :])` @4:20")
+
+@test("a measured argument takes the overload of its dimension")
+overload_units()
+    assert_eq(holds("def f(x: real<m>): integer = 1\ndef f(x: real<s>): integer = 2\ndef main() =\n  print(f(2.0<m>))\n  print(f(3.0<s>))\n  print(f(5.0<km>))\n",
+        ["(call:int64 f(real64<m>) ", "(call:int64 f(real64<s>) "]), "ok")
+    assert_eq(refused("def f(x: real<m>): integer = 1\ndef f(x: real<s>): integer = 2\ndef main() = print(f(2.0<kg>))\n"),
+        "error: no `f` takes the arguments (real64<kg>); its overloads are `f(real64<m>)` and `f(real64<s>)` @3:20")
+
+@test("an inout overload takes a variable; overloads that differ only in a parameter's mode are refused")
+overload_inout()
+    assert_eq(holds("def f(x: inout [real]) = x[1] = 0.0\ndef f(x: real) = print(x)\ndef main() =\n  var a = [1.0, 2.0]\n  f(a)\n  f(2.0)\n",
+        ["(call f([real64]) (inout a#", "(call f(real64) 2.0)"]), "ok")
+    assert_eq(refused("def f(x: inout integer) = x = 1\ndef f(x: integer) = print(x)\n" + MAIN),
+        "error: redeclaration of `f` with the parameter types (int64): each overload of a name takes parameter types of its own @2:1")
+    // A value that is no variable cannot be borrowed, so only the value overload is left to take it.
+    assert_eq(refused("def f(x: inout [real]) = x[1] = 0.0\ndef f(x: integer) = print(x)\ndef main() = f([1.0])\n"),
+        "error: no `f` takes the arguments ([real64]); its overloads are `f(inout [real64])` and `f(int64)` @3:14")
+
+@test("an overloaded function takes no defaults, and its calls no named arguments")
+overload_defaults_refused()
+    assert_eq(refused("def f(x: integer, y: integer = 1): integer = x + y\ndef f(x: real): integer = 0\n" + MAIN),
+        "error: `f` is overloaded, so its parameters take no defaults: a call of an overloaded function gives every argument, by position @1:32")
+    assert_eq(refused("def f(x: integer): integer = x\ndef f(x: real): integer = 0\ndef main() = print(f(x = 1))\n"),
+        "error: `f` is overloaded, so its arguments are passed by position @3:22")
+
+@test("a function value of an overloaded name is the overload the expected function type names")
+overload_function_value()
+    val fs = "def f(x: integer): integer = x\ndef f(x: real): integer = 0\n"
+
+    assert_eq(holds(fs + "def apply(g: (integer) -> integer) = g(1)\ndef main() =\n  print(apply(f))\n  val h: (real) -> integer = f\n  print(h(1.0))\n",
+        ["(call:int64 apply f(int64))", "(val h#", "f(real64))"]), "ok")
+    assert_eq(refused(fs + "def main() =\n  val h = f\n"),
+        "error: `f` is overloaded, so a value of it is the overload the function type expected here names: give that type, as in `val g: (int64) -> int64 = f`; its overloads are `f(int64)` and `f(real64)` @4:11")
+    assert_eq(refused(fs + "def main() =\n  val h: (string) -> integer = f\n"),
+        "error: no `f` takes (string), the parameter types the function type expected here names; its overloads are `f(int64)` and `f(real64)` @4:32")
+
+@test("an overload calls another of its name, and itself")
+overload_recursion()
+    assert_eq(holds("def size(x: integer): integer = 1\ndef size(x: [integer]): integer =\n  var n = 0\n  for v in x\n    n += size(v)\n  n\ndef depth(x: integer): integer = if x <= 0 then 0 else 1 + depth(x - 1)\ndef depth(x: real): integer = depth(to_integer(x))\ndef main() =\n  print(size([1, 2, 3]))\n  print(depth(2.0))\n",
+        ["(call:int64 size(int64) v#", "(call:int64 size([int64]) ", "(call:int64 depth(int64) (-:int64 x#", "(call:int64 depth(int64) (convert-trap:int64 x#"]), "ok")
+
+@test("an extern overload binds the C symbol its @symbol names; two binding one symbol are refused")
+overload_externs()
+    assert_eq(holds("@symbol(\"cbrtf\")\nextern def cube_root(x: real32): real32\n@symbol(\"cbrt\")\nextern def cube_root(x: real64): real64\ndef main() =\n  val a: real32 = 8.0\n  print(cube_root(a))\n  print(cube_root(27.0))\n",
+        ["(call:real32 cube_root(real32) a#", "(call:real64 cube_root(real64) 27.0)"]), "ok")
+    assert_eq(refused("extern def cube_root(x: real32): real32\nextern def cube_root(x: real64): real64\n" + MAIN),
+        "error: `cube_root` is overloaded, and each `extern` of it binds a C symbol of its own, but two name `cube_root`: give each its symbol, `@symbol(\"...\")` @2:1")
+
+@test("main is one def, and a function shares its name only with functions")
+overload_main_and_values()
+    assert_eq(refused("def main() = ()\ndef main(args: [string]) = ()\n"), "error: redeclaration of `main`: a program has one `main`, which is not overloaded @2:1")
+    assert_eq(refused("val f = 1\ndef f(x: integer) = x\n" + MAIN), "error: redeclaration of `f` @2:1")
+    assert_eq(refused("def f(x: integer) = x\nval f = 1\n" + MAIN), "error: redeclaration of `f` @2:1")

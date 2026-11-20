@@ -99,8 +99,8 @@ elab_generic_lambdas()
 elab_generic_overloads()
     assert_eq(elaborated("def f(x: real): integer = 1\ndef f[T](x: T): integer = 2\ndef main() =\n  print(f(3.14))\n  print(f(42))\n  print(f(\"x\"))\n"),
         "(def f ((x#0 real64)) int64 1)\n(def main () void (block (print (call:int64 f 3.14)) (print (call:int64 f (adopt:real64 42))) (print (call:int64 f[string] \"x\"))))\n(def f[string] ((x#1 string)) int64 2)")
-    assert_eq(refused("def f(x: real): integer = 1\ndef f[T](x: T): integer = 2\ndef main() = print(f(x = 1.0))\n"), "error: `f` is declared both as a concrete and as a generic `def`, so its arguments are passed by position @3:22")
-    assert_eq(refused("def f[T](x: T): integer = 1\ndef f[U](x: U): integer = 2\n" + MAIN), "error: redeclaration of `f` @2:1")
+    assert_eq(refused("def f(x: real): integer = 1\ndef f[T](x: T): integer = 2\ndef main() = print(f(x = 1.0))\n"), "error: `f` is overloaded, so its arguments are passed by position @3:22")
+    assert_eq(refused("def f[T](x: T): integer = 1\ndef f[T](x: T): integer = 2\n" + MAIN), "error: redeclaration of `f` as the generic [T](T): each overload of a name takes parameter types of its own @2:1")
     assert_eq(refused("val f = 1\ndef f[T](x: T): integer = 2\n" + MAIN), "error: redeclaration of `f` @2:1")
     assert_eq(refused("def f[T](x: T): integer = 2\nval f = 1\n" + MAIN), "error: redeclaration of `f` @2:1")
 

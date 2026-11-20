@@ -2195,7 +2195,8 @@ int32_t nex_recv(const nex_desc *x, int32_t from, int32_t tag);
 
 Without it a library over every element type could not be written in nex: a generic body cannot
 hand its `[T; R]` to an `extern`, whose parameter has one element type and one rank; an `extern`
-is not generic; and nex has no overloading by type to give one `extern` per element type.
+is not generic; and overloading (§11.6) gives one `extern` per element type and rank only by
+writing each out, with a C symbol of its own.
 
 **The spelling `[*; ..]` (PROPOSED)** is nex's array type `[T; axes]` with Fortran's two wildcards in
 their places: `*` for the element type, as `type(*)`, and `..` for the axes, as `dimension(..)`. It
@@ -2628,6 +2629,62 @@ its module, and a `@test module` exists only in a test build — with these rule
   `stop n` with `n` not 0 (`stopped with status 3`). What a passing test prints is not shown. The last
   line is the summary, `6 passed, 3 failed`, with `, 2 filtered out` where a substring left tests out;
   the exit status is 1 when any test failed and 0 otherwise.
+
+### 11.6 Overloading
+
+Ref §6.5 and §6.10 stand: several functions may share a name, a call chooses one by the types of its
+arguments, a concrete overload wins over a generic one, and an overload set is called by position.
+The rules as built:
+
+- **An overload set** is every concrete `def`, generic `def` and `extern def` of one name. A name may
+  be shared by functions only: a function and a binding, a struct, an enum, a variant or an `mpi`
+  collective of one name are still a redeclaration.
+- **A call elaborates its arguments first, each on its own**, and then chooses:
+  1. **The concrete bucket.** Each concrete `def` and `extern` that takes the arguments is a
+     candidate: as many arguments as parameters, each argument of its parameter's type or widening
+     to it along §2.2's arrows (a unit converting within its dimension, §13.3), a literal adopting
+     it (§2.3), an array of the parameter's rank whose elements widen, a variable for an `inout`
+     parameter of exactly its type, a lambda for a function parameter of as many parameters, and an
+     array for an `@elemental` function's scalar parameter. **Each argument costs how far it
+     travels:** nothing for its own type; 100 for each step from integer to real or real to
+     complex, 50 for a change of signedness, and 1 for each doubling or halving of the width; 1
+     more for a unit conversion; 1000 more for an array applied element by element. A literal
+     costs as far as the type it adopts lies from its own (`f(1)` takes `int64`, then `int32`,
+     before `real64`). **A candidate wins when no other is cheaper at any argument and it is
+     cheaper than each other at one**; where none does, the call is ambiguous, and the diagnostic
+     names the candidates tied.
+  2. **The generic bucket, only where no concrete candidate applies.** A generic `def` applies where
+     its type arguments infer from the arguments and its constraints admit them (§2.6). One that
+     applies is called; two are ambiguous: *"add a concrete overload for them, or constrain one of
+     the generics"*.
+  3. Otherwise **no overload takes the arguments**, and the diagnostic lists every overload's
+     parameter types.
+- **Overloads differ in their parameter types.** Two concrete overloads (or `extern`s) of the same
+  parameter types are a redeclaration, also where they differ only in a parameter's `inout`; two
+  generic `def`s of one head (`[T](T)`) are too. The result type takes no part.
+- **An overloaded function takes no defaults, and its calls no named arguments** (ref §6.5): a
+  default on any member is refused at the default, and a named argument at the call.
+- **`main` and a `@test` function are one `def` each**; a second of the name is a redeclaration. A
+  `@host` function is given by the host by its name, and a function generic over units (`[U: Unit]`)
+  is checked once with its units held abstract; neither is overloaded.
+- **An `extern` overload binds the C symbol its `@symbol` names.** Two that would bind one symbol —
+  two overloads of `f` with no `@symbol` both name `f` — are refused, as any two externs naming one
+  symbol are (§10.1).
+- **A function value of an overloaded name is the overload whose parameter types the function type
+  expected there names** — a parameter of function type, an annotated binding, `val g: (real) ->
+  integer = f`. With no expected function type it is an error asking for one; where no concrete
+  overload has the type and the set has one generic `def`, it is that generic's instance the type
+  gives, as for a generic alone.
+- **Method-call syntax** `x.f(args)` is `f(x, args)` and chooses the same way.
+- **Across modules**, functions merge: a module's own functions of a name, those it imports under it
+  and those two imports bind to it are one set where every declaration of the name is a function;
+  a binding or a type beside them is still a clash (§11.5). The source and built-in preludes are
+  still shadowed by the module's own names, not merged with them.
+- **Internal names.** Where two or more concrete overloads or `extern`s share a name, each is known
+  to both engines and the MLIR emitter by its name and parameter types, `f(int64, real64)`; a lone
+  concrete `def` beside generic ones keeps its plain name. Where generic `def`s share a name, each
+  one's instances are named after its head, `f[T: Numeric](T)[real64]`. Stack traces and messages
+  print the plain name. A host calls an overloaded script function by its internal name.
 
 ---
 

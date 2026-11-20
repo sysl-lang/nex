@@ -108,8 +108,11 @@ struct Generics
     checked: Buf[bool]
     // The instance standing for the generic whose body is being checked, its parameters bound.
     checking: Option[usize]
+    // What each generic function's instances are named after: its name, or, where several generic
+    // `def`s share one, its name with its type parameters and parameter types, `f[T: Numeric](T)`.
+    symbols: Buf[string]
 
-empty_generics() -> Generics = Generics(buf(), buf(), buf(), buf(), buf(), buf(), None)
+empty_generics() -> Generics = Generics(buf(), buf(), buf(), buf(), buf(), buf(), None, buf())
 
 // The elaborator's tables before a generic's body is checked: the length of each one the check can
 // only add to, and a copy of each whose entries it can change.
@@ -282,14 +285,13 @@ impl Elab
                 self.fail(d.span, s"`${name}` has no body")
                 return
 
-        if self.find_generic_fun(name).is_some() || self.find_top(name).is_some() && !self.is_concrete_fun(name) || self.is_aggregate_name(name)
-            self.fail(d.span, s"redeclaration of `${name}`")
-            return
+        if !self.declare_fun(d.span, name) then return
 
         val valid = self.check_tparams(d.span, tparams, true)
 
         self.gen.funs.push(GenFun(d, name, tparams, params, ret, b, buf(), None, valid))
         self.gen.checked.push(false)
+        self.gen.symbols.push(name)
     end collect_generic_fun
 
     collect_generic_agg(*self, d: Decl, name: string, tparams: Buf[TypeParam], is_enum: bool)
@@ -297,15 +299,15 @@ impl Elab
 
         self.gen.aggs.push(GenAgg(d, name, tparams, is_enum, buf(), valid))
 
-    // A concrete `def` may share its name with a generic one, and with nothing else.
+    // A function may share its name with other functions, concrete, generic or `extern`, which
+    // overload it (`elab_overload.sysl`), and with nothing else.
     declare_fun(*self, span: Span, name: string) -> bool
-        if self.find_generic_fun(name).is_some() && self.find_top(name).is_none() then return true
+        if self.find_top(name).is_none() && self.find_generic_fun(name).is_none() then return self.declare(span, name)
 
-        self.declare(span, name)
+        if self.functions_only(name) && !self.is_aggregate_name(name) && !self.is_intrinsic(name) then return true
 
-    private is_concrete_fun(self, name: string) -> bool = self.find_top(name) match
-        Some(TopFun(_)) -> true
-        _ -> false
+        self.fail(span, s"redeclaration of `${name}`")
+        false
 
     find_generic_fun(self, name: string) -> Option[usize]
         for g in 0..<self.gen.funs.len()
@@ -598,7 +600,7 @@ impl Elab
 
         if !f.valid then return None
 
-        val name = mangle(f.name, args)
+        val name = mangle(self.gen.symbols[g], args)
         var up = self.fx.instance
 
         loop
@@ -660,7 +662,7 @@ impl Elab
         val k = self.funs.len()
         val inst = self.gen.fun_insts.len()
 
-        self.funs.push(FunSrc(f.decl, mangle(f.name, args), f.params, f.ret, f.body, buf()))
+        self.funs.push(FunSrc(f.decl, mangle(self.gen.symbols[g], args), f.params, f.ret, f.body, buf()))
         self.fret.push(Error)
         self.fret_known.push(false)
         self.fstate.push(Waiting)
@@ -1114,7 +1116,7 @@ impl Elab
     end arg_slots
 
     // Every argument elaborated on its own but the lambdas, which wait for their parameter types.
-    private elaborate_args(*self, args: Buf[Expr]) -> Buf[Option[TExpr]]
+    elaborate_args(*self, args: Buf[Expr]) -> Buf[Option[TExpr]]
         var out: Buf[Option[TExpr]] = buf()
 
         for a in args
@@ -1135,29 +1137,15 @@ impl Elab
 
     // -- calls ------------------------------------------------------------------------------------
 
-    // A call of a name that has a generic `def`: its concrete `def` where it has one that takes the
-    // arguments, the generic instance the arguments infer otherwise, each argument the expected type
-    // `want` reaches through the result type elaborated against it.
+    // A call of the generic `def` `g`, the only `def` its name has: the instance the arguments infer,
+    // each argument the expected type `want` reaches through the result type elaborated against it.
     generic_call(*self, span: Span, at: Span, n: string, g: usize, args: Buf[Expr], want: Option[Ty]) -> TExpr
-        val concrete = self.find_top(n) match
-            Some(TopFun(k)) -> Some(k)
-            _ -> None
+        var pre = unelaborated(args.len())
 
-        if concrete.is_some()
-            for a in args
-                *a.kind match
-                    NamedArg(_, _) ->
-                        self.fail(a.span, s"`${n}` is declared both as a concrete and as a generic `def`, so its arguments are passed by position")
-                        return self.invalid(span)
-                    _ -> ()
+        self.generic_call_with(span, at, n, g, args, want, &pre)
 
-        // Beside a concrete `def`, the arguments are elaborated before either is chosen.
-        var pre = if concrete.is_some() then self.elaborate_args(args) else unelaborated(args.len())
-
-        concrete match
-            Some(k) -> if self.concrete_applies(k, args, &pre) then return self.concrete_call(span, at, k, args, &pre)
-            None -> ()
-
+    // `generic_call` with the arguments `pre` already elaborated, where an overload set chose `g`.
+    generic_call_with(*self, span: Span, at: Span, n: string, g: usize, args: Buf[Expr], want: Option[Ty], pre: *Buf[Option[TExpr]]) -> TExpr
         self.check_generic(g)
 
         val f = self.gen.funs[g]
@@ -1181,7 +1169,7 @@ impl Elab
                 None -> ()
             None -> ()
 
-        if !self.infer_from(&inf, &expected, f.formals, what, slots, args, &pre) then return self.invalid(span)
+        if !self.infer_from(&inf, &expected, f.formals, what, slots, args, pre) then return self.invalid(span)
 
         if !self.inferred(span, &inf, "no argument fixes it") || !self.constraints_hold(span, &inf) then return self.invalid(span)
 
@@ -1214,62 +1202,58 @@ impl Elab
         val (items, filled) = self.defaulted_args(k, out, given)
 
         after_items(span, items, texpr(span, ret, TCall(texpr(at, ty, TFnRef(self.funs[k].name)), filled)))
-    end generic_call
+    end generic_call_with
 
-    // Whether the concrete `def` beside a generic one takes these arguments, each as it is or
-    // widened, a literal adopting its parameter's type.
-    private concrete_applies(*self, k: usize, args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> bool
-        val sig = self.fsig[k]
+    // Whether the generic `g` takes these arguments, already elaborated where `pre` has them: its
+    // type arguments inferred and admitted by their constraints. Nothing the trial elaborates or
+    // reports is kept.
+    generic_fits(*self, span: Span, n: string, g: usize, args: Buf[Expr], want: Option[Ty], pre: *Buf[Option[TExpr]]) -> bool
+        self.check_generic(g)
 
-        if args.len() > sig.tys.len() then return false
+        val f = self.gen.funs[g]
 
-        // Whether a default was written, not whether it is elaborated yet: `concrete_call` elaborates it.
-        for j in args.len()..<sig.tys.len()
-            if self.funs[k].params[j].default.is_none() then return false
+        if !f.valid then return false
+
+        var names: Buf[string] = buf()
+        var what: Buf[string] = buf()
+
+        for p in f.params
+            names.push(p.name)
+            what.push(s"argument `${p.name}`")
+
+        if args.len() != names.len() then return false
+
+        val mark = self.mark()
+        val base = self.diags.len()
+        val saved = self.fx
+        var trial = copied(*pre)
+        var slots: Buf[Option[usize]] = buf()
 
         for i in 0..<args.len()
-            val ty = sig.tys[i]
-            val e = args[i]
+            slots.push(Some(i))
 
-            val v = pre[i] match
-                Some(v) -> v
-                None ->
-                    val arity = *e.kind match
-                        Lambda(ps, _) -> ps.len()
-                        _ -> 0
+        var inf = new_infer(n, f.tparams)
+        var expected = new_infer(n, f.tparams)
 
-                    val fits = ty match
-                        Fn(s) -> s.params.len() == arity
-                        _ -> false
+        f.result match
+            Some(r) -> want match
+                Some(w) -> if !self.unify(r, w, &expected, true) then expected = new_infer(n, f.tparams)
+                None -> ()
+            None -> ()
 
-                    if !fits then return false
+        val fits = self.infer_from(&inf, &expected, f.formals, what, slots, args, &trial) && self.inferred(span, &inf, "") && self.constraints_hold(span, &inf)
+        val clean = self.diags.len() == base
 
-                    continue
+        self.diags.truncate(base)
+        self.fx = saved
+        self.undo(mark)
+        fits && clean
+    end generic_fits
 
-            if is_wild(v.ty) || has_error(v.ty) then continue
-
-            if sig.modes[i] == Inout
-                if !ty_eq(v.ty, ty) then return false
-
-                continue
-
-            val class = self.literal_class(e)
-
-            if class != NOT_LITERAL && adoption(class, ty).is_some() then continue
-            if promotes(v.ty, ty) then continue
-
-            val arrays = v.ty match
-                Ty.Array(ae, ax) -> ty match
-                    Ty.Array(te, tx) -> ax.len() == tx.len() && promotes(*ae, *te)
-                    _ -> false
-                _ -> false
-
-            if !arrays then return false
-
-        true
-    end concrete_applies
-
-    private concrete_call(*self, span: Span, at: Span, k: usize, args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> TExpr
+    // A call of the `k`th `def` with the arguments `pre` already elaborated, where the call chose it
+    // among others of its name: each brought to its parameter's type, an array to an `@elemental`
+    // function's scalar parameter element by element.
+    concrete_call(*self, span: Span, at: Span, k: usize, args: Buf[Expr], pre: *Buf[Option[TExpr]]) -> TExpr
         val complete = self.ensure_defaults(k, span)
         val sig = self.fsig[k]
         val name = self.funs[k].name
@@ -1279,7 +1263,18 @@ impl Elab
         for j in 0..<sig.tys.len()
             given.push(j < args.len())
 
-            if j < args.len()
+            var elementwise = false
+
+            if j < args.len() && self.is_elemental(k) && sig.modes[j] != Inout && !is_array(sig.tys[j])
+                elementwise = pre[j] match
+                    Some(x) -> is_array(x.ty)
+                    None -> false
+
+            if elementwise
+                val x = pre[j].unwrap()
+
+                out.push(self.coerce(x, with_elem(x.ty, sig.tys[j]), s"argument `${sig.names[j]}`"))
+            elif j < args.len()
                 out.push(self.settle_arg(args[j], pre[j], sig.tys[j], sig.modes[j], s"argument `${sig.names[j]}`"))
             else
                 sig.defaults[j] match

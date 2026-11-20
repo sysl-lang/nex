@@ -265,6 +265,19 @@ mod_import_clash()
         "error: `x` is imported twice, as `a.x` and as `b.x` @main.nex:2:1")
     assert_eq(project_refused([("main.nex", "import a.{x}\nimport a.{x}\ndef main() = print(x)\n"), ("a/c.nex", "val x = 1\n")]), "ok")
 
+@test("functions of one name from the module itself and from its imports are one overload set")
+mod_import_overloads()
+    val out = elab_project(project([("main.nex", "import a.{f}\nimport b.*\ndef f(x: string): integer = 3\ndef main() =\n  print(f(1))\n  print(f(1.0))\n  print(f(\"s\"))\n"),
+        ("a/c.nex", "def f(x: integer): integer = 1\n"), ("b/c.nex", "def f(x: real): integer = 2\n")]))
+
+    assert_eq(out.contains("(call:int64 a.f 1)") && out.contains("(call:int64 b.f 1.0)") && out.contains("(call:int64 f \"s\")"), true)
+    // Two modules' overloads of one parameter types are ambiguous where both are imported.
+    assert_eq(project_refused([("main.nex", "import a.{f}\nimport b.{f}\ndef main() = print(f(1))\n"), ("a/c.nex", "def f(x: integer): integer = 1\n"), ("b/c.nex", "def f(x: integer): integer = 2\n")]),
+        "error: this call of `f` is ambiguous: `f(int64)` and `f(int64)` take the arguments (int64) equally well; convert an argument to the type of the one meant @main.nex:3:20")
+    // A value and a function of one name still clash.
+    assert_eq(project_refused([("main.nex", "import a.{f}\nval f = 1\ndef main() = print(f)\n"), ("a/c.nex", "def f(x: integer): integer = 1\n")]),
+        "error: the imported `f` clashes with this module's own `f` @main.nex:1:1")
+
 // -- the source prelude ------------------------------------------------------------------------------
 
 // A prelude directory holding `files`, beside the project.
