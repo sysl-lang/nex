@@ -659,6 +659,7 @@ struct Elab
         self.fret_known[k] = true
         self.close()
         self.unresolved_lambdas(pending_base, diags_base)
+        self.check_fn_params(sig.params, body)
         self.leave_unit_params(saved_units)
         self.fx = saved
         self.fout.push(TFun(f.decl.span, f.name, sig.params, sig.defaults, frame.ret, body))
